@@ -1,0 +1,4 @@
+# Baseline profile: Android precompiles these at install, so the first launch and scrolling don't run in the
+# interpreter. Covers Unbraid's own code; Compose ships its own profile.
+HSPLapp/unbraid/**->**(**)**
+Lapp/unbraid/**;

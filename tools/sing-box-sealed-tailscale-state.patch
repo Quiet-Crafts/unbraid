@@ -1,0 +1,139 @@
+diff --git a/experimental/libbox/platform.go b/experimental/libbox/platform.go
+index 108cc20..367152e 100644
+--- a/experimental/libbox/platform.go
++++ b/experimental/libbox/platform.go
+@@ -28,6 +28,8 @@ type PlatformInterface interface {
+ 	LookupSFTPServer() (string, error)
+ 	ReadSystemSSHHostKey() (string, error)
+ 	TailscaleHostname() string
++	ReadTailscaleState() (string, error)
++	WriteTailscaleState(state string) error
+ 	UsePlatformBridge() bool
+ 	CreateBridge(options *BridgeOptions) (BridgeSession, error)
+ }
+diff --git a/experimental/libbox/service.go b/experimental/libbox/service.go
+index 4cd6045..80d81b5 100644
+--- a/experimental/libbox/service.go
++++ b/experimental/libbox/service.go
+@@ -300,6 +300,14 @@ func (w *platformInterfaceWrapper) TailscaleHostname() string {
+ 	return w.iif.TailscaleHostname()
+ }
+ 
++func (w *platformInterfaceWrapper) ReadTailscaleState() (string, error) {
++	return w.iif.ReadTailscaleState()
++}
++
++func (w *platformInterfaceWrapper) WriteTailscaleState(state string) error {
++	return w.iif.WriteTailscaleState(state)
++}
++
+ func (w *platformInterfaceWrapper) UsePlatformBridge() bool {
+ 	return w.iif.UsePlatformBridge()
+ }
+diff --git a/protocol/tailscale/endpoint.go b/protocol/tailscale/endpoint.go
+index b7b6b90..86f9d35 100644
+--- a/protocol/tailscale/endpoint.go
++++ b/protocol/tailscale/endpoint.go
+@@ -187,6 +187,10 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 	}
+ 	taildropDirectory = filemanager.BasePath(ctx, os.ExpandEnv(taildropDirectory))
+ 	taildropDirectory, _ = filepath.Abs(taildropDirectory)
++	stateStore, err := newPlatformStore(platformInterface)
++	if err != nil {
++		return nil, err
++	}
+ 	return &Endpoint{
+ 		Adapter:           endpoint.NewAdapter(C.TypeTailscale, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, nil),
+ 		ctx:               ctx,
+@@ -199,6 +203,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 		detour:            options.Detour,
+ 		server: &tsnet.Server{
+ 			Dir:      stateDirectory,
++			Store:    stateStore,
+ 			Hostname: hostname,
+ 			Logf: func(format string, args ...any) {
+ 				logger.Trace(fmt.Sprintf(format, args...))
+diff --git a/protocol/tailscale/platform_store.go b/protocol/tailscale/platform_store.go
+new file mode 100644
+index 0000000..8ddb989
+--- /dev/null
++++ b/protocol/tailscale/platform_store.go
+@@ -0,0 +1,78 @@
++package tailscale
++
++import (
++	"bytes"
++	"encoding/json"
++	"maps"
++	"sync"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/tailscale/ipn"
++)
++
++// Unbraid: tsnet's FileStore writes the node and machine keys in plaintext. This store keeps the
++// state in memory and hands every change, in FileStore's JSON format, to the platform to seal.
++type platformStateStore interface {
++	ReadTailscaleState() (string, error)
++	WriteTailscaleState(state string) error
++}
++
++type platformStore struct {
++	access   sync.Mutex
++	platform platformStateStore
++	state    map[ipn.StateKey][]byte
++}
++
++func newPlatformStore(platformInterface adapter.PlatformInterface) (ipn.StateStore, error) {
++	platform, loaded := platformInterface.(platformStateStore)
++	if !loaded {
++		return nil, nil
++	}
++	content, err := platform.ReadTailscaleState()
++	if err != nil {
++		return nil, err
++	}
++	store := &platformStore{platform: platform, state: make(map[ipn.StateKey][]byte)}
++	if content != "" {
++		err = json.Unmarshal([]byte(content), &store.state)
++		if err != nil {
++			return nil, err
++		}
++	}
++	return store, nil
++}
++
++func (s *platformStore) ReadState(id ipn.StateKey) ([]byte, error) {
++	s.access.Lock()
++	defer s.access.Unlock()
++	state, loaded := s.state[id]
++	if !loaded {
++		return nil, ipn.ErrStateNotExist
++	}
++	return state, nil
++}
++
++func (s *platformStore) WriteState(id ipn.StateKey, state []byte) error {
++	s.access.Lock()
++	defer s.access.Unlock()
++	if bytes.Equal(s.state[id], state) {
++		return nil
++	}
++	// Kept in memory only once sealed: a failed write is retried with the next one, not skipped as unchanged.
++	next := maps.Clone(s.state)
++	if state == nil {
++		delete(next, id)
++	} else {
++		next[id] = bytes.Clone(state)
++	}
++	content, err := json.Marshal(next)
++	if err != nil {
++		return err
++	}
++	err = s.platform.WriteTailscaleState(string(content))
++	if err != nil {
++		return err
++	}
++	s.state = next
++	return nil
++}

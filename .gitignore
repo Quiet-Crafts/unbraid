@@ -1,0 +1,16 @@
+.secrets/
+local.properties
+*.jks
+*.keystore
+dist/
+.gradle/
+.kotlin/
+build/
+*/build/
+app/libs/*.aar
+app/libs/*.jar
+*.apk
+.idea/
+*.iml
+
+.DS_Store

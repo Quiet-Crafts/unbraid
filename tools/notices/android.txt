@@ -1,0 +1,7 @@
+=== AndroidX, Jetpack Compose, Material 3, Material Symbols
+Copyright The Android Open Source Project and Google LLC.
+Licensed under the Apache License, Version 2.0 (full text at the end).
+
+=== Kotlin standard library, kotlinx.coroutines, kotlinx.serialization
+Copyright JetBrains s.r.o. and Kotlin Programming Language contributors.
+Licensed under the Apache License, Version 2.0 (full text at the end).

@@ -1,0 +1,334 @@
+package app.unbraid.vpn
+
+import app.unbraid.data.DIRECT
+import app.unbraid.data.Link
+import app.unbraid.data.Manual
+import app.unbraid.data.OvpnLink
+import app.unbraid.data.SsLink
+import app.unbraid.data.TsLink
+import app.unbraid.data.validWgKey
+import app.unbraid.data.WgLink
+import app.unbraid.data.Route
+import app.unbraid.data.Setup
+import app.unbraid.data.WgPeer
+import java.security.MessageDigest
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
+
+/**
+ * Turns a [Setup] into a sing-box config.
+ *
+ * Order of decisions for every connection: DNS → home networks → LAN → the app's route → default route.
+ * Apps on Direct are excluded from the VPN at OS level, so they never see it; under system lockdown
+ * (where Android would cut excluded apps off) they are routed through `direct` instead.
+ */
+object Compiler {
+    const val NORD_DNS = "103.86.96.100"
+    const val NORD_TP = "103.86.96.108"
+    const val TS_TAG = "home-ts"
+    /** In-tunnel blocking resolvers, from each provider's docs: Mullvad ads+trackers+malware, PIA MACE, IVPN AntiTracker. */
+    val FILTER_DNS = mapOf("mullvad" to "100.64.0.7", "pia" to "10.0.0.244", "ivpn" to "10.0.254.2")
+    private val LAN = listOf("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255/32")
+    private const val TAILNET = "100.64.0.0/10"
+    /** The fake-IP pool in two halves: each new domain table takes the other one ([Input.fakeHalf]). */
+    val FAKE_RANGES = listOf("198.18.0.0/16", "198.19.0.0/16")
+
+    class Input(
+        val setup: Setup,
+        val links: Map<String, Link>,
+        val selfPackage: String,
+        val lockdown: Boolean,
+        val tsDir: String,
+        val cacheFile: String,
+        /** The tailnet's MagicDNS domain, if known. */
+        val tsSuffix: String? = null,
+        /** Loopback port and password of the app's own way into each exit ([PROBE]); null = none. */
+        val probe: Pair<Int, String>? = null,
+        /** Index into [FAKE_RANGES] of the half this engine hands out; the other half is refused. */
+        val fakeHalf: Int = 0,
+    )
+
+    /**
+     * Inbound tag of the app's own way into a chosen exit, for speed and health tests: a proxy on 127.0.0.1 whose
+     * user name is the exit's tunnel tag. The app itself is excluded from the VPN, so this is its only path into a
+     * tunnel; the password is random per connection, so no other app on the phone can use it.
+     */
+    const val PROBE = "probe"
+
+    /** Route id → the tunnel tag it runs on: routes that resolve to one server with one login share a tunnel. */
+    fun shared(s: Setup, links: Map<String, Link>): Map<String, String> {
+        val owners = HashMap<String, String>()
+        return s.activeRoutes.filter { it.tsExit == null }.associate { r ->
+            val link = links[r.id] ?: error("No server for ${r.name}")
+            r.id to owners.getOrPut(linkKey(r, link)) { "r-${r.id}" }
+        }
+    }
+
+    fun compile(i: Input): String {
+        val s = i.setup
+        val active = s.activeRoutes
+        require(active.mapNotNull { it.tsExit }.distinct().size <= 1) { "Tailscale allows one exit node at a time. Use the same node for every Tailscale route." }
+        // Tailscale-exit routes have no tunnel of their own: they ride the Tailscale endpoint, whose exit node is set below.
+        // Routes that resolve to the same server with the same credentials share one tunnel: two with one key would fight over it.
+        val shared = shared(s, i.links)
+        val tag = { id: String -> if (id == DIRECT) "direct" else if (s.route(id)?.tsExit != null) TS_TAG else shared[id] ?: "r-$id" }
+        val tsDomains = listOfNotNull("ts.net", tsSuffix(i.tsSuffix)).distinct()
+        // OpenVPN routes use the DNS their server pushes, except NordVPN's own routes: those keep Nord's
+        // (Threat Protection) resolvers through the tunnel.
+        val pushedDns = { r: app.unbraid.data.Route -> s.prefs.customDns.isEmpty() && (r.imported || r.loc.provider != "nord") }
+        val direct = s.apps.filterValues { it == DIRECT }.keys.sorted()
+        val homeWg = s.home.wg
+        val ts = s.tailscale
+        // An exit keeps the endpoint running, but only the home toggle grants every app tailnet access.
+        val homeTs = s.home.tailscale
+        val dnsFor = { id: String -> if (id == DIRECT) "local" else "dns-r-$id" }
+        val defaultDns = if (s.defaultRoute == DIRECT || active.isEmpty()) "local" else dnsFor(s.defaultRoute)
+        // Every tunnel the app can test, with the DNS of a route on it; Tailscale even without an exit route (its nodes).
+        val probeTags = active.groupBy { tag(it.id) }.mapValues { (_, rs) -> dnsFor(rs.first().id) }.toMutableMap()
+            .apply { if (s.tailscale) putIfAbsent(TS_TAG, defaultDns); if (app.unbraid.BuildConfig.DEBUG) put("direct", "local") } // debug: the line itself, for comparisons
+        // Apps with their own route, grouped. Direct only appears here under lockdown (otherwise excluded at OS level).
+        val perApp = s.apps.entries.groupBy({ it.value }, { it.key }).toSortedMap()
+            .filterKeys { id -> id != s.defaultRoute && if (id == DIRECT) i.lockdown else active.any { it.id == id } }
+            .mapValues { (_, p) -> JsonArray(p.sorted().map(::JsonPrimitive)) }
+        // Destination rules that beat any app rule. Repeated after every resolve, because fake-IP connections
+        // only get a real address there.
+        val network = buildList {
+            homeWg?.let { w -> homeCidrs(w).takeIf { it.isNotEmpty() }?.let { add(obj("ip_cidr" to JsonArray(it.map(::JsonPrimitive)), "outbound" to "home-wg")) } }
+            if (homeTs) add(obj("ip_cidr" to JsonArray((listOf(TAILNET) + s.home.subnets.filter(::isPrivate)).map(::JsonPrimitive)), "outbound" to TS_TAG))
+            if (s.prefs.lan) add(obj("ip_cidr" to JsonArray(LAN.map(::JsonPrimitive)), "outbound" to "direct"))
+        }
+
+        return buildJsonObject {
+            putJsonObject("log") { put("level", "warn"); put("timestamp", false) }
+            putJsonObject("dns") {
+                putJsonArray("servers") {
+                    add(obj("type" to "fakeip", "tag" to "fake", "inet4_range" to FAKE_RANGES[i.fakeHalf]))
+                    add(obj("type" to "local", "tag" to "local"))
+                    active.forEach { r ->
+                        val link = i.links[r.id]
+                        if (link is OvpnLink && pushedDns(r)) add(obj("type" to "openvpn", "tag" to "dns-r-${r.id}", "endpoint" to tag(r.id), "accept_default_resolvers" to true))
+                        else add(obj("type" to "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, link), "detour" to tag(r.id)))
+                    }
+                    if (homeTs) add(obj("type" to "tailscale", "tag" to "dns-tailnet", "endpoint" to TS_TAG, "accept_default_resolvers" to false))
+                }
+                putJsonArray("rules") {
+                    if (homeTs) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
+                    if (s.prefs.lan) add(obj("domain_suffix" to arr("local", "lan", "home.arpa", "fritz.box"), "server" to "local"))
+                    add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
+                    // Other query types (HTTPS, SVCB, TXT…) go to the asking app's own exit, never the ISP.
+                    for ((id, pkgs) in perApp) add(obj("package_name" to pkgs, "server" to dnsFor(id)))
+                }
+                put("final", defaultDns)
+                put("strategy", "ipv4_only")
+                // A slow or re-handshaking exit must not hold every app's new connections: answer from the cache
+                // (stale if need be) and refresh in the background, and give up on a lookup sooner than the 10 s default.
+                put("optimistic", buildJsonObject { put("enabled", true); put("timeout", "1h") }) // stale at most an hour, not the 3-day default
+                put("timeout", "5s")
+                put("cache_capacity", 4096)
+            }
+            putJsonArray("inbounds") {
+                add(buildJsonObject {
+                    put("type", "tun"); put("tag", "tun")
+                    put("address", arr("172.19.0.1/30"))
+                    put("mtu", 9000)
+                    put("auto_route", true)
+                    put("strict_route", true)
+                    // gVisor: on Android 17 the kernel TCP path of "mixed" never answered (Direct and Shadowsocks timed
+                    // out on the emulator; cf. sing-tun#98). WireGuard, OpenVPN and Tailscale forward their flows past
+                    // the stack either way, at the same speed.
+                    put("stack", "gvisor")
+                    // Forwarded flows and UDP are forgotten after udp_timeout idle (5 min by default), which silently
+                    // kills idle long-lived connections like push (FCM heartbeats run up to ~28 min apart).
+                    put("udp_timeout", "30m")
+                    // Under system lockdown Android drops anything that bypasses the TUN, so LAN goes through `direct` instead.
+                    if (s.prefs.lan && !i.lockdown) {
+                        // LAN never enters the tunnel: Android sends it straight to Wi-Fi. Home subnets reached
+                        // through a tunnel stay routed, because the more specific route wins.
+                        val home = (if (homeTs) s.home.subnets.filter(::isPrivate) else emptyList()) + (homeWg?.let(::homeCidrs) ?: emptyList())
+                        put("route_address", JsonArray((listOf("0.0.0.0/0") + home).map(::JsonPrimitive)))
+                        // Android applies exclusions after inclusions, so an exclusion equal to a home prefix would win.
+                        put("route_exclude_address", JsonArray((LAN - home.toSet()).map(::JsonPrimitive)))
+                    }
+                    put("exclude_package", JsonArray(((if (i.lockdown) emptyList() else direct) + i.selfPackage).map(::JsonPrimitive)))
+                })
+                // No tunnel to test, no inbound: sing-box would run a proxy with an empty user list unauthenticated.
+                i.probe?.takeIf { probeTags.isNotEmpty() }?.let { (port, password) ->
+                    add(buildJsonObject {
+                        put("type", "mixed"); put("tag", PROBE); put("listen", "127.0.0.1"); put("listen_port", port)
+                        putJsonArray("users") { probeTags.keys.forEach { t -> add(obj("username" to t, "password" to password)) } }
+                    })
+                }
+            }
+            putJsonArray("endpoints") {
+                active.filter { shared[it.id] == "r-${it.id}" }.forEach { r ->
+                    when (val l = i.links.getValue(r.id)) {
+                        is WgLink -> add(wg(tag(r.id), l.peer, r.name))
+                        is OvpnLink -> Manual.ovpnEndpoint(tag(r.id), l.profile).let { add(if (pushedDns(r)) openVpn(it) else it) }
+                        is SsLink, is TsLink -> Unit
+                    }
+                }
+                homeWg?.let { add(wg("home-wg", it, "the home network")) }
+                if (ts) add(buildJsonObject {
+                    put("type", "tailscale"); put("tag", TS_TAG)
+                    put("state_directory", i.tsDir)
+                    put("hostname", "unbraid")
+                    put("accept_routes", true)
+                    s.home.tsAuthKey?.let { put("auth_key", it) }
+                    // Over plain HTTP a network attacker could hand Tailscale a fake control-server key.
+                    s.home.tsControlUrl?.let { require(it.startsWith("https://")) { "Headscale needs an https:// address. Change it in Settings." }; put("control_url", it) }
+                    s.tsExit?.let { put("exit_node", it); put("exit_node_allow_lan_access", s.prefs.lan) }
+                })
+            }
+            putJsonArray("outbounds") {
+                add(obj("type" to "direct", "tag" to "direct"))
+                active.filter { shared[it.id] == "r-${it.id}" }.forEach { r -> (i.links[r.id] as? SsLink)?.let { add(Manual.ssOutbound(tag(r.id), it.profile)) } }
+            }
+            putJsonObject("route") {
+                putJsonArray("rules") {
+                    add(obj("protocol" to "dns", "action" to "hijack-dns"))
+                    // UDP only: the engine never completes a hijacked TCP connection, and apps test "am I online?" by
+                    // opening TCP to 8.8.8.8:53. That TCP goes out through the app's own exit like any other connection.
+                    add(obj("port" to 53, "network" to "udp", "action" to "hijack-dns"))
+                    // Fake IPs an app kept from the previous domain table name nothing now: refused at once, so the app
+                    // looks the name up again instead of waiting on a dead address.
+                    add(obj("ip_cidr" to arr(FAKE_RANGES[1 - i.fakeHalf]), "action" to "reject", "no_drop" to true))
+                    // The app's own tests: each proxy user goes out through its exit only, names resolved there too.
+                    if (i.probe != null) probeTags.forEach { (t, dns) -> // nothing to add when there is no tunnel
+                        add(obj("inbound" to PROBE, "auth_user" to arr(t), "action" to "resolve", "server" to dns))
+                        add(obj("inbound" to PROBE, "auth_user" to arr(t), "outbound" to t))
+                    }
+                    network.forEach { add(it) }
+                    // Tailscale's control plane and login pages never ride the tailnet for apps on a Tailscale exit: a
+                    // not-yet-signed-in exit node would otherwise block its own sign-in. Other apps keep their own exits.
+                    val tsLogin = if (!ts) emptyList() else listOfNotNull(
+                        ("domain_suffix" to arr("tailscale.com", "tailscale.io")).takeIf { s.tsExit != null },
+                        s.home.tsControlUrl?.let { u -> java.net.URI(u).host?.let { h -> if (h.first().isDigit()) "ip_cidr" to arr("$h/32") else "domain" to arr(h) } },
+                    )
+                    val onTs = { id: String -> s.route(id)?.tsExit != null }
+                    for ((id, p) in perApp) {
+                        // Before its exit's DNS, which an exit node not yet signed in can't answer; Direct resolves locally.
+                        if (onTs(id)) tsLogin.forEach { add(obj("package_name" to p, it, "outbound" to "direct")) }
+                        add(obj("package_name" to p, "action" to "resolve", "server" to dnsFor(id)))
+                        network.forEach { add(it) }
+                        add(obj("package_name" to p, "outbound" to tag(id)))
+                    }
+                    if (onTs(s.defaultRoute)) tsLogin.forEach { add(obj(it, "outbound" to "direct")) }
+                    add(obj("action" to "resolve", "server" to defaultDns))
+                    network.forEach { add(it) }
+                    // Ping has no owner the engine can look up, so it never matches an app's rule and lands here: with
+                    // Direct as the default, an app kept on a VPN could ping out from the phone's own address. Refused,
+                    // after the LAN and home rules (names resolved), so pinging the router or a home box still works.
+                    if (s.defaultRoute == DIRECT && perApp.keys.any { it != DIRECT }) add(obj("network" to "icmp", "action" to "reject"))
+                }
+                put("final", if (active.isEmpty()) "direct" else tag(s.defaultRoute))
+                put("auto_detect_interface", true)
+                put("default_domain_resolver", "local")
+            }
+            putJsonObject("experimental") {
+                putJsonObject("cache_file") { put("enabled", true); put("path", i.cacheFile); put("store_fakeip", true) }
+            }
+        }.toString()
+    }
+
+    /** Private ranges only: a home tunnel must never capture public traffic meant for an exit. */
+    private val PRIVATE = listOf("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")
+
+    private fun ipv4(cidr: String): Pair<Long, Int>? {
+        val (ip, len) = cidr.split('/').let { it[0] to (it.getOrNull(1)?.toIntOrNull() ?: 32) }
+        val o = ip.split('.').mapNotNull { it.toIntOrNull()?.takeIf { v -> v in 0..255 } }
+        if (o.size != 4 || len !in 0..32) return null
+        return o.fold(0L) { a, v -> a shl 8 or v.toLong() } to len
+    }
+
+    /** True when the whole of [cidr] lies inside a private IPv4 range. */
+    fun isPrivate(cidr: String): Boolean {
+        val (a, l) = ipv4(cidr) ?: return false
+        return PRIVATE.any { r -> val (b, m) = ipv4(r)!!; l >= m && (a xor b) shr (32 - m) == 0L }
+    }
+
+    /** Networks to send through the home tunnel: its private AllowedIPs; else the interface's own subnet. */
+    fun homeCidrs(p: WgPeer): List<String> = p.allowedIps.filter(::isPrivate).ifEmpty {
+        p.address.mapNotNull { a ->
+            val (ip, len) = a.split('/').let { it[0] to (it.getOrNull(1)?.toInt() ?: 32) }
+            val v = ip.split('.').fold(0L) { acc, o -> acc shl 8 or o.toLong() } and (0xFFFFFFFFL shl (32 - len))
+            ((3 downTo 0).joinToString(".") { (v shr (it * 8) and 255).toString() } + "/$len").takeIf(::isPrivate)
+        }
+    }
+
+    /** Resolver inside a route's tunnel: custom DNS, else the provider's blocking resolver if asked, else the tunnel's own, else Nord's (filtering if TP Lite is on), else Quad9. */
+    private fun dnsServer(s: Setup, r: app.unbraid.data.Route, link: Link?): String {
+        val provider = r.takeIf { !it.imported }?.loc?.provider
+        return s.prefs.customDns.firstOrNull()
+            ?: FILTER_DNS[provider]?.takeIf { r.filter }
+            ?: (link as? WgLink)?.peer?.dns?.firstOrNull()
+            ?: if (provider == "nord") (if (s.prefs.threatProtection) NORD_TP else NORD_DNS) else "9.9.9.9"
+    }
+
+    /** The engine's error for a bad key quotes it, so every key is checked here and never named. */
+    private fun wg(tag: String, p: WgPeer, name: String) = buildJsonObject {
+        require(validWgKey(p.privateKey) && validWgKey(p.publicKey) && p.presharedKey?.let(::validWgKey) != false) { "Invalid WireGuard key for $name" }
+        put("type", "wireguard"); put("tag", tag)
+        // 1280 fits every mobile path (cellular, 464XLAT); 1420 makes 1480-byte packets that stall big uploads there.
+        put("mtu", minOf(p.mtu, 1280))
+        put("address", JsonArray(p.address.map(::JsonPrimitive)))
+        put("private_key", p.privateKey)
+        putJsonArray("peers") {
+            add(buildJsonObject {
+                val host = p.endpoint.substringBeforeLast(':').removePrefix("[").removeSuffix("]")
+                put("address", host)
+                put("port", p.endpoint.substringAfterLast(':').toIntOrNull() ?: 51820)
+                put("public_key", p.publicKey)
+                p.presharedKey?.let { put("pre_shared_key", it) }
+                put("allowed_ips", arr("0.0.0.0/0"))
+                put("persistent_keepalive_interval", 25)
+            })
+        }
+    }
+
+    private val OPENVPN_ROUTING = listOf("route ", "route-ipv6 ", "route-metric", "redirect-gateway", "redirect-private", "block-ipv6", "block-outside-dns")
+
+    /**
+     * Manual builds OpenVPN endpoints with `route_no_pull`, which also drops the pushed DNS. Here the server's routes
+     * stay ignored (sing-box's own rules steer traffic) but its DNS is kept, for the `openvpn` DNS server.
+     */
+    private fun openVpn(e: JsonObject) = JsonObject(
+        e.filterKeys { it != "route_no_pull" } + ("pull_filters" to JsonArray(
+            // First match wins: the app's ignores go first, so a profile's own accept filter can't let pushed routes through.
+            OPENVPN_ROUTING.map { obj("action" to "ignore", "text" to it) } + ((e["pull_filters"] as? JsonArray) ?: JsonArray(emptyList())),
+        )),
+    )
+
+    private val DOMAIN = Regex("[a-z0-9]([a-z0-9.-]*[a-z0-9])?")
+
+    /** A MagicDNS suffix as Tailscale reports it ("tail1234.ts.net." or a Headscale base domain), or null if unusable. */
+    fun tsSuffix(raw: String?): String? = raw?.trim()?.lowercase()?.trim('.')?.takeIf { it.matches(DOMAIN) && it != "ts.net" }
+
+    private fun sha(s: String) = MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
+
+    /** Same key = same physical exit with the same credentials, whichever route asked for it. */
+    internal fun linkKey(r: Route, l: Link): String = when (l) {
+        is WgLink -> listOf("wg", if (r.imported) "-" else r.loc.provider, l.server.ip.ifEmpty { l.peer.endpoint }, l.peer.publicKey, sha(l.peer.privateKey))
+        // Same remotes but another protocol, CA or login is another tunnel: compare the whole profile.
+        is OvpnLink -> listOf("ovpn", sha(l.profile.config), l.profile.username, sha(l.profile.password))
+        // The plugin and its options (TLS, certificate, host) are part of the tunnel too.
+        is SsLink -> listOf("ss", l.profile.server, l.profile.port.toString(), l.profile.method, sha(l.profile.password), l.profile.plugin.orEmpty(), sha(l.profile.pluginOpts.orEmpty()))
+        is TsLink -> listOf("ts")
+    }.joinToString("|")
+
+    private fun arr(vararg v: String) = JsonArray(v.map(::JsonPrimitive))
+
+    private fun obj(vararg kv: Pair<String, Any>) = JsonObject(kv.associate { (k, v) ->
+        k to when (v) {
+            is String -> JsonPrimitive(v)
+            is Number -> JsonPrimitive(v)
+            is Boolean -> JsonPrimitive(v)
+            is JsonArray -> v
+            else -> error("unsupported $v")
+        }
+    })
+}

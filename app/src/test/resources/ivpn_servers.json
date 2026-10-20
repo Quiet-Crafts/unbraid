@@ -1,0 +1,606 @@
+{
+ "wireguard": [
+  {
+   "gateway": "ar.wg.ivpn.net",
+   "country_code": "AR",
+   "country": "Argentina",
+   "city": "Buenos Aires",
+   "latitude": -34.614,
+   "longitude": -58.371,
+   "isp": "Datapacket",
+   "hosts": [
+    {
+     "hostname": "ar1.wg.ivpn.net",
+     "dns_name": "ar1.gw.ivpn.net",
+     "host": "149.22.83.100",
+     "public_key": "NXlWMTFlNJKQXfOnt+DJogxnDmfapEdgmHNat2JqwE0=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 62.21,
+     "multihop_port": 20600,
+     "v2ray": "149.22.83.102",
+     "isp": "Datapacket"
+    }
+   ]
+  },
+  {
+   "gateway": "nl.wg.ivpn.net",
+   "country_code": "NL",
+   "country": "Netherlands",
+   "city": "Amsterdam",
+   "latitude": 52.376,
+   "longitude": 4.898,
+   "isp": "Datapacket",
+   "hosts": [
+    {
+     "hostname": "nl2.wg.ivpn.net",
+     "dns_name": "nl2.gw.ivpn.net",
+     "host": "185.102.218.104",
+     "public_key": "AsMT2FqpkZbjzWeDch6GwufF5odl259W/hIkGytVfWo=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 7.05,
+     "multihop_port": 20910,
+     "v2ray": "185.102.218.99",
+     "isp": "Datapacket"
+    },
+    {
+     "hostname": "nl3.wg.ivpn.net",
+     "dns_name": "nl3.gw.ivpn.net",
+     "host": "95.211.95.9",
+     "public_key": "XDU6Syq1DY82IMatsHV0x/TAtbLiRwh/SdFCXlEn40c=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 43.34,
+     "multihop_port": 23101,
+     "v2ray": "95.211.172.72",
+     "isp": "Leaseweb"
+    },
+    {
+     "hostname": "nl5.wg.ivpn.net",
+     "dns_name": "nl5.gw.ivpn.net",
+     "host": "95.211.243.162",
+     "public_key": "NCagAawwRixI6Iw/NWiGD8lbjDNCl0aTICZKJtO/1HA=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 71.29,
+     "multihop_port": 23901,
+     "v2ray": "95.211.187.225",
+     "isp": "Leaseweb"
+    }
+   ]
+  },
+  {
+   "gateway": "se.wg.ivpn.net",
+   "country_code": "SE",
+   "country": "Sweden",
+   "city": "Stockholm",
+   "latitude": 59.3508,
+   "longitude": 18.0973,
+   "isp": "GleSyS",
+   "hosts": [
+    {
+     "hostname": "se1.wg.ivpn.net",
+     "dns_name": "se1.gw.ivpn.net",
+     "host": "80.67.10.141",
+     "public_key": "u8VHnYEpoEjJWDAF9NAUkU6s810RnkMuhEfFD9U0cGo=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {},
+     "load": 22.95,
+     "multihop_port": 24001,
+     "v2ray": "80.67.10.139",
+     "isp": "GleSyS"
+    },
+    {
+     "hostname": "se2.wg.ivpn.net",
+     "dns_name": "se2.gw.ivpn.net",
+     "host": "37.120.153.226",
+     "public_key": "2n0nFE1g/+vQr2AOQPm9Igyiy0zh9uTTultvOOSkMRo=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 23.29,
+     "multihop_port": 20970,
+     "v2ray": "37.120.153.227",
+     "isp": "M247"
+    }
+   ]
+  },
+  {
+   "gateway": "us-az.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Phoenix, AZ",
+   "latitude": 33.455,
+   "longitude": -111.978,
+   "isp": "Tzulo",
+   "hosts": [
+    {
+     "hostname": "us-az2.wg.ivpn.net",
+     "dns_name": "us-az2.gw.ivpn.net",
+     "host": "198.44.133.198",
+     "public_key": "IXV6W/NAMdIyf5QpndaLOVDgwupq0hQIxPGLb580cy4=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 18.22,
+     "multihop_port": 20350,
+     "v2ray": "198.44.133.200",
+     "isp": "Tzulo"
+    }
+   ]
+  },
+  {
+   "gateway": "us-ca-sjc.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "San Jose, CA",
+   "latitude": 37.408,
+   "longitude": -121.893,
+   "isp": "Tzulo",
+   "hosts": [
+    {
+     "hostname": "us-ca-sjc1.wg.ivpn.net",
+     "dns_name": "us-ca-sjc1.gw.ivpn.net",
+     "host": "198.44.134.38",
+     "public_key": "HJWSwK2AWdygxWVA6QzbsvyvGYUiLJWe4qZIiEZXMDo=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 55.62,
+     "multihop_port": 20370,
+     "v2ray": "198.44.134.40",
+     "isp": "Tzulo"
+    }
+   ]
+  },
+  {
+   "gateway": "us-ca.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Los Angeles, CA",
+   "latitude": 34.1139,
+   "longitude": -118.4068,
+   "isp": "Tzulo",
+   "hosts": [
+    {
+     "hostname": "us-ca3.wg.ivpn.net",
+     "dns_name": "us-ca3.gw.ivpn.net",
+     "host": "198.54.129.100",
+     "public_key": "J5+Bx84LxNPdWEhewOvBV/fGWiDluIBlAcr1QlJZil8=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 38.42,
+     "multihop_port": 21301,
+     "v2ray": "198.54.129.212",
+     "isp": "Tzulo"
+    },
+    {
+     "hostname": "us-ca5.wg.ivpn.net",
+     "dns_name": "us-ca5.gw.ivpn.net",
+     "host": "185.180.13.41",
+     "public_key": "FGl78s9Ct6xNamQ2/CtAyXwGePrrU0kiZxfM27pm8XA=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 8.04,
+     "multihop_port": 20940,
+     "v2ray": "185.180.13.38",
+     "isp": "Datapacket"
+    },
+    {
+     "hostname": "us-ca6.wg.ivpn.net",
+     "dns_name": "us-ca6.gw.ivpn.net",
+     "host": "185.152.67.20",
+     "public_key": "gFPUMq/KAr5KXWAeIH1wyPJ3lzjJ70zkV7GqMP15ymA=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 9.82,
+     "multihop_port": 20340,
+     "v2ray": "185.152.67.22",
+     "isp": "Datapacket"
+    }
+   ]
+  },
+  {
+   "gateway": "us-co.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Denver, CO",
+   "latitude": 39.749,
+   "longitude": -104.997,
+   "isp": "Datapacket",
+   "hosts": [
+    {
+     "hostname": "us-co1.wg.ivpn.net",
+     "dns_name": "us-co1.gw.ivpn.net",
+     "host": "121.127.44.29",
+     "public_key": "eW3Xf/azDAah8xaM0z5rMxJZkWM6YlWuZsEbMwy9j2Y=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 10.51,
+     "multihop_port": 20560,
+     "v2ray": "121.127.44.31",
+     "isp": "Datapacket"
+    }
+   ]
+  },
+  {
+   "gateway": "us-fl.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Miami, FL",
+   "latitude": 25.776,
+   "longitude": -80.193,
+   "isp": "Datapacket",
+   "hosts": [
+    {
+     "hostname": "us-fl2.wg.ivpn.net",
+     "dns_name": "us-fl2.gw.ivpn.net",
+     "host": "195.181.163.83",
+     "public_key": "HWDCBq3k20Ky72W4wMrAtCITY0fwqNVooHzKEKFtHCc=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 41.55,
+     "multihop_port": 20380,
+     "v2ray": "195.181.163.86",
+     "isp": "Datapacket"
+    }
+   ]
+  },
+  {
+   "gateway": "us-ga.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Atlanta, GA",
+   "latitude": 33.749,
+   "longitude": -84.387,
+   "isp": "Datapacket",
+   "hosts": [
+    {
+     "hostname": "us-ga3.wg.ivpn.net",
+     "dns_name": "us-ga3.gw.ivpn.net",
+     "host": "185.93.0.212",
+     "public_key": "jD8h+pL5/d6fmYcTzl0lR8AWzQVN5XkwRFSmM/3NcDM=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 56.77,
+     "multihop_port": 20900,
+     "v2ray": "185.93.0.217",
+     "isp": "Datapacket"
+    },
+    {
+     "hostname": "us-ga5.wg.ivpn.net",
+     "dns_name": "us-ga5.gw.ivpn.net",
+     "host": "198.44.138.54",
+     "public_key": "4BIZI97EGcwqZBg5S+nba3rZ18CL0wG7I872Wj0WATY=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 36.35,
+     "multihop_port": 20390,
+     "v2ray": "198.44.138.56",
+     "isp": "Tzulo"
+    }
+   ]
+  },
+  {
+   "gateway": "us-il.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Chicago, IL",
+   "latitude": 41.887,
+   "longitude": -87.632,
+   "isp": "Datapacket",
+   "hosts": [
+    {
+     "hostname": "us-il3.wg.ivpn.net",
+     "dns_name": "us-il3.gw.ivpn.net",
+     "host": "89.187.181.116",
+     "public_key": "hku9gjamhoii8OvxZgx+TdUDIkOAQYFu39qbav2AyUQ=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 65.33,
+     "multihop_port": 20930,
+     "v2ray": "89.187.181.121",
+     "isp": "Datapacket"
+    },
+    {
+     "hostname": "us-il4.wg.ivpn.net",
+     "dns_name": "us-il4.gw.ivpn.net",
+     "host": "68.235.50.198",
+     "public_key": "JeKmL8RcIHoHbjFcrStJL8uCHaoZ+jvY/M0SkLA93kE=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 17.85,
+     "multihop_port": 20410,
+     "v2ray": "68.235.50.200",
+     "isp": "Tzulo"
+    },
+    {
+     "hostname": "us-il5.wg.ivpn.net",
+     "dns_name": "us-il5.gw.ivpn.net",
+     "host": "68.235.50.214",
+     "public_key": "TLS6jY8aHviLDDywQ6iCeEM+b+YI2l3YSD6UtGZ5okY=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 30.23,
+     "multihop_port": 20420,
+     "v2ray": "68.235.50.216",
+     "isp": "Tzulo"
+    }
+   ]
+  },
+  {
+   "gateway": "us-ma.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Boston, MA",
+   "latitude": 42.376,
+   "longitude": -71.078,
+   "isp": "Datapacket",
+   "hosts": [
+    {
+     "hostname": "us-ma1.wg.ivpn.net",
+     "dns_name": "us-ma1.gw.ivpn.net",
+     "host": "109.61.86.50",
+     "public_key": "JtIx5H4hqFUhwyrnlVlvthQgwNKJTKnpmT7Ld1XcPhM=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 20.51,
+     "multihop_port": 20870,
+     "v2ray": "109.61.86.52",
+     "isp": "Datapacket"
+    }
+   ]
+  },
+  {
+   "gateway": "us-nj.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Secaucus, NJ",
+   "latitude": 40.737764,
+   "longitude": -74.151747,
+   "isp": "M247",
+   "hosts": [
+    {
+     "hostname": "us-nj4.wg.ivpn.net",
+     "dns_name": "us-nj4.gw.ivpn.net",
+     "host": "194.36.111.54",
+     "public_key": "1Te4AfL1yKo2k4jzPALnRPfKE3YSzXKo4XIRHPz5FxI=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 29.8,
+     "multihop_port": 27401,
+     "v2ray": "37.120.202.42",
+     "isp": "M247"
+    }
+   ]
+  },
+  {
+   "gateway": "us-nv.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Las Vegas, NV",
+   "latitude": 36.2333,
+   "longitude": -115.2654,
+   "isp": "M247",
+   "hosts": [
+    {
+     "hostname": "us-nv1.wg.ivpn.net",
+     "dns_name": "us-nv1.gw.ivpn.net",
+     "host": "185.242.5.37",
+     "public_key": "PRpvAZyoNWNm/KHlqafjtYoZtn1PkIPylUE4WbuYmgM=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 45.32,
+     "multihop_port": 26501,
+     "v2ray": "185.242.5.146",
+     "isp": "M247"
+    }
+   ]
+  },
+  {
+   "gateway": "us-ny.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "New York, NY",
+   "latitude": 40.6943,
+   "longitude": -73.9249,
+   "isp": "M247",
+   "hosts": [
+    {
+     "hostname": "us-ny2.wg.ivpn.net",
+     "dns_name": "us-ny2.gw.ivpn.net",
+     "host": "212.103.48.195",
+     "public_key": "c7DwY2uT+6ulWAJ5u8qJNWHroA0qyJLcdNzf/f2kkhs=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 33.69,
+     "multihop_port": 21801,
+     "v2ray": "212.103.48.199",
+     "isp": "M247"
+    },
+    {
+     "hostname": "us-ny3.wg.ivpn.net",
+     "dns_name": "us-ny3.gw.ivpn.net",
+     "host": "89.187.178.145",
+     "public_key": "m5/Ssw9SN3WuE+yD/fAsH5G8iuI8TcDGEiZZnPgiMCc=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 12.12,
+     "multihop_port": 27601,
+     "v2ray": "89.187.178.150",
+     "isp": "Datapacket"
+    },
+    {
+     "hostname": "us-ny4.wg.ivpn.net",
+     "dns_name": "us-ny4.gw.ivpn.net",
+     "host": "91.132.137.170",
+     "public_key": "6/tjvgb7HFl7UuvBSegolxa1zKr3iSlDrlCexCmhAGE=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 31.95,
+     "multihop_port": 20990,
+     "v2ray": "91.132.137.173",
+     "isp": "M247"
+    }
+   ]
+  },
+  {
+   "gateway": "us-tx.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Dallas, TX",
+   "latitude": 32.912,
+   "longitude": -96.785,
+   "isp": "Datapacket",
+   "hosts": [
+    {
+     "hostname": "us-tx4.wg.ivpn.net",
+     "dns_name": "us-tx4.gw.ivpn.net",
+     "host": "89.187.164.118",
+     "public_key": "6jIFbOQFIW7HalTcJBq9hx28Yp9C11ZwtEojpGDqfFA=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 10.72,
+     "multihop_port": 20300,
+     "v2ray": "89.187.164.120",
+     "isp": "Datapacket"
+    },
+    {
+     "hostname": "us-tx6.wg.ivpn.net",
+     "dns_name": "us-tx6.gw.ivpn.net",
+     "host": "198.44.137.198",
+     "public_key": "ovdPq1PhjsqSrYgH4LbLyKNkXs+q5w9YvG31B81TLyU=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 41.81,
+     "multihop_port": 20430,
+     "v2ray": "198.44.137.200",
+     "isp": "Tzulo"
+    }
+   ]
+  },
+  {
+   "gateway": "us-ut.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Salt Lake City, Utah",
+   "latitude": 40.75,
+   "longitude": -111.88,
+   "isp": "Tzulo",
+   "hosts": [
+    {
+     "hostname": "us-ut2.wg.ivpn.net",
+     "dns_name": "us-ut2.gw.ivpn.net",
+     "host": "198.44.139.94",
+     "public_key": "5bX1NIcNST+78oqQVS8I+uGY4vBHGSpF95lNIokwHRY=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 6.41,
+     "multihop_port": 24402,
+     "v2ray": "198.44.139.91",
+     "isp": "Tzulo"
+    }
+   ]
+  },
+  {
+   "gateway": "us-va.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Ashburn, VA",
+   "latitude": 39.0437,
+   "longitude": -77.4875,
+   "isp": "Datapacket",
+   "hosts": [
+    {
+     "hostname": "us-va1.wg.ivpn.net",
+     "dns_name": "us-va1.gw.ivpn.net",
+     "host": "37.19.206.106",
+     "public_key": "ZCnZK6U+cRuP/WgzIDb/P6UG2rX/KyCRd5vJ1hAbr2E=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 8.99,
+     "multihop_port": 27701,
+     "v2ray": "37.19.206.111",
+     "isp": "Datapacket"
+    }
+   ]
+  },
+  {
+   "gateway": "us-wa.wg.ivpn.net",
+   "country_code": "US",
+   "country": "United States",
+   "city": "Seattle, WA",
+   "latitude": 47.62,
+   "longitude": -122.34,
+   "isp": "Tzulo",
+   "hosts": [
+    {
+     "hostname": "us-wa2.wg.ivpn.net",
+     "dns_name": "us-wa2.gw.ivpn.net",
+     "host": "198.44.131.4",
+     "public_key": "4OvdVPdxffZx3gbU0fXAzQdTcE2w6mLKP+p4fIAJoQM=",
+     "local_ip": "172.16.0.1/12",
+     "ipv6": {
+      "local_ip": "fd00:4956:504e:ffff::/96"
+     },
+     "load": 40.78,
+     "multihop_port": 27801,
+     "v2ray": "198.44.131.20",
+     "isp": "Tzulo"
+    }
+   ]
+  }
+ ]
+}

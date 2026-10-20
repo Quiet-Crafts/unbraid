@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug builds only. DUMP is held by adb shell, never by ordinary apps. -->
+        <receiver android:name=".DebugHooks" android:exported="true" android:permission="android.permission.DUMP">
+            <intent-filter><action android:name="app.unbraid.DEBUG" /></intent-filter>
+        </receiver>
+    </application>
+</manifest>

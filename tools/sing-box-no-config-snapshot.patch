@@ -1,0 +1,17 @@
+diff --git a/experimental/libbox/log.go b/experimental/libbox/log.go
+index 992cf8f..d03636c 100644
+--- a/experimental/libbox/log.go
++++ b/experimental/libbox/log.go
+@@ -61,10 +61,9 @@ func configSnapshotPath() string {
+ 	return filepath.Join(sBasePath, "configuration.json")
+ }
+ 
++// Unbraid: never persist the configuration; it contains private keys.
+ func saveConfigSnapshot(configContent string) {
+-	snapshotPath := configSnapshotPath()
+-	os.WriteFile(snapshotPath, []byte(configContent), 0o666)
+-	chownReport(snapshotPath)
++	os.Remove(configSnapshotPath())
+ }
+ 
+ func redirectStderr(path string) error {

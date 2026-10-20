@@ -1,0 +1,2 @@
+• About & support: the donation and source links now go to unbraid.app and the project's new home on GitHub.
+• Releases: APKs are now signed with a new key. If you installed an earlier test build, uninstall it once first.

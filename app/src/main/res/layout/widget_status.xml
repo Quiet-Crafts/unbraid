@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 1x1 status card: status badge top-left, the logo top-right, action pill at the bottom.
+     Colours, icons and texts are set in code (StatusWidget) from the live connection state. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@android:id/background"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg"
+    android:backgroundTint="#FF1E2428"
+    android:orientation="vertical"
+    android:padding="9dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <FrameLayout
+            android:id="@+id/badge"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:background="@drawable/widget_dot"
+            android:backgroundTint="#FFFF8A80">
+
+            <ImageView
+                android:id="@+id/badgeIcon"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:layout_gravity="center"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_w_off"
+                android:tint="#FF0F1214" />
+        </FrameLayout>
+
+        <!-- A flexible gap. Home-screen widgets (RemoteViews) don't allow Space, so an empty FrameLayout it is. -->
+        <FrameLayout
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1"
+            tools:ignore="UselessLeaf" />
+
+        <ImageView
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_tile"
+            android:tint="#FFFFA66B" />
+    </LinearLayout>
+
+    <!-- The whole lower part takes the action's taps, so the target is larger than the pill drawn at its foot. -->
+    <FrameLayout
+        android:id="@+id/actionArea"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:minHeight="40dp">
+
+    <TextView
+        android:id="@+id/action"
+        android:layout_width="match_parent"
+        android:layout_height="32dp"
+        android:layout_gravity="bottom"
+        android:background="@drawable/widget_pill"
+        android:backgroundTint="#FFFFA66B"
+        android:fontFamily="sans-serif-medium"
+        android:gravity="center"
+        android:maxLines="1"
+        android:text="@string/widget_connect"
+        android:textColor="#FF2A1A0F"
+        android:textSize="13sp" />
+    </FrameLayout>
+</LinearLayout>

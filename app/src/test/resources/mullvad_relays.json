@@ -1,0 +1,284 @@
+{
+ "locations": {
+  "nl-ams": {
+   "country": "Netherlands",
+   "city": "Amsterdam",
+   "latitude": 52.35,
+   "longitude": 4.916667
+  },
+  "se-got": {
+   "country": "Sweden",
+   "city": "Gothenburg",
+   "latitude": 57.70887,
+   "longitude": 11.97456
+  },
+  "us-lax": {
+   "country": "USA",
+   "city": "Los Angeles, CA",
+   "latitude": 34.052235,
+   "longitude": -118.243683
+  },
+  "se-mma": {
+   "country": "Sweden",
+   "city": "Malm\u00f6",
+   "latitude": 55.607075,
+   "longitude": 13.002716
+  },
+  "us-nyc": {
+   "country": "USA",
+   "city": "New York, NY",
+   "latitude": 40.73061,
+   "longitude": -73.935242
+  },
+  "se-sto": {
+   "country": "Sweden",
+   "city": "Stockholm",
+   "latitude": 59.3289,
+   "longitude": 18.0649
+  }
+ },
+ "wireguard": {
+  "port_ranges": [
+   [
+    53,
+    53
+   ],
+   [
+    123,
+    123
+   ],
+   [
+    4000,
+    33433
+   ],
+   [
+    33565,
+    51820
+   ],
+   [
+    52001,
+    60000
+   ]
+  ],
+  "ipv4_gateway": "10.64.0.1",
+  "ipv6_gateway": "fc00:bbbb:bbbb:bb01::1",
+  "relays": [
+   {
+    "hostname": "se-got-wg-001",
+    "location": "se-got",
+    "active": true,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "185.213.154.66",
+    "include_in_country": true,
+    "weight": 1,
+    "public_key": "5JMPeO7gXIbR5CnUa/NPNK4L5GqUnreF0/Bozai4pl4=",
+    "ipv6_addr_in": "2a03:1b20:5:f011:31::a03f"
+   },
+   {
+    "hostname": "se-got-wg-002",
+    "location": "se-got",
+    "active": true,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "185.213.154.67",
+    "include_in_country": true,
+    "weight": 1,
+    "public_key": "AtvE5KdPeQtOcE2QyXaPt9eQoBV3GBxzimQ2FIuGQ2U=",
+    "ipv6_addr_in": "2a03:1b20:5:f011::a05f"
+   },
+   {
+    "hostname": "se-sto-wg-001",
+    "location": "se-sto",
+    "active": true,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "185.195.233.76",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "MkP/Jytkg51/Y/EostONjIN6YaFRpsAYiNKMX27/CAY=",
+    "ipv6_addr_in": "2a03:1b20:4:f011::999f"
+   },
+   {
+    "hostname": "se-sto-wg-002",
+    "location": "se-sto",
+    "active": true,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "185.65.135.67",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "q2ZZPfumPaRVl4DJfzNdQF/GHfe6BYAzQ2GZZHb6rmI=",
+    "ipv6_addr_in": "2a03:1b20:4:f011::a02f"
+   },
+   {
+    "hostname": "se-sto-wg-009",
+    "location": "se-sto",
+    "active": true,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "185.195.233.69",
+    "include_in_country": false,
+    "weight": 1,
+    "public_key": "t1XlQD7rER0JUPrmh3R5IpxjUP9YOqodJAwfRorNxl4=",
+    "ipv6_addr_in": "2a03:1b20:4:f011::a09f"
+   },
+   {
+    "hostname": "se-mma-wg-001",
+    "location": "se-mma",
+    "active": true,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "193.138.218.220",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "Qn1QaXYTJJSmJSMw18CGdnFiVM0/Gj/15OdkxbXCSG0=",
+    "ipv6_addr_in": "2a03:1b20:1:f410::fa01"
+   },
+   {
+    "hostname": "se-mma-wg-002",
+    "location": "se-mma",
+    "active": true,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "193.138.218.80",
+    "include_in_country": true,
+    "weight": 0,
+    "public_key": "5y66WShsFXqM5K7/4CPEGCWfk7PQyNhVBT2ILjbGm2I=",
+    "ipv6_addr_in": "2a03:1b20:1:f410::a15f"
+   },
+   {
+    "hostname": "se-mma-wg-101",
+    "location": "se-mma",
+    "active": false,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "45.83.220.68",
+    "include_in_country": true,
+    "weight": 200,
+    "public_key": "7ncbaCb+9za3jnXlR95I6dJBkwL1ABB5i4ndFUesYxE=",
+    "ipv6_addr_in": "2a03:1b20:1:e011::a21f"
+   },
+   {
+    "hostname": "se-mma-wg-004",
+    "location": "se-mma",
+    "active": true,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "193.138.218.130",
+    "include_in_country": false,
+    "weight": 100,
+    "public_key": "m4jnogFbACz7LByjo++8z5+1WV0BuR1T7E1OWA+n8h0=",
+    "ipv6_addr_in": "2a03:1b20:1:f410:40::a04f"
+   },
+   {
+    "hostname": "nl-ams-wg-004",
+    "location": "nl-ams",
+    "active": true,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "193.32.249.69",
+    "include_in_country": true,
+    "weight": 50,
+    "public_key": "hnRyse6QxPPcZOoSwRsHUtK1W+APWXnIoaDTmH6JsHQ=",
+    "ipv6_addr_in": "2a03:1b20:3:f011::f301"
+   },
+   {
+    "hostname": "nl-ams-wg-005",
+    "location": "nl-ams",
+    "active": true,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "193.32.249.70",
+    "include_in_country": true,
+    "weight": 50,
+    "public_key": "33BoONMGCm2vknq2eq72eozRsHmHQY6ZHEEZ4851TkY=",
+    "ipv6_addr_in": "2a03:1b20:3:f011::f401"
+   },
+   {
+    "hostname": "nl-ams-wg-001",
+    "location": "nl-ams",
+    "active": false,
+    "owned": true,
+    "provider": "31173",
+    "ipv4_addr_in": "193.32.249.66",
+    "include_in_country": true,
+    "weight": 50,
+    "public_key": "UrQiI9ISdPPzd4ARw1NHOPKKvKvxUhjwRjaI0JpJFgM=",
+    "ipv6_addr_in": "2a03:1b20:3:f011::f001"
+   },
+   {
+    "hostname": "us-nyc-wg-001",
+    "location": "us-nyc",
+    "active": true,
+    "owned": true,
+    "provider": "xtom",
+    "ipv4_addr_in": "23.165.56.3",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "8kBm0P9xz3cXVn3so1czm5mLv0dEcrM6vFCOlozQ7Hk=",
+    "ipv6_addr_in": "2a07:d883:705:1::f001"
+   },
+   {
+    "hostname": "us-nyc-wg-002",
+    "location": "us-nyc",
+    "active": true,
+    "owned": true,
+    "provider": "xtom",
+    "ipv4_addr_in": "23.165.8.3",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "xtX5Y0+E54jvIvubYLdTwMjCYQlBrmgNaL1tJNQyFlc=",
+    "ipv6_addr_in": "2a07:d883:705:2::f001"
+   },
+   {
+    "hostname": "us-nyc-wg-503",
+    "location": "us-nyc",
+    "active": false,
+    "owned": false,
+    "provider": "M247",
+    "ipv4_addr_in": "146.70.165.194",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "czE6NJ8CccA5jnJkKoZGDpMXFqSudeVTzxU5scLP/H8=",
+    "ipv6_addr_in": "2a0d:5600:24:2b9::f001"
+   },
+   {
+    "hostname": "us-lax-wg-001",
+    "location": "us-lax",
+    "active": true,
+    "owned": false,
+    "provider": "Tzulo",
+    "ipv4_addr_in": "23.234.72.2",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "zqsfGglzJPY657WMRxf/S4omG7+ZkSDIpDq+ggbc9yo=",
+    "ipv6_addr_in": "2607:9000:300:31::f001"
+   },
+   {
+    "hostname": "us-lax-wg-002",
+    "location": "us-lax",
+    "active": true,
+    "owned": false,
+    "provider": "Tzulo",
+    "ipv4_addr_in": "23.234.72.127",
+    "include_in_country": true,
+    "weight": 100,
+    "public_key": "sgcr0zSYzfspx4lD38bl3Nb9X7gtJiFLAVE2rqaDjxE=",
+    "ipv6_addr_in": "2607:9000:300:32::f001"
+   },
+   {
+    "hostname": "us-lax-wg-201",
+    "location": "us-lax",
+    "active": true,
+    "owned": false,
+    "provider": "DataPacket",
+    "ipv4_addr_in": "169.150.203.2",
+    "include_in_country": false,
+    "weight": 100,
+    "public_key": "xWobY7DWTL+vL1yD4NWwbQ3V4e8qz10Yz+EFdkIjq0Y=",
+    "ipv6_addr_in": "2a02:6ea0:c859:1::a01f"
+   }
+  ]
+ }
+}

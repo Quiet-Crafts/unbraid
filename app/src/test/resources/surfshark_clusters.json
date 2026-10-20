@@ -1,0 +1,263 @@
+[
+{
+"country": "Albania",
+"countryCode": "AL",
+"region": "Europe",
+"location": "Tirana",
+"connectionName": "al-tia.prod.surfshark.com",
+"pubKey": "l8EOWPyzt/njrb74CADY4VOhns/TbUN6KFTbytHcFQw=",
+"type": "generic"
+},
+{
+"country": "Germany",
+"countryCode": "DE",
+"region": "Europe",
+"location": "Frankfurt am Main",
+"connectionName": "de-fra.prod.surfshark.com",
+"pubKey": "fJDA+OA6jzQxfRcoHfC27xz7m3C8/590fRjpntzSpGo=",
+"type": "generic"
+},
+{
+"country": "Germany",
+"countryCode": "DE",
+"region": "Europe",
+"location": "Berlin",
+"connectionName": "de-ber.prod.surfshark.com",
+"pubKey": "d3ldwEjnFcbLwD1o8uC5xC3DaSNek8DGeTpOb/h/IE4=",
+"type": "generic"
+},
+{
+"country": "Japan",
+"countryCode": "JP",
+"region": "Asia Pacific",
+"location": "Tokyo",
+"connectionName": "jp-tok.prod.surfshark.com",
+"pubKey": "YJSjrc/WWOjQUyUi4iYcHb7LsWWoCY+2fK8/8VtC/BY=",
+"type": "generic"
+},
+{
+"country": "Netherlands",
+"countryCode": "NL",
+"region": "Europe",
+"location": "Amsterdam",
+"connectionName": "nl-ams.prod.surfshark.com",
+"pubKey": "Lxg3jAOKcBA9tGBtB6vEWMFl5LUEB6AwOpuniYn1cig=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Boston",
+"connectionName": "us-bos.prod.surfshark.com",
+"pubKey": "V0vpMcp0/586Y/q1EzW9PhM45JhypnCYgmrP0rzDEVw=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "New York",
+"connectionName": "us-nyc.prod.surfshark.com",
+"pubKey": "rhuoCmHdyYrh0zW3J0YXZK4aN3It7DD26TXlACuWnwU=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Buffalo",
+"connectionName": "us-buf.prod.surfshark.com",
+"pubKey": "156ry2sOmv+I9KYTy2jR4/BLTnPT+Qn+DoCNqOon1ys=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Ashburn",
+"connectionName": "us-ash.prod.surfshark.com",
+"pubKey": "9ef2f8mXHnAxx06lx4OxhtzASfJgv6YfEimuVyef6QE=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Detroit",
+"connectionName": "us-dtw.prod.surfshark.com",
+"pubKey": "WFhlLK8H1pRzgMggza5NhBMjIcGhmsCqjR8+yFRfXhg=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Chicago",
+"connectionName": "us-chi.prod.surfshark.com",
+"pubKey": "DpMfulanF/MVHmt3AX4dqLqcyE0dpPqYBjDlWMaUI00=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Charlotte",
+"connectionName": "us-clt.prod.surfshark.com",
+"pubKey": "tLnNDtNUOScxIU6t70ujsx1erSWOj9hWkWJD5iJwPwc=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Latham",
+"connectionName": "us-ltm.prod.surfshark.com",
+"pubKey": "Smruh1SmMqi7CecjV/+yI4Sy62gpAr+Uddq+9K6iLB0=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Nashville",
+"connectionName": "us-bna.prod.surfshark.com",
+"pubKey": "BNaDm2NLUySO0sNiCxaYkE5KS1i6KgshxVZudNli4jI=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Atlanta",
+"connectionName": "us-atl.prod.surfshark.com",
+"pubKey": "SgciXll6wGQhcyxPUdp0V0z6WwN9P3fqDoeh3N3xNjc=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Omaha",
+"connectionName": "us-oma.prod.surfshark.com",
+"pubKey": "7Z8FJEl+BtQuAyNuUWIZxHGrQP7rumhFlIq4azHvCgs=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Kansas City",
+"connectionName": "us-kan.prod.surfshark.com",
+"pubKey": "SWN/jzfK69ucEUqQyPejKb9wWxwUoOgG37YlgeCmvjg=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Miami",
+"connectionName": "us-mia.prod.surfshark.com",
+"pubKey": "KvJ/jtWb8BsBI85OcZnOIJu9kfh12mCMR4cejWFpDCc=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Denver",
+"connectionName": "us-den.prod.surfshark.com",
+"pubKey": "AnRLZKBwCfuGFZfoa3dsdjpcpvgFsQhASmjHXhIJLgM=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Dallas",
+"connectionName": "us-dal.prod.surfshark.com",
+"pubKey": "0iwHQpV+rsOg38ogv4g4XMLJa51YqWY/yKWR9UEUMDk=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Seattle",
+"connectionName": "us-sea.prod.surfshark.com",
+"pubKey": "SpMH/p90bg9ZAG6V2DWJQ9csWPVnKcDVppIp9Xul5G8=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Houston",
+"connectionName": "us-hou.prod.surfshark.com",
+"pubKey": "1g84fGxVJokKXdMYEJKjN6/opyYN/YSHmrMyw0v6VnM=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Salt Lake City",
+"connectionName": "us-slc.prod.surfshark.com",
+"pubKey": "jxotWPy1jNzKzjqSqg6KkWnoOsp/FbrTK4+j9gluSFA=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Bend",
+"connectionName": "us-bdn.prod.surfshark.com",
+"pubKey": "YaxEFQHtwF/EGvf5s/aLlX5Jr0djKTV5oNcAcIwAz0E=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Las Vegas",
+"connectionName": "us-las.prod.surfshark.com",
+"pubKey": "Nw5CG5BOvqb8GXVEKLOo7v3gGvP7WaUYlJT++c3c31g=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Phoenix",
+"connectionName": "us-phx.prod.surfshark.com",
+"pubKey": "HDCyeD2+lw6KHVMu7Opkt4V4ikYZHzQNWmwklBMb4Ac=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "San Francisco",
+"connectionName": "us-sfo.prod.surfshark.com",
+"pubKey": "7SpGSSI78hf8jy689ec5Ql0/Gsq0LLHDmjEFsGUWl1k=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "San Jose",
+"connectionName": "us-sjc.prod.surfshark.com",
+"pubKey": "sDDS1f/+IqVljMN7GzMFeAbNescQUTLIt0xio0W61Q0=",
+"type": "generic"
+},
+{
+"country": "United States",
+"countryCode": "US",
+"region": "The Americas",
+"location": "Los Angeles",
+"connectionName": "us-lax.prod.surfshark.com",
+"pubKey": "m+L7BVQWDwU2TxjfspMRLkRctvmo7fOkd+eVk6KC5lM=",
+"type": "generic"
+}
+]
