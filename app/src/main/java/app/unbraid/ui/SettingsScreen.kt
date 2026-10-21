@@ -294,7 +294,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     group(null, listOf(Item("Sign out of ${pr.name}", when {
                         accounts.size == 1 && setup.servers.isEmpty() && setup.routes.none { it.imported } && !home.tailscale -> "It's your only connection: you'll be back at sign-in"
                         routes.isEmpty() -> "No route uses it"
-                        else -> "The VPN stops until its ${routes.size} ${if (routes.size == 1) "route moves" else "routes move"} to another location or you sign in again"
+                        else -> "Apps on its routes are blocked until you sign in again or move them; other routes keep running"
                     }, { dialog = "signout:${pr.id}" }, danger = true)))
                 }
             }

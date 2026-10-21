@@ -1,0 +1,5 @@
+• Connection: Signing out of a provider, or a refused login, now blocks only that provider's apps. Other routes keep running; routes that fail retry by themselves.
+• Privacy: Connection checks look up names inside the tunnels, Surfshark needs no lookups, and VPN servers can't open connections to your phone.
+• Tailscale: Taildrop is off, and speed tests switch back to your exit node.
+• Imports: More WireGuard and OpenVPN configs work.
+• Stats: History keeps the provider it was recorded with.
