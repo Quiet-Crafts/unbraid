@@ -393,6 +393,35 @@ class CompilerTest {
         assertEquals("openvpn", dns.first { it["tag"]!!.jsonPrimitive.content == "dns-ovpn-r-ex" }["type"]!!.jsonPrimitive.content)
     }
 
+    /** A NordVPN OpenVPN route (Nord's DNS) and an import of the same profile share a tunnel, in either order. */
+    @Test fun nordAndImportSharingOneOpenVpnTunnelKeepPushedDns() {
+        val p = app.unbraid.data.Manual.parseOvpn(javaClass.getResource("/ovpn/nord-double.udp.ovpn")!!.readText(), "dv", "u", "p")
+        val nord = Route("nl", Location("nord", 153, "NL", "Netherlands")); val imp = Route("im", ovpn = p, hue = 1)
+        for (order in listOf(listOf(nord, imp), listOf(imp, nord))) for (custom in listOf(emptyList(), listOf("1.1.1.1"))) {
+            val s = Setup(routes = order, defaultRoute = order[0].id, apps = mapOf("com.x" to order[1].id), prefs = Prefs(customDns = custom))
+            val raw = Compiler.compile(Compiler.Input(s, mapOf("nl" to OvpnLink(sv("nl"), p), "im" to OvpnLink(sv("im"), p)), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", probe = 40000 to "pw"))
+            File("build/compiled").apply { mkdirs() }.resolve("ovpn-mixed-${order[0].id}-${custom.size}.json").writeText(raw)
+            val c = Json.parseToJsonElement(raw).jsonObject
+            val ctx = "order=${order.map { it.id }} custom=$custom"
+            val ep = c["endpoints"]!!.jsonArray.single().jsonObject
+            val servers = c["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }
+            val ovpn = servers.filter { it["type"]!!.jsonPrimitive.content == "openvpn" }
+            if (custom.isEmpty()) {
+                // The import uses the pushed DNS: one server for the tunnel, which keeps it whichever route owns the tunnel.
+                assertEquals(ctx, listOf(ep["tag"]!!.jsonPrimitive.content), ovpn.map { it["endpoint"]!!.jsonPrimitive.content })
+                assertFalse(ctx, ep.containsKey("route_no_pull"))
+            } else {
+                assertTrue(ctx, ovpn.isEmpty())
+                assertEquals(ctx, "true", ep["route_no_pull"]!!.jsonPrimitive.content)
+            }
+            // Nord's route keeps Nord's resolver through the tunnel either way.
+            assertEquals(ctx, if (custom.isEmpty()) Compiler.NORD_TP else "1.1.1.1", servers.first { it["tag"]!!.jsonPrimitive.content == "dns-r-nl" }["server"]!!.jsonPrimitive.content)
+            val tags = servers.map { it["tag"]!!.jsonPrimitive.content }.toSet()
+            val used = (c["dns"]!!.jsonObject["rules"]!!.jsonArray + c["route"]!!.jsonObject["rules"]!!.jsonArray).mapNotNull { it.jsonObject["server"]?.jsonPrimitive?.content }
+            assertTrue(ctx, used.all { it in tags })
+        }
+    }
+
     @Test fun homeTunnelNeverCatchesAll() {
         val full = WgConf.parse(FRITZ.replace("192.168.178.0/24, ", ""), "Home") // AllowedIPs = 0.0.0.0/0 only
         assertEquals(listOf("192.168.178.0/24"), Compiler.homeCidrs(full))
