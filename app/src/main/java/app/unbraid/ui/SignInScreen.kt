@@ -86,10 +86,12 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
     fun key(f: Field) = "${provider.id}:${f.key}"
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var fileFor by remember { mutableStateOf<Field?>(null) }
+    // The field's key, saved: the picker may outlive this activity (rotation), and its file must still land.
+    var fileFor by rememberSaveable(provider.id) { mutableStateOf<String?>(null) }
     // Config files keep their line breaks only when loaded from a file; a pasted .conf in one line can't be parsed.
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        val f = fileFor ?: return@rememberLauncherForActivityResult
+        val f = provider.fields.firstOrNull { it.key == fileFor } ?: return@rememberLauncherForActivityResult
+        fileFor = null
         if (uri == null) return@rememberLauncherForActivityResult
         // Off the main thread: a slow document provider must not freeze the app.
         scope.launch {
@@ -125,7 +127,7 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
                         if (f.file) Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                             val v = ui.form[key(f)].orEmpty()
                             Text(if ('\n' in v) "Config file loaded" else "Or load the downloaded file", style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f))
-                            Secondary("Choose file", { fileFor = f; pickFile.launch(arrayOf("*/*")) })
+                            Secondary("Choose file", { fileFor = f.key; pickFile.launch(arrayOf("*/*")) })
                         }
                     }
                     error?.let { Text(it, style = Type.caption, color = Ink.bad, modifier = Modifier.padding(horizontal = 8.dp)) }

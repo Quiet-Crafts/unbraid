@@ -109,7 +109,11 @@ class MainActivity : ComponentActivity() {
     // Android's Always-on and Block connections, and the installed apps, can change while unbraid is in the background.
     override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); ui.refreshApps(); app.unbraid.stats.Stats.maintain() }
 
+    // The open sheet and a connect waiting on it outlive a rotation (never a secret here); nothing connects by itself.
+    override fun onSaveInstanceState(out: Bundle) { super.onSaveInstanceState(out); out.putString("sheet", sheet); out.putBoolean("connectAfter", connectAfter) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        savedInstanceState?.let { sheet = it.getString("sheet"); connectAfter = it.getBoolean("connectAfter") }
         window.setHideOverlayWindows(true) // no tapjacking over sign-in or connect
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
