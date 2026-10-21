@@ -602,5 +602,141 @@
     }
    ]
   }
- ]
+ ],
+ "config": {
+  "antitracker_plus": {
+   "DnsServers": [
+    {
+     "Name": "Basic",
+     "Description": "Basic",
+     "Normal": "10.0.254.4",
+     "Hardcore": "10.0.254.5"
+    },
+    {
+     "Name": "Comprehensive",
+     "Description": "Comprehensive",
+     "Normal": "10.0.254.6",
+     "Hardcore": "10.0.254.7"
+    },
+    {
+     "Name": "Restrictive",
+     "Description": "Restrictive",
+     "Normal": "10.0.254.18",
+     "Hardcore": "10.0.254.19"
+    },
+    {
+     "Name": "Easylist",
+     "Description": "EasyList + EasyPrivacy",
+     "Normal": "10.0.254.14",
+     "Hardcore": "10.0.254.15"
+    },
+    {
+     "Name": "Oisdbig",
+     "Description": "OISD Big",
+     "Normal": "10.0.254.2",
+     "Hardcore": "10.0.254.3"
+    },
+    {
+     "Name": "Stevenblack",
+     "Description": "Steven Black Unified + Ads + Malware",
+     "Normal": "10.0.254.20",
+     "Hardcore": "10.0.254.21"
+    },
+    {
+     "Name": "Hagezilight",
+     "Description": "Hagezi Light",
+     "Normal": "10.0.254.22",
+     "Hardcore": "10.0.254.23"
+    },
+    {
+     "Name": "Hagezipro",
+     "Description": "Hagezi Pro",
+     "Normal": "10.0.254.10",
+     "Hardcore": "10.0.254.11"
+    },
+    {
+     "Name": "Hageziproplus",
+     "Description": "Hagezi Pro++",
+     "Normal": "10.0.254.24",
+     "Hardcore": "10.0.254.25"
+    },
+    {
+     "Name": "Hageziultimate",
+     "Description": "Hagezi Ultimate",
+     "Normal": "10.0.254.12",
+     "Hardcore": "10.0.254.13"
+    }
+   ]
+  },
+  "ports": {
+   "wireguard": [
+    {
+     "type": "UDP",
+     "port": 53
+    },
+    {
+     "type": "UDP",
+     "port": 80
+    },
+    {
+     "type": "UDP",
+     "port": 123
+    },
+    {
+     "type": "UDP",
+     "port": 443
+    },
+    {
+     "type": "UDP",
+     "port": 500
+    },
+    {
+     "type": "UDP",
+     "port": 1194
+    },
+    {
+     "type": "UDP",
+     "port": 2049
+    },
+    {
+     "type": "UDP",
+     "port": 2050
+    },
+    {
+     "type": "UDP",
+     "port": 4500
+    },
+    {
+     "type": "UDP",
+     "port": 30587
+    },
+    {
+     "type": "UDP",
+     "port": 41893
+    },
+    {
+     "type": "UDP",
+     "port": 48574
+    },
+    {
+     "type": "UDP",
+     "port": 58237
+    },
+    {
+     "type": "UDP",
+     "range": {
+      "min": 5500,
+      "max": 19999
+     }
+    },
+    {
+     "type": "UDP",
+     "range": {
+      "min": 30000,
+      "max": 65000
+     }
+    }
+   ]
+  }
+ }
 }

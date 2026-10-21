@@ -1,6 +1,7 @@
 package app.unbraid
 
 import app.unbraid.data.AuthException
+import app.unbraid.data.Challenge
 import app.unbraid.data.Ivpn
 import app.unbraid.data.Location
 import org.junit.Assert.assertEquals
@@ -49,6 +50,34 @@ class IvpnTest {
         assertEquals("Amsterdam", l.server.city)
     }
 
+    /** Automatic tries 2049, then the ports restrictive networks let through, all from IVPN's own list; offline only the default. */
+    @Test fun linksCarryTheFallbackPortsIvpnLists() {
+        val l = Ivpn.link(list, Location("ivpn", countryCode = "NL"), acct)
+        assertEquals(listOf(2049, 443, 53, 80, 123, 2050, 1194, 500, 4500), l.ports)
+        assertTrue(list.ports.containsAll(l.ports))
+        assertEquals(emptyList<Int>(), Ivpn.link(null, Location("ivpn", pinned = l.server), acct).ports)
+        assertEquals(listOf(2049, 53), Ivpn.link(list.copy(config = Ivpn.Config(Ivpn.Ports(listOf(Ivpn.Port("UDP", 53), Ivpn.Port("TCP", 443), Ivpn.Port("UDP", 2049))))), Location("ivpn", countryCode = "NL"), acct).ports)
+    }
+
+    /** Every host of a country can be picked by hand (the US has more than twenty). */
+    @Test fun everyServerOfACountryIsListed() {
+        val us = list.wireguard.filter { it.countryCode == "US" }.sumOf { it.hosts.size }
+        assertEquals(us, with(Ivpn) { list.match(Location("ivpn", countryCode = "US")) }.size)
+    }
+
+    /** AntiTracker's lists come from IVPN's list, saved as both resolvers; Hardcore picks the second; nonsense falls back. */
+    @Test fun antiTrackerListsAndHardcore() {
+        val list = Ivpn.options(this.list).first { it.key == "list" }.also { assertEquals(10, it.choices.size) }
+        val pro = list.choices.first { it.second == "Hagezi Pro" }.first
+        assertEquals("10.0.254.10|10.0.254.11", pro)
+        fun dns(vararg o: Pair<String, String>) = Ivpn.blockingDns { k -> mapOf(*o)[k] ?: Ivpn.defaults[k] }
+        assertEquals("10.0.254.2", dns())
+        assertEquals("10.0.254.3", dns("hardcore" to "on"))
+        assertEquals("10.0.254.10", dns("list" to pro))
+        assertEquals("10.0.254.11", dns("list" to pro, "hardcore" to "on"))
+        assertEquals("10.0.254.2", dns("list" to "1.2.3.4/0|x", "hardcore" to "on"))
+    }
+
     @Test fun cityLinkStaysInThatGateway() {
         val l = Ivpn.link(list, Location("ivpn", countryCode = "US", region = "us-ny.wg.ivpn.net"), acct)
         assertEquals("New York, NY", l.server.city)
@@ -85,10 +114,21 @@ class IvpnTest {
     @Test fun sessionReplies() {
         val ok = Ivpn.session(200 to """{"status":200,"token":"tok","vpn_username":"u","vpn_password":"p","service_status":{"is_active":true},"wireguard":{"status":200,"message":"Success","ip_address":"172.16.1.2"}}""", "i-ABCD-EFGH-IJKL", "priv")
         assertEquals(Ivpn.Account("i-ABCD-EFGH-IJKL", "tok", "priv", "172.16.1.2"), Ivpn.account(ok))
-        val limit = try { Ivpn.session(400 to """{"status":602,"message":"You've reached the maximum number of connected devices","data":{"limit":5}}""", "a", "p"); null } catch (e: AuthException) { e.message }
-        assertTrue(limit!!.contains("device limit"))
-        for (body in listOf("""{"status":401,"message":"The provided Account ID is not valid"}""", """{"status":702,"message":"inactive"}""", """{"status":70011}""", """{"status":70001}""")) {
+        // The device name and the plan's limit, for the IVPN page.
+        val named = Ivpn.session(200 to """{"status":200,"token":"tok","device_name":"Brave Owl","service_status":{"current_plan":"IVPN Standard","available_plans":[{"name":"Pro","device_limit":10},{"name":"Standard","device_limit":5}]},"wireguard":{"ip_address":"172.16.1.2"}}""", "a", "p")
+        assertEquals("Brave Owl" to 5, Ivpn.account(named).let { it.device to it.limit })
+        // A full account says how many devices and links to where they are listed.
+        val full = try { Ivpn.session(400 to """{"status":602,"message":"You've reached the maximum number of connected devices","data":{"limit":5}}""", "a", "p"); null } catch (e: AuthException) { e }
+        assertEquals("All 5 devices on this IVPN account are in use. Log one out in the IVPN client area, then sign in again.", full!!.message)
+        assertTrue(full.url!!.startsWith("https://www.ivpn.net/"))
+        for (body in listOf("""{"status":401,"message":"The provided Account ID is not valid"}""", """{"status":702,"message":"inactive"}""", """{"status":70001}""")) {
             try { Ivpn.session(400 to body, "a", "p"); fail() } catch (e: AuthException) { }
+        }
+        // Two-factor and captcha are one more question, then the same sign-in again.
+        for (st in listOf(70011, 70012)) try { Ivpn.session(400 to """{"status":$st}""", "a", "p"); fail() } catch (e: Challenge) { assertEquals("confirmation", e.field.key); assertNull(e.image) }
+        val png = byteArrayOf(-119, 80, 78, 71)
+        try { Ivpn.session(400 to """{"status":70002,"captcha_id":"c-1","captcha_image":"data:image/png;base64,${Base64.getEncoder().encodeToString(png)}"}""", "a", "p"); fail() } catch (e: Challenge) {
+            assertEquals("captcha", e.field.key); assertEquals(mapOf("captcha_id" to "c-1"), e.keep); assertTrue(png.contentEquals(e.image))
         }
         try { Ivpn.session(502 to "<html>", "a", "p"); fail() } catch (e: IOException) { assertFalse(e is AuthException) }
     }

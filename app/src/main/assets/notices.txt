@@ -683,6 +683,10 @@ Licensed under the Apache License, Version 2.0 (full text at the end).
 Copyright JetBrains s.r.o. and Kotlin Programming Language contributors.
 Licensed under the Apache License, Version 2.0 (full text at the end).
 
+=== ZXing core 3.5.3 (QR code reading)
+Copyright ZXing authors.
+Licensed under the Apache License, Version 2.0 (full text at the end).
+
 === lzokay (the LZO code in github.com/anchore/go-lzo derives from it)
 The MIT License
 

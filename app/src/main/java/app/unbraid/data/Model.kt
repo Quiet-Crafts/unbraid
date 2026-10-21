@@ -64,8 +64,11 @@ data class Route(
     /** Display name of the [tsExit] node; [tsExit] itself holds its tailnet IP so similarly named nodes can't be confused. */
     val tsName: String? = null,
     val hue: Int = 0,
-    /** The provider's own ad/tracker-blocking DNS (Mullvad blocklists, PIA MACE, IVPN AntiTracker). */
-    val filter: Boolean = false,
+    /**
+     * The provider's own blocking (NordVPN Threat Protection Lite, IVPN AntiTracker…) for this route only: null follows
+     * the provider's page ([Setup.protects]).
+     */
+    val filter: Boolean? = null,
     /** The saved [OwnServer] whose config [wg]/[ovpn]/[ss] is a copy of, so renaming or removing it reaches this route. */
     val own: String? = null,
 ) {
@@ -92,9 +95,12 @@ data class Home(
 
 @Serializable
 data class Prefs(
+    /** Moved to NordVPN's page ([Setup.opts]); read only to carry an older choice over ([Setup.migrated]). */
     val threatProtection: Boolean = true, val customDns: List<String> = emptyList(), val lan: Boolean = true,
     /** Local statistics; off until the user agrees, and nothing is recorded while off. */
     val stats: Boolean = false,
+    /** unbraid's own DNS filter and where it applies. [customDns] is read only to carry an older choice over. */
+    val filter: Filter = Filter(),
 )
 
 /** One of the user's own servers, added in Settings and picked for any route (which keeps a copy of the config). */
@@ -104,6 +110,9 @@ data class OwnServer(val id: String, val wg: WgPeer? = null, val ovpn: OvpnProfi
     val kind get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; else -> "Shadowsocks" }
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OVPN"; else -> "SS" }
 }
+
+/** The current [Setup.version]. */
+const val VERSION = 1
 
 @Serializable
 data class Setup(
@@ -119,6 +128,10 @@ data class Setup(
     val home: Home = Home(),
     val prefs: Prefs = Prefs(),
     val servers: List<OwnServer> = emptyList(),
+    /** Saved format: 1 = provider pages and unbraid's filter. New setups start at the current one ([Store]). */
+    val version: Int = 0,
+    /** Each provider's page settings: provider id → [Opt.key] → value. Unset keys take [Provider.defaults]. */
+    val opts: Map<String, Map<String, String>> = emptyMap(),
 ) {
     fun route(id: String?) = routes.firstOrNull { it.id == id }
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute
@@ -130,6 +143,25 @@ data class Setup(
     val tailscale get() = home.tailscale || tsExit != null
     /** Nothing goes through a VPN (Direct default, no app on a route, no home tunnel): running protects nothing. */
     val directOnly get() = defaultRoute == DIRECT && apps.values.all { it == DIRECT } && home.wg == null && !home.tailscale
+
+    /** [provider]'s page setting [key], or its default. */
+    fun opt(provider: String, key: String) = opts[provider]?.get(key) ?: Providers.get(provider)?.defaults?.get(key)
+
+    /** Whether route [r] uses its provider's own blocking: its own choice, else the provider page's. */
+    fun protects(r: Route) = !r.imported && (r.filter ?: (opt(r.loc.provider, PROTECT) == "on"))
+
+    /**
+     * Older saves kept Threat Protection Lite in [Prefs] (it now lives on NordVPN's page) and a custom DNS server for every
+     * route (now unbraid's filter set to that server, on VPN routes).
+     */
+    fun migrated(): Setup {
+        if (version >= VERSION) return this
+        // NordVPN routes had no blocking switch of their own: a flag one kept from another provider meant nothing then.
+        var s = copy(version = VERSION, routes = routes.map { if (!it.imported && it.loc.provider == "nord") it.copy(filter = null) else it })
+        if (!prefs.threatProtection) s = s.copy(opts = opts + ("nord" to (opts["nord"].orEmpty() + (PROTECT to "off"))), prefs = s.prefs.copy(threatProtection = true))
+        prefs.customDns.firstOrNull()?.let { s = s.copy(prefs = s.prefs.copy(customDns = emptyList(), filter = s.prefs.filter.takeIf { it.id != null } ?: Filter(Filters.OWN, it, routes = true))) }
+        return s
+    }
 }
 
 @Serializable

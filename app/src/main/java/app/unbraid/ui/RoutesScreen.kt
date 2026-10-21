@@ -154,6 +154,15 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     // The default carries every app not sent elsewhere; its preview shows user apps, not system ones.
     val defaultPkgs = remember(apps, setup) { apps.filter { setup.routeOf(it.pkg) == setup.defaultRoute }.sortedBy { it.system }.map { it.pkg } }
     val server = vpn.servers[setup.defaultRoute]
+    // Right after a sign-in, a provider's new key may not reach all its servers for a minute: say so instead of nothing.
+    val accounts by ui.accounts.collectAsStateWithLifecycle()
+    val settingUp by produceState(emptySet<String>(), on, setup, accounts) {
+        while (true) {
+            value = if (on) Providers.settingUp().filterTo(HashSet()) { p -> setup.activeRoutes.any { !it.imported && it.loc.provider == p } } else emptySet()
+            if (value.isEmpty()) break
+            delay(5_000)
+        }
+    }
     var resumed by remember { mutableStateOf(0) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { resumed++ }
     val privateDns = remember(resumed) { context.privateDnsHost() }
@@ -172,7 +181,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
             Phase.Paused -> "Paused"; Phase.Connecting -> "Connecting"; Phase.Off -> "Unprotected"
         },
         subColor = if (vpn.error != null) Ink.bad else Ink.dim,
-        sub = vpn.error ?: when (vpn.phase) {
+        sub = vpn.error ?: settingUp.takeIf { it.isNotEmpty() }?.let { ps -> "${ps.joinToString(" and ") { Providers.get(it)?.name ?: it }} is setting up your key. Its routes can take a minute to work" } ?: when (vpn.phase) {
             Phase.On -> "Tap to pause or disconnect"
             Phase.Paused -> if (vpn.lockdown) "Apps are offline (Block connections without VPN) · tap to resume" else "Apps skip the VPN · tap to resume"
             Phase.Connecting -> "Setting up your routes"

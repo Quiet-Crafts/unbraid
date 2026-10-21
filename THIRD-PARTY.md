@@ -15,6 +15,7 @@ app in `app/src/main/assets/notices.txt`. `tools/notices.sh` regenerates that fi
 | Go modules linked into libbox | Protocols, crypto and networking in sing-box | Each module's own licence, listed with its full text in `notices.txt` |
 | AndroidX, Jetpack Compose, Material 3, Material Symbols | User interface | Apache-2.0 |
 | Kotlin standard library, kotlinx.coroutines, kotlinx.serialization | Language runtime | Apache-2.0 |
+| [ZXing](https://github.com/zxing/zxing) core 3.5.3 | Reads QR codes from a photo or picture at sign-in | Apache-2.0 |
 | ThreeTenBP | Date and time code inside the Kotlin standard library | BSD-3-Clause |
 | [lzokay](https://github.com/jackoalan/lzokay) | The LZO code in go-lzo derives from it | MIT |
 | [uTLS](https://github.com/metacubex/utls) | TLS fingerprints | BSD-3-Clause, with parts under LGPL-3.0 (with a static-linking exception) and MIT |

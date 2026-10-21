@@ -28,6 +28,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.layout.height
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.unbraid.data.Field
 import app.unbraid.data.Provider
@@ -78,7 +80,15 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
     val signing by ui.signing.collectAsStateWithLifecycle()
     val busy = provider.id in signing
     val error = ui.formError[provider.id]
+    val link = ui.formLink[provider.id]
+    // A question the provider asked (a two-factor code, a captcha) is one more field, answered and sent with the rest.
+    val asked = ui.challenge[provider.id]
+    val fields = provider.fields + listOfNotNull(asked?.field)
     fun key(f: Field) = "${provider.id}:${f.key}"
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var scanFor by rememberSaveable(provider.id) { mutableStateOf<String?>(null) }
+    var scanning by rememberSaveable(provider.id) { mutableStateOf(false) }
+    val scan = rememberQrScan { uri -> provider.fields.firstOrNull { it.key == scanFor }?.let { ui.readQr(uri, key(it), provider.id) } }
     // The field's key, saved: the picker may outlive this activity (rotation), and its file must still land.
     var fileFor by rememberSaveable(provider.id) { mutableStateOf<String?>(null) }
     // Config files keep their line breaks only when loaded from a file; a pasted .conf in one line can't be parsed.
@@ -89,14 +99,14 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
         // In the view model, off the main thread: a slow document provider neither freezes the app nor loses the file on rotation.
         ui.loadFormFile(uri, key(f), provider.id)
     }
-    val ready = provider.fields.all { ui.form[key(it)].orEmpty().isNotBlank() }
+    val ready = fields.all { ui.form[key(it)].orEmpty().isNotBlank() }
     // The sign-in runs in the view model; when it lands, this form is done.
     val done = provider.id in accounts
     LaunchedEffect(done) { if (done) onClose?.invoke() }
 
     fun submit() {
         if (busy || !ready) return
-        ui.signIn(provider, provider.fields.associate { it.key to ui.form[key(it)].orEmpty() })
+        ui.signIn(provider, fields.associate { it.key to ui.form[key(it)].orEmpty() })
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -106,20 +116,31 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
         ) {
             item {
                 Column(Modifier.padding(start = Gutter, end = Gutter, top = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    provider.fields.forEachIndexed { i, f ->
+                    fields.forEachIndexed { i, f ->
+                        if (f == asked?.field) asked.image?.let { png ->
+                            remember(png) { android.graphics.BitmapFactory.decodeByteArray(png, 0, png.size)?.asImageBitmap() }?.let {
+                                androidx.compose.foundation.Image(it, "Captcha", Modifier.padding(horizontal = 8.dp).fillMaxWidth().height(96.dp).background(androidx.compose.ui.graphics.Color.White))
+                            }
+                        }
                         Text(f.label, style = Type.sub.copy(fontWeight = FontWeight.Medium), color = Ink.text, modifier = Modifier.padding(horizontal = 8.dp))
                         PillField(
-                            ui.form[key(f)].orEmpty(), { ui.form[key(f)] = it; ui.formError.remove(provider.id) },
+                            ui.form[key(f)].orEmpty(), { ui.form[key(f)] = it; if (f != asked?.field) { ui.formError.remove(provider.id); ui.formLink.remove(provider.id); ui.challenge.remove(provider.id) } },
                             f.label, placeholder = f.hint.ifBlank { f.label }, secret = f.secret,
-                            imeAction = if (i == provider.fields.lastIndex) ImeAction.Done else ImeAction.Next, onDone = ::submit,
+                            imeAction = if (i == fields.lastIndex) ImeAction.Done else ImeAction.Next, onDone = ::submit,
                         )
+                        if (f.qr) Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Or scan its QR code: take a photo, or pick a screenshot", style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f))
+                            Secondary("Scan QR code", { scanFor = f.key; scanning = true })
+                        }
                         if (f.file) Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                             val v = ui.form[key(f)].orEmpty()
                             Text(if ('\n' in v) "Config file loaded" else "Or load the downloaded file", style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f))
                             Secondary("Choose file", { fileFor = f.key; pickFile.launch(arrayOf("*/*")) })
                         }
                     }
-                    error?.let { Text(it, style = Type.caption, color = Ink.bad, modifier = Modifier.padding(horizontal = 8.dp)) }
+                    // A question isn't a failure: it reads as an instruction, not in red.
+                    error?.let { Text(it, style = Type.caption, color = if (asked != null) Ink.text else Ink.bad, modifier = Modifier.padding(horizontal = 8.dp)) }
+                    link?.let { u -> Secondary("Open the ${provider.name} client area", { context.openUrl(u) }) }
                     Text(
                         "${provider.help} Stored encrypted on this phone.",
                         style = Type.caption, color = Ink.dim, modifier = Modifier.padding(horizontal = 8.dp),
@@ -131,5 +152,9 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Ink.ground).imePadding().navigationBarsPadding()
                 .padding(start = Gutter, end = Gutter, top = 8.dp, bottom = 16.dp),
         ) { Primary("Continue", ::submit, enabled = ready, busy = busy) }
+    }
+    if (scanning) Prompt("Scan QR code", "Take a photo", { scanning = false; scan.photo() }, { scanning = false }) {
+        Text("Photograph the QR code with your camera app, or pick a screenshot of it.", style = Type.sub)
+        Secondary("Choose a picture", { scanning = false; scan.picture() })
     }
 }

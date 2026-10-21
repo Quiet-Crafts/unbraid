@@ -40,7 +40,7 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
     }
 
     // Sealed: it can hold imported WireGuard private keys and a Tailscale auth key.
-    private val _setup = MutableStateFlow(load("setup.bin") { json.decodeFromString(Setup.serializer(), it) } ?: Setup())
+    private val _setup = MutableStateFlow(load("setup.bin") { json.decodeFromString(Setup.serializer(), it).migrated() } ?: Setup(version = VERSION))
     val setup: StateFlow<Setup> = _setup.asStateFlow()
 
     /** Applies [f]; false when it couldn't be written (see [unsaved]), so callers keep a pasted secret on the clipboard. */

@@ -239,4 +239,24 @@ class LinkPickerTest {
         assertTrue(r.blocked.getValue("2") is AuthException)
         assertTrue("2" !in r.links && "2" !in r.remember.values.map { it.server.name })
     }
+
+    /** A fixed port wins; Automatic walks the server's ports one step at a time, per provider; imports keep theirs. */
+    @Test fun portsFollowTheProviderPage() {
+        val peer = WgPeer("x", "k", listOf("10.0.0.2/32"), "p", endpoint = "198.51.100.1:2049", allowedIps = listOf("0.0.0.0/0"))
+        val l = WgLink(a, peer, listOf(2049, 443, 53))
+        val s = setup(Route("1", Location("fake", countryCode = "NL")), Route("2", wg = peer))
+        val links = mapOf("1" to l, "2" to WgLink(a, peer, listOf(1, 2)))
+        fun port(s: Setup, step: Map<String, Int> = emptyMap(), id: String = "1") = (LinkPicker.ported(s, links, step)[id] as WgLink).peer.endpoint
+        assertEquals("198.51.100.1:2049", port(s))
+        assertEquals("198.51.100.1:443", port(s, mapOf("fake" to 1)))
+        assertEquals("198.51.100.1:2049", port(s, mapOf("fake" to 3)))
+        assertEquals("198.51.100.1:53", port(s, mapOf("other" to 1, "fake" to 2)))
+        assertEquals("198.51.100.1:2049", port(s, mapOf("fake" to 1), "2"))
+        assertEquals("198.51.100.1:80", port(s.copy(opts = mapOf("fake" to mapOf("port" to "80"))), mapOf("fake" to 1)))
+        assertEquals("198.51.100.1:2049", port(s.copy(opts = mapOf("fake" to mapOf("port" to "99999")))))
+        // A tunnel saved without a list (offline) still takes its provider's step, so two on one server never differ.
+        val offline = mapOf("1" to l, "3" to WgLink(a, peer))
+        val s3 = setup(Route("1", Location("fake", countryCode = "NL")), Route("3", Location("fake", countryCode = "DE")))
+        assertEquals(setOf("198.51.100.1:443"), LinkPicker.ported(s3, offline, mapOf("fake" to 1)).values.map { (it as WgLink).peer.endpoint }.toSet())
+    }
 }

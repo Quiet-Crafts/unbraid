@@ -1,6 +1,7 @@
 package app.unbraid.vpn
 
 import app.unbraid.data.DIRECT
+import app.unbraid.data.Filters
 import app.unbraid.data.Home
 import app.unbraid.data.Link
 import app.unbraid.data.Manual
@@ -32,8 +33,8 @@ object Compiler {
     const val NORD_DNS = "103.86.96.100"
     const val NORD_TP = "103.86.96.108"
     const val TS_TAG = "home-ts"
-    /** In-tunnel blocking resolvers, from each provider's docs: Mullvad ads+trackers+malware, PIA MACE, IVPN AntiTracker. */
-    val FILTER_DNS = mapOf("mullvad" to "100.64.0.7", "pia" to "10.0.0.244", "ivpn" to "10.0.254.2")
+    /** Apps set to Direct that pass through unbraid for its filter, as one group of app rules. */
+    private const val FILTERED = "direct+filter"
     private val LAN = listOf("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255/32")
     private const val TAILNET = "100.64.0.0/10"
     /**
@@ -97,26 +98,34 @@ object Compiler {
         // Tailscale-exit routes have no tunnel of their own: they ride the Tailscale endpoint, whose exit node is set below.
         // Routes that resolve to the same server with the same credentials share one tunnel: two with one key would fight over it.
         val shared = shared(s, i.links, i.blocked)
-        val tag = { id: String -> if (id == DIRECT) "direct" else if (s.route(id)?.tsExit != null) TS_TAG else shared[id] ?: "r-$id" }
+        val tag = { id: String -> if (id == DIRECT || id == FILTERED) "direct" else if (s.route(id)?.tsExit != null) TS_TAG else shared[id] ?: "r-$id" }
         val tsDomains = listOfNotNull("ts.net".takeIf { officialTs(s.home) }, trustedSuffix(i.tsSuffix, s.home)).distinct()
         // OpenVPN routes use the DNS their server pushes, except NordVPN's own routes: those keep Nord's
         // (Threat Protection) resolvers through the tunnel.
-        val pushedDns = { r: app.unbraid.data.Route -> s.prefs.customDns.isEmpty() && (r.imported || r.loc.provider != "nord") }
+        // unbraid's filter, when set: on VPN routes (through each route's tunnel) it replaces their own DNS and blocking.
+        val filter = s.prefs.filter.server()
+        val filterRoutes = filter != null && s.prefs.filter.routes
+        val pushedDns = { r: app.unbraid.data.Route -> !filterRoutes && (r.imported || r.loc.provider != "nord") }
         val direct = s.apps.filterValues { it == DIRECT }.keys.sorted()
+        // Direct apps that pass through unbraid for the filter: still straight out, but not left out of the VPN.
+        val through = direct.filter(s.prefs.filter::through).toSet()
         val homeWg = s.home.wg
         val ts = s.tailscale
         // An exit keeps the endpoint running, but only the home toggle grants every app tailnet access.
         val homeTs = s.home.tailscale
         // A route on its OpenVPN server's pushed DNS asks that tunnel's one DNS server (the engine allows one per tunnel).
         val ovpnDns = { id: String -> i.links[id] is OvpnLink && s.route(id)?.let(pushedDns) == true }
-        val dnsFor = { id: String -> if (id == DIRECT) "local" else if (ovpnDns(id)) "dns-ovpn-${tag(id)}" else "dns-r-$id" }
-        val defaultDns = if (s.defaultRoute == DIRECT || defaultBlocked || active.isEmpty()) "local" else dnsFor(s.defaultRoute)
+        // A filter reached by name, on an imported OpenVPN route, is looked up with that tunnel's pushed DNS (it may only be known there).
+        val ovpnBoot = { id: String -> filterRoutes && filter != null && Filters.byName(filter) && i.links[id] is OvpnLink && s.route(id)?.imported == true }
+        val dnsFor = { id: String -> if (id == FILTERED) "dns-filter" else if (id == DIRECT) "local" else if (ovpnDns(id)) "dns-ovpn-${tag(id)}" else "dns-r-$id" }
+        val directFiltered = filter != null && s.prefs.filter.direct && s.defaultRoute == DIRECT
+        val defaultDns = if (directFiltered && !defaultBlocked) "dns-filter" else if (s.defaultRoute == DIRECT || defaultBlocked || active.isEmpty()) "local" else dnsFor(s.defaultRoute)
         // Every tunnel the app can test, with the DNS of a route on it; Tailscale even without an exit route (its nodes).
         val probeTags = active.groupBy { tag(it.id) }.mapValues { (_, rs) -> dnsFor(rs.first().id) }.toMutableMap()
             .apply { if (s.tailscale) putIfAbsent(TS_TAG, defaultDns); if (app.unbraid.BuildConfig.DEBUG) put("direct", "local") } // debug: the line itself, for comparisons
         // Apps with their own route, grouped. Direct only appears here under lockdown (otherwise excluded at OS level).
-        val perApp = s.apps.entries.groupBy({ it.value }, { it.key }).toSortedMap()
-            .filterKeys { id -> id != s.defaultRoute && if (id == DIRECT) i.lockdown else s.activeRoutes.any { it.id == id } }
+        val perApp = s.apps.entries.groupBy({ if (it.key in through) FILTERED else it.value }, { it.key }).toSortedMap()
+            .filterKeys { id -> id != s.defaultRoute && when (id) { DIRECT -> i.lockdown; FILTERED -> true; else -> s.activeRoutes.any { it.id == id } } }
             .mapValues { (_, p) -> JsonArray(p.sorted().map(::JsonPrimitive)) }
         // Destination rules that beat any app rule. Repeated after every resolve, because fake-IP connections
         // only get a real address there.
@@ -132,7 +141,21 @@ object Compiler {
                 putJsonArray("servers") {
                     add(obj("type" to "fakeip", "tag" to "fake", "inet4_range" to FAKE_RANGES[i.fakeBlock]))
                     add(obj("type" to "local", "tag" to "local"))
-                    active.filter { !ovpnDns(it.id) }.forEach { r -> add(obj("type" to "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))) }
+                    val boots = HashSet<String>() // one lookup server per tunnel: the engine allows one OpenVPN DNS server per endpoint
+                    active.filter { !ovpnDns(it.id) }.forEach { r ->
+                        val boot = "boot-${tag(r.id)}"
+                        val own = obj("type" to "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))
+                        if (filter == null || !filterRoutes) add(own) else {
+                            // A filter reached by name is looked up first through the same tunnel, with the route's own resolver.
+                            if (Filters.byName(filter) && boots.add(boot)) add(
+                                if (ovpnBoot(r.id)) obj("type" to "openvpn", "tag" to boot, "endpoint" to tag(r.id), "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9")
+                                else JsonObject(own + ("tag" to JsonPrimitive(boot))),
+                            )
+                            add(filterDns(filter, "dns-r-${r.id}", tag(r.id), boot))
+                        }
+                    }
+                    // Direct traffic the filter applies to goes to it straight, not through a tunnel.
+                    if (filter != null && (directFiltered || through.isNotEmpty())) add(filterDns(filter, "dns-filter", "direct", "local"))
                     active.filter { ovpnDns(it.id) }.map { tag(it.id) }.distinct().forEach { t ->
                         // A server that pushes no DNS at all is answered by Quad9 through the same tunnel (an engine patch).
                         add(obj("type" to "openvpn", "tag" to "dns-ovpn-$t", "endpoint" to t, "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9"))
@@ -179,7 +202,7 @@ object Compiler {
                         // Android applies exclusions after inclusions, so an exclusion equal to a home prefix would win.
                         put("route_exclude_address", JsonArray((LAN - home.toSet()).map(::JsonPrimitive)))
                     }
-                    put("exclude_package", JsonArray(((if (i.lockdown) emptyList() else direct) + i.selfPackage).map(::JsonPrimitive)))
+                    put("exclude_package", JsonArray(((if (i.lockdown) emptyList() else direct - through) + i.selfPackage).map(::JsonPrimitive)))
                 })
                 // No tunnel to test, no inbound: sing-box would run a proxy with an empty user list unauthenticated.
                 i.probe?.takeIf { probeTags.isNotEmpty() }?.let { (port, password) ->
@@ -194,7 +217,7 @@ object Compiler {
                     when (val l = i.links.getValue(r.id)) {
                         is WgLink -> add(wg(tag(r.id), l.peer, r.name))
                         // Keeps the pushed DNS if any route on this tunnel uses it, not only the route that owns it.
-                        is OvpnLink -> Manual.ovpnEndpoint(tag(r.id), l.profile).let { e -> add(if (active.any { tag(it.id) == tag(r.id) && ovpnDns(it.id) }) openVpn(e) else e) }
+                        is OvpnLink -> Manual.ovpnEndpoint(tag(r.id), l.profile).let { e -> add(if (active.any { tag(it.id) == tag(r.id) && (ovpnDns(it.id) || ovpnBoot(it.id)) }) openVpn(e) else e) }
                         is SsLink, is TsLink -> Unit
                     }
                 }
@@ -312,13 +335,22 @@ object Compiler {
         p.address.mapNotNull(::canonical).filter(::isPrivate).distinct()
     }
 
-    /** Resolver inside a route's tunnel: custom DNS, else the provider's blocking resolver if asked, else the tunnel's own, else Nord's (filtering if TP Lite is on), else Quad9. */
+    /** A DNS server in the engine for filter [d]: over HTTPS or TLS by its address and TLS name, or plain; [boot] looks up a name. */
+    private fun filterDns(d: Filters.Dns, tag: String, detour: String, boot: String) = buildJsonObject {
+        put("type", if (d.path != null) "https" else if (d.tls != null) "tls" else "udp"); put("tag", tag)
+        put("server", d.ip); put("server_port", d.port)
+        d.path?.let { put("path", it) }
+        if (d.path != null || d.tls != null) putJsonObject("tls") { put("enabled", true); d.tls?.let { put("server_name", it) } }
+        if (Filters.byName(d)) put("domain_resolver", boot)
+        if (detour != "direct") put("detour", detour)
+    }
+
+    /** Resolver inside a route's tunnel: the provider's blocking resolver if on, else the tunnel's own, else Nord's, else Quad9. */
     private fun dnsServer(s: Setup, r: app.unbraid.data.Route, link: Link?): String {
         val provider = r.takeIf { !it.imported }?.loc?.provider
-        return s.prefs.customDns.firstOrNull()
-            ?: FILTER_DNS[provider]?.takeIf { r.filter }
+        return provider?.takeIf { s.protects(r) }?.let { p -> app.unbraid.data.Providers.get(p)?.blockingDns { s.opt(p, it) } }
             ?: (link as? WgLink)?.peer?.dns?.firstOrNull()
-            ?: if (provider == "nord") (if (s.prefs.threatProtection) NORD_TP else NORD_DNS) else "9.9.9.9"
+            ?: if (provider == "nord") NORD_DNS else "9.9.9.9"
     }
 
     /** The engine's error for a bad key quotes it, so every key is checked here and never named. */

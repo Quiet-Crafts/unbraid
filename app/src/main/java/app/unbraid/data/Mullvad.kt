@@ -117,6 +117,9 @@ object Mullvad : Provider {
 
     override val id = "mullvad"
     override val name = "Mullvad"
+    override val protection = Opt(PROTECT, "Block ads, trackers & malware", "Mullvad's DNS blocklists, on every Mullvad route")
+    override val defaults = mapOf(PROTECT to "off")
+    override fun blockingDns(opts: (String) -> String?) = "100.64.0.7"
     override val fields = listOf(Field("account", "Account number", hint = "16 digits"))
     override val help = "Your 16-digit account number: shown when you created the account, and at mullvad.net/account after logging in. Each account has 5 device slots; $APP uses one."
 
