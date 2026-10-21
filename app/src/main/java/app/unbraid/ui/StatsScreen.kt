@@ -641,7 +641,7 @@ private fun Lane(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Chip(ex)
             Text(ex?.name ?: "?", style = Type.body, color = Ink.text, modifier = Modifier.weight(1f), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-            Text("${apps.size} apps", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
+            Text("${apps.size} ${if (apps.size == 1) "app" else "apps"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
             Text(bytesText(bytes), style = Type.code.copy(fontSize = 15.sp, fontWeight = FontWeight.Medium), color = Ink.text)
             Text("${100 * bytes / total}%", style = Type.code.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.width(34.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End)
         }
