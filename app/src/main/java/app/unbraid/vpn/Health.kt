@@ -26,6 +26,23 @@ object Health {
         runCatching { Probe.open(tag, "www.google.com", timeoutMs = 10_000).close(); true }.getOrDefault(false)
     }
 
+    /**
+     * Tunnels a round's failures may be blamed on: none when every checked tunnel failed and so did a plain HTTPS
+     * request over the phone's own network ([direct]), since then it is that network that is down, not the servers.
+     */
+    suspend fun blame(down: Set<String>, checked: Set<String>, direct: suspend () -> Boolean): Set<String>? =
+        if (down.isNotEmpty() && down == checked && !direct()) null else down
+
+    /** One HTTPS request over [network] itself, past every tunnel. */
+    suspend fun direct(network: android.net.Network?) = withContext(Dispatchers.IO) {
+        runCatching {
+            (network!!.openConnection(java.net.URL("https://www.google.com/generate_204")) as java.net.HttpURLConnection).run {
+                connectTimeout = 10_000; readTimeout = 10_000
+                try { responseCode in 200..399 } finally { disconnect() }
+            }
+        }.getOrDefault(false)
+    }
+
     private suspend fun binding(server: String, tag: String): Boolean {
         val answer = CompletableDeferred<Boolean>()
         // Callbacks only hand the answer over: closing the session from inside one would wait for itself.

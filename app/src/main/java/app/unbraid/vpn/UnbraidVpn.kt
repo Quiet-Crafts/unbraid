@@ -78,6 +78,8 @@ data class VpnState(
     val pausedUntil: Long = 0,
     /** While paused: when the pause began (epoch ms), for the countdown ring. */
     val pausedAt: Long = 0,
+    /** While paused: Android may resume it somewhat after [pausedUntil] (no exact alarms). */
+    val pausedAbout: Boolean = false,
     /** Android's "Block connections without VPN": apps are offline while paused. */
     val lockdown: Boolean = false,
     /** Android's "Always-on VPN" for this app; both are only known while the service runs. */
@@ -437,31 +439,43 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /**
      * Every minute, checks each provider tunnel the app can move ([Health]); one that fails three checks in a row
-     * gets another server of its location. A round where every tunnel fails is the phone's own network: ignored.
+     * gets another server of its location. A round where every tunnel fails while the phone's own network does too is
+     * most likely that network: no server is blamed, and checks slow down (up to every ~8 min) until one works again.
      */
     private suspend fun watchHealth() {
         val fails = HashMap<String, Int>()
+        var slow = 1
+        var last: Pair<Map<String, Link>, android.net.Network?>? = null // the tunnels and network the streaks are about
         while (true) {
-            kotlinx.coroutines.delay(48_000L + kotlin.random.Random.nextLong(24_000)) // ~1 min, jittered
+            kotlinx.coroutines.delay((48_000L + kotlin.random.Random.nextLong(24_000)) * slow) // ~1 min, jittered
             if (state.value.phase != VpnState.Phase.On || net.network == null || SpeedTest.testing) continue
             var servers = emptyMap<String?, List<String>>() // tag → its servers as checked, before a reload can swap them
+            var seen = links // what was checked: results about other tunnels or another network are thrown away
+            val network = net.network
             val byTag = lock.withLock {
+                seen = links
                 val s = running ?: return@withLock emptyMap()
                 links.keys.filter { id -> s.route(id)?.let { !it.imported && it.loc.pinned == null && it.loc.group != app.unbraid.data.Nord.DEDICATED_IP } == true }
                     .groupBy { tags[it] }.filterKeys { it != null && it != Compiler.TS_TAG }
                     .also { m -> servers = m.mapValues { (_, ids) -> ids.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } } } }
             }
             if (byTag.isEmpty()) continue
-            val down = byTag.keys.filter { !Health.reachable(it!!) }
-            // Set even when every tunnel failed (maybe the phone's network): a reconnect then just doesn't reuse them.
-            failing = down.flatMap { servers[it].orEmpty() }.toSet()
-            if (byTag.size > 1 && down.size == byTag.size) continue
-            byTag.keys.forEach { t -> fails[t!!] = if (t in down) (fails[t] ?: 0) + 1 else 0 }
-            val dead = byTag.filterKeys { (fails[it] ?: 0) >= 3 }.values.flatten()
-            if (dead.isEmpty()) continue
-            dead.forEach { fails.remove(tags[it]) }
-            Log.w(TAG, "health: ${dead.size} route(s) stopped answering, moving to another server")
+            val checked = byTag.keys.filterNotNull().toSet()
+            val down = Health.blame(checked.filter { !Health.reachable(it) }.toSet(), checked) { Health.direct(network) }
             lock.withLock {
+                // Stopped, reloaded or moved to another network meanwhile: start counting afresh.
+                if (state.value.phase != VpnState.Phase.On || links !== seen || net.network != network) { fails.clear(); failing = emptySet(); last = null; return@withLock }
+                // Other tunnels or another network than the last round's: their streaks and blame don't carry over.
+                if (last != (seen to network)) { fails.clear(); failing = emptySet(); slow = 1; last = seen to network }
+                if (down == null) { fails.clear(); failing = emptySet(); slow = minOf(slow * 2, 8); return@withLock }
+                slow = 1
+                // The next connect, even a manual one, avoids them.
+                failing = down.flatMap { servers[it].orEmpty() }.toSet()
+                checked.forEach { t -> fails[t] = if (t in down) (fails[t] ?: 0) + 1 else 0 }
+                val dead = byTag.filterKeys { (fails[it] ?: 0) >= 3 }.values.flatten()
+                if (dead.isEmpty()) return@withLock
+                dead.forEach { fails.remove(tags[it]) }
+                Log.w(TAG, "health: ${dead.size} route(s) stopped answering, moving to another server")
                 val s = running ?: return@withLock
                 val avoid = dead.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } }.toSet()
                 // The newest setup, not the running one: a change still waiting to apply must never be undone here.
@@ -540,7 +554,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun stopEngine() {
         watch?.cancel(); watch = null
         health?.cancel(); health = null
-        retry?.cancel(); retry = null; retries = 0; refusals = emptyMap()
+        retry?.cancel(); retry = null; retries = 0; refusals = emptyMap(); failing = emptySet()
         runCatching { ts?.close() }; ts = null
         runCatching { server?.closeService() }
         runCatching { tun?.close() }; tun = null
@@ -595,7 +609,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val at = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(until))
         getSystemService(NotificationManager::class.java).notify(1, notification(if (until <= 0) "Paused" else if (exact) "Paused until $at" else "Paused until about $at", paused = true))
         // Last: whoever sees Paused (a resume refused for lack of consent) finds the alarm and notice to cancel.
-        state.value = VpnState(VpnState.Phase.Paused, pausedUntil = until, pausedAt = System.currentTimeMillis(), lockdown = lockdown, alwaysOn = alwaysOn)
+        state.value = VpnState(VpnState.Phase.Paused, pausedUntil = until, pausedAt = System.currentTimeMillis(), pausedAbout = !exact, lockdown = lockdown, alwaysOn = alwaysOn)
     }
 
     override fun onRevoke() { scope.launch { shutdown(null) } }
@@ -619,6 +633,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 net.quit()
                 openTable(false)
                 forgetLookups(this@UnbraidVpn)
+                failing = emptySet()
                 if (state.value.phase != VpnState.Phase.Off) state.value = VpnState()
             }
         }

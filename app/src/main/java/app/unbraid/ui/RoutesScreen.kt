@@ -320,7 +320,7 @@ private fun Status(vpn: VpnState) {
         Phase.On -> "Connected · $elapsed"
         Phase.Connecting -> "Connecting"
         Phase.Off -> "Not connected"
-        Phase.Paused -> if (vpn.pausedUntil > 0) "Paused · resumes ${java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(vpn.pausedUntil))}" else "Paused"
+        Phase.Paused -> if (vpn.pausedUntil > 0) "Paused · resumes ${if (vpn.pausedAbout) "about " else ""}${java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(vpn.pausedUntil))}" else "Paused"
     }
     Text(label.uppercase(), style = Type.overline, color = stateColor(vpn.phase), maxLines = 1)
 }
