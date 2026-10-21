@@ -1,6 +1,7 @@
 package app.unbraid.vpn
 
 import app.unbraid.data.DIRECT
+import app.unbraid.data.Home
 import app.unbraid.data.Link
 import app.unbraid.data.Manual
 import app.unbraid.data.OvpnLink
@@ -93,7 +94,7 @@ object Compiler {
         // Routes that resolve to the same server with the same credentials share one tunnel: two with one key would fight over it.
         val shared = shared(s, i.links, i.blocked)
         val tag = { id: String -> if (id == DIRECT) "direct" else if (s.route(id)?.tsExit != null) TS_TAG else shared[id] ?: "r-$id" }
-        val tsDomains = listOfNotNull("ts.net", tsSuffix(i.tsSuffix)).distinct()
+        val tsDomains = listOfNotNull("ts.net".takeIf { officialTs(s.home) }, trustedSuffix(i.tsSuffix, s.home)).distinct()
         // OpenVPN routes use the DNS their server pushes, except NordVPN's own routes: those keep Nord's
         // (Threat Protection) resolvers through the tunnel.
         val pushedDns = { r: app.unbraid.data.Route -> s.prefs.customDns.isEmpty() && (r.imported || r.loc.provider != "nord") }
@@ -133,7 +134,7 @@ object Compiler {
                     if (homeTs) add(obj("type" to "tailscale", "tag" to "dns-tailnet", "endpoint" to TS_TAG, "accept_default_resolvers" to false))
                 }
                 putJsonArray("rules") {
-                    if (homeTs) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
+                    if (homeTs && tsDomains.isNotEmpty()) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
                     if (s.prefs.lan) add(obj("domain_suffix" to arr("local", "lan", "home.arpa", "fritz.box"), "server" to "local"))
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
                     // Other query types (HTTPS, SVCB, TXT…) go to the asking app's own exit, never the ISP.
@@ -208,10 +209,15 @@ object Compiler {
             }
             putJsonObject("route") {
                 putJsonArray("rules") {
-                    add(obj("protocol" to "dns", "action" to "hijack-dns"))
+                    // The tunnels carry the phone's own connections and their replies, never new ones a server or peer
+                    // opens: those would reach the phone, its network and the home network through another route.
+                    val tunnels = active.filter { shared[it.id] == "r-${it.id}" && (i.links[it.id] is WgLink || i.links[it.id] is OvpnLink) }.map { tag(it.id) } +
+                        listOfNotNull("home-wg".takeIf { homeWg != null }, TS_TAG.takeIf { ts })
+                    if (tunnels.isNotEmpty()) add(obj("inbound" to JsonArray(tunnels.map(::JsonPrimitive)), "action" to "reject"))
+                    add(obj("inbound" to arr("tun"), "protocol" to "dns", "action" to "hijack-dns"))
                     // UDP only: the engine never completes a hijacked TCP connection, and apps test "am I online?" by
                     // opening TCP to 8.8.8.8:53. That TCP goes out through the app's own exit like any other connection.
-                    add(obj("port" to 53, "network" to "udp", "action" to "hijack-dns"))
+                    add(obj("inbound" to arr("tun"), "port" to 53, "network" to "udp", "action" to "hijack-dns"))
                     // Fake IPs an app kept from the previous domain table name nothing now: refused at once, so the app
                     // looks the name up again instead of waiting on a dead address.
                     add(obj("ip_cidr" to JsonArray((FAKE_RANGES - FAKE_RANGES[i.fakeBlock]).map(::JsonPrimitive)), "action" to "reject", "no_drop" to true))
@@ -324,10 +330,20 @@ object Compiler {
         )),
     )
 
-    private val DOMAIN = Regex("[a-z0-9]([a-z0-9.-]*[a-z0-9])?")
+    /** Two or more DNS labels: letters, digits and inner hyphens, 63 characters each at most. */
+    private val DOMAIN = Regex("(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+")
 
     /** A MagicDNS suffix as Tailscale reports it ("tail1234.ts.net." or a Headscale base domain), or null if unusable. */
     fun tsSuffix(raw: String?): String? = raw?.trim()?.lowercase()?.trim('.')?.takeIf { it.matches(DOMAIN) && it != "ts.net" }
+
+    /** Tailscale's own control server (none set, or one on tailscale.com) rather than a Headscale. */
+    fun officialTs(h: Home) = h.tsControlUrl == null || runCatching { java.net.URI(h.tsControlUrl).host.lowercase() }.getOrNull()?.let { it == "tailscale.com" || it.endsWith(".tailscale.com") } == true
+
+    /**
+     * The suffix the tailnet's DNS may answer for every app: a tailnet's own under ts.net on Tailscale's server; on
+     * Headscale (which can name any domain, even a whole top-level one) only the one the user allowed.
+     */
+    fun trustedSuffix(raw: String?, h: Home) = tsSuffix(raw)?.takeIf { if (officialTs(h)) it.endsWith(".ts.net") else it == h.tsSuffixAllowed }
 
     private fun sha(s: String) = MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
 

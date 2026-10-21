@@ -74,7 +74,7 @@ class CompilerTest {
         val refuse = rules.indexOfFirst { it["ip_cidr"]?.jsonArray?.map { r -> r.jsonPrimitive.content } == Compiler.FAKE_RANGES - Compiler.FAKE_RANGES[h] }
         assertEquals("reject", rules[refuse]["action"]!!.jsonPrimitive.content)
         assertEquals("true", rules[refuse]["no_drop"]!!.jsonPrimitive.content) // refused every time, never silently dropped
-        assertTrue(rules.take(refuse).all { it["action"]?.jsonPrimitive?.content == "hijack-dns" })
+        assertTrue(rules.take(refuse).all { it["action"]?.jsonPrimitive?.content == "hijack-dns" || it["inbound"] != null && it["action"]?.jsonPrimitive?.content == "reject" })
     }
 
     /** New tables walk through all eight blocks; a reload keeps its block; older versions' halves start in the other half. */
@@ -130,6 +130,30 @@ class CompilerTest {
         val c = compile(example, lockdown = true)
         assertEquals(listOf("app.unbraid"), c.excluded())
         assertTrue(c.rules().any { it["outbound"]?.jsonPrimitive?.content == "direct" && it["package_name"] != null })
+    }
+
+    /** Connections a VPN server or tailnet peer opens are refused first; only the phone's apps get DNS answered. */
+    @Test fun tunnelsNeverOpenConnectionsIntoThePhone() {
+        val home = example.copy(home = example.home.copy(wg = WgConf.parse(FRITZ, "Home")))
+        val rules = compile(home).rules()
+        val first = rules.first()
+        assertEquals("reject", first["action"]!!.jsonPrimitive.content)
+        assertEquals(compile(home).endpointTags().toSet(), first["inbound"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet())
+        assertTrue(first.keys == setOf("inbound", "action")) // every protocol, TCP and UDP alike
+        rules.filter { it["action"]?.jsonPrimitive?.content == "hijack-dns" }.also { assertEquals(2, it.size) }
+            .forEach { assertEquals(listOf("tun"), it["inbound"]!!.jsonArray.map { t -> t.jsonPrimitive.content }) }
+        assertTrue(compile(Setup(routes = emptyList(), defaultRoute = DIRECT), links = emptyMap()).rules().none { it["action"]?.jsonPrimitive?.content == "reject" && it["inbound"] != null })
+        // WireGuard, two OpenVPN routes sharing one endpoint and Shadowsocks, with the probe: every endpoint once, no outbound or probe.
+        val ss = SsProfile("s", "h.example", 8388, "aes-256-gcm", "pw")
+        val mixed = example.copy(routes = example.routes + ovpnRoute("o1", "u") + ovpnRoute("o2", "u") + Route("s", ss = ss),
+            apps = example.apps + mapOf("com.o1" to "o1", "com.o2" to "o2", "com.s" to "s"))
+        val raw = Compiler.compile(Compiler.Input(mixed, links(mixed) + mapOf("o1" to OvpnLink(sv("o1"), mixed.route("o1")!!.ovpn!!), "o2" to OvpnLink(sv("o2"), mixed.route("o2")!!.ovpn!!), "s" to SsLink(sv("s"), ss)),
+            "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", probe = 40000 to "pw"))
+        File("build/compiled").apply { mkdirs() }.resolve("ingress-mixed.json").writeText(raw)
+        val c = Json.parseToJsonElement(raw).jsonObject
+        val refused = c.rules().first()["inbound"]!!.jsonArray.map { it.jsonPrimitive.content }
+        assertEquals(c.endpointTags(), refused)
+        assertEquals(listOf("r-nl", "r-us", "r-it", "r-o1", "home-ts"), refused)
     }
 
     /** A route without a tunnel refuses its apps' connections and lookups; the other routes keep running. */
@@ -277,7 +301,7 @@ class CompilerTest {
                     apps = example.apps + ("com.n" to "ts"),
                     prefs = example.prefs.copy(lan = lan),
                 )
-                val c = compile(s, lockdown, tsSuffix = "corp.example")
+                val c = compile(s, lockdown, tsSuffix = "tail1234.ts.net")
                 val context = "home=$homeAccess default=$default lan=$lan lockdown=$lockdown"
                 val homeRules = c.rules().filter { it["outbound"]?.jsonPrimitive?.content == "home-ts" && it["ip_cidr"] != null }
                 assertEquals(context, homeAccess, homeRules.isNotEmpty())
@@ -287,7 +311,7 @@ class CompilerTest {
                 val dns = c["dns"]!!.jsonObject
                 val tailnetDns = dns["rules"]!!.jsonArray.map { it.jsonObject }.filter { it["server"]?.jsonPrimitive?.content == "dns-tailnet" }
                 assertEquals(context, homeAccess, tailnetDns.isNotEmpty())
-                if (homeAccess) assertEquals(listOf("ts.net", "corp.example"), tailnetDns.single()["domain_suffix"]!!.jsonArray.map { it.jsonPrimitive.content })
+                if (homeAccess) assertEquals(listOf("ts.net", "tail1234.ts.net"), tailnetDns.single()["domain_suffix"]!!.jsonArray.map { it.jsonPrimitive.content })
                 assertEquals(context, homeAccess, dns["servers"]!!.jsonArray.any { it.jsonObject["tag"]?.jsonPrimitive?.content == "dns-tailnet" })
                 val tun = c["inbounds"]!!.jsonArray[0].jsonObject
                 if (lan && !lockdown) {
@@ -475,15 +499,22 @@ class CompilerTest {
     // ---- tailnet DNS ----
 
     @Test fun tailnetSuffixIsRoutedToTailscaleDns() {
-        fun suffixes(suffix: String?): List<String> {
-            val i = Compiler.Input(example, links(example), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", suffix)
+        fun suffixes(suffix: String?, home: Home = example.home): List<String> {
+            val s = example.copy(home = home)
+            val i = Compiler.Input(s, links(s), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", suffix)
             val rules = Json.parseToJsonElement(Compiler.compile(i)).jsonObject["dns"]!!.jsonObject["rules"]!!.jsonArray
-            return rules.map { it.jsonObject }.first { it["server"]?.jsonPrimitive?.content == "dns-tailnet" }["domain_suffix"]!!.jsonArray.map { it.jsonPrimitive.content }
+            return rules.map { it.jsonObject }.firstOrNull { it["server"]?.jsonPrimitive?.content == "dns-tailnet" }?.get("domain_suffix")?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
         }
+        // Tailscale's own server: its ts.net names, never another domain it reports.
         assertEquals(listOf("ts.net"), suffixes(null))
         assertEquals(listOf("ts.net", "tail1234.ts.net"), suffixes("Tail1234.ts.net."))
-        assertEquals(listOf("ts.net", "corp.example"), suffixes("corp.example"))
-        assertEquals(listOf("ts.net"), suffixes("bad\" domain"))
+        for (bad in listOf("corp.example", "com", "co.uk", "ts.net", "bad\" domain", "-x.ts.net", "a..ts.net", "x".repeat(64) + ".ts.net")) assertEquals(bad, listOf("ts.net"), suffixes(bad))
+        // Headscale: no ts.net, and its suffix only once allowed (a switch in Settings), exactly that one.
+        val hs = example.home.copy(tsControlUrl = "https://hs.example.org")
+        assertEquals(emptyList<String>(), suffixes("corp.example", hs))
+        assertEquals(listOf("corp.example"), suffixes("corp.example", hs.copy(tsSuffixAllowed = "corp.example")))
+        assertEquals(emptyList<String>(), suffixes("com", hs.copy(tsSuffixAllowed = "corp.example")))
+        assertEquals(listOf("ts.net", "tail9.ts.net"), suffixes("tail9.ts.net", example.home.copy(tsControlUrl = "https://controlplane.tailscale.com")))
     }
 
     @Test fun tailscaleExitNodeTakesAnIpAndKeepsItsName() {

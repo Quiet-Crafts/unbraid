@@ -310,7 +310,16 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     Item(n.name, "${if (n.online) "Online" else "Offline"} · ${if (used == 0) "not used" else "used by $used ${if (used == 1) "route" else "routes"}"}")
                 })
                 if (setup.tailscale) caption("Pick an exit node for a route in Routes. Reaching your home network through Tailscale is under Local & home access.")
-                if (setup.tailscale) group("Advanced", listOf(Item("Control server", home.tsControlUrl ?: "Tailscale (default)", { dialog = "tsserver" }, icon = Icons.dns) { Chevron() }))
+                // A Headscale server can name any domain: its devices' names answer apps only once the user allows that suffix.
+                val sfx = vpn.tsSuffix?.takeIf { home.tailscale && !app.unbraid.vpn.Compiler.officialTs(home) }
+                if (setup.tailscale) group("Advanced", listOfNotNull(
+                    Item("Control server", home.tsControlUrl ?: "Tailscale (default)", { dialog = "tsserver" }, icon = Icons.dns) { Chevron() },
+                    sfx?.let { d ->
+                        val on = home.tsSuffixAllowed == d
+                        Item("Device names under $d", if (on) "On · your server answers every lookup under $d" else "Off · allow to reach devices by name; your server then answers every lookup under $d",
+                            { ui.setHome { it.copy(tsSuffixAllowed = if (on) null else d) } }, checked = on) { Toggle(on) }
+                    },
+                ))
                 if (setup.tailscale && vpn.tsState == "Running") group(null, listOf(Item("Sign out of Tailscale", "Its exit routes are removed; their apps follow the default route", { dialog = "tsout" }, danger = true)))
             }
 

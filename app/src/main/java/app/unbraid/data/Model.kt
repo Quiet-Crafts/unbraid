@@ -86,6 +86,8 @@ data class Home(
     /** LANs behind a Tailscale subnet router, e.g. 192.168.178.0/24. Reached through Tailscale even on other Wi-Fi. */
     val subnets: List<String> = emptyList(),
     val wg: WgPeer? = null,
+    /** A Headscale server's DNS suffix the user allowed to answer every app's lookups under it; Tailscale's own needs none. */
+    val tsSuffixAllowed: String? = null,
 )
 
 @Serializable

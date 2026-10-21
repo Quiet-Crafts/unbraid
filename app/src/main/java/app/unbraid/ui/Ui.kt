@@ -203,7 +203,7 @@ class Ui(app: Application) : AndroidViewModel(app) {
         if (!whileStopped("switch servers") {
             File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
             store.tsSuffix = null
-            saved = store.update { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl })) }
+            saved = store.update { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl }, tsSuffixAllowed = null)) }
         }) return@launch
         if (saved) authKey?.let(::clearClipboardIf)
     }

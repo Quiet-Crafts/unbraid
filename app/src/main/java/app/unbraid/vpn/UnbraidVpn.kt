@@ -72,6 +72,8 @@ data class VpnState(
     val error: String? = null,
     val tsLoginUrl: String? = null,
     val tsState: String? = null,
+    /** The DNS suffix the tailnet reports (usable form); whether apps may use it is [app.unbraid.data.Home.tsSuffixAllowed]. */
+    val tsSuffix: String? = null,
     /** Tailnet peers that offer themselves as exit nodes. */
     val tsExitNodes: List<TsNode> = emptyList(),
     /** While paused: when the connection comes back (epoch ms), 0 = only when resumed by hand. */
@@ -588,11 +590,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                         }
                     }.sortedBy { it.name.lowercase() }
                     val suffix = Compiler.tsSuffix(ep.magicDNSSuffix)
-                    state.update { s -> s.copy(tsLoginUrl = ep.authURL.ifEmpty { null }, tsState = ep.backendState, tsExitNodes = nodes) }
+                    val reported = if (ep.backendState == "Running") suffix else store.tsSuffix
+                    state.update { s -> s.copy(tsLoginUrl = ep.authURL.ifEmpty { null }, tsState = ep.backendState, tsExitNodes = nodes, tsSuffix = reported) }
                     // A speed test that was cut off left Tailscale on its test node: put the configured one back.
                     if (ep.backendState == "Running" && store.tsTestNode && !SpeedTest.testing) SpeedTest.restoreNode()
                     // The tailnet's own domain is only known once signed in: reload once so DNS routes it to Tailscale.
-                    if (suffix != null && suffix != store.tsSuffix) {
+                    if (ep.backendState == "Running" && suffix != store.tsSuffix) {
                         store.tsSuffix = suffix
                         scope.launch { reload() }
                     }
@@ -744,7 +747,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (o.autoRoute) {
             o.dnsServerAddress.forEachString { b.addDnsServer(it) }
             // Short tailnet names ("nas") expand to the MagicDNS domain, as with the Tailscale app.
-            store.tsSuffix?.takeIf { store.setup.value.home.tailscale }?.let { b.addSearchDomain(it) }
+            Compiler.trustedSuffix(store.tsSuffix, store.setup.value.home)?.takeIf { store.setup.value.home.tailscale }?.let { b.addSearchDomain(it) }
             val r4 = o.inet4RouteAddress.toList()
             if (r4.isEmpty()) b.addRoute("0.0.0.0", 0) else r4.forEach { b.addRoute(it.ipPrefix()) }
             o.inet6RouteAddress.forEach { b.addRoute(it.ipPrefix()) }
