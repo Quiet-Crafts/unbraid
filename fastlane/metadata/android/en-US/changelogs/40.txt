@@ -1,0 +1,4 @@
+• Protection: an encrypted DNS filter (AdGuard, Cloudflare, NextDNS, Quad9 or your own server) for VPN routes, Direct traffic and Direct apps.
+• Providers: each provider's page holds its blocking switch and settings; a status dot shows how each provider is doing.
+• IVPN: AntiTracker block lists and Hardcore mode, port choice with Automatic fallback, two-factor and captcha sign-in, and account ID from a QR code.
+• NordVPN: Threat Protection Lite lives on the NordVPN page.
