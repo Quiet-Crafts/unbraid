@@ -33,7 +33,7 @@ class Unbraid : Application() {
         UnbraidVpn.forgetLookups(this)
         java.io.File(filesDir, "tailscale/profile-data").deleteRecursively()
         // Files other Tailscale devices sent before receiving them was turned off: the engine no longer accepts any.
-        java.io.File(filesDir, "box/Taildrop").deleteRecursively()
+        if (!java.io.File(filesDir, "box/Taildrop").deleteRecursively()) android.util.Log.w("Unbraid", "old received files not deleted")
         app.unbraid.data.Snapshot.dir = filesDir
         // The home-screen widget mirrors every connection change.
         UnbraidVpn.state.map { it.phase }.distinctUntilChanged().onEach { StatusWidget.update(this) }.launchIn(MainScope())

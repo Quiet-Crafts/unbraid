@@ -1,26 +1,13 @@
 diff --git a/daemon/started_service.go b/daemon/started_service.go
-index f1fb0f0..f695e9e 100644
+index f1fb0f0..2bf5112 100644
 --- a/daemon/started_service.go
 +++ b/daemon/started_service.go
-@@ -3,6 +3,7 @@ package daemon
- import (
- 	"context"
- 	"net/netip"
-+	"strings"
- 	"os"
- 	"runtime"
- 	runtimeDebug "runtime/debug"
-@@ -1545,10 +1546,16 @@ func (s *StartedService) StartSTUNTest(
+@@ -1545,10 +1545,11 @@ func (s *StartedService) StartSTUNTest(
  		return err
  	}
  
 -	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", adapter.DNSQueryOptions{}, 0)
-+	// Unbraid: "<DNS server tag>|<host:port>" looks the STUN host up through that DNS server (the tunnel's own), never
-+	// the default one; an unknown tag fails the test instead of falling back.
-+	dnsServer, stunServer := "", request.Server
-+	if i := strings.IndexByte(stunServer, '|'); i >= 0 {
-+		dnsServer, stunServer = stunServer[:i], stunServer[i+1:]
-+	}
++	dnsServer, stunServer := splitSTUNServer(request.Server)
 +	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, dnsServer, adapter.DNSQueryOptions{}, 0)
  
  	result, stunErr := stun.Run(stun.Options{
@@ -29,3 +16,65 @@ index f1fb0f0..f695e9e 100644
  		Dialer:  resolvedDialer,
  		Context: server.Context(),
  		OnProgress: func(p stun.Progress) {
+diff --git a/daemon/stun_server.go b/daemon/stun_server.go
+new file mode 100644
+index 0000000..21c3a2f
+--- /dev/null
++++ b/daemon/stun_server.go
+@@ -0,0 +1,12 @@
++package daemon
++
++import "strings"
++
++// Unbraid: a STUN test's server may be "<DNS server tag>|<host:port>": its host is then looked up through that DNS
++// server (the tunnel's own), never the default one, and an unknown tag fails the test instead of falling back.
++func splitSTUNServer(server string) (dnsServer string, stunServer string) {
++	if i := strings.IndexByte(server, '|'); i >= 0 {
++		return server[:i], server[i+1:]
++	}
++	return "", server
++}
+diff --git a/daemon/stun_server_test.go b/daemon/stun_server_test.go
+new file mode 100644
+index 0000000..34cc696
+--- /dev/null
++++ b/daemon/stun_server_test.go
+@@ -0,0 +1,38 @@
++package daemon
++
++import (
++	"context"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/dialer"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/service"
++)
++
++func TestSplitSTUNServer(t *testing.T) {
++	for _, c := range []struct{ in, dns, server string }{
++		{"dns-r-nl|stun.l.google.com:19302", "dns-r-nl", "stun.l.google.com:19302"},
++		{"stun.l.google.com:19302", "", "stun.l.google.com:19302"},
++		{"dns-r-nl|74.125.250.129:19302", "dns-r-nl", "74.125.250.129:19302"},
++	} {
++		dns, server := splitSTUNServer(c.in)
++		if dns != c.dns || server != c.server {
++			t.Fatalf("%q: got %q %q", c.in, dns, server)
++		}
++	}
++}
++
++type noTransports struct{ adapter.DNSTransportManager }
++
++func (noTransports) Transport(string) (adapter.DNSTransport, bool) { return nil, false }
++
++// A named DNS server that doesn't exist fails the lookup: it never falls back to the default resolver.
++func TestUnknownResolverFails(t *testing.T) {
++	ctx := service.ContextWith[adapter.DNSTransportManager](context.Background(), noTransports{})
++	d := dialer.NewResolveDialer(ctx, N.SystemDialer, true, "dns-missing", adapter.DNSQueryOptions{}, 0)
++	if _, err := d.ListenPacket(ctx, M.ParseSocksaddr("stun.l.google.com:19302")); err == nil {
++		t.Fatal("an unknown resolver must fail the lookup")
++	}
++}
