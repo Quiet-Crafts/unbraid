@@ -1,1 +1,1 @@
-unbraid: split tunnel VPN
+unbraid: split tunneling VPN

@@ -1,6 +1,6 @@
 # unbraid
 
-unbraid is a VPN client for Android that lets every app take its own exit. Your banking app can skip the VPN
+unbraid is a split tunneling VPN client for Android that lets every app take its own exit. Your banking app can skip the VPN
 while a streaming app leaves from the US, a second app from Italy and everything else from the Netherlands, all
 at the same time. If you use Tailscale, your home network stays reachable too.
 
