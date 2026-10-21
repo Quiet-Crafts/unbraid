@@ -31,9 +31,9 @@ apps -> TUN -> sing-box -> rules: DNS, home, LAN, the app's route, default
 ```
 
 Each TCP and UDP connection is routed by the app that owns it, which Android reports through
-`ConnectivityManager.getConnectionOwnerUid`. Ping has no owning app, so it follows the default route. DNS is answered with fake addresses and looked up again on the exit
-the app really uses, so a site sees the country you picked for that app. Apps set to Direct are left out of the
-VPN by Android itself. If you turn on "Block connections without VPN", they are sent out directly from inside the
+`ConnectivityManager.getConnectionOwnerUid`. Ping has no owning app, so it follows the default route (when Direct is the default and other apps use VPN routes, internet ping is blocked instead). DNS is answered with fake addresses and looked up again on the exit
+the app really uses, so a site sees the country you picked for that app. Apps you set to Direct are left out of the
+VPN by Android itself; apps that only follow a Direct default route still go through unbraid. If you turn on "Block connections without VPN", they are sent out directly from inside the
 app instead. Only the default route and the routes your apps use are connected.
 
 For NordVPN, unbraid picks a server from the provider's low-load recommendations when it connects, unless you
@@ -78,8 +78,8 @@ To report a security problem, see [SECURITY.md](SECURITY.md).
 
 ## Support the project
 
-unbraid is free and has no paid features. If it is useful to you, you can donate at
-[unbraid.app/donate](https://unbraid.app/donate/). A donation doesn't unlock anything.
+unbraid is free and has no paid features. If it is useful to you, see
+[unbraid.app/donate](https://unbraid.app/donate/) for ways to support it. A donation doesn't unlock anything.
 
 Bug reports are welcome in the [issue tracker](https://github.com/quiet-crafts/unbraid/issues). The project
 doesn't take pull requests. [CONTRIBUTING.md](CONTRIBUTING.md) explains why and how else you can help.

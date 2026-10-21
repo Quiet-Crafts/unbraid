@@ -48,7 +48,7 @@ android {
     }
     buildFeatures { compose = true; buildConfig = true }
     // play = Google Play, with an in-app tip jar through Play Billing (a proprietary library F-Droid won't ship);
-    // foss = GitHub and F-Droid, no Google code. Everything else is the same app.
+    // foss = GitHub and F-Droid, no Google Play Billing (no tip jar). Everything else is the same app.
     flavorDimensions += "store"
     productFlavors {
         create("foss") { dimension = "store" }
