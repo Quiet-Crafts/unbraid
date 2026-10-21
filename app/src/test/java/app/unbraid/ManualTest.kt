@@ -386,6 +386,30 @@ class ManualTest {
         assertEquals(128, Manual.parseSs("ss://$ok@h.example:1#" + "n".repeat(128)).name.length)
     }
 
+    /** A profile that only trusts its CA (which signs every customer's certificate too) gets the warning; a server check clears it. */
+    @Test fun aProfileThatNeverChecksTheServerIsFlagged() {
+        val noCheck = base.lines().filterNot { it.startsWith("remote-cert-tls") || it.startsWith("verify-x509-name") || it.startsWith("ns-cert-type") }.joinToString("\n")
+        fun w(extra: String) = Manual.weakness(Manual.parseOvpn(noCheck + "\n" + extra, "x", "u", "p"))
+        assertTrue(w("")!!.contains("right server"))
+        for (ok in listOf("remote-cert-tls server", "remote-cert-eku \"TLS Web Server Authentication\"", "remote-cert-eku serverAuth", "ns-cert-type server", "verify-x509-name vpn.example name"))
+            assertNull(ok, w(ok))
+        // The client's role, or a later EKU overriding a server check, is no server check.
+        assertTrue(w("remote-cert-tls client")!!.contains("right server"))
+        assertTrue(w("remote-cert-tls server\nremote-cert-eku clientAuth\nremote-cert-ku a0")!!.contains("right server"))
+        // Weak crypto and no server check are both named.
+        assertTrue(w("tls-version-min 1.0")!!.let { "TLS 1.0" in it && "right server" in it })
+    }
+
+    /** The engine checks a name against the CN only: a profile asking for another certificate field is refused. */
+    @Test fun x509UsernameFieldOtherThanCnIsRefused() {
+        val named = base.lines().filterNot { it.startsWith("verify-x509-name") }.joinToString("\n") + "\nverify-x509-name gw.example name"
+        Manual.parseOvpn(named, "x", "u", "p")
+        Manual.parseOvpn(named + "\nx509-username-field CN", "x", "u", "p")
+        for (f in listOf("OU", "emailAddress", "ext:subjectAltName", "CN OU")) rejects("only the certificate's CN") { Manual.parseOvpn(named + "\nx509-username-field $f", "x", "u", "p") }
+        // Without a name check the field changes nothing on the client.
+        Manual.parseOvpn(base.lines().filterNot { it.startsWith("verify-x509-name") }.joinToString("\n") + "\nx509-username-field OU", "x", "u", "p")
+    }
+
     @Test fun weakEncryptionIsFlaggedButStillImports() {
         assertNull(Manual.weakness(Manual.parseOvpn(base, "x", "u", "p")))
         for ((extra, says) in listOf("tls-version-min 1.0" to "TLS 1.0", "tls-cipher AES128-SHA:DES-CBC3-SHA" to "3DES", "tls-cert-profile insecure" to "certificates")) {

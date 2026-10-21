@@ -42,7 +42,7 @@ object Manual {
     private val USED = setOf(
         "client", "tls-client", "pull", "remote", "remote-random", "port", "rport", "proto", "dev", "dev-type", "ca", "cert", "key",
         "tls-auth", "tls-crypt", "tls-crypt-v2", "key-direction", "auth-user-pass", "auth-retry", "cipher", "data-ciphers", "ncp-ciphers",
-        "data-ciphers-fallback", "ncp-disable", "auth", "remote-cert-tls", "remote-cert-eku", "remote-cert-ku", "ns-cert-type",
+        "data-ciphers-fallback", "ncp-disable", "auth", "remote-cert-tls", "remote-cert-eku", "remote-cert-ku", "ns-cert-type", "x509-username-field",
         "verify-x509-name", "tls-version-min", "tls-version-max", "tls-cert-profile", "comp-lzo", "compress", "allow-compression",
         "mssfix", "fragment", "tun-mtu", "reneg-sec", "reneg-bytes", "reneg-pkts", "ping", "ping-restart", "keepalive", "tls-timeout",
         "hand-window", "explicit-exit-notify", "replay-window", "peer-fingerprint", "key-method", "tls-cipher", "pull-filter", "compat-mode",
@@ -59,7 +59,7 @@ object Manual {
         "ifconfig-noexec", "ifconfig-nowarn", "push-peer-info", "disable-occ", "ignore-unknown-option", "remote-random-hostname",
         "tls-exit", "ping-exit", "ping-timer-rem", "inactive", "lport", "local", "bind", "topology",
         "tun-ipv6", "mlock", "mtu-disc", "mtu-test", "link-mtu", "tun-mtu-extra", "dev-node", "ip-win32", "win-sys", "keysize",
-        "x509-username-field", "opt-verify", "dns", "allow-pull-fqdn", "tran-window", "auth-token", "show-ciphers",
+        "opt-verify", "dns", "allow-pull-fqdn", "tran-window", "auth-token", "show-ciphers",
     )
 
     private val REJECTED = mapOf(
@@ -179,8 +179,19 @@ object Manual {
             "allows TLS 1.0 or 1.1".takeIf { c.arg("tls-version-min") in setOf("1.0", "1.1") },
             "allows the broken RC4 or 3DES ciphers".takeIf { c.arg("tls-cipher").orEmpty().split(':').any { "RC4" in it || "3DES" in it || "DES-CBC3" in it } },
             "accepts weak server certificates (tls-cert-profile insecure)".takeIf { c.arg("tls-cert-profile") == "insecure" },
+            "doesn't check that it reaches the right server (no remote-cert-tls server, verify-x509-name or peer-fingerprint)".takeIf { !checksServer(c) },
         )
         return if (issues.isEmpty()) null else "This config ${issues.joinToString(", ")}.$RISK"
+    }
+
+    /**
+     * Whether the server's certificate must be a server's (by its key usage, the last of remote-cert-tls and
+     * remote-cert-eku deciding) or this one by name or fingerprint. The CA alone also signs every customer's certificate.
+     */
+    private fun checksServer(c: Cfg): Boolean {
+        val role = c.last("remote-cert-eku", "remote-cert-tls")?.let { (k, a) -> a.singleOrNull()?.lowercase()?.let { if (k == "remote-cert-tls") it == "server" else it in SERVER_EKU } } == true
+        return role || c.arg("ns-cert-type") == "server" || !c.arg("verify-x509-name").isNullOrEmpty() ||
+            c.has("peer-fingerprint") || !c.blocks["peer-fingerprint"].isNullOrBlank()
     }
 
     /** Stream ciphers have no integrity check (see [weakness] for OpenVPN). */
@@ -294,7 +305,13 @@ object Manual {
             putJsonObject("tls") {
                 c.d["verify-x509-name"]?.last()?.let { a ->
                     put("server_name", a[0])
-                    put("server_name_type", (a.getOrNull(1) ?: "subject").also { require(it in setOf("subject", "name", "name-prefix")) { "Invalid verify-x509-name type: $it" } })
+                    val type = (a.getOrNull(1) ?: "subject").also { require(it in setOf("subject", "name", "name-prefix")) { "Invalid verify-x509-name type: $it" } }
+                    put("server_name_type", type)
+                    // The engine compares a name with the certificate's CN only: a profile asking for another field would
+                    // pass certificates it means to refuse.
+                    c.d["x509-username-field"]?.last()?.let { f ->
+                        require(type == "subject" || f.singleOrNull()?.equals("CN", true) == true) { "verify-x509-name with x509-username-field ${f.joinToString(" ")} isn't supported: only the certificate's CN can be checked" }
+                    }
                 }
                 c.blocks["ca"]?.let { put("certificate", pems("ca", it)) }
                 // A client certificate chain is the leaf followed by its intermediates, which is how <extra-certs> is meant.
