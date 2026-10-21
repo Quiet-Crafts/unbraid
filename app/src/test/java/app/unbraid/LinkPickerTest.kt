@@ -152,7 +152,10 @@ class LinkPickerTest {
         val s = setup(kept, Route("2", Location("fake", countryCode = "DE")))
         val out = LinkPicker.pick(s, mapOf("1" to link(a) as Link), s, mapOf("fake" to "acc"), mapOf("fake" to "acc"), emptyMap(), offline = true) { p }
         assertEquals(a, out.links.getValue("1").server)
-        assertTrue(out.blocked.getValue("2") is Fail)
+        assertTrue(out.blocked.getValue("2") is LinkPicker.Waiting)
+        // A signed-out provider's route is refused at once, offline too: it never waits for a server.
+        val signedOut = LinkPicker.pick(s, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { p }
+        assertTrue(signedOut.blocked.values.all { it is AuthException })
     }
 
     /** One refusal blocks every route of that provider, also one that could keep its running tunnel. */

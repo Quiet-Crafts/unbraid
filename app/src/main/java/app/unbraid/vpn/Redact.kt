@@ -5,7 +5,7 @@ import kotlinx.serialization.SerializationException
 import java.io.IOException
 
 /** A failure whose message is written by Unbraid and safe to show as is. */
-class Fail(message: String) : IOException(message)
+open class Fail(message: String) : IOException(message)
 
 /**
  * Engine and library errors can quote the configuration they choked on, private keys included. Nothing from them

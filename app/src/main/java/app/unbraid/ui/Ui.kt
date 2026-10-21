@@ -54,7 +54,8 @@ class Ui(app: Application) : AndroidViewModel(app) {
     val vpn = UnbraidVpn.state
     /** Signed in to at least one provider, or holding an imported config. */
     val accounts = store.accounts
-    private val _signedIn = MutableStateFlow(store.accounts.value.isNotEmpty() || store.setup.value.routes.any { it.imported } || store.setup.value.servers.isNotEmpty() || store.setup.value.home.tailscale)
+    // A running VPN keeps its controls, also after its last provider signed out (its routes' apps wait blocked).
+    private val _signedIn = MutableStateFlow(store.accounts.value.isNotEmpty() || store.setup.value.routes.any { it.imported } || store.setup.value.servers.isNotEmpty() || store.setup.value.home.tailscale || vpn.value.phase != VpnState.Phase.Off)
     val signedIn = _signedIn.asStateFlow()
     private val _countries = MutableStateFlow(Providers.all.associate { it.id to store.countries(it.id) })
     /** Server catalog per provider id. */

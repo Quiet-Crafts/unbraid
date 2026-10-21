@@ -22,6 +22,8 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     @Volatile var network: Network? = null
         private set
     @Volatile private var listener: InterfaceUpdateListener? = null
+    /** Called when the phone moves to another network (not on the first one the engine gets). */
+    @Volatile var onChange: (() -> Unit)? = null
     private val thread = HandlerThread("net").apply { start() }
     private val handler = Handler(thread.looper)
 
@@ -63,6 +65,7 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
         if (!force && now == pushed) return
         pushed = now
         l.updateDefaultInterface(now.first, now.second, false, false)
+        if (!force && now.second >= 0) onChange?.invoke()
     }
 }
 

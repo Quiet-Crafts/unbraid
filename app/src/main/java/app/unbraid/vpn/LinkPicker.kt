@@ -14,6 +14,9 @@ import app.unbraid.data.WgLink
 
 /** Chooses the tunnel each active route runs. Kept free of Android so it can be tested. */
 object LinkPicker {
+    /** An offline pick's route that needs its provider for a tunnel. */
+    class Waiting : Fail("waiting for a server")
+
     /** [blocked]: routes that got no tunnel, with why; their apps are blocked until one is found ([Compiler.Input.blocked]). */
     class Result(val links: Map<String, Link>, val remember: Map<String, Link>, val blocked: Map<String, Exception> = emptyMap())
 
@@ -59,7 +62,8 @@ object LinkPicker {
                 else -> keep[r.id]?.takeIf {
                     applied?.route(r.id)?.let { a -> !a.imported && a.loc == r.loc } == true && appliedAccounts[r.loc.provider] == accounts[r.loc.provider] &&
                         trusted(it, r, accounts, providers)
-                } ?: if (offline) throw Fail("waiting for a server") else fresh(r, accounts, last, used, providers)
+                } ?: if (offline) throw if (accounts[r.loc.provider] == null) AuthException("Sign in to ${providers(r.loc.provider)?.name ?: r.loc.provider} for ${r.name}") else Waiting()
+                    else fresh(r, accounts, last, used, providers)
             } } catch (e: Exception) { blocked[r.id] = e; continue }
             if (!r.imported) used += "${r.loc.provider}|${serverId(link.server)}"
             out[r.id] = link
