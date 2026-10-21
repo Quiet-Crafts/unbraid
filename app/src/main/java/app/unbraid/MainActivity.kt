@@ -208,8 +208,8 @@ class MainActivity : ComponentActivity() {
                     }
                     // A change that applied but couldn't be written, wherever it was made: it would be gone after a restart.
                     val unsaved by Unbraid.store.unsaved.collectAsStateWithLifecycle()
-                    if (unsaved) Caption("Your last change couldn't be saved and would be lost when unbraid restarts. Make it again. Tap to dismiss.",
-                        Modifier.fillMaxWidth().tap({ Unbraid.store.unsaved.value = false }).padding(horizontal = 24.dp, vertical = 12.dp), color = Ink.bad)
+                    if (unsaved) Caption("Some of your changes couldn't be saved and would be lost when unbraid restarts. Tap to try saving again.",
+                        Modifier.fillMaxWidth().tap({ kotlin.concurrent.thread { Unbraid.store.saveAgain() } }).padding(horizontal = 24.dp, vertical = 12.dp), color = Ink.bad)
                     if (signedIn && picker == null && !adding) NavBar(tab) { tab = it }
                 }
                 if (tour >= 0) TourOverlay(

@@ -160,13 +160,11 @@ class Ui(app: Application) : AndroidViewModel(app) {
         warn("Couldn't release this phone's device slot at $it. Remove it in your $it account${if (names.size > 1) "s" else ""}.")
     }
 
-    fun signOut(provider: String) {
+    fun signOut(provider: String) = viewModelScope.launch(Dispatchers.IO) {
         val blob = store.accounts.value[provider]
-        store.account(provider, null)
+        store.account(provider, null) // a failed save shows the unsaved banner; the account is out of memory either way
         resetIfEmpty()
-        if (blob != null) viewModelScope.launch(Dispatchers.IO) {
-            if (!release(provider, blob)) unreleased(listOf(Providers.get(provider)?.name ?: provider))
-        }
+        if (blob != null && !release(provider, blob)) unreleased(listOf(Providers.get(provider)?.name ?: provider))
     }
 
     /**

@@ -14,6 +14,8 @@ val signing = Properties().apply {
 }
 
 android {
+    // Android classes in JVM unit tests (Log, for one) do nothing instead of throwing.
+    testOptions { unitTests.isReturnDefaultValues = true }
     namespace = "app.unbraid"
     compileSdk = 37
     defaultConfig {
