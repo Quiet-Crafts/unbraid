@@ -197,7 +197,7 @@ private fun load(p: Period, ui: Ui): View {
     }
     val zoneMs = { d: Long -> LocalDate.ofEpochDay(d).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli() }
     val tests = Stats.tests().filter { it.at in zoneMs(from) until zoneMs(to + 1) }.groupBy { it.exit }.mapValues { (_, t) -> t.maxBy { it.down } }
-    // Hours protected per day, the last 13 weeks ending this Sunday; this week's days for the hub.
+    // Hours connected per day, the last 13 weeks ending this Sunday; this week's days for the hub.
     val heatStart = today.with(DayOfWeek.MONDAY).minusWeeks(12)
     val zone = java.time.ZoneId.systemDefault()
     val ms = { d: LocalDate -> d.atStartOfDay(zone).toInstant().toEpochMilli() }
@@ -402,7 +402,7 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                         Rise("stats", 3, play) {
                             Tile("journal", "Journal", Icons.calendar, onOpen = go) {
                                 Num(hmParts(v?.weekMs ?: 0), 28)
-                                Text("protected this week", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
+                                Text("connected this week", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
                                 if (v != null) WeekMarks(v.week.map { it.coerceAtLeast(0f) }, DayOfWeek.entries.map { it.getDisplayName(DayStyle.NARROW, locale()) }, LocalDate.now().dayOfWeek.ordinal)
                             }
                         }
@@ -686,11 +686,11 @@ private fun Journal(v: View, go: (String?) -> Unit) {
     val goodDays = v.week.count { it >= 4f }
     Section("journal", "Last 13 weeks", "Journal", back = { go(null) }) {
         item(key = "hero") {
-            Hero("This week", "", "", "$goodDays of 7 days with at least 4 h protected", parts = hmParts(v.weekMs)) {
+            Hero("This week", "", "", "$goodDays of 7 days with at least 4 h connected", parts = hmParts(v.weekMs)) {
                 // A month's name over the week it starts in; the first column only if no month starts in the next two.
                 val starts = (0 until 13).filter { w -> v.heatStart.plusWeeks(w.toLong()).dayOfMonth <= 7 }
                 val months = (listOf(0).filter { starts.none { s -> s in 1..2 } } + starts).associateWith { w -> v.heatStart.plusWeeks(w.toLong()).plusDays(6).month.getDisplayName(DayStyle.SHORT, locale()) }
-                Heatmap(v.heat, day, DayOfWeek.entries.map { it.getDisplayName(DayStyle.NARROW, locale()) }, months, "Hours protected per day, last 13 weeks")
+                Heatmap(v.heat, day, DayOfWeek.entries.map { it.getDisplayName(DayStyle.NARROW, locale()) }, months, "Hours connected per day, last 13 weeks")
             }
         }
         item(key = "day") {
@@ -703,16 +703,16 @@ private fun Journal(v: View, go: (String?) -> Unit) {
         item(key = "timeline") {
             Column(Modifier.padding(horizontal = Gutter).clip(RoundedCornerShape(24.dp)).background(Ink.surface).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Timeline(spans.map { (a, b, p) -> Triple((a - dayStart) / dayLen, (b - dayStart) / dayLen, p) },
-                    "${hm(on.sumOf { it.second - it.first })} protected, ${spans.count { it.third }} pauses")
+                    "${hm(on.sumOf { it.second - it.first })} connected, ${spans.count { it.third }} pauses")
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { listOf("00", "06", "12", "18", "24").forEach { Text(it, style = Type.code.copy(fontSize = 12.sp), color = Ink.dim) } }
-                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) { listOf(Ink.good to "Protected", Ink.accent to "Paused", Ink.surfaceTop to "Off").forEach { (c, t) -> Legend2(c, t) } }
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) { listOf(Ink.good to "Connected", Ink.accent to "Paused", Ink.surfaceTop to "Off").forEach { (c, t) -> Legend2(c, t) } }
             }
         }
         item(key = "facts") {
             Row(Modifier.padding(Gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 val pauses = spans.filter { it.third }
                 listOf(
-                    hmParts(on.sumOf { it.second - it.first }) to "protected",
+                    hmParts(on.sumOf { it.second - it.first }) to "connected",
                     hmParts(on.maxOfOrNull { it.second - it.first } ?: 0) to "longest",
                     listOf("${pauses.size}" to "") to if (pauses.isEmpty()) "pauses" else "pauses · ${hm(pauses.sumOf { it.second - it.first })}",
                 ).forEach { (a, b) ->
@@ -934,7 +934,7 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
                             done -> if (setup.prefs.stats) "Test complete · saved with your statistics" else "Test complete · not saved: statistics are off"
                             node -> "Tailscale switches to ${ex?.name} for the test, then back." + (if (setup.tsExit != null) " Apps on your Tailscale route use it meanwhile." else "") +
                                 " Tested with M-Lab, about 20 seconds of real data."
-                            else -> "Tested with M-Lab on a server in the exit's country: ten seconds each way, real data."
+                            else -> "Tested with M-Lab on a server in the exit's country, or a nearby one: ten seconds each way, real data."
                         },
                         style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                     )
@@ -978,9 +978,9 @@ private fun MlabConsent(dismiss: () -> Unit, accept: () -> Unit) {
         Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("Speed tests use M-Lab", style = Type.title.copy(fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.Medium))
             listOf(
-                Icons.speed to "Measurement Lab (M-Lab) is an open platform run by researchers. A test uses one of its servers in the exit's country, ten seconds each way.",
+                Icons.speed to "Measurement Lab (M-Lab) is an open platform run by researchers. A test asks for one of its servers in the exit's country; for your own servers and Tailscale nodes M-Lab picks a nearby one. Ten seconds each way.",
                 Icons.history to "M-Lab publishes every test's results openly and keeps them, with the public IP address of the exit you test: a VPN server's, or your home's for a home or Tailscale exit.",
-                Icons.block to "Also sent: the time and the app's name and version. Nothing about your phone or accounts. Up to $SPEED_TESTS_PER_DAY tests a day.",
+                Icons.block to "Also sent: the time, the app's name and version, and the exit's country when it's known. Nothing about your phone or accounts. Up to $SPEED_TESTS_PER_DAY tests a day.",
             ).forEach { (i, t) -> Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) { Icon(i, null, Modifier.size(24.dp), tint = Ink.dim); Text(t, style = Type.sub, color = Ink.text) } }
             LinkButton(Icons.external, "M-Lab privacy policy") { context.openUrl("https://www.measurementlab.net/privacy/") }
             Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1088,7 +1088,7 @@ private fun StatsOff(hasData: Boolean, turnOn: () -> Unit, view: () -> Unit) = S
                 modifier = tourAnchor(TourStop.StatsIntro))
             Text(
                 if (hasData) "Nothing new is recorded. Statistics kept so far are still on this phone; delete them in Settings."
-                else "Data per app and per exit, time protected and speeds. Statistics aren't uploaded, and no browsing destinations are recorded.",
+                else "Data per app and per exit, time connected and speeds. Statistics aren't uploaded, and no browsing destinations are recorded.",
                 style = Type.body.copy(fontWeight = FontWeight.Normal, lineHeight = 24.sp), color = Ink.dim,
             )
             listOf(Icons.phone to "Kept only on this phone", Icons.block to "No browsing destinations", Icons.deleteForever to "Delete it any time in Settings").forEach { (i, t) ->
