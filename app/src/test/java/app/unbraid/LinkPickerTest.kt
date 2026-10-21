@@ -183,6 +183,15 @@ class LinkPickerTest {
         assertFalse(LinkPicker.leavesDirect(null, directDefault, setOf("v")))
     }
 
+    /** Two imports of one key on one server with other settings: the second is blocked, the first runs. */
+    @Test fun aClashingWireGuardRouteIsBlocked() {
+        val peer = link(a).peer
+        val s = setup(Route("1", wg = peer), Route("2", wg = peer.copy(mtu = 1200)))
+        val out = LinkPicker.pick(s, emptyMap(), null, emptyMap(), emptyMap(), emptyMap()) { null }
+        assertEquals(setOf("1"), out.links.keys)
+        assertTrue(out.blocked.getValue("2") is Fail)
+    }
+
     @Test fun aSignedOutProvidersRouteIsBlockedAndTheOthersStillRun() {
         val other = object : Provider by Fake(listOf(b)) { override val id = "other" }
         val s = setup(Route("1", Location("fake", countryCode = "NL")), Route("2", Location("other", countryCode = "DE")))

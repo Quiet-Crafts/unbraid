@@ -80,7 +80,9 @@ object Compiler {
     /** Route id → the tunnel tag it runs on: routes that resolve to one server with one login share a tunnel. */
     fun shared(s: Setup, links: Map<String, Link>, blocked: Set<String> = emptySet()): Map<String, String> {
         val owners = HashMap<String, String>()
-        return s.activeRoutes.filter { it.tsExit == null && it.id !in blocked }.associate { r ->
+        val routes = s.activeRoutes.filter { it.tsExit == null && it.id !in blocked }
+        require(clashes(s, links).isEmpty()) { CLASH } // [LinkPicker] blocks them first
+        return routes.associate { r ->
             val link = links[r.id] ?: error("No server for ${r.name}")
             r.id to owners.getOrPut(linkKey(r, link)) { "r-${r.id}" }
         }
@@ -369,13 +371,32 @@ object Compiler {
 
     /** Same key = same physical exit with the same credentials, whichever route asked for it. */
     internal fun linkKey(r: Route, l: Link): String = when (l) {
-        is WgLink -> listOf("wg", if (r.imported) "-" else r.loc.provider, l.server.ip.ifEmpty { l.peer.endpoint }, l.peer.publicKey, sha(l.peer.privateKey))
+        // Everything the engine's WireGuard device is built from, whichever provider or import it came through.
+        is WgLink -> listOf(wgKey(l.peer))
         // Same remotes but another protocol, CA or login is another tunnel: compare the whole profile.
         is OvpnLink -> listOf("ovpn", sha(l.profile.config), l.profile.username, sha(l.profile.password))
         // The plugin and its options (TLS, certificate, host) are part of the tunnel too.
         is SsLink -> listOf("ss", l.profile.server, l.profile.port.toString(), l.profile.method, sha(l.profile.password), l.profile.plugin.orEmpty(), sha(l.profile.pluginOpts.orEmpty()))
         is TsLink -> listOf("ts")
     }.joinToString("|")
+
+    private fun wgIdentity(p: WgPeer) = listOf(p.endpoint.lowercase(), p.publicKey, sha(p.privateKey)).joinToString("|")
+    // Address order too: the engine sends from the last IPv4 address.
+    private fun wgKey(p: WgPeer) = listOf("wg", wgIdentity(p), sha(p.presharedKey.orEmpty()), p.address.joinToString(","), minOf(p.mtu, 1280)).joinToString("|")
+
+    const val CLASH = "Another of your WireGuard connections uses this key on the same server with other settings. Use one config for both."
+
+    /**
+     * Routes whose WireGuard identity (client key on one server) is already taken, with other settings, by an earlier
+     * route or the home tunnel: one identity can be one tunnel only, two would knock each other off.
+     */
+    fun clashes(s: Setup, links: Map<String, Link>): Set<String> {
+        val seen = HashMap<String, String>().apply { s.home.wg?.let { put(wgIdentity(it), "home") } }
+        return s.activeRoutes.filter { it.tsExit == null }.mapNotNullTo(HashSet()) { r ->
+            val p = (links[r.id] as? WgLink)?.peer ?: return@mapNotNullTo null
+            r.id.takeIf { seen.getOrPut(wgIdentity(p)) { wgKey(p) }.let { it == "home" || it != wgKey(p) } }
+        }
+    }
 
     private fun arr(vararg v: String) = JsonArray(v.map(::JsonPrimitive))
 

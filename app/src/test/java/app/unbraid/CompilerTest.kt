@@ -8,6 +8,7 @@ import app.unbraid.data.Nord
 import app.unbraid.data.OvpnLink
 import app.unbraid.data.TsLink
 import app.unbraid.data.WgLink
+import app.unbraid.data.WgPeer
 import app.unbraid.data.Location
 import app.unbraid.data.NordApi
 import app.unbraid.data.Prefs
@@ -470,6 +471,30 @@ class CompilerTest {
         val other = "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30="
         assertEquals(listOf("r-a", "r-b"), two(WgLink(sv("a"), Nord.peer(sv("a"), other))).first.endpointTags())
         assertEquals(listOf("r-a", "r-b"), two(WgLink(sv("b"), Nord.peer(sv("b"), key))).first.endpointTags())
+    }
+
+    /** Sharing follows what the engine's WireGuard device is built from, never the provider label. */
+    @Test fun wireGuardSharingFollowsTheRealSettings() {
+        val peer = Nord.peer(sv("a"), key)
+        val imported = Route("b", wg = peer.copy(name = "mine"))
+        fun tags(second: WgPeer, r: Route = imported) = compile(Setup(routes = listOf(Route("a", Location("nord", 1, "NL", "Netherlands")), r), defaultRoute = "a", apps = mapOf("com.b" to "b")),
+            links = mapOf("a" to WgLink(sv("a"), peer), "b" to WgLink(sv("a"), second))).endpointTags()
+        // A provider route and an import of the same config share one tunnel.
+        assertEquals(listOf("r-a"), tags(peer))
+        // Another server or another client key is another tunnel.
+        assertEquals(listOf("r-a", "r-b"), tags(peer.copy(endpoint = "10.9.9.9:51820")))
+        assertEquals(listOf("r-a", "r-b"), tags(peer.copy(privateKey = "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=")))
+        // The same key on the same server with another preshared key, addresses (also their order) or MTU clashes;
+        // the compiler refuses it outright, and LinkPicker blocks such a route before it gets there.
+        val two = peer.copy(address = listOf("10.5.0.2/32", "10.6.0.2/32"))
+        for (other in listOf(peer.copy(presharedKey = key), peer.copy(address = listOf("10.5.0.9/32")), peer.copy(mtu = 1200))) {
+            try { tags(other); fail("ran two tunnels for one identity: $other") } catch (e: IllegalArgumentException) { assertFalse(e.message!!.contains(key)) }
+        }
+        val s2 = Setup(routes = listOf(Route("a", wg = two), Route("b", wg = two.copy(address = two.address.reversed()), hue = 1)), defaultRoute = "a", apps = mapOf("com.b" to "b"))
+        assertEquals(setOf("b"), Compiler.clashes(s2, mapOf("a" to WgLink(sv("a"), two), "b" to WgLink(sv("a"), two.copy(address = two.address.reversed())))))
+        // Nor as both a route and the home tunnel.
+        val s = Setup(routes = listOf(Route("a", Location("nord", 1, "NL", "Netherlands"))), defaultRoute = "a", home = Home(wg = peer))
+        assertEquals(setOf("a"), Compiler.clashes(s, mapOf("a" to WgLink(sv("a"), peer))))
     }
 
     private fun ovpnRoute(id: String, user: String) = Route(id, ovpn = Manual.parseOvpn(javaClass.getResource("/ovpn/expressvpn.ovpn")!!.readText(), id, user, "pw"))
