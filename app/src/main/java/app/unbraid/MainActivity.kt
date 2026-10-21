@@ -106,8 +106,8 @@ class MainActivity : ComponentActivity() {
         VpnService.prepare(this)?.let { vpnConsent.launch(it) } ?: ui.connect()
     }
 
-    // Android's Always-on and Block connections can change in its settings at any time: read them on every return.
-    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this) }
+    // Android's Always-on and Block connections, and the installed apps, can change while unbraid is in the background.
+    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); ui.refreshApps() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         window.setHideOverlayWindows(true) // no tapjacking over sign-in or connect

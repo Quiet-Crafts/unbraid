@@ -82,7 +82,6 @@ class Ui(app: Application) : AndroidViewModel(app) {
     init {
         // Catalogs are multi-MB: refreshed once a day, not on every launch (the picker refreshes an empty one itself).
         store.accounts.value.keys.filterNot(store::countriesFresh).forEach(::refreshCountries)
-        if (disclosed.value) loadApps()
         saveImportedServers()
     }
 
@@ -262,18 +261,27 @@ class Ui(app: Application) : AndroidViewModel(app) {
     }
 
 
-    private fun loadApps() = viewModelScope.launch(Dispatchers.IO) {
+    /**
+     * Reads the installed apps again (on every return to the app: the VPN keeps this process, and so this list, alive for
+     * days), so new apps can be routed and removed ones drop their route. Only after the installed-apps notice.
+     */
+    fun refreshApps() { if (disclosed.value) loadApps() }
+    @Volatile private var appsAsked = 0
+
+    private fun loadApps() = (++appsAsked).let { n -> viewModelScope.launch(Dispatchers.IO) {
         val self = getApplication<Application>().packageName
         val all = pm.getInstalledApplications(0)
         // One query for every app allowed online, not one permission check per app.
         val online = pm.getPackagesHoldingPermissions(arrayOf(android.Manifest.permission.INTERNET), 0).mapTo(HashSet()) { it.packageName }
-        _apps.value = all.filter { it.packageName != self && it.packageName in online }
+        val list = all.filter { it.packageName != self && it.packageName in online }
             .map { AppInfo(it.packageName, it.loadLabel(pm).toString(), it.flags and ApplicationInfo.FLAG_SYSTEM != 0 && pm.getLaunchIntentForPackage(it.packageName) == null) }
             .sortedBy { it.label.lowercase() }
+        if (n != appsAsked) return@launch // a newer read is under way
+        _apps.value = list
         // An uninstalled app must not keep its route (and a tunnel) alive.
         val installed = all.mapTo(HashSet()) { it.packageName }
         if (store.setup.value.apps.keys.any { it !in installed }) store.update { s -> s.copy(apps = s.apps.filterKeys { it in installed }) }
-    }
+    } }
 
     private val icons = LruCache<String, Bitmap>(200)
 
