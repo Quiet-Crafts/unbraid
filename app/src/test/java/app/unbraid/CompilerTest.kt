@@ -178,7 +178,8 @@ class CompilerTest {
         assertNull(Filter("nextdns").server())
         assertEquals("/abc123", Filter("nextdns", "abc123").server()!!.path)
         val own = compile(example.copy(prefs = Prefs(filter = Filter(Filters.OWN, "tls://dns.example.org", routes = true)))).dnsServers()
-        assertEquals("tls", own["dns-r-nl"]!!.str("type")); assertEquals("boot-r-nl", own["dns-r-nl"]!!.str("domain_resolver")); assertEquals(853, own["dns-r-nl"]!!["server_port"]!!.jsonPrimitive.content.toInt())
+        assertEquals("tls", own["dns-r-nl"]!!.str("type")); assertEquals("boot-r-nl", own["dns-r-nl"]!!.str("domain_resolver"))
+        assertEquals(own.keys.filter { it.startsWith("boot-") }.size, own.values.mapNotNull { it.str("domain_resolver") }.toSet().size); assertEquals(853, own["dns-r-nl"]!!["server_port"]!!.jsonPrimitive.content.toInt())
         assertEquals(Compiler.NORD_TP, own["boot-r-nl"]!!.str("server")); assertEquals("r-nl", own["boot-r-nl"]!!.str("detour"))
         for (bad in listOf("http://x.org", "https://x.org:99999/q", "tls://x.org/path", "dns.example.org", "1.2.3", "https://a b", "https://x.org/q%", "https://x.org/q%GG")) assertNull(bad, Filters.own(bad))
         assertEquals("/a%2Fb", Filters.own("https://x.org/a%2Fb")!!.path)
@@ -674,6 +675,10 @@ class CompilerTest {
         val s = ovpnSetup(Prefs(filter = Filter(Filters.OWN, "tls://dns.internal.example", routes = true)))
         val c = compile(s, links = mapOf("x" to OvpnLink(sv("x"), s.routes[0].ovpn!!)))
         assertEquals("openvpn", c.dnsServer("boot-r-x")["type"]!!.jsonPrimitive.content)
+        // Two routes on that one tunnel share one lookup server: the engine allows one OpenVPN DNS server per endpoint.
+        val two = s.copy(routes = s.routes + s.routes[0].copy(id = "y"), apps = mapOf("com.y" to "y"))
+        val c2 = compile(two, links = mapOf("x" to OvpnLink(sv("x"), s.routes[0].ovpn!!), "y" to OvpnLink(sv("x"), s.routes[0].ovpn!!)))
+        assertEquals(1, c2["dns"]!!.jsonObject["servers"]!!.jsonArray.count { it.jsonObject["type"]!!.jsonPrimitive.content == "openvpn" })
         assertEquals("tls", c.dnsServer("dns-r-x")["type"]!!.jsonPrimitive.content)
         assertFalse(c["endpoints"]!!.jsonArray[0].jsonObject.containsKey("route_no_pull"))
     }

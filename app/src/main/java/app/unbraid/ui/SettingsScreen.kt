@@ -168,6 +168,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     val vpn by ui.vpn.collectAsStateWithLifecycle()
     val accounts by ui.accounts.collectAsStateWithLifecycle()
     val notice by ui.notice.collectAsStateWithLifecycle()
+    val refreshed by ui.refreshed.collectAsStateWithLifecycle()
     val signedIn = Providers.all.filter { it.id in accounts }
     val prefs = setup.prefs
     val home = setup.home
@@ -283,7 +284,9 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     val on = vpn.phase == Phase.On && active.isNotEmpty()
                     val (tone, words) = providerStatus(
                         pr.name, n > 0, vpn.stuck[pr.id] == true, on && pr.id in app.unbraid.data.Providers.settingUp(), on && vpn.stuck[pr.id] == false,
-                        app.unbraid.Unbraid.store.countriesFresh(pr.id), on && active.all { it.id in vpn.servers },
+                        refreshed.let { app.unbraid.Unbraid.store.countriesFresh(pr.id) },
+                        // Only the setup the engine runs counts: a route just moved to this provider isn't connected yet.
+                        on && active.all { r -> r.id in vpn.servers && UnbraidVpn.running?.route(r.id)?.loc == r.loc },
                     )
                     Item(pr.name, words + if (n > 0) " · used by $n ${if (n == 1) "route" else "routes"}" else "", { go("provider:${pr.id}") }) {
                         Row(verticalAlignment = Alignment.CenterVertically) {

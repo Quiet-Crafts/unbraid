@@ -60,6 +60,8 @@ class Ui(app: Application) : AndroidViewModel(app) {
     private val _countries = MutableStateFlow(Providers.all.associate { it.id to store.countries(it.id) })
     /** Server catalog per provider id. */
     val countries = _countries.asStateFlow()
+    /** Counts catalog refreshes, also ones that brought the same list (its saved copy is fresh again). */
+    val refreshed = MutableStateFlow(0)
     private val _apps = MutableStateFlow<List<AppInfo>>(emptyList())
     val apps = _apps.asStateFlow()
     /** Store tips (Play build); null in the GitHub/F-Droid build. */
@@ -270,6 +272,7 @@ class Ui(app: Application) : AndroidViewModel(app) {
         runCatching { p.countries(acc) }.onSuccess { c ->
             store.countries(provider, c)
             _countries.update { it + (provider to c) }
+            refreshed.update { it + 1 }
         }
     }
 

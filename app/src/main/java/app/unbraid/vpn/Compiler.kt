@@ -141,13 +141,17 @@ object Compiler {
                 putJsonArray("servers") {
                     add(obj("type" to "fakeip", "tag" to "fake", "inet4_range" to FAKE_RANGES[i.fakeBlock]))
                     add(obj("type" to "local", "tag" to "local"))
+                    val boots = HashSet<String>() // one lookup server per tunnel: the engine allows one OpenVPN DNS server per endpoint
                     active.filter { !ovpnDns(it.id) }.forEach { r ->
+                        val boot = "boot-${tag(r.id)}"
                         val own = obj("type" to "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))
                         if (filter == null || !filterRoutes) add(own) else {
                             // A filter reached by name is looked up first through the same tunnel, with the route's own resolver.
-                            if (ovpnBoot(r.id)) add(obj("type" to "openvpn", "tag" to "boot-r-${r.id}", "endpoint" to tag(r.id), "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9"))
-                            else if (Filters.byName(filter)) add(JsonObject(own + ("tag" to JsonPrimitive("boot-r-${r.id}"))))
-                            add(filterDns(filter, "dns-r-${r.id}", tag(r.id), "boot-r-${r.id}"))
+                            if (Filters.byName(filter) && boots.add(boot)) add(
+                                if (ovpnBoot(r.id)) obj("type" to "openvpn", "tag" to boot, "endpoint" to tag(r.id), "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9")
+                                else JsonObject(own + ("tag" to JsonPrimitive(boot))),
+                            )
+                            add(filterDns(filter, "dns-r-${r.id}", tag(r.id), boot))
                         }
                     }
                     // Direct traffic the filter applies to goes to it straight, not through a tunnel.
