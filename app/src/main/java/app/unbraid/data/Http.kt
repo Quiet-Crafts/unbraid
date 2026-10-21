@@ -24,7 +24,15 @@ object Http {
      * replaced by a fixed message with no cause.
      */
     fun <T> parsed(what: String, f: () -> T): T = try { f() } catch (e: kotlinx.serialization.SerializationException) {
-        throw IOException("Unexpected reply from $what")
+        throw app.unbraid.vpn.Fail("Unexpected reply from $what. Try again later")
+    }
+
+    /** What a failed sign-in at [provider] tells the user: the reason when the app knows it, never a reply's own text. */
+    fun explain(e: Throwable, provider: String): String = when (e) {
+        is IllegalArgumentException, is AuthException, is app.unbraid.vpn.Fail -> app.unbraid.vpn.Redact.clean(e.message).ifBlank { "$provider didn't accept these details" }
+        is Status -> if (e.code == 429) "$provider has had too many attempts. Wait a few minutes and try again" else "$provider couldn't sign you in right now (error ${e.code}). Try again later"
+        is IOException -> "Couldn't reach $provider. Check the connection."
+        else -> "Something went wrong signing in to $provider. Try again"
     }
 
     fun postForm(url: String, form: Map<String, String>, headers: Map<String, String> = emptyMap()) =

@@ -16,11 +16,11 @@ import app.unbraid.Unbraid
 import app.unbraid.data.DIRECT
 import app.unbraid.stats.Stats
 import app.unbraid.data.Home
+import app.unbraid.data.Http
 import app.unbraid.data.Location
 import app.unbraid.data.OwnServer
 import app.unbraid.data.favKey
 import app.unbraid.data.ident
-import app.unbraid.data.AuthException
 import app.unbraid.data.Nord
 import app.unbraid.data.Provider
 import app.unbraid.data.Providers
@@ -96,10 +96,13 @@ class Ui(app: Application) : AndroidViewModel(app) {
      * app keeps it, so the user can fetch a key from the browser and come back.
      */
     fun discardForm(id: String) {
-        if (id in signing.value) return // a sign-in in flight keeps its form, for a retry if it fails
+        // A sign-in in flight still finishes (a device slot it registers must be saved), but its form is gone for good.
+        if (id in signing.value) dismissed += id
         form.keys.filter { it.startsWith("$id:") }.forEach { form.remove(it) }
         formError.remove(id)
     }
+    /** Sign-ins whose form was closed while they ran: a failure leaves no error and brings nothing back. */
+    private val dismissed: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
     private val _signing = MutableStateFlow<Set<String>>(emptySet())
     /** Provider ids with a sign-in in flight. It runs here, not in the screen, so rotation can't drop or repeat it. */
     val signing = _signing.asStateFlow()
@@ -134,13 +137,8 @@ class Ui(app: Application) : AndroidViewModel(app) {
                 form.keys.filter { it.startsWith("$id:") }.forEach { form.remove(it) }
                 refreshCountries(id)
                 null
-            }.getOrElse {
-                when (it) {
-                    is IllegalArgumentException, is AuthException -> it.message ?: "${provider.name} didn't accept these details"
-                    else -> "Couldn't reach ${provider.name}. Check the connection."
-                }
-            }
-            error?.let { formError[id] = it }
+            }.getOrElse { Http.explain(it, provider.name) }
+            if (!dismissed.remove(id)) error?.let { formError[id] = it }
             _signing.update { it - id }
         }
     }
