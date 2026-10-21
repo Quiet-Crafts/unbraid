@@ -391,6 +391,7 @@ class ManualTest {
         val noCheck = base.lines().filterNot { it.startsWith("remote-cert-tls") || it.startsWith("verify-x509-name") || it.startsWith("ns-cert-type") }.joinToString("\n")
         fun w(extra: String) = Manual.weakness(Manual.parseOvpn(noCheck + "\n" + extra, "x", "u", "p"))
         assertTrue(w("")!!.contains("right server"))
+        assertTrue(w("peer-fingerprint")!!.contains("right server")) // a bare directive checks nothing
         for (ok in listOf("remote-cert-tls server", "remote-cert-eku \"TLS Web Server Authentication\"", "remote-cert-eku serverAuth", "ns-cert-type server", "verify-x509-name vpn.example name"))
             assertNull(ok, w(ok))
         // The client's role, or a later EKU overriding a server check, is no server check.

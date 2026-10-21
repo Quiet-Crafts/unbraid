@@ -92,9 +92,9 @@ abstract class KeyProvider : Provider {
         val all = try { entries() } catch (e: IOException) { if (trustsKey(peerKey(p, a), a)) return p else throw e }
         val found = all.filter { it.hostname == p.host && (it.serverName ?: it.hostname.substringBefore('.')) == p.name }
             .ifEmpty { all.filter { p.ip in it.ips } }
-        if (found.isEmpty()) throw IOException("$name no longer lists ${p.name}")
-        // Unresolvable now: keep the pinned address, but with the list's current key.
-        val live = usable(found, Location(loc.provider)).firstOrNull { it.hostname == found.first().hostname }
+        if (found.isEmpty()) throw NoLongerOffered(p)
+        // No address for it now: keep the pinned one, but with the list's current key.
+        val live = try { usable(found, Location(loc.provider)).firstOrNull { it.hostname == found.first().hostname } } catch (_: IOException) { null }
             ?: return found.first().wgpubkey?.let { p.copy(publicKey = it) } ?: p
         return Catalog.server(live, p.name)
     }

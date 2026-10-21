@@ -45,7 +45,7 @@ class ProviderFixesTest {
                 {"country":"Netherlands","location":"Amsterdam","connectionName":"nl-ams3.prod.surfshark.com","pubKey":"$key1"}]""",
         )
         assertEquals(listOf(41, 6, -1), clusters.map { it.load })
-        Surfshark.resolve = { listOf("203.0.113.7") }
+        surfsharkAt(clusters)
         val l = Surfshark.link(Location("surfshark", country = "Netherlands"), account) { clusters }
         assertEquals("nl-ams2.prod.surfshark.com", l.server.host)
         assertEquals(6, l.server.load)

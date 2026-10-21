@@ -191,7 +191,7 @@ object Manual {
     private fun checksServer(c: Cfg): Boolean {
         val role = c.last("remote-cert-eku", "remote-cert-tls")?.let { (k, a) -> a.singleOrNull()?.lowercase()?.let { if (k == "remote-cert-tls") it == "server" else it in SERVER_EKU } } == true
         return role || c.arg("ns-cert-type") == "server" || !c.arg("verify-x509-name").isNullOrEmpty() ||
-            c.has("peer-fingerprint") || !c.blocks["peer-fingerprint"].isNullOrBlank()
+            c.d["peer-fingerprint"].orEmpty().any { it.isNotEmpty() } || !c.blocks["peer-fingerprint"].isNullOrBlank()
     }
 
     /** Stream ciphers have no integrity check (see [weakness] for OpenVPN). */

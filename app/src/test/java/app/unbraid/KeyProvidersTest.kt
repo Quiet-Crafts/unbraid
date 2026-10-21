@@ -6,6 +6,7 @@ import app.unbraid.data.KeyProvider
 import app.unbraid.data.Location
 import app.unbraid.data.Proton
 import app.unbraid.data.ProtonFree
+import app.unbraid.data.Snapshot
 import app.unbraid.data.Surfshark
 import app.unbraid.data.WgLink
 import app.unbraid.data.WgPeer
@@ -66,7 +67,7 @@ class KeyProvidersTest {
     }
 
     @Before fun noNetwork() {
-        Surfshark.resolve = { error("unexpected DNS lookup") }
+        Surfshark.addressBook = Snapshot.memory()
         Surfshark.catalogue = { throw IOException("offline") }
     }
 
@@ -182,23 +183,22 @@ class KeyProvidersTest {
         assertTrue(cs.all { iso.matches(it.code) })
     }
 
-    @Test fun surfsharkResolvesTheChosenHostAtConnect() {
-        val asked = mutableListOf<String>()
-        Surfshark.resolve = { asked += it; listOf("203.0.113.7") }
+    /** The chosen host's address comes from the catalogue, its key from Surfshark's own list; nothing is looked up. */
+    @Test fun surfsharkTakesTheChosenHostsAddressFromTheCatalogue() {
+        surfsharkAt(clusters)
         val a = Surfshark.signed(priv)
         val l = Surfshark.link(Location("surfshark", country = "Netherlands"), a) { clusters }
-        assertEquals(1, asked.size)
-        assertTrue(asked.single().startsWith("nl-"))
+        assertTrue(l.server.host.startsWith("nl-"))
         assertEquals("203.0.113.7:51820", l.peer.endpoint)
         assertEquals(listOf("10.14.0.2/16"), l.peer.address)
         assertEquals(listOf("162.252.172.57", "149.154.159.92"), l.peer.dns)
         assertEquals(1280, l.peer.mtu)
-        assertEquals(clusters.first { it.hostname == asked.single() }.wgpubkey, l.peer.publicKey)
+        assertEquals(clusters.first { it.hostname == l.server.host }.wgpubkey, l.peer.publicKey)
         assertEquals("Amsterdam", l.server.city)
 
         val byCode = Surfshark.link(Location("surfshark", countryCode = "DE"), a) { clusters }
         assertEquals("DE", byCode.server.country)
-        assertTrue(asked.last().startsWith("de-"))
+        assertTrue(byCode.server.host.startsWith("de-"))
 
         val city = cityLoc("surfshark", clusters)
         val lc = Surfshark.link(city, a) { clusters }
@@ -211,7 +211,6 @@ class KeyProvidersTest {
         val cat = catalog("surfshark") + staticHost
         val de = Surfshark.fallback(cat).filter { it.place == "Germany" }.flatMap { it.ips }
         assertTrue(de.isNotEmpty())
-        Surfshark.resolve = { throw UnknownHostException(it) }
         Surfshark.catalogue = { cat }
         val a = Surfshark.signed(priv)
         val l = Surfshark.link(Location("surfshark", country = "Germany"), a) { clusters }
@@ -225,25 +224,42 @@ class KeyProvidersTest {
         assertEquals(city.countryCode, lc.server.country)
     }
 
-    @Test fun surfsharkResolutionIsBoundedByADeadline() {
-        val cat = catalog("surfshark")
-        Surfshark.resolve = { Thread.sleep(60_000); listOf("203.0.113.7") }
-        Surfshark.catalogue = { cat }
-        val t0 = System.nanoTime()
-        val l = Surfshark.link(Location("surfshark", country = "Netherlands"), Surfshark.signed(priv)) { clusters }
-        assertTrue("took ${(System.nanoTime() - t0) / 1_000_000} ms", System.nanoTime() - t0 < TimeUnit.SECONDS.toNanos(8))
-        assertTrue(l.peer.endpoint.substringBefore(':') in cat.filter { it.place == "Netherlands" }.flatMap { it.ips })
+    /** Each host once, also when the list is asked for more than it has; the catalogue is read once a day, its last copy offline. */
+    @Test fun surfsharkListsEachHostOnceAndReadsTheCatalogueOnceADay() {
+        var reads = 0
+        val nl = clusters.filter { it.place == "Netherlands" }
+        Surfshark.catalogue = { reads++; nl.map { Catalog.Entry("wireguard", "Netherlands", hostname = it.hostname, wgpubkey = "unused", ips = listOf("203.0.113.7")) } }
+        Surfshark.live = { res("surfshark_clusters.json") }
+        Surfshark.snapshot = Snapshot.memory()
+        val acc = Surfshark.signIn(mapOf("key" to priv))
+        val listed = Surfshark.servers(Location("surfshark", country = "Netherlands"), acc, 200)
+        assertEquals(nl.size, listed.size)
+        assertEquals(listed.size, listed.map { it.host }.distinct().size)
+        Surfshark.servers(Location("surfshark", country = "Netherlands"), acc, 200)
+        assertEquals(1, reads)
+        assertEquals(mapOf(nl.first().hostname to listOf("203.0.113.7")), Surfshark.addresses().filterKeys { it == nl.first().hostname })
+        // Two days later, the catalogue unreachable and nothing in memory (a new process): the copy kept on disk, and no
+        // second try within 15 minutes.
+        Surfshark.catalogue = { reads++; throw IOException("offline") }
+        val later = System.currentTimeMillis() + 2 * 86_400_000L
+        assertEquals(listOf("203.0.113.7"), Surfshark.addresses(later)[nl.first().hostname])
+        Surfshark.addresses(later + 60_000)
+        assertEquals(2, reads)
+        // A host name in the catalogue's addresses is never used (it would be looked up on the phone's network).
+        Surfshark.catalogue = { listOf(Catalog.Entry("wireguard", "Netherlands", hostname = nl.first().hostname, wgpubkey = "unused", ips = listOf("evil.example.com", "203.0.113.8"))) }
+        assertEquals(listOf("203.0.113.8"), Surfshark.addresses()[nl.first().hostname])
+        Surfshark.live = { throw IOException("offline") }
     }
 
-    @Test fun surfsharkSkipsHostsThatDoNotResolve() {
-        val wanted = clusters.last { it.place == "Germany" }.hostname
-        Surfshark.resolve = { if (it == wanted) listOf("198.51.100.9") else throw UnknownHostException(it) }
+    @Test fun surfsharkSkipsHostsWithoutAnAddress() {
+        val wanted = clusters.last { it.place == "Germany" }
+        Surfshark.catalogue = { listOf(Catalog.Entry("wireguard", "Germany", hostname = wanted.hostname, wgpubkey = "unused", ips = listOf("198.51.100.9"))) }
         val l = Surfshark.link(Location("surfshark", country = "Germany"), Surfshark.signed(priv)) { clusters }
         assertEquals("198.51.100.9:51820", l.peer.endpoint)
-        Surfshark.resolve = { throw UnknownHostException(it) }
+        Surfshark.catalogue = { listOf(Catalog.Entry("wireguard", "Germany", hostname = "elsewhere.prod.surfshark.com", wgpubkey = "unused", ips = listOf("198.51.100.9"))) }
         try {
             Surfshark.link(Location("surfshark", country = "Germany"), Surfshark.signed(priv)) { clusters }
-            fail("no server should resolve")
+            fail("no server has an address")
         } catch (e: IOException) {
             assertTrue(e.message!!.contains("Germany"))
         }
@@ -379,7 +395,7 @@ class KeyProvidersTest {
     }
 
     @Test fun singBoxAcceptsEveryLink() {
-        Surfshark.resolve = { listOf("203.0.113.7") }
+        surfsharkAt(clusters)
         val pe = Proton.filtered(catalog("protonvpn"))
         val pa = Proton.signed(priv)
         val sa = Surfshark.signed(priv)

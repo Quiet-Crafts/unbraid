@@ -2,24 +2,19 @@ package app.unbraid.data
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import java.io.IOException
-import java.io.InterruptedIOException
-import java.net.Inet4Address
-import java.net.InetAddress
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 
 /**
  * Surfshark over WireGuard. Sign-in is local: the key pair is generated (or registered) at my.surfshark.com → VPN →
  * Manual setup → Desktop or mobile → WireGuard, and one registered key works on every location.
  * Servers: Surfshark's own public list `GET api.surfshark.com/v4/server/clusters/generic` (country, city, hostname and
- * WireGuard key per cluster, no login; the updater of gluetun reads the same URL). It carries no IPs, so the chosen
- * hostname is resolved at connect time (within 5 s in all). Keys only ever come from that list: if it can't be read, the
- * last copy read ([snapshot]) stands in. If none of the chosen location's hosts resolves, gluetun's catalogue supplies
- * addresses for the same host names, never keys (a swapped catalogue key would make another server the trusted one),
- * minus the Static-IP `-stNNN` servers a normal key may not be registered on.
+ * WireGuard key per cluster, no login; the updater of gluetun reads the same URL). It carries no IPs: gluetun's catalogue
+ * supplies the addresses for the same host names ([addresses]), never keys (a swapped catalogue key would make another
+ * server the trusted one), minus the Static-IP `-stNNN` servers a normal key may not be registered on. No host name is
+ * looked up on the phone's own network, whose resolver would see which city each route uses. Keys only ever come from
+ * Surfshark's list: if it can't be read, the last copy read ([snapshot]) stands in.
  * Parameters from Surfshark's manual Linux guide (support.surfshark.com/hc/en-us/articles/19262406140306): address
  * 10.14.0.2/16, DNS 162.252.172.57 and 149.154.159.92, endpoint `<host>:51820`, MTU 1280. A pasted .conf overrides them.
  * Surfshark assigns the address per key, so pasting the whole .conf is the safe route; the preshared key is not used.
@@ -31,11 +26,6 @@ object Surfshark : KeyProvider() {
     private const val API = "https://api.surfshark.com/v4/server/clusters/generic"
     private val STATIC_IP = Regex("-st\\d+\\.")
     private val KEY = Regex("[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=")
-    private val TOTAL_NS = TimeUnit.SECONDS.toNanos(5)
-    private val PER_HOST_NS = TimeUnit.SECONDS.toNanos(2)
-
-    /** Daemon threads: a lookup that hangs can't be interrupted, so it must not hold up the next one or the process. */
-    private val dns = Executors.newCachedThreadPool { r -> Thread(r, "surfshark-dns").apply { isDaemon = true } }
 
     override val id = "surfshark"
     override val name = "Surfshark"
@@ -50,9 +40,32 @@ object Surfshark : KeyProvider() {
     override val defaultPort = 51820
     override val defaultMtu = 1280
 
-    internal var resolve: (String) -> List<String> = { host -> InetAddress.getAllByName(host).filterIsInstance<Inet4Address>().mapNotNull { it.hostAddress } }
-
     internal var catalogue: () -> List<Catalog.Entry> = { Catalog.fetch("surfshark", "wireguard") }
+        set(v) { field = v; synchronized(this) { addressList = null } } // another source: read it afresh
+
+    /** The last address list read, kept for when the catalogue can't be read. */
+    internal var addressBook: Snapshot = Snapshot.file("addresses-surfshark.json")
+    private val book = MapSerializer(String.serializer(), ListSerializer(String.serializer()))
+    private var addressList: Map<String, List<String>>? = null
+    private var addressesAt = 0L
+
+    /**
+     * Host name → IPv4 addresses from gluetun's catalogue, read at most once a day; the last copy when it can't be read,
+     * then asked again only after 15 minutes. Only literal addresses count: a name here would be looked up after all.
+     */
+    @Synchronized
+    internal fun addresses(now: Long = System.currentTimeMillis()): Map<String, List<String>> {
+        addressList?.takeIf { now - addressesAt < 86_400_000 }?.let { return it }
+        val fresh = try { literal(fallback(catalogue()).associate { it.hostname to it.ips }) } catch (_: IOException) { null }
+        if (!fresh.isNullOrEmpty()) { addressList = fresh; addressesAt = now; addressBook.write(NordApi.json.encodeToString(book, fresh)) }
+        else {
+            addressList = addressList ?: addressBook.read()?.let { runCatching { literal(NordApi.json.decodeFromString(book, it)) }.getOrNull() }
+            addressesAt = now - 86_400_000 + 15 * 60_000
+        }
+        return addressList ?: throw IOException("Surfshark's server addresses can't be read right now")
+    }
+
+    private fun literal(m: Map<String, List<String>>) = m.mapValues { (_, ips) -> ips.filter { '/' !in it && app.unbraid.vpn.Compiler.ipv4(it) != null } }.filterValues { it.isNotEmpty() }
 
     /** The last list read from Surfshark's own API: its keys still apply when the API can't be reached. */
     internal var snapshot: Snapshot = Snapshot.file("servers-surfshark.json")
@@ -72,33 +85,11 @@ object Surfshark : KeyProvider() {
             ?: throw IOException("Surfshark's server list can't be reached right now")
     }
 
+    /** Each of the location's hosts once, with its catalogue addresses and Surfshark's own key; hosts without one are skipped. */
     override fun usable(all: List<Catalog.Entry>, loc: Location): Sequence<Catalog.Entry> {
-        val end = System.nanoTime() + TOTAL_NS
-        val live = Catalog.pick(all, loc).asSequence().mapNotNull { e ->
-            if (e.ipv4 != null) e else lookup(e.hostname, end)?.let { e.copy(ips = it) }
-        }
-        if (all.any { it.ipv4 != null }) return live // already has addresses
-        // Hosts that don't resolve: gluetun's addresses for the same host names, with Surfshark's own key.
-        return live + sequence {
-            val ips = try { fallback(catalogue()).associate { it.hostname to it.ips } } catch (_: IOException) { emptyMap() }
-            yieldAll(Catalog.pick(all, loc).mapNotNull { e -> ips[e.hostname]?.takeIf { it.any { ip -> '.' in ip } }?.let { e.copy(ips = it) } })
-        }
-    }
-
-    /** The first IPv4 addresses of [host], or null if it doesn't resolve before the [end] deadline (nanoTime) or its own 2 s. */
-    private fun lookup(host: String, end: Long): List<String>? {
-        val left = end - System.nanoTime()
-        if (left <= 0) return null
-        val f = dns.submit<List<String>> { resolve(host) }
-        return try {
-            f.get(minOf(left, PER_HOST_NS), TimeUnit.NANOSECONDS).takeIf { it.isNotEmpty() }
-        } catch (_: ExecutionException) {
-            null
-        } catch (_: TimeoutException) {
-            f.cancel(true); null
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt(); throw InterruptedIOException("Interrupted while resolving a $name server")
-        }
+        val picked = Catalog.pick(all, loc)
+        if (all.any { it.ipv4 != null }) return picked.asSequence() // already has addresses
+        return sequence { val ips = addresses(); yieldAll(picked.mapNotNull { e -> ips[e.hostname]?.let { e.copy(ips = it) } }) }
     }
 
     internal fun parse(body: String): List<Catalog.Entry> =

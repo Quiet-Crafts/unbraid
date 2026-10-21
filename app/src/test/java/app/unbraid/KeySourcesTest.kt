@@ -4,6 +4,7 @@ import app.unbraid.data.AirVpn
 import app.unbraid.data.Catalog
 import app.unbraid.data.KeyProvider
 import app.unbraid.data.Location
+import app.unbraid.data.Server
 import app.unbraid.data.Snapshot
 import app.unbraid.data.Surfshark
 import org.junit.After
@@ -16,6 +17,11 @@ import java.io.IOException
 import java.net.UnknownHostException
 
 /** Server keys come only from the provider (or the user's .conf), never from gluetun's catalogue. */
+/** Surfshark's addresses come from the catalogue: give every one of [entries]' hosts the address [ip]. */
+internal fun surfsharkAt(entries: List<Catalog.Entry>, ip: String = "203.0.113.7") {
+    Surfshark.catalogue = { entries.map { Catalog.Entry("wireguard", it.place.ifEmpty { "Netherlands" }, hostname = it.hostname, wgpubkey = "unused", ips = listOf(ip)) } }
+}
+
 class KeySourcesTest {
     private val priv = "dW5icmFpZC10ZXN0LXByaXZhdGUta2V5LTAwMDAwMDE="
     private val psk = "dW5icmFpZC10ZXN0LXByZXNoYXJlZC1rZXktMDAwMDE="
@@ -28,7 +34,7 @@ class KeySourcesTest {
     private val live = Surfshark.parse(liveBody)
 
     @Before fun offline() {
-        Surfshark.resolve = { throw UnknownHostException(it) }
+        Surfshark.addressBook = Snapshot.memory()
         Surfshark.catalogue = { throw IOException("offline") }
         Surfshark.live = { throw IOException("offline") }
         Surfshark.snapshot = Snapshot.memory()
@@ -45,6 +51,15 @@ class KeySourcesTest {
         val l = Surfshark.link(Location("surfshark", country = live.first().place), Surfshark.account(Surfshark.signed(priv))) { live }
         assertEquals("198.51.100.66:51820", l.peer.endpoint)
         assertEquals(live.first().wgpubkey, l.peer.publicKey)
+    }
+
+    /** A pinned server with no address to be had (catalogue down, nothing kept) keeps its saved address, with Surfshark's current key. */
+    @Test fun surfsharkPinnedServerKeepsItsAddressWhenNoneCanBeRead() {
+        val e = live.first()
+        val pin = Server(e.hostname.substringBefore('.'), e.hostname, "203.0.113.5", "stale", 0)
+        val l = Surfshark.link(Location("surfshark", country = e.place, pinned = pin), Surfshark.account(Surfshark.signed(priv))) { live }
+        assertEquals("203.0.113.5:51820", l.peer.endpoint)
+        assertEquals(e.wgpubkey, l.peer.publicKey)
     }
 
     @Test fun surfsharkIgnoresCatalogueHostsItDoesNotList() {
@@ -113,7 +128,7 @@ class KeySourcesTest {
 
     @Test fun savedTunnelsNeedATrustedKey() {
         val account = Surfshark.signed(priv)
-        Surfshark.resolve = { listOf("203.0.113.7") }
+        surfsharkAt(live)
         val good = Surfshark.link(Location("surfshark", country = live.first().place), Surfshark.account(account)) { live }
         // No own list kept yet: a saved Surfshark tunnel can't be vouched for.
         assertTrue(!Surfshark.trusts(good, account))
@@ -158,7 +173,7 @@ class KeySourcesTest {
             Endpoint = ${live.first().hostname}:51820
         """.trimIndent()
         val account = Surfshark.signed(conf)
-        Surfshark.resolve = { listOf("203.0.113.7") }
+        surfsharkAt(live)
         val l = Surfshark.link(Location("surfshark", country = live.first().place), Surfshark.account(account)) { live }
         // Right after an upgrade, with no own list kept yet: the .conf's own server is still trusted.
         assertTrue(Surfshark.trusts(l, account))
