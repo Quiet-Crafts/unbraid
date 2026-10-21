@@ -26,6 +26,8 @@ class DebugHooks : BroadcastReceiver() {
                     "setup" -> { s.update { NordApi.json.decodeFromString(Setup.serializer(), i.getStringExtra("arg")!!) }; "setup ok" }
                     "start" -> { UnbraidVpn.start(ctx); "starting" }
                     "stop" -> { UnbraidVpn.stop(ctx); "stopping" }
+                    "pause" -> { UnbraidVpn.pause(ctx, i.getStringExtra("arg")!!.toInt()); "pausing" }
+                    "signout" -> { s.account(i.getStringExtra("arg")!!, null); "signed out" }
                     "account" -> {
                         val o = NordApi.json.parseToJsonElement(i.getStringExtra("arg")!!).jsonObject
                         val p = app.unbraid.data.Providers.get(o["provider"]!!.jsonPrimitive.content)!!
