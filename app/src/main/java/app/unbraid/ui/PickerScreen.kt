@@ -378,7 +378,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             ) {
                 BarButton("Route options", when {
                     provider == "nord" -> groupLabel
-                    provider in BLOCKERS && route != null && current?.provider == provider -> if (route.filter) "Protection on" else "Protection off"
+                    provider in BLOCKERS && route != null && current?.provider == provider -> if (route.filter && setup.prefs.customDns.isEmpty()) "Protection on" else "Protection off"
                     else -> "App settings"
                 }, Modifier.weight(1f)) { sheet = "options" }
             }
@@ -410,9 +410,12 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
                     }
                     val blocker = route?.takeIf { current?.provider == provider }?.let { r -> BLOCKERS[provider]?.let { r to it } }
                     blocker?.let { (r, label) ->
+                        // Custom DNS replaces the provider's blocking resolver (as with Nord's): shown off, the choice kept.
+                        val custom = setup.prefs.customDns.isNotEmpty()
                         item { SectionLabel("Protection") }
                         item {
-                            GroupRow(0, 1, label.first, label.second, onClick = { ui.setFilter(r.id, !r.filter) }, checked = r.filter, trailing = { Toggle(r.filter) })
+                            GroupRow(0, 1, label.first, if (custom) "Off while a custom DNS server is set" else label.second,
+                                onClick = { ui.setFilter(r.id, !r.filter); Unit }.takeUnless { custom }, checked = r.filter && !custom, trailing = { Toggle(r.filter && !custom, enabled = !custom) })
                         }
                         item { Gap(16.dp) }
                     }

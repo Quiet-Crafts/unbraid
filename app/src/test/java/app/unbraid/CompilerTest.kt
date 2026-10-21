@@ -303,9 +303,13 @@ class CompilerTest {
         fun dns(s: Setup, id: String) = compile(s)["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }
             .first { it["tag"]!!.jsonPrimitive.content == "dns-r-$id" }["server"]!!.jsonPrimitive.content
         val r = example.routes.first { it.id != example.defaultRoute }
-        val mullvad = example.copy(routes = example.routes.map { if (it.id == r.id) it.copy(loc = it.loc.copy(provider = "mullvad"), filter = true) else it })
-        assertEquals("100.64.0.7", dns(mullvad, r.id))
-        assertEquals("9.9.9.9", dns(mullvad.copy(prefs = mullvad.prefs.copy(customDns = listOf("9.9.9.9"))), r.id))
+        // Each provider's blocking resolver while asked for; a custom DNS server replaces it (the choice is kept for later).
+        for ((provider, blocking) in Compiler.FILTER_DNS) {
+            val on = example.copy(routes = example.routes.map { if (it.id == r.id) it.copy(loc = it.loc.copy(provider = provider), filter = true) else it })
+            assertEquals(provider, blocking, dns(on, r.id))
+            assertEquals(provider, "1.1.1.1", dns(on.copy(prefs = on.prefs.copy(customDns = listOf("1.1.1.1"))), r.id))
+            assertTrue(provider, on.route(r.id)!!.filter)
+        }
     }
 
     @Test fun lanOffRemovesDirectLanRule() {
