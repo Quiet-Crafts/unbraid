@@ -240,6 +240,14 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle
                 }
             }
         }
+        // A Direct app's lookups: outside unbraid (the phone's DNS) or through it, with unbraid's filter.
+        val f = setup.prefs.filter
+        if (expanded && explicit == DIRECT && f.server() != null) {
+            val on = f.through(a.pkg)
+            GroupRow(0, 1, "Filter its lookups", if (on) "Through $APP, with ${f.server()?.name}. The app can see a VPN is on" else "Outside $APP, with the phone's DNS",
+                onClick = { ui.setPrefs { p -> p.copy(filter = p.filter.copy(apps = if (!on == p.filter.directApps) p.filter.apps - a.pkg else p.filter.apps + (a.pkg to !on))) } },
+                checked = on, trailing = { Toggle(on) }, modifier = Modifier.padding(start = 60.dp, end = 6.dp, bottom = 12.dp))
+        }
     }
 }
 

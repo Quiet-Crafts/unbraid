@@ -75,6 +75,9 @@ object Pia : Provider {
 
     override val id = "pia"
     override val name = "Private Internet Access"
+    override val protection = Opt(PROTECT, "MACE", "PIA's ad, tracker and malware blocking, on every PIA route")
+    override val defaults = mapOf(PROTECT to "off")
+    override fun blockingDns(opts: (String) -> String?) = "10.0.0.244"
     override val fields = listOf(
         Field("username", "Username", secret = false, hint = "p1234567"),
         Field("password", "Password", hint = "PIA password"),

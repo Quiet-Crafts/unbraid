@@ -76,6 +76,7 @@ private val credits = listOfNotNull(
     "gVisor" to "Apache-2.0 · The gVisor Authors",
     "Go and about 90 more modules" to "BSD, MIT, Apache-2.0, ISC and MPL-2.0, each listed in the full texts",
     "AndroidX, Jetpack Compose, Kotlin" to "Apache-2.0 · Google, JetBrains",
+    "ZXing" to "Apache-2.0 · ZXing authors. Reads QR codes at sign-in",
     "Material Symbols" to "Apache-2.0 · Google",
     "Big Shoulders Display, Onest, Martian Mono" to "SIL Open Font License 1.1 · their project authors",
     "gluetun" to "MIT · Quentin McGaw. Server lists, and the ExpressVPN profile",
@@ -145,7 +146,6 @@ private fun LazyListScope.notice(ui: Ui, text: String?) = text?.let { n ->
 private fun LazyListScope.caption(text: String) = item { Caption(text, modifier = Modifier.padding(top = 4.dp)) }
 
 private val octet = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)"
-private val ipv4 = Regex("$octet(\\.$octet){3}")
 private val cidr = Regex("$octet(\\.$octet){3}/([12]?\\d|3[0-2])")
 private fun split(s: String) = s.split(Regex("[,\\s]+")).filter { it.isNotEmpty() }
 
@@ -217,9 +217,20 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     // unbraid asks the store for prices and open purchases when this page opens or comes back.
     LifecycleResumeEffect(page) { if (page == "about") ui.tips?.refresh(); onPauseOrDispose {} }
 
-    val customDns = prefs.customDns.isNotEmpty()
-    val nord = "nord" in accounts
-    val filtering = prefs.threatProtection && !customDns && nord
+    val filter = prefs.filter
+    val filterDns = filter.server()
+    // unbraid's filter on VPN routes replaces each provider's own blocking: those switches show off, their choice kept.
+    val customDns = filterDns != null && filter.routes
+    val setFilter = { f: (app.unbraid.data.Filter) -> app.unbraid.data.Filter -> ui.setPrefs { it.copy(filter = f(it.filter)) } }
+    // The open provider page's settings and device slot: some come from the provider's server list, so read off the main thread.
+    val shown = page?.removePrefix("provider:")?.takeIf { page.startsWith("provider:") }?.let(Providers::get)
+    val shownAcc = shown?.let { accounts[it.id] }
+    val opts by androidx.compose.runtime.produceState(emptyList<app.unbraid.data.Opt>(), shown, shownAcc) {
+        value = shownAcc?.let { a -> withContext(Dispatchers.IO) { listOfNotNull(shown.protection) + runCatching { shown.options(a) }.getOrDefault(emptyList()) } }.orEmpty()
+    }
+    val device by androidx.compose.runtime.produceState<app.unbraid.data.Device?>(null, shown, shownAcc) {
+        value = shownAcc?.let { a -> withContext(Dispatchers.IO) { runCatching { shown.device(a) }.getOrNull() } }
+    }
     var statsSize by remember { mutableStateOf(Stats.size()) }
     // Deleting runs on the stats thread: read the size again once it has had time to finish.
     LaunchedEffect(prefs.stats, dialog, page) { statsSize = Stats.size(); delay(800); statsSize = Stats.size() }
@@ -227,10 +238,6 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     val onOff = { b: Boolean -> if (b) "on" else "off" }
     val tsStatus = tailscaleSub(home.tailscale, vpn.phase == Phase.On, vpn.tsState)
     val homeVia = listOfNotNull("Tailscale".takeIf { home.tailscale }, "WireGuard".takeIf { home.wg != null }).joinToString(" and ").ifEmpty { null }
-    val tpItem = Item(
-        "Threat Protection Lite", if (customDns) "Off while a custom DNS server is set" else "Blocks ads and malicious domains on NordVPN routes",
-        { ui.setPrefs { it.copy(threatProtection = !it.threatProtection) } }.takeUnless { customDns }, checked = prefs.threatProtection && !customDns, icon = Icons.shield,
-    ) { Toggle(prefs.threatProtection && !customDns, enabled = !customDns) }
 
     val play = firstShow("settings") // the hub's first rows rise in once per session, as on Routes and Stats
     val motion = androidx.compose.material3.MaterialTheme.motionScheme
@@ -247,14 +254,14 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     Item("Tailscale", if (setup.tailscale) tsStatus else "Off", { go("tailscale") }, icon = Icons.hub) { Chevron() },
                     Item("Local & home access", "Local network ${onOff(prefs.lan)} · ${homeVia?.let { "home via $it" } ?: "no home access"}", { go("local") }, icon = Icons.home, anchor = TourStop.LocalHome) { Chevron() },
                 ))
-                group("Protection", rise = play to 3, items = listOf(
+                group("Safety", rise = play to 3, items = listOf(
                     // Not leak-proof: the one warning left once the reminders are off.
                     Item("VPN behaviour", when {
                         running && !(vpn.alwaysOn && vpn.lockdown) -> "Not leak-proof: apps go online when $APP is off"
                         running -> "Always-on on · blocking on"
                         else -> "Always-on and blocking, set in Android"
                     }, { go("behaviour") }, icon = Icons.tunnel, cta = running && !(vpn.alwaysOn && vpn.lockdown)) { Chevron() },
-                    Item("DNS & filtering", (prefs.customDns.firstOrNull() ?: "Provider DNS") + if (filtering) " · NordVPN filtering on" else "", { go("dns") }, icon = Icons.dns) { Chevron() },
+                    Item("Protection", filterDns?.let { d -> listOfNotNull(d.name, "VPN routes".takeIf { filter.routes }, "Direct".takeIf { filter.direct || filter.directApps || filter.apps.containsValue(true) }).joinToString(" · ") } ?: "Each provider's own blocking", { go("dns") }, icon = Icons.dns) { Chevron() },
                 ))
                 group("This app", listOf(
                     Item("Statistics", if (prefs.stats) "Recording · ${"%.1f".format(statsSize / 1e6)} MB" else if (statsSize > 0) "Off · ${"%.1f".format(statsSize / 1e6)} MB saved" else "Off", { go("stats") }, icon = Icons.stats) { Chevron() },
@@ -285,12 +292,27 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 val routes = setup.routes.filter { !it.imported && it.loc.provider == pr.id }
                 Page(pr.name, back, over = "Providers & servers") {
                     notice(ui, notice)
-                    group(null, listOf(Item("Account", "Signed in", null, icon = Icons.vpnKey)))
+                    // Providers that count connections, not devices: each separate tunnel to one of its servers is one.
+                    val tunnels = if (running) UnbraidVpn.tags.filterKeys { id -> UnbraidVpn.running?.route(id)?.let { !it.imported && it.loc.provider == pr.id } == true }.values.toSet().size else 0
+                    val counted = Item("This phone", "$APP is using $tunnels of your ${pr.connections} ${pr.name} connections. Your other devices aren't counted.", null, icon = Icons.info).takeIf { pr.connections > 0 }
+                    group(null, listOfNotNull(Item("Account", "Signed in", null, icon = Icons.vpnKey), counted, device?.let { d ->
+                        Item("This phone", d.line, d.url?.let { u -> { context.openUrl(u) } }, icon = Icons.info) { if (d.url != null) Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) }
+                    }))
+                    val protect = pr.protection
+                    if (opts.isNotEmpty()) group("${pr.name} settings", opts.map { o ->
+                        val v = setup.opt(pr.id, o.key)
+                        // unbraid's filter on VPN routes replaces the provider's blocking resolver: shown off, the choice kept.
+                        val off = customDns && o.key == app.unbraid.data.PROTECT
+                        if (o.choices.isEmpty()) Item(o.label, if (off) "Off while unbraid's filter is on for VPN routes" else o.sub, { ui.setOpt(pr.id, o.key, if (v == "on") "off" else "on"); Unit }.takeUnless { off },
+                            checked = v == "on" && !off, icon = Icons.shield.takeIf { o.key == app.unbraid.data.PROTECT }) { Toggle(v == "on" && !off, enabled = !off) }
+                        else Item(o.label, o.choices.firstOrNull { it.first == v }?.second ?: o.sub, { dialog = "opt:${pr.id}:${o.key}" }) { Chevron() }
+                    })
                     if (routes.isNotEmpty()) group("Used by", routes.map { r ->
                         val apps = setup.apps.count { it.value == r.id }
-                        Item(r.name, listOfNotNull(if (r.id == setup.defaultRoute) "Default route" else "$apps ${if (apps == 1) "app" else "apps"}", vpn.servers[r.id]?.name).joinToString(" · ")) { Code(r.code, Ink.route(r.hue)) }
+                        // A route that turned the provider's blocking on or off for itself says so.
+                        val own = r.filter?.takeIf { protect != null }?.let { "${protect!!.label} ${if (it) "on" else "off"} here" }
+                        Item(r.name, listOfNotNull(if (r.id == setup.defaultRoute) "Default route" else "$apps ${if (apps == 1) "app" else "apps"}", vpn.servers[r.id]?.name, own).joinToString(" · ")) { Code(r.code, Ink.route(r.hue)) }
                     })
-                    if (pr.id == "nord") group("NordVPN options", listOf(tpItem))
                     group(null, listOf(Item("Sign out of ${pr.name}", when {
                         accounts.size == 1 && setup.servers.isEmpty() && setup.routes.none { it.imported } && !home.tailscale -> "It's your only connection: you'll be back at sign-in"
                         routes.isEmpty() -> "No route uses it"
@@ -367,14 +389,39 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 caption((if (running) "" else "Connect to see how they're set. ") + "Blocking off: before the first connect, while paused and if $APP stops, apps use your normal connection. $LEAK_TRADEOFF While $APP is on, Direct apps always use your normal connection.")
             }
 
-            p == "dns" -> Page("DNS & filtering", back) {
+            p == "dns" -> Page("Protection", back) {
                 notice(ui, notice)
-                group("DNS server", listOf(
-                    Item("Provider DNS", "Each route asks its own provider's resolver", { ui.setPrefs { it.copy(customDns = emptyList()) } }, icon = Icons.dns, selected = !customDns) { Radio(!customDns) },
-                    Item("Custom server", prefs.customDns.firstOrNull() ?: "One IPv4 address, e.g. 1.1.1.1", { dialog = "dns" }, icon = Icons.sliders, selected = customDns) { Radio(customDns) },
-                ))
-                if (nord) group("Filtering", listOf(tpItem))
-                privateDns?.let { caption("Android's Private DNS ($it) overrides all of this. Set it to Automatic in Android settings.") }
+                // Each filter once, alphabetical, with what it blocks in its own words; none is suggested.
+                group("unbraid's filter", listOf(
+                    Item("None", "Each provider's own blocking, set on its page. Direct apps use the phone's DNS", { setFilter { it.copy(id = null) } }, selected = filter.id == null) { Radio(filter.id == null) },
+                ) + app.unbraid.data.Filters.all.map { d ->
+                    val on = filter.id == d.id
+                    Item(d.name, d.blocks + if (d.id == "nextdns") " · profile ${if (on) filter.value.ifBlank { "not set" } else "needed"}" else "",
+                        { if (d.id == "nextdns") dialog = "filter:nextdns" else setFilter { it.copy(id = d.id) } }, selected = on) { Radio(on) }
+                } + Item("Your own server", if (filter.id == app.unbraid.data.Filters.OWN) filter.value + if (filterDns?.tls == null && filterDns?.path == null) " · not encrypted" else "" else "https://… (DNS over HTTPS) or tls://… (DNS over TLS)",
+                    { dialog = "filter:own" }, selected = filter.id == app.unbraid.data.Filters.OWN) { Radio(filter.id == app.unbraid.data.Filters.OWN) })
+                if (filterDns != null) {
+                    val providers = signedIn.mapNotNull { pr -> pr.protection?.takeIf { setup.opt(pr.id, app.unbraid.data.PROTECT) == "on" }?.label }
+                    group("Where it applies", listOf(
+                        Item("VPN routes", if (filter.routes) "Replaces the protection set on each provider" + (if (providers.isNotEmpty()) " (${providers.joinToString()})" else "") + ". Asked through each route's own tunnel"
+                            else "Off · each route uses its provider's own DNS and blocking", { setFilter { it.copy(routes = !it.routes) } }, checked = filter.routes) { Toggle(filter.routes) },
+                        Item("Direct traffic through $APP", "Apps that follow a Direct default route", { setFilter { it.copy(direct = !it.direct) } }, checked = filter.direct) { Toggle(filter.direct) },
+                    ))
+                    group("Apps set to Direct", listOf(
+                        Item("Outside $APP", "They never touch the VPN and use the phone's DNS", { setFilter { it.copy(directApps = false) } }, selected = !filter.directApps) { Radio(!filter.directApps) },
+                        Item("Through $APP", "Still straight out, not through a tunnel, but their lookups use this filter. They can see a VPN is on, which some banking and streaming apps refuse",
+                            { setFilter { it.copy(directApps = true) } }, selected = filter.directApps) { Radio(filter.directApps) },
+                    ))
+                    caption(if (vpn.lockdown && running) "Block connections without VPN is on, so every app passes through $APP: apps kept outside use the phone's DNS until it is off."
+                        else "Each Direct app can be set on its own in Apps.")
+                    filterDns.privateDns?.takeIf { !filter.directApps }?.let { host ->
+                        group(null, listOf(Item("Private DNS for apps outside $APP", "Android can send them to $host. It then applies to every app, and apps on routes skip their routes' DNS. Tap to copy it and open Android settings", {
+                            context.getSystemService(android.content.ClipboardManager::class.java)?.setPrimaryClip(android.content.ClipData.newPlainText("Private DNS", host))
+                            start(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+                        }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) }))
+                    }
+                }
+                privateDns?.let { caption("Android's Private DNS ($it) does lookups itself, for every app: apps on routes skip their routes' DNS. Set it to Automatic in Android settings.") }
             }
 
             p == "stats" -> Page("Statistics", back) {
@@ -450,10 +497,15 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     }
 
     when (dialog) {
-        "dns" -> ListDialog(
-            "DNS server", "1.1.1.1", prefs.customDns.take(1), ipv4::matches, "Enter one IPv4 address, e.g. 1.1.1.1",
-            note = "Leave empty to use the provider's DNS.", max = 1, onSave = { l -> ui.setPrefs { it.copy(customDns = l) } }, onDismiss = { dialog = null },
-        )
+        "filter:nextdns", "filter:own" -> {
+            val own = dialog == "filter:own"
+            var text by remember { mutableStateOf(filter.value.takeIf { filter.id == if (own) app.unbraid.data.Filters.OWN else "nextdns" }.orEmpty()) }
+            val ok = if (own) app.unbraid.data.Filters.own(text) != null else app.unbraid.data.Filter("nextdns", text).server() != null
+            Prompt(if (own) "Your own server" else "NextDNS profile", "Save", { dialog = null; setFilter { it.copy(id = if (own) app.unbraid.data.Filters.OWN else "nextdns", value = text.trim()) } }, { dialog = null }, enabled = ok) {
+                Text(if (own) "A DNS over HTTPS address (https://dns.example.com/dns-query), DNS over TLS (tls://dns.example.com), or a plain IPv4 address, which isn't encrypted." else "The ID of your profile, as on my.nextdns.io (6 characters).", style = Type.sub)
+                DialogField(text, { text = it.take(200) }, if (own) "Server" else "Profile ID", if (own) "https://dns.example.com/dns-query" else "abc123")
+            }
+        }
         "tsout" -> Prompt("Sign out of Tailscale?", "Sign out", { dialog = null; ui.signOutTailscale() }, { dialog = null }, danger = true) {
             Text("Tailscale exit routes are removed. Their apps follow the default route.", style = Type.sub)
         }
@@ -498,6 +550,18 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             val d = dialog.orEmpty()
             val arg = d.substringAfter(':')
             when {
+                d.startsWith("opt:") -> opts.firstOrNull { "opt:${shown?.id}:${it.key}" == d }?.let { o ->
+                    ModalBottomSheet({ dialog = null }, containerColor = Ink.surface, contentColor = Ink.text) {
+                        Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
+                            Text(o.label, style = Type.title, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
+                            Text(o.sub, style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 8.dp))
+                            val v = shown?.let { setup.opt(it.id, o.key) }
+                            o.choices.forEachIndexed { i, (value, label) ->
+                                GroupRow(i, o.choices.size, label, null, onClick = { shown?.let { ui.setOpt(it.id, o.key, value) }; dialog = null; Unit }, selected = v == value, trailing = { Radio(v == value) })
+                            }
+                        }
+                    }
+                }
                 d.startsWith("signout:") -> Prompt("Sign out of ${Providers.get(arg)?.name ?: arg}?", "Sign out", { dialog = null; ui.signOut(arg) }, { dialog = null }, danger = true) {
                     Text("Routes and app choices stay on this phone. While connected, apps on its routes are blocked until you sign in again or move them to another route.", style = Type.sub)
                 }

@@ -12,6 +12,9 @@ import app.unbraid.data.WgPeer
 import app.unbraid.data.Location
 import app.unbraid.data.NordApi
 import app.unbraid.data.Prefs
+import app.unbraid.data.Filter
+import app.unbraid.data.Filters
+import app.unbraid.data.PROTECT
 import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.data.Setup
@@ -29,6 +32,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -134,6 +138,51 @@ class CompilerTest {
         val app = rules.indexOfFirst { it["package_name"] != null }
         assertTrue(home in 0 until lan && lan < app)
         assertTrue(rules[home]["ip_cidr"]!!.jsonArray.map { it.jsonPrimitive.content }.contains("192.168.178.0/24"))
+    }
+
+    private fun JsonObject.dnsServers() = this["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }.associateBy { it["tag"]!!.jsonPrimitive.content }
+    private fun JsonObject.str(k: String) = this[k]?.jsonPrimitive?.content
+
+    /** unbraid's filter: over HTTPS by address and TLS name, through each route's tunnel; Direct scopes go straight to it. */
+    @Test fun filterScopes() {
+        val quad9 = Filter("quad9")
+        // Chosen but on nothing: everything as before.
+        val none = compile(example.copy(prefs = Prefs(filter = quad9)))
+        assertEquals("udp", none.dnsServers()["dns-r-nl"]!!.str("type"))
+        assertFalse("dns-filter" in none.dnsServers())
+        assertEquals(listOf("com.x", "com.y", "app.unbraid"), none.excluded())
+        // VPN routes: each route's resolver is the filter, through its own tunnel, by address with its TLS name.
+        val routes = compile(example.copy(prefs = Prefs(filter = quad9.copy(routes = true))))
+        routes.dnsServers()["dns-r-us"]!!.let {
+            assertEquals("https", it.str("type")); assertEquals("9.9.9.9", it.str("server")); assertEquals("r-us", it.str("detour")); assertEquals("/dns-query", it.str("path"))
+            assertEquals("dns.quad9.net", it["tls"]!!.jsonObject.str("server_name")); assertNull(it["domain_resolver"])
+        }
+        // Apps set to Direct pass through unbraid, out directly, their lookups to the filter (one app kept outside).
+        for (lockdown in listOf(false, true)) {
+            val c = compile(example.copy(prefs = Prefs(filter = quad9.copy(directApps = true, apps = mapOf("com.y" to false)))), lockdown)
+            val ctx = "lockdown=$lockdown"
+            assertEquals(ctx, if (lockdown) listOf("app.unbraid") else listOf("com.y", "app.unbraid"), c.excluded())
+            assertNull(ctx, c.dnsServers()["dns-filter"]!!["detour"])
+            val dnsRule = c["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }.first { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf("com.x") }
+            assertEquals(ctx, "dns-filter", dnsRule.str("server"))
+            val out = c.rules().first { it.str("outbound") != null && it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf("com.x") }
+            assertEquals(ctx, "direct", out.str("outbound"))
+            // Kept outside: only under lockdown does it pass through, with the phone's DNS.
+            assertEquals(ctx, lockdown, c.rules().any { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf("com.y") && it.str("server") == "local" })
+        }
+        // Direct default: apps following it ask the filter, straight out.
+        val d = example.copy(defaultRoute = DIRECT, apps = mapOf("com.a" to "us"), prefs = Prefs(filter = quad9.copy(direct = true)))
+        assertEquals("dns-filter", compile(d)["dns"]!!.jsonObject.str("final"))
+        assertEquals("local", compile(d.copy(prefs = Prefs(filter = quad9)))["dns"]!!.jsonObject.str("final"))
+        // NextDNS needs a profile; an own server by name is looked up first, through the same tunnel.
+        assertNull(Filter("nextdns").server())
+        assertEquals("/abc123", Filter("nextdns", "abc123").server()!!.path)
+        val own = compile(example.copy(prefs = Prefs(filter = Filter(Filters.OWN, "tls://dns.example.org", routes = true)))).dnsServers()
+        assertEquals("tls", own["dns-r-nl"]!!.str("type")); assertEquals("boot-r-nl", own["dns-r-nl"]!!.str("domain_resolver")); assertEquals(853, own["dns-r-nl"]!!["server_port"]!!.jsonPrimitive.content.toInt())
+        assertEquals(Compiler.NORD_TP, own["boot-r-nl"]!!.str("server")); assertEquals("r-nl", own["boot-r-nl"]!!.str("detour"))
+        for (bad in listOf("http://x.org", "https://x.org:99999/q", "tls://x.org/path", "dns.example.org", "1.2.3", "https://a b")) assertNull(bad, Filters.own(bad))
+        // An older custom DNS server becomes this filter on VPN routes, the same resolver as before.
+        assertEquals(Filter(Filters.OWN, "1.1.1.1", routes = true), example.copy(prefs = Prefs(customDns = listOf("1.1.1.1"))).migrated().prefs.filter)
     }
 
     @Test fun lockdownRoutesDirectAppsInsteadOfExcluding() {
@@ -246,8 +295,20 @@ class CompilerTest {
     @Test fun threatProtectionAndCustomDns() {
         fun dnsOf(c: JsonObject) = c["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }.first { it["tag"]!!.jsonPrimitive.content == "dns-r-nl" }["server"]!!.jsonPrimitive.content
         assertEquals(Compiler.NORD_TP, dnsOf(compile(example)))
-        assertEquals(Compiler.NORD_DNS, dnsOf(compile(example.copy(prefs = Prefs(threatProtection = false)))))
-        assertEquals("9.9.9.9", dnsOf(compile(example.copy(prefs = Prefs(customDns = listOf("9.9.9.9"))))))
+        assertEquals(Compiler.NORD_DNS, dnsOf(compile(example.copy(opts = mapOf("nord" to mapOf(PROTECT to "off"))))))
+        // A save from before the move keeps the user's choice, now on NordVPN's page.
+        val old = example.copy(prefs = Prefs(threatProtection = false)).migrated()
+        assertEquals("off", old.opt("nord", PROTECT))
+        assertEquals(Compiler.NORD_DNS, dnsOf(compile(old)))
+        assertEquals(old, old.migrated())
+        // A NordVPN route that kept another provider's blocking flag follows the NordVPN page, as it did; new setups aren't migrated.
+        val kept = example.copy(prefs = Prefs(threatProtection = false), routes = example.routes.map { if (it.id == "nl") it.copy(filter = true) else it }).migrated()
+        assertEquals(Compiler.NORD_DNS, dnsOf(compile(kept)))
+        val fresh = example.copy(version = app.unbraid.data.VERSION, routes = example.routes.map { if (it.id == "nl") it.copy(filter = false) else it })
+        assertEquals(fresh, fresh.migrated())
+        // One route can turn it off for itself.
+        assertEquals(Compiler.NORD_DNS, dnsOf(compile(example.copy(routes = example.routes.map { if (it.id == "nl") it.copy(filter = false) else it }))))
+        assertEquals("9.9.9.9", dnsOf(compile(example.copy(prefs = Prefs(customDns = listOf("9.9.9.9"))).migrated())))
     }
 
     @Test fun lanBypassesTheTunnelButHomeSubnetsStayRouted() {
@@ -312,12 +373,15 @@ class CompilerTest {
         fun dns(s: Setup, id: String) = compile(s)["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }
             .first { it["tag"]!!.jsonPrimitive.content == "dns-r-$id" }["server"]!!.jsonPrimitive.content
         val r = example.routes.first { it.id != example.defaultRoute }
-        // Each provider's blocking resolver while asked for; a custom DNS server replaces it (the choice is kept for later).
-        for ((provider, blocking) in Compiler.FILTER_DNS) {
-            val on = example.copy(routes = example.routes.map { if (it.id == r.id) it.copy(loc = it.loc.copy(provider = provider), filter = true) else it })
+        // Each provider's blocking resolver while on for the route or its provider page; a custom DNS server replaces it (the choice is kept for later).
+        for ((provider, blocking) in mapOf("mullvad" to "100.64.0.7", "pia" to "10.0.0.244", "ivpn" to "10.0.254.2")) {
+            val moved = example.copy(routes = example.routes.map { if (it.id == r.id) it.copy(loc = it.loc.copy(provider = provider)) else it })
+            val on = moved.copy(routes = moved.routes.map { if (it.id == r.id) it.copy(filter = true) else it })
             assertEquals(provider, blocking, dns(on, r.id))
-            assertEquals(provider, "1.1.1.1", dns(on.copy(prefs = on.prefs.copy(customDns = listOf("1.1.1.1"))), r.id))
-            assertTrue(provider, on.route(r.id)!!.filter)
+            assertEquals(provider, blocking, dns(moved.copy(opts = mapOf(provider to mapOf(PROTECT to "on"))), r.id))
+            assertNotEquals(provider, blocking, dns(moved, r.id))
+            assertEquals(provider, "1.1.1.1", dns(on.copy(prefs = on.prefs.copy(filter = Filter(Filters.OWN, "1.1.1.1", routes = true))), r.id))
+            assertTrue(provider, on.route(r.id)!!.filter!!)
         }
     }
 
@@ -407,7 +471,7 @@ class CompilerTest {
         val p = app.unbraid.data.Manual.parseOvpn(javaClass.getResource("/ovpn/nord-double.udp.ovpn")!!.readText(), "dv", "u", "p")
         val nord = Route("nl", Location("nord", 153, "NL", "Netherlands")); val imp = Route("im", ovpn = p, hue = 1)
         for (order in listOf(listOf(nord, imp), listOf(imp, nord))) for (custom in listOf(emptyList(), listOf("1.1.1.1"))) {
-            val s = Setup(routes = order, defaultRoute = order[0].id, apps = mapOf("com.x" to order[1].id), prefs = Prefs(customDns = custom))
+            val s = Setup(routes = order, defaultRoute = order[0].id, apps = mapOf("com.x" to order[1].id), prefs = Prefs(filter = if (custom.isEmpty()) Filter() else Filter(Filters.OWN, custom[0], routes = true)))
             val raw = Compiler.compile(Compiler.Input(s, mapOf("nl" to OvpnLink(sv("nl"), p), "im" to OvpnLink(sv("im"), p)), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", probe = 40000 to "pw"))
             File("build/compiled").apply { mkdirs() }.resolve("ovpn-mixed-${order[0].id}-${custom.size}.json").writeText(raw)
             val c = Json.parseToJsonElement(raw).jsonObject
@@ -605,7 +669,7 @@ class CompilerTest {
     }
 
     @Test fun customDnsKeepsOpenVpnOnItsOwnResolverAndNoPull() {
-        val s = ovpnSetup(Prefs(customDns = listOf("1.1.1.1")))
+        val s = ovpnSetup(Prefs(filter = Filter(Filters.OWN, "1.1.1.1", routes = true)))
         val c = compile(s, links = mapOf("x" to OvpnLink(sv("x"), s.routes[0].ovpn!!)))
         assertEquals("udp", c.dnsServer("dns-r-x")["type"]!!.jsonPrimitive.content)
         assertEquals("true", c["endpoints"]!!.jsonArray[0].jsonObject["route_no_pull"]!!.jsonPrimitive.content)

@@ -16,6 +16,11 @@ object Nord : Provider {
     override val fields = listOf(Field("token", "Access token", hint = "Paste token"))
     override val help = "Nord Account → NordVPN → Manual setup → Generate new token."
 
+    override val protection = Opt(PROTECT, "Threat Protection Lite", "Blocks ads and malicious domains on NordVPN routes")
+    override val defaults = mapOf(PROTECT to "on")
+    override val connections = 10
+    override fun blockingDns(opts: (String) -> String?) = app.unbraid.vpn.Compiler.NORD_TP
+
     override fun signIn(input: Map<String, String>): String {
         val t = input["token"].orEmpty().filterNot(Char::isWhitespace)
         require(t.matches(Regex("[A-Za-z0-9]{32,128}"))) { "That doesn't look like a NordVPN token" }

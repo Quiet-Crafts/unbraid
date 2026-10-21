@@ -80,6 +80,24 @@ object LinkPicker {
         return Result(out, remember, blocked)
     }
 
+    /**
+     * [links] with each provider WireGuard tunnel on the port its provider page asks for: a fixed one, or with Automatic
+     * the [step]-th of the server's ports (a step per provider moves on when its tunnels stop answering).
+     */
+    fun ported(setup: Setup, links: Map<String, Link>, step: Map<String, Int>): Map<String, Link> {
+        val provider = { id: String -> setup.route(id)?.takeIf { !it.imported }?.loc?.provider }
+        // One list per provider, so a tunnel saved without one (offline) still takes the same port as its provider's others.
+        val lists = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.ports.orEmpty() }).mapValues { (_, l) -> l.firstOrNull { it.isNotEmpty() }.orEmpty() }
+        return links.mapValues { (id, l) -> portedOne(setup, provider(id), l, lists, step) }
+    }
+
+    private fun portedOne(setup: Setup, p: String?, l: Link, lists: Map<String?, List<Int>>, step: Map<String, Int>): Link {
+        if (l !is WgLink || p == null) return l
+        val port = setup.opt(p, app.unbraid.data.PORT_OPT)?.toIntOrNull()?.takeIf { it in 1..65535 }
+            ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[(step[p] ?: 0) % it.size] } ?: return l
+        return l.copy(peer = l.peer.copy(endpoint = "${l.peer.endpoint.substringBeforeLast(':')}:$port"))
+    }
+
     /** True if an app that went Direct under [old] goes to one of [routes] under [new] (explicitly or by default). */
     fun leavesDirect(old: Setup?, new: Setup, routes: Set<String>): Boolean = old != null && routes.any { id ->
         (old.apps.keys + new.apps.keys).any { new.routeOf(it) == id && old.routeOf(it) == DIRECT } || (new.defaultRoute == id && old.defaultRoute == DIRECT)

@@ -89,6 +89,10 @@ class Ui(app: Application) : AndroidViewModel(app) {
     val form = mutableStateMapOf<String, String>()
     /** Last sign-in error per provider id. */
     val formError = mutableStateMapOf<String, String>()
+    /** Where the user can fix that error (a device list), per provider id. */
+    val formLink = mutableStateMapOf<String, String>()
+    /** A question the provider asked before it signs in (a two-factor code, a captcha), per provider id. */
+    val challenge = mutableStateMapOf<String, app.unbraid.data.Challenge>()
 
     /** Files being read into a form, per provider: closing the form or picking another file makes an older read moot. Main thread. */
     private val reads = HashMap<String, Int>()
@@ -102,7 +106,7 @@ class Ui(app: Application) : AndroidViewModel(app) {
         // A sign-in in flight still finishes (a device slot it registers must be saved), but its form is gone for good.
         if (id in signing.value) dismissed += id
         form.keys.filter { it.startsWith("$id:") }.forEach { form.remove(it) }
-        formError.remove(id)
+        formError.remove(id); formLink.remove(id); challenge.remove(id)
     }
     /** Sign-ins whose form was closed while they ran: a failure leaves no error and brings nothing back. */
     private val dismissed: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
@@ -120,12 +124,15 @@ class Ui(app: Application) : AndroidViewModel(app) {
         val id = provider.id
         if (id in _signing.value) return
         if (id in store.accounts.value) { formError[id] = "Already signed in to ${provider.name}"; return }
-        formError.remove(id)
+        formError.remove(id); formLink.remove(id)
+        val asked = challenge[id]
         _signing.update { it + id }
         viewModelScope.launch(Dispatchers.IO) {
+            var failure: Throwable? = null
             val error = runCatching {
-                val clean = provider.fields.associate { f -> f.key to input[f.key].orEmpty().let { if (f.secret) it else it.trim() } }
+                val clean = (provider.fields + listOfNotNull(asked?.field)).associate { f -> f.key to input[f.key].orEmpty().let { if (f.secret) it else it.trim() } } + asked?.keep.orEmpty()
                 val saved = store.account(id, provider.signIn(clean))
+                Providers.signedInAt[id] = System.currentTimeMillis()
                 // First provider on a fresh install: point the default route at it.
                 store.update { s ->
                     val d = s.route(s.defaultRoute)
@@ -139,14 +146,20 @@ class Ui(app: Application) : AndroidViewModel(app) {
                 if (saved) input.values.forEach(::clearClipboardIf)
                 refreshCountries(id)
                 null
-            }.getOrElse { Http.explain(it, provider.name) }
+            }.getOrElse { e -> failure = e; (e as? app.unbraid.data.Challenge)?.message ?: Http.explain(e, provider.name) }
             // On the main thread, like Back: a form closed now never gets this attempt's error.
             withContext(Dispatchers.Main) {
                 if (error == null) { // a file still being read must not refill the form just used
                     reads[id] = (reads[id] ?: 0) + 1
                     form.keys.filter { it.startsWith("$id:") }.forEach { form.remove(it) }
                 }
-                if (!dismissed.remove(id)) error?.let { formError[id] = it }
+                if (!dismissed.remove(id)) {
+                    error?.let { formError[id] = it }
+                    (failure as? app.unbraid.data.AuthException)?.url?.let { formLink[id] = it }
+                    // A new question replaces the last one (its answer is spent); any other outcome ends the questions.
+                    val c = failure as? app.unbraid.data.Challenge
+                    if (c != null) { challenge[id] = c; form.remove("$id:${c.field.key}") } else challenge.remove(id)
+                }
                 _signing.update { it - id }
             }
         }
@@ -304,6 +317,16 @@ class Ui(app: Application) : AndroidViewModel(app) {
         else { form[formKey] = text; formError.remove(provider) }
     }
 
+    /** A QR code read for a sign-in field, here so a rotation during a slow decode doesn't lose it. */
+    fun readQr(uri: android.net.Uri?, formKey: String, provider: String) = viewModelScope.launch {
+        val mine = (reads[provider] ?: 0) + 1
+        reads[provider] = mine
+        val text = uri?.let { withContext(Dispatchers.IO) { decodeQr(getApplication(), it) } }
+        if (reads[provider] != mine || uri == null) return@launch // closed, cancelled, or another read started meanwhile
+        if (text.isNullOrBlank()) formError[provider] = "No QR code found in that picture. Try again closer, or type it in."
+        else { form[formKey] = text.trim().take(200); formError.remove(provider); formLink.remove(provider); challenge.remove(provider) }
+    }
+
     private val icons = LruCache<String, Bitmap>(200)
 
     suspend fun icon(pkg: String): Bitmap? = icons.get(pkg) ?: withContext(Dispatchers.IO) {
@@ -332,7 +355,8 @@ class Ui(app: Application) : AndroidViewModel(app) {
 
     /** Points route [id] at a provider location, dropping any imported source it had. */
     fun setLocation(id: String, loc: Location) = store.update { s ->
-        s.copy(routes = s.routes.map { if (it.id == id) it.copy(loc = loc, wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null) else it })
+        // A route's blocking choice belongs to its provider: another provider starts from its own page.
+        s.copy(routes = s.routes.map { if (it.id == id) it.copy(loc = loc, wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null, filter = it.filter.takeIf { _ -> it.loc.provider == loc.provider && !it.imported }) else it })
     }
 
     // ---- own servers ----
@@ -475,7 +499,13 @@ class Ui(app: Application) : AndroidViewModel(app) {
         s.copy(apps = if (routeId == null || routeId == s.defaultRoute) s.apps - pkg else s.apps + (pkg to routeId))
     }
 
-    fun setFilter(id: String, on: Boolean) = store.update { s -> s.copy(routes = s.routes.map { if (it.id == id) it.copy(filter = on) else it }) }
+    /** Route [id]'s own blocking choice; one equal to its provider page's is dropped, so the route follows the page again. */
+    fun setFilter(id: String, on: Boolean) = store.update { s ->
+        s.copy(routes = s.routes.map { r -> if (r.id != id) r else r.copy(filter = on.takeIf { it != (s.opt(r.loc.provider, app.unbraid.data.PROTECT) == "on") }) })
+    }
+
+    /** One setting on [provider]'s page. */
+    fun setOpt(provider: String, key: String, value: String) = store.update { s -> s.copy(opts = s.opts + (provider to (s.opts[provider].orEmpty() + (key to value)))) }
 
     fun toggleFavorite(loc: Location) = store.update { s ->
         val l = loc.favKey()

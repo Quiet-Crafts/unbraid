@@ -374,7 +374,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         }
         lastGood = json
         tunnelDns = runCatching { Compiler.probeDns(json) }.getOrDefault(emptyMap())
-        tags = Compiler.shared(setup, links, blocked) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG }
+        tags = Compiler.shared(setup, LinkPicker.ported(setup, links, portStep), blocked) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG }
         val was = running
         running = setup
         // After tags and running, which stats label new connections by; also when only the setup changed (a city that
@@ -511,6 +511,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             var servers = emptyMap<String?, List<String>>() // tag → its servers as checked, before a reload can swap them
             var seen = links // what was checked: results about other tunnels or another network are thrown away
             val network = net.network
+            // Ports Automatic learned on another network don't hold here: back to each provider's first port.
+            if (network != portNet) { portNet = network; if (portStep.isNotEmpty()) { portStep = emptyMap(); reload(); continue } }
             val byTag = lock.withLock {
                 seen = links
                 val s = running ?: return@withLock emptyMap()
@@ -520,7 +522,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     .also { m -> servers = m.mapValues { (_, ids) -> ids.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } } } }
             }
             if (byTag.isEmpty()) continue
-            val checked = byTag.keys.filterNotNull().toSet()
+            // A provider whose new key is still reaching its servers isn't judged yet.
+            val settingUp = Providers.settingUp()
+            val checked = byTag.filter { (_, ids) -> ids.none { running?.route(it)?.loc?.provider in settingUp } }.keys.filterNotNull().toSet()
+            if (checked.isEmpty()) continue
             val down = Health.blame(checked.filter { !Health.reachable(it) }.toSet(), checked) { Health.direct(network) }
             val move = lock.withLock {
                 // Stopped, reloaded or moved to another network meanwhile: start counting afresh.
@@ -536,10 +541,13 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 if (dead.isEmpty()) return@withLock null
                 dead.forEach { fails.remove(tags[it]) }
                 val s = running ?: return@withLock null
+                // A dead tunnel on Automatic also tries its provider's next port: a failed check can't tell a blocked port from a dead server.
+                val stepped = dead.mapNotNull { id -> s.route(id)?.loc?.provider?.takeIf { p -> (links[id] as? app.unbraid.data.WgLink)?.ports.orEmpty().size > 1 && s.opt(p, app.unbraid.data.PORT_OPT) == app.unbraid.data.AUTO } }.toSet()
+                portStep = portStep + stepped.associateWith { (portStep[it] ?: 0) + 1 }
                 val movable = dead.filter { id -> s.route(id)?.loc?.let { it.pinned == null && it.group != app.unbraid.data.Nord.DEDICATED_IP } == true }
                 Log.w(TAG, "health: ${dead.size} route(s) stopped answering, ${movable.size} to move to another server")
                 Move(links - movable.toSet(), movable.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } }.toSet(), generation,
-                    dead.mapNotNull { id -> s.route(id)?.loc?.provider }.toSet(), movable.isNotEmpty())
+                    dead.mapNotNull { id -> s.route(id)?.loc?.provider }.toSet(), movable.isNotEmpty() || stepped.isNotEmpty())
             } ?: continue
             // A dead tunnel can mean the provider dropped this phone (its device removed on the website): then its routes
             // wait blocked for a new sign-in instead of trying server after server.
@@ -595,8 +603,13 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** Providers that refused an account, with that account and why: their routes stay blocked until it changes. */
     private var refusals: Map<String, Pair<String?, Exception>> = emptyMap()
 
+    /** Provider id → how many of its ports Automatic has moved past on this network ([LinkPicker.ported]). */
+    @Volatile private var portStep: Map<String, Int> = emptyMap()
+    /** The network [portStep] was learned on. */
+    private var portNet: android.net.Network? = null
+
     private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
-        Compiler.Input(setup, links, packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending)
+        Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending)
 
     /** The open table's fake-IP block for a reload; a new table takes the next one, refusing the rest. */
     private fun fakeBlock() = Compiler.nextBlock(lastBlock ?: store.fakeBlock, synchronized(Companion) { tableOpen })

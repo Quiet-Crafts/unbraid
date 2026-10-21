@@ -24,13 +24,33 @@ import kotlin.math.roundToInt
  */
 object Ivpn : Provider {
     @Serializable
-    data class Account(val accountId: String, val sessionToken: String, val privateKey: String, val ipAddress: String)
+    data class Account(
+        val accountId: String, val sessionToken: String, val privateKey: String, val ipAddress: String,
+        /** The name IVPN gave this session, as its client area lists it, and the plan's device limit (0 = unknown). */
+        val device: String = "", val limit: Int = 0,
+    )
 
     @Serializable
     private class WgReply(@SerialName("ip_address") val ipAddress: String? = null)
 
     @Serializable
-    private class SessionReply(val status: Int? = null, val token: String? = null, val wireguard: WgReply? = null)
+    internal class Plan(val name: String = "", @SerialName("device_limit") val deviceLimit: Int = 0)
+
+    @Serializable
+    internal class Status(
+        @SerialName("current_plan") val plan: String = "", @SerialName("available_plans") val plans: List<Plan> = emptyList(),
+        val limit: Int = 0,
+    ) {
+        /** The device limit: the 602 reply's own, else the current plan's ("IVPN Standard" is plan "Standard"). */
+        val deviceLimit get() = limit.takeIf { it > 0 } ?: plans.filter { it.name.isNotBlank() && plan.contains(it.name, true) }.maxByOrNull { it.name.length }?.deviceLimit ?: 0
+    }
+
+    @Serializable
+    private class SessionReply(
+        val status: Int? = null, val token: String? = null, val wireguard: WgReply? = null,
+        @SerialName("device_name") val device: String? = null, @SerialName("service_status") val service: Status? = null, val data: Status? = null,
+        @SerialName("captcha_id") val captchaId: String? = null, @SerialName("captcha_image") val captchaImage: String? = null,
+    )
 
     @Serializable
     internal data class Host(
@@ -51,24 +71,83 @@ object Ivpn : Provider {
     )
 
     @Serializable
-    internal data class ServerList(val wireguard: List<Gateway> = emptyList())
+    internal data class Port(val type: String = "", val port: Int? = null)
+
+    @Serializable
+    internal data class Ports(val wireguard: List<Port> = emptyList())
+
+    @Serializable
+    internal data class Blocklist(@SerialName("Description") val name: String = "", @SerialName("Normal") val normal: String = "", @SerialName("Hardcore") val hardcore: String = "")
+
+    @Serializable
+    internal data class AntiTracker(@SerialName("DnsServers") val lists: List<Blocklist> = emptyList())
+
+    @Serializable
+    internal data class Config(val ports: Ports = Ports(), @SerialName("antitracker_plus") val antitracker: AntiTracker = AntiTracker())
+
+    @Serializable
+    internal data class ServerList(val wireguard: List<Gateway> = emptyList(), val config: Config = Config()) {
+        /** The single UDP ports IVPN's WireGuard servers take (its list also has ranges, left out here). */
+        val ports get() = config.ports.wireguard.filter { it.type.equals("UDP", true) }.mapNotNull { it.port }.distinct()
+    }
 
     private const val API = "https://api.ivpn.net"
     private const val PORT = 2049
+    /** Automatic port: the default first, then the ones restrictive networks most often let through. Only those IVPN lists. */
+    private val FALLBACK = listOf(PORT, 443, 53, 80, 123, 2050, 1194, 500, 4500)
     private const val DNS = "172.16.0.1"
 
     override val id = "ivpn"
     /** Every host in IVPN's list carries its load, and the app picks the lowest. */
     override val hasLoad = true
     override val name = "IVPN"
-    override val fields = listOf(Field("account", "Account ID", hint = "i-XXXX-XXXX-XXXX"))
-    override val help = "Your account ID (i-XXXX-XXXX-XXXX, or ivpn plus 8 characters on older accounts): in the IVPN client area, or on any device already logged in. $APP uses one of your device sessions."
+    override val protection = Opt(PROTECT, "AntiTracker", "IVPN's ad and tracker blocking, on every IVPN route")
+    // AntiTracker's block list until one is picked: OISD Big, the one IVPN's plain AntiTracker uses.
+    private const val OISD = "10.0.254.2|10.0.254.3"
+    private const val LIST = "list"
+    private const val HARDCORE = "hardcore"
+    private const val CLIENT_AREA = "https://www.ivpn.net/account/"
+    override val defaults = mapOf(PROTECT to "off", LIST to OISD, HARDCORE to "off", PORT_OPT to AUTO)
+
+    /** One session serves every IVPN route, so this phone is always one device. */
+    override fun device(account: String): Device {
+        val a = account(account)
+        // The status check names the session and plan as they are now; offline, as at sign-in.
+        val now = runCatching { NordApi.json.decodeFromString(SessionReply.serializer(), postJsonRaw("$API/v4/session/status", buildJsonObject { put("session_token", a.sessionToken) }.toString()).second) }
+            .getOrNull()?.takeIf { it.status == 200 }
+        val name = now?.device ?: a.device
+        val limit = now?.service?.deviceLimit?.takeIf { it > 0 } ?: a.limit
+        return Device("$APP uses 1 of your ${if (limit > 0) "$limit " else ""}devices${if (name.isNotBlank()) ", named $name" else ""}. See them all in the IVPN client area.", CLIENT_AREA)
+    }
+    /** A block list is saved as its two resolvers, "normal|hardcore", so a route needs no server list to use it. */
+    override fun blockingDns(opts: (String) -> String?) =
+        (opts(LIST) ?: OISD).split('|').getOrNull(if (opts(HARDCORE) == "on") 1 else 0)?.takeIf { app.unbraid.vpn.Compiler.ipv4(it)?.second == 32 && '/' !in it } ?: OISD.substringBefore('|')
+    /** A new key reaches every IVPN server within about a minute of the sign-in. */
+    override val keySetup = 90_000L
+
+    override fun options(account: String) = options(fetch())
+
+    internal fun options(l: ServerList) = listOfNotNull(
+        Opt(LIST, "Block list", "What AntiTracker blocks, from IVPN's own lists", l.config.antitracker.lists.map { "${it.normal}|${it.hardcore}" to it.name })
+            .takeIf { it.choices.isNotEmpty() },
+        Opt(HARDCORE, "Hardcore mode", "Also blocks Google and Facebook, and sites that need them"),
+        Opt(PORT_OPT, "Port", "Automatic tries 2049 first, then other ports when a network blocks it",
+            listOf(AUTO to "Automatic") + l.ports.sorted().map { "$it" to "UDP $it" }),
+    )
+    override val fields = listOf(Field("account", "Account ID", hint = "i-XXXX-XXXX-XXXX", qr = true))
+    override val help = "Your account ID (i-XXXX-XXXX-XXXX, or ivpn plus 8 characters on older accounts): in the IVPN client area, or on any device already logged in. " +
+        "Signed up with an email? Log in at ivpn.net with it: the account ID is at the top of the client area, with a QR code you can scan. $APP uses one of your devices."
 
     override fun signIn(input: Map<String, String>): String {
         val acct = input["account"].orEmpty().filterNot(Char::isWhitespace)
         require(acct.matches(Regex("i-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}|ivpn[A-Za-z0-9]{7,8}"))) { "Account ID must look like i-XXXX-XXXX-XXXX or ivpnXXXXXXXX" }
         val keys = WgKeys.generate()
-        return session(postJsonRaw("$API/v4/session/new", """{"username":"$acct","force":false,"wg_public_key":"${keys.public}"}"""), acct, keys.private)
+        val body = buildJsonObject {
+            put("username", acct); put("force", false); put("wg_public_key", keys.public)
+            // The answers to an earlier reply's two-factor or captcha question.
+            for (k in listOf(CODE, CAPTCHA, CAPTCHA_ID)) input[k]?.filterNot(Char::isWhitespace)?.takeIf { it.isNotEmpty() }?.let { put(k, it) }
+        }
+        return session(postJsonRaw("$API/v4/session/new", body.toString()), acct, keys.private)
     }
 
     override fun signOut(account: String): Boolean = try {
@@ -85,21 +164,34 @@ object Ivpn : Provider {
     internal fun sessionGone(reply: Pair<Int, String>) =
         (runCatching { NordApi.json.decodeFromString(SessionReply.serializer(), reply.second).status }.getOrNull() ?: reply.first).let { it == 601 || it == 401 }
 
+    private const val CODE = "confirmation"
+    private const val CAPTCHA = "captcha"
+    private const val CAPTCHA_ID = "captcha_id"
+    private val codeField = Field(CODE, "Two-factor code", secret = false, hint = "6 digits")
+    private val captchaField = Field(CAPTCHA, "Characters in the picture", secret = false)
+
     internal fun session(reply: Pair<Int, String>, account: String, privateKey: String): String {
         val (code, body) = reply
         val o = Http.parsed("IVPN") { NordApi.json.decodeFromString(SessionReply.serializer(), body) }
         when (val status = o.status ?: code) {
             200 -> Unit
             401 -> throw AuthException("IVPN doesn't recognise that account ID")
-            602 -> throw AuthException("This IVPN account has reached its device limit. Remove a device in the IVPN client area (or log one out) and sign in again.")
+            602 -> o.data?.deviceLimit?.takeIf { it > 0 }.let { n ->
+                throw AuthException("All ${n ?: "the"} devices on this IVPN account are in use. Log one out in the IVPN client area, then sign in again.", CLIENT_AREA)
+            }
             702 -> throw AuthException("This IVPN account isn't active. Renew it first.")
-            70001, 70002 -> throw AuthException("IVPN is asking for a captcha. Log in once on ivpn.net or in the IVPN app, then try again.")
-            70011, 70012 -> throw AuthException("This IVPN account uses two-factor authentication, which $APP can't complete yet.")
+            70001, 70002 -> {
+                val id = o.captchaId?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,128}")) } ?: throw AuthException("IVPN is asking for a captcha. Log in once on ivpn.net or in the IVPN app, then try again.")
+                val png = runCatching { java.util.Base64.getMimeDecoder().decode(o.captchaImage.orEmpty().substringAfter("base64,")) }.getOrNull()
+                throw Challenge(if (status == 70001) "IVPN wants to check you're a person. Type the characters in the picture." else "That didn't match. Try this picture.", captchaField, png, mapOf(CAPTCHA_ID to id))
+            }
+            70011 -> throw Challenge("Two-factor authentication is on for this account. Enter the code from your authenticator app.", codeField)
+            70012 -> throw Challenge("That code didn't work. Enter the current one.", codeField)
             else -> throw Http.Status(status, "IVPN error $status")
         }
         val ip = o.wireguard?.ipAddress ?: throw app.unbraid.vpn.Fail("IVPN didn't assign a WireGuard address. Try again later")
         val token = o.token ?: throw app.unbraid.vpn.Fail("IVPN didn't return a session. Try again later")
-        return NordApi.json.encodeToString(Account.serializer(), Account(account, token, privateKey, ip.substringBefore('/')))
+        return NordApi.json.encodeToString(Account.serializer(), Account(account, token, privateKey, ip.substringBefore('/'), o.device.orEmpty().take(64), o.service?.deviceLimit ?: 0))
     }
 
     fun account(blob: String) = Http.parsed("IVPN") { NordApi.json.decodeFromString(Account.serializer(), blob) }
@@ -139,12 +231,14 @@ object Ivpn : Provider {
                 else l.match(loc).minByOrNull { it.second.load } ?: throw IOException("No IVPN server for ${loc.label}")
             server(g, h) to h.localIp.substringBefore('/')
         }
+        val ports = l?.ports?.let { listed -> FALLBACK.filter { it in listed } }.orEmpty()
         return WgLink(
             sv,
             WgPeer(
                 name = sv.name, privateKey = a.privateKey, address = listOf("${a.ipAddress.substringBefore('/')}/32"),
                 publicKey = sv.publicKey, endpoint = "${sv.ip}:$PORT", allowedIps = listOf("0.0.0.0/0"), dns = listOf(dns),
             ),
+            ports,
         )
     }
 

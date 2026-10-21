@@ -85,13 +85,6 @@ import app.unbraid.data.Server
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Providers with an in-tunnel blocking resolver (see [app.unbraid.vpn.Compiler.FILTER_DNS]): title and explanation. */
-private val BLOCKERS = mapOf(
-    "mullvad" to ("Block ads, trackers & malware" to "Mullvad's DNS blocklists, for this route"),
-    "pia" to ("MACE" to "PIA's ad, tracker and malware blocking, for this route"),
-    "ivpn" to ("AntiTracker" to "IVPN's ad and tracker blocking, for this route"),
-)
-
 val NordGroups = listOf<Pair<String?, String>>(
     null to "Standard", "legacy_p2p" to "P2P", "legacy_dedicated_ip" to "Dedicated IP",
     "legacy_double_vpn" to "Double VPN", "legacy_onion_over_vpn" to "Onion",
@@ -378,7 +371,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             ) {
                 BarButton("Route options", when {
                     provider == "nord" -> groupLabel
-                    provider in BLOCKERS && route != null && current?.provider == provider -> if (route.filter && setup.prefs.customDns.isEmpty()) "Protection on" else "Protection off"
+                    Providers.get(provider.orEmpty())?.protection != null && route != null && current?.provider == provider -> if (setup.protects(route) && !(setup.prefs.filter.routes && setup.prefs.filter.server() != null)) "Protection on" else "Protection off"
                     else -> "App settings"
                 }, Modifier.weight(1f)) { sheet = "options" }
             }
@@ -408,14 +401,15 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
                         item { Caption("Lists only the countries that offer it. Pick a location to use it.") }
                         item { Gap(16.dp) }
                     }
-                    val blocker = route?.takeIf { current?.provider == provider }?.let { r -> BLOCKERS[provider]?.let { r to it } }
-                    blocker?.let { (r, label) ->
-                        // Custom DNS replaces the provider's blocking resolver (as with Nord's): shown off, the choice kept.
-                        val custom = setup.prefs.customDns.isNotEmpty()
+                    val blocker = route?.takeIf { current?.provider == provider }?.let { r -> Providers.get(provider.orEmpty())?.protection?.let { r to it } }
+                    blocker?.let { (r, o) ->
+                        // unbraid's filter on VPN routes replaces the provider's blocking resolver: shown off, the choice kept.
+                        val custom = setup.prefs.filter.routes && setup.prefs.filter.server() != null
+                        val on = setup.protects(r)
                         item { SectionLabel("Protection") }
                         item {
-                            GroupRow(0, 1, label.first, if (custom) "Off while a custom DNS server is set" else label.second,
-                                onClick = { ui.setFilter(r.id, !r.filter); Unit }.takeUnless { custom }, checked = r.filter && !custom, trailing = { Toggle(r.filter && !custom, enabled = !custom) })
+                            GroupRow(0, 1, o.label, if (custom) "Off while unbraid's filter is on for VPN routes" else if (r.filter == null) "As set for ${Providers.get(provider.orEmpty())?.name} in Settings" else "For this route only",
+                                onClick = { ui.setFilter(r.id, !on); Unit }.takeUnless { custom }, checked = on && !custom, trailing = { Toggle(on && !custom, enabled = !custom) })
                         }
                         item { Gap(16.dp) }
                     }

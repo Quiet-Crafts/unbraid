@@ -93,6 +93,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    // Reads QR codes from a photo or a picture (an IVPN account ID); no camera permission, no Play services.
+    implementation("com.google.zxing:core:3.5.3")
     "playImplementation"("com.android.billingclient:billing-ktx:9.1.0")
     // Billing pulls Fragment 1.1.0, whose activity-result handling predates the launchers Unbraid uses.
     "playImplementation"("androidx.fragment:fragment:1.9.1")
