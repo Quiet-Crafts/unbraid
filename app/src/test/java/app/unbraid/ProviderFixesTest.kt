@@ -159,6 +159,18 @@ class ProviderFixesTest {
         Windscribe.signIn(mapOf("config" to wsConf("unlisted-1.whiskergalaxy.com:443")))
     }
 
+    /** Generated configs name the location's WireGuard host (wg_endpoint), not a node: those are ordinary configs. */
+    @Test fun windscribeAcceptsTheLocationsWireGuardHost() {
+        val hosts = Windscribe.hosts(Windscribe.parse(javaClass.getResource("/windscribe_serverlist.json")!!.readText()))
+        assertTrue("dfw-86-wg.whiskergalaxy.com" in hosts && "us-central-117.whiskergalaxy.com" in hosts)
+        Windscribe.nodeHosts = { hosts }
+        val blob = Windscribe.signIn(mapOf("config" to wsConf("DFW-86-WG.whiskergalaxy.com:443")))
+        assertTrue(blob.contains(psk))
+        // A byte-order mark in front (some editors write one) changes nothing.
+        assertEquals(blob, Windscribe.signIn(mapOf("config" to "\uFEFF" + wsConf("dfw-86-wg.whiskergalaxy.com:443").replace("\n", "\r\n"))))
+        Windscribe.nodeHosts = { null }
+    }
+
     @Test fun airvpnRefusesAmneziaConfigs() {
         val conf = { extra: String -> """
             [Interface]

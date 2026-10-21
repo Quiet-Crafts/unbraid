@@ -37,7 +37,11 @@ object Windscribe : Provider {
     internal data class Node(val hostname: String = "", val ip3: String = "", val health: Int = 0)
 
     @Serializable
-    internal data class Group(val city: String = "", @SerialName("wg_pubkey") val publicKey: String = "", val nodes: List<Node> = emptyList())
+    internal data class Group(
+        val city: String = "", @SerialName("wg_pubkey") val publicKey: String = "", val nodes: List<Node> = emptyList(),
+        /** The host Windscribe's Config Generator writes as Endpoint for this location. */
+        @SerialName("wg_endpoint") val wgEndpoint: String = "",
+    )
 
     @Serializable
     internal data class Region(val name: String = "", @SerialName("country_code") val code: String = "", val status: Int = 1, val groups: List<Group> = emptyList())
@@ -62,15 +66,19 @@ object Windscribe : Provider {
         "The key works for every location your plan covers. Build-a-Plan accounts can only connect to the locations they paid for. " +
         "Static IP configs are tied to one server: import those under \"Your own servers\" instead."
 
-    /** Host names of the ordinary nodes, or null if the list can't be read (then only the format of the endpoint is checked). */
-    internal var nodeHosts: () -> Set<String>? = {
-        runCatching { rows(parse(Http.get(LIST + System.currentTimeMillis() / 1000))).map { it.node.hostname }.toSet() }.getOrNull()
-    }
+    /**
+     * Host names of the ordinary locations (each group's WireGuard host, as generated configs name it, and its nodes),
+     * also of locations down right now; null if the list can't be read (then only the endpoint's form is checked).
+     */
+    internal var nodeHosts: () -> Set<String>? = { runCatching { hosts(parse(Http.get(LIST + System.currentTimeMillis() / 1000))) }.getOrNull() }
+
+    internal fun hosts(l: ServerList) = l.data.flatMap { r -> r.groups.flatMap { g -> g.nodes.map { it.hostname } + g.wgEndpoint } }
+        .filter { it.isNotBlank() }.mapTo(HashSet()) { it.lowercase() }
 
     /** A Static IP config points at one purchased address or host that is not in the node list. */
     private fun isStatic(endpoint: String): Boolean {
         val host = endpoint.substringBeforeLast(':')
-        return IPV4.matches(host) || !HOST.matches(host) || "static" in host.lowercase() || nodeHosts()?.let { host !in it } == true
+        return IPV4.matches(host) || !HOST.matches(host) || "static" in host.lowercase() || nodeHosts()?.let { host.lowercase() !in it } == true
     }
 
     override fun signIn(input: Map<String, String>): String {
