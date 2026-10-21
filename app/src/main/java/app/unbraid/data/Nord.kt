@@ -41,7 +41,12 @@ object Nord : Provider {
     override fun connect(loc: Location, account: String): Link {
         val a = account(account)
         val tech = tech(loc)
-        val sv = loc.pinned
+        // A pinned server as Nord lists it now (address and key can change); as saved when the list can't be read.
+        val sv = loc.pinned?.let { p ->
+            // A Dedicated IP server comes from the account's own list, which a refused login must not hide.
+            val list = try { if (loc.group == DEDICATED_IP) NordApi.dedicated(a.token, tech) else loc.countryId?.let { NordApi.inPlace(it, loc.cityId, tech) } } catch (e: AuthException) { throw e } catch (e: Exception) { null }
+            p.asListed(list)
+        }
             ?: if (loc.group == DEDICATED_IP) dedicated(a, loc, tech).firstOrNull() ?: throw IOException("Your Dedicated IP isn't in ${loc.label}")
             // One of the three least loaded, not always the first: Nord gives an account one WireGuard key for every
             // device, and two devices with one key on one server knock each other off. Every device at the same

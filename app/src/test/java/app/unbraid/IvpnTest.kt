@@ -60,6 +60,15 @@ class IvpnTest {
         assertEquals(sv, Ivpn.link(null, Location("ivpn", pinned = sv), acct).server)
     }
 
+    /** With the list readable, a pinned server takes its current address and key; gone from the list, it is final. */
+    @Test fun pinnedServerIsRefreshedFromTheList() {
+        val sv = Ivpn.link(list, Location("ivpn", countryCode = "SE"), acct).server
+        val stale = sv.copy(ip = "203.0.113.9", publicKey = "x".repeat(43) + "=")
+        val l = Ivpn.link(list, Location("ivpn", pinned = stale), acct)
+        assertEquals(sv.ip, l.server.ip); assertEquals(sv.publicKey, l.peer.publicKey); assertEquals(sv.host, l.server.host)
+        try { Ivpn.link(list, Location("ivpn", pinned = sv.copy(host = "gone.wg.ivpn.net")), acct); org.junit.Assert.fail() } catch (e: app.unbraid.data.NoLongerOffered) {}
+    }
+
     @Test fun unknownCountryFails() {
         try { Ivpn.link(list, Location("ivpn", countryCode = "ZZ"), acct); fail() } catch (e: IOException) { }
     }

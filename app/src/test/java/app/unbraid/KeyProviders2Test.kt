@@ -132,6 +132,20 @@ class KeyProviders2Test {
         try { Windscribe.link(rows, Location("windscribe", country = "Italy", region = "Rome"), ws()); fail() } catch (e: IOException) { }
     }
 
+    @Test fun windscribeAndExpressPinnedServersAreRefreshed() {
+        val sv = Windscribe.link(rows, Location("windscribe", countryCode = "JP"), ws()).server
+        assertEquals(sv.ip, Windscribe.link(rows, Location("windscribe", pinned = sv.copy(ip = "203.0.113.9")), ws()).server.ip)
+        try { Windscribe.link(rows, Location("windscribe", pinned = sv.copy(host = "gone.whiskergalaxy.com")), ws()); fail() } catch (e: app.unbraid.data.NoLongerOffered) {}
+        val ex = ExpressVpn.link(express, Location("expressvpn", countryCode = "SE"), ExpressVpn.Account("u", "p")).server
+        // Its old address while the server still has it, else a current one.
+        assertEquals(ex.ip, ExpressVpn.link(express, Location("expressvpn", pinned = ex), ExpressVpn.Account("u", "p")).server.ip)
+        assertTrue(ExpressVpn.link(express, Location("expressvpn", pinned = ex.copy(ip = "203.0.113.9")), ExpressVpn.Account("u", "p")).server.ip != "203.0.113.9")
+        try { ExpressVpn.link(express, Location("expressvpn", pinned = ex.copy(host = "gone.expressnetw.com")), ExpressVpn.Account("u", "p")); fail() } catch (e: app.unbraid.data.NoLongerOffered) {}
+        // Nothing but a dotted IPv4 goes into the profile, a saved pinned address included.
+        for (bad in listOf("1.2.3.4\nscript-security 2", "1.2.3", "1.2.3.256", "a.b.c.d", " 1.2.3.4", "١.2.3.4"))
+            try { ExpressVpn.link(null, Location("expressvpn", pinned = ex.copy(ip = bad)), ExpressVpn.Account("u", "p")); fail(bad) } catch (e: IllegalArgumentException) {}
+    }
+
     @Test fun windscribePinnedServerNeedsNoList() {
         val sv = Windscribe.link(rows, Location("windscribe", countryCode = "JP"), ws()).server
         val again = Windscribe.link(null, Location("windscribe", pinned = sv), ws(80))

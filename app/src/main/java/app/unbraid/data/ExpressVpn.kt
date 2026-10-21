@@ -56,7 +56,8 @@ object ExpressVpn : Provider {
 
     override fun countries(account: String) = countries(fetch())
 
-    override fun connect(loc: Location, account: String): Link = link(if (loc.pinned == null) fetch() else null, loc, account(account))
+    // A pinned server is looked up in the current list (its addresses may have changed); the saved one only offline.
+    override fun connect(loc: Location, account: String): Link = link(if (loc.pinned == null) fetch() else runCatching { fetch() }.getOrNull(), loc, account(account))
 
     override fun servers(loc: Location, account: String, limit: Int): List<Server> =
         Catalog.pick(fetch(), loc).take(limit).map { server(it, it.ips.filter(::isIpv4).random()) }
@@ -66,15 +67,19 @@ object ExpressVpn : Provider {
     internal fun countries(entries: List<Catalog.Entry>): List<Country> = Catalog.countries(entries)
 
     internal fun link(entries: List<Catalog.Entry>?, loc: Location, a: Account, rnd: Random = Random): OvpnLink {
-        val sv = loc.pinned ?: run {
-            val e = Catalog.pick(entries!!, loc).firstOrNull() ?: throw IOException("No ExpressVPN server for ${loc.label}")
+        val pinned = loc.pinned
+        val sv = if (entries == null) pinned!! else if (pinned != null) entries.firstOrNull { it.hostname == pinned.host }?.let { e ->
+            // Its current addresses; the one it had while it still has it.
+            e.ips.filter(::isIpv4).let { ips -> server(e, if (pinned.ip in ips) pinned.ip else ips.randomOrNull(rnd) ?: throw NoLongerOffered(pinned)) }
+        } ?: throw NoLongerOffered(pinned) else {
+            val e = Catalog.pick(entries, loc).firstOrNull() ?: throw IOException("No ExpressVPN server for ${loc.label}")
             server(e, e.ips.filter(::isIpv4).random(rnd))
         }
         return OvpnLink(sv, Manual.parseOvpn(profile(sv.ip), sv.name, a.username, a.password))
     }
 
     /** Strict dotted IPv4: catalogue text is interpolated into the OpenVPN profile, so nothing else may get through. */
-    private fun isIpv4(s: String) = s.split('.').let { p -> p.size == 4 && p.all { it.length in 1..3 && it.all(Char::isDigit) && it.toInt() <= 255 } }
+    private fun isIpv4(s: String) = s.split('.').let { p -> p.size == 4 && p.all { it.length in 1..3 && it.all { c -> c in '0'..'9' } && it.toInt() <= 255 } }
 
     private fun server(e: Catalog.Entry, ip: String) =
         Server(e.hostname.substringBefore('.').removeSuffix("-ca-version-2").trimEnd('-'), e.hostname, ip, "", 0, e.city.orEmpty(), Catalog.code(e.place))
@@ -83,6 +88,8 @@ object ExpressVpn : Provider {
 
     /** The client profile for [ip], as gluetun writes it (see the class comment); the login is passed separately. */
     internal fun profile(ip: String): String = buildString {
+        // Every caller's address, a saved pinned one too, goes into the profile: nothing but a dotted IPv4 may.
+        require(isIpv4(ip)) { "Unexpected server address" }
         append("client\ndev tun\nproto udp\nremote $ip $PORT\nauth-user-pass\n")
         append("key-direction 1\nremote-cert-tls server\nverify-x509-name Server name-prefix\nfast-io\n")
         append("data-ciphers-fallback aes-256-gcm\ndata-ciphers aes-256-gcm:aes-256-cbc:aes-128-gcm\nauth sha512\n")

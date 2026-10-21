@@ -98,7 +98,8 @@ object Ivpn : Provider {
 
     override fun countries(account: String) = countries(fetch())
 
-    override fun connect(loc: Location, account: String): Link = link(if (loc.pinned == null) fetch() else null, loc, account(account))
+    // A pinned server is looked up in the current list (its address and key may have changed); the saved one only offline.
+    override fun connect(loc: Location, account: String): Link = link(if (loc.pinned == null) fetch() else runCatching { fetch() }.getOrNull(), loc, account(account))
 
     override fun servers(loc: Location, account: String, limit: Int): List<Server> =
         fetch().match(loc).sortedBy { it.second.load }.take(limit).map { (g, h) -> server(g, h) }
@@ -125,8 +126,9 @@ object Ivpn : Provider {
 
     internal fun link(l: ServerList?, loc: Location, a: Account): WgLink {
         val pinned = loc.pinned
-        val (sv, dns) = if (pinned != null) pinned to DNS else {
-            val (g, h) = l!!.match(loc).minByOrNull { it.second.load } ?: throw IOException("No IVPN server for ${loc.label}")
+        val (sv, dns) = if (l == null) pinned!! to DNS else {
+            val (g, h) = if (pinned != null) l.wireguard.flatMap { g -> g.hosts.map { g to it } }.firstOrNull { it.second.hostname == pinned.host } ?: throw NoLongerOffered(pinned)
+                else l.match(loc).minByOrNull { it.second.load } ?: throw IOException("No IVPN server for ${loc.label}")
             server(g, h) to h.localIp.substringBefore('/')
         }
         return WgLink(

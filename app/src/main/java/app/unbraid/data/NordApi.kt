@@ -73,6 +73,19 @@ object NordApi {
     )
 
     /**
+     * A city's servers for [tech], or a country's without a city (the API can't look one up by host name), cut down to
+     * what a [Server] needs: a few hundred at most per city, some thousands for a whole large country.
+     */
+    fun inPlace(countryId: Int, cityId: Int?, tech: String): List<Server> = parseServers(get(
+        "/servers?" + query(
+            (if (cityId != null) "filters[country_city_id]" to "$cityId" else "filters[country_id]" to "$countryId"),
+            "filters[servers_technologies][identifier]" to tech, "limit" to "20000",
+            *listOf("name", "hostname", "station", "load", "locations.country.code", "locations.country.city.name", "technologies.identifier", "technologies.metadata")
+                .map { "fields[servers.$it]" to null }.toTypedArray(),
+        ),
+    ), tech == "wireguard_udp")
+
+    /**
      * Country codes with servers in a specialty [group]. `/servers/recommendations` is distance-sorted and cuts a long
      * list short (P2P came back as 4 countries); the full `/servers` list with two fields is complete and small.
      */

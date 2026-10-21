@@ -93,7 +93,8 @@ object Windscribe : Provider {
 
     override fun countries(account: String) = countries(fetch())
 
-    override fun connect(loc: Location, account: String): Link = link(if (loc.pinned == null) fetch() else null, loc, account(account))
+    // A pinned node is looked up in the current list (its address and group key may have changed); the saved one only offline.
+    override fun connect(loc: Location, account: String): Link = link(if (loc.pinned == null) fetch() else runCatching { fetch() }.getOrNull(), loc, account(account))
 
     override fun servers(loc: Location, account: String, limit: Int): List<Server> =
         fetch().match(loc).sortedWith(compareBy<Row> { it.node.health }.thenBy { it.node.hostname }).take(limit).map(::server)
@@ -122,8 +123,9 @@ object Windscribe : Provider {
     }
 
     internal fun link(rows: List<Row>?, loc: Location, a: Account, rnd: Random = Random): WgLink {
-        val sv = loc.pinned ?: run {
-            val rs = rows!!.match(loc)
+        val pinned = loc.pinned
+        val sv = if (rows == null) pinned!! else if (pinned != null) rows.firstOrNull { it.node.hostname == pinned.host }?.let(::server) ?: throw NoLongerOffered(pinned) else {
+            val rs = rows.match(loc)
             if (rs.isEmpty()) throw IOException("No Windscribe server for ${loc.label}")
             server(rs.shuffled(rnd).minBy { it.node.health })
         }

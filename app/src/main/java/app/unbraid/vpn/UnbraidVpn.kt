@@ -548,15 +548,27 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         return r
     }
 
-    /** Routes whose provider refused the account it still has. A refusal holds until that account changes (a sign-out or a new sign-in). */
+    /**
+     * Routes whose provider refused the account it still has, or whose pinned server it no longer offers. A refusal
+     * holds until that account changes (a sign-out or a new sign-in), a server's removal while connected: a later
+     * request that fails never brings the saved server back.
+     */
     private fun refusedFor(setup: Setup, accounts: Map<String, String>): Map<String, Exception> {
         refusals = refusals.filter { (p, v) -> v.first == accounts[p] }
-        return setup.activeRoutes.filter { !it.imported }.mapNotNull { r -> refusals[r.loc.provider]?.let { r.id to it.second } }.toMap()
+        return setup.activeRoutes.filter { !it.imported }.mapNotNull { r ->
+            (refusals[r.loc.provider]?.second ?: r.loc.pinned?.let { gone["${r.loc.provider}|${it.host}"] })?.let { r.id to it }
+        }.toMap()
     }
 
     private fun noteRefusals(setup: Setup, accounts: Map<String, String>, r: LinkPicker.Result) = r.blocked.forEach { (id, e) ->
-        setup.route(id)?.takeIf { e is AuthException && !it.imported }?.let { refusals = refusals + (it.loc.provider to (accounts[it.loc.provider] to e)) }
+        setup.route(id)?.takeIf { !it.imported }?.let {
+            if (e is AuthException) refusals = refusals + (it.loc.provider to (accounts[it.loc.provider] to e))
+            if (e is app.unbraid.data.NoLongerOffered) it.loc.pinned?.let { p -> gone = gone + ("${it.loc.provider}|${p.host}" to e) }
+        }
     }
+
+    /** Pinned servers ("provider|host") their provider's list no longer has, while connected. */
+    private var gone: Map<String, Exception> = emptyMap()
 
     /** Tailscale gave a sign-in link and waits for the user ([Compiler.Input.tsLoginPending]). */
     @Volatile private var tsLoginPending = false
@@ -622,7 +634,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         watch?.cancel(); watch = null
         health?.cancel(); health = null
         generation++
-        retry?.cancel(); retry = null; retries = 0; net.onChange = null; refusals = emptyMap(); failing = emptySet()
+        retry?.cancel(); retry = null; retries = 0; net.onChange = null; refusals = emptyMap(); gone = emptyMap(); failing = emptySet()
         runCatching { ts?.close() }; ts = null
         runCatching { server?.closeService() }
         runCatching { tun?.close() }; tun = null

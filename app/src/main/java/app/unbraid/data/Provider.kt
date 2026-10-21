@@ -6,6 +6,12 @@ import java.io.IOException
 /** Credentials were refused; the user must sign in again. */
 class AuthException(message: String) : IOException(message)
 
+/** The provider's list was read and no longer has a pinned server: final, so no older copy of it is used instead. */
+class NoLongerOffered(server: Server) : app.unbraid.vpn.Fail("${server.name} is no longer offered. Pick another server")
+
+/** This pinned server as [list] (the provider's current one) has it; as saved when there is no list; gone if it lacks it. */
+fun Server.asListed(list: List<Server>?) = list?.let { l -> l.firstOrNull { it.host == host } ?: throw NoLongerOffered(this) } ?: this
+
 /** One sign-in form field. */
 /** [file] = can hold a whole config file: multi-line, with a "Choose file" action. */
 data class Field(val key: String, val label: String, val secret: Boolean = true, val hint: String = "", val file: Boolean = false)

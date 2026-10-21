@@ -12,6 +12,7 @@ import app.unbraid.data.Server
 import app.unbraid.data.Setup
 import app.unbraid.data.WgLink
 import app.unbraid.data.WgPeer
+import app.unbraid.data.asListed
 import app.unbraid.vpn.Fail
 import app.unbraid.vpn.LinkPicker
 import org.junit.Assert.assertEquals
@@ -190,6 +191,44 @@ class LinkPickerTest {
         val out = LinkPicker.pick(s, emptyMap(), null, emptyMap(), emptyMap(), emptyMap()) { null }
         assertEquals(setOf("1"), out.links.keys)
         assertTrue(out.blocked.getValue("2") is Fail)
+    }
+
+    /** Offline, a pinned server starts from its last refreshed copy (same host), not the older one saved with the route. */
+    @Test fun anOfflinePinnedServerUsesItsLastRefreshedCopy() {
+        var asked: Server? = null
+        val p = object : Provider by Fake(listOf(a)) { override fun connect(loc: Location, account: String): Link { asked = loc.pinned; return link(loc.pinned!!) } }
+        val r = Route("1", Location("fake", countryCode = "NL", pinned = a))
+        val newer = a.copy(ip = "10.0.0.77", publicKey = "newer")
+        LinkPicker.pick(setup(r), emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), mapOf(LinkPicker.cacheKey(r) to link(newer))) { p }
+        assertEquals(newer, asked)
+    }
+
+    /** A server no longer offered blocks every route pinned to it in the same pass, whichever asked first. */
+    @Test fun aServerNoLongerOfferedBlocksEveryRoutePinnedToIt() {
+        var calls = 0
+        val p = object : Provider by Fake(listOf(a)) { override fun connect(loc: Location, account: String): Link = if (calls++ == 0) link(loc.pinned!!) else throw app.unbraid.data.NoLongerOffered(a) }
+        val s = setup(Route("1", Location("fake", countryCode = "NL", pinned = a)), Route("2", Location("fake", countryCode = "DE", pinned = a)))
+        val out = LinkPicker.pick(s, emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), emptyMap()) { p }
+        assertEquals(setOf("1", "2"), out.blocked.keys)
+        // Another host that once had this address is never taken from the cache for it.
+        val r = Route("3", Location("fake", countryCode = "NL", pinned = a))
+        val other = link(a.copy(host = "other.example"))
+        val down = Fake(listOf(a), online = false)
+        assertTrue(LinkPicker.pick(setup(r), emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), mapOf(LinkPicker.cacheKey(r) to other)) { down }.links.isEmpty())
+        // The pin decision: as listed now, as saved without a list, gone when the list lacks it.
+        val fresh = a.copy(ip = "10.0.0.88")
+        assertEquals(fresh, a.asListed(listOf(fresh)))
+        assertEquals(a, a.asListed(null))
+        try { a.asListed(listOf(b.copy(host = "elsewhere.example"))); fail() } catch (e: app.unbraid.data.NoLongerOffered) {}
+    }
+
+    /** A pinned server the provider no longer lists is blocked, never brought back from the cache. */
+    @Test fun aServerNoLongerOfferedIsNotTakenFromTheCache() {
+        val gone = object : Provider by Fake(listOf(a)) { override fun connect(loc: Location, account: String): Link = throw app.unbraid.data.NoLongerOffered(a) }
+        val r = Route("1", Location("fake", countryCode = "NL", pinned = a))
+        val out = LinkPicker.pick(setup(r), emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), mapOf(LinkPicker.cacheKey(r) to link(a))) { gone }
+        assertTrue(out.links.isEmpty())
+        assertTrue(out.blocked.getValue("1") is app.unbraid.data.NoLongerOffered)
     }
 
     @Test fun aSignedOutProvidersRouteIsBlockedAndTheOthersStillRun() {

@@ -68,6 +68,9 @@ object LinkPicker {
             if (!r.imported) used += "${r.loc.provider}|${serverId(link.server)}"
             out[r.id] = link
         }
+        // A server no longer offered is gone for every route pinned to it, not only the one that asked.
+        val gone = blocked.entries.filter { it.value is app.unbraid.data.NoLongerOffered }.mapNotNull { (id, e) -> setup.route(id)?.loc?.let { l -> l.pinned?.let { "${l.provider}|${it.host}" to e } } }.toMap()
+        setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> r.loc.pinned?.let { gone["${r.loc.provider}|${it.host}"] }?.let { blocked[r.id] = it; out.remove(r.id) } }
         // A provider that refused its account refuses it for every route: none of them keeps a tunnel on it.
         val refusedBy = blocked.entries.filter { it.value is AuthException }.mapNotNull { (id, e) -> setup.route(id)?.takeIf { !it.imported }?.let { it.loc.provider to e } }.toMap()
         setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> refusedBy[r.loc.provider]?.let { blocked[r.id] = it; out.remove(r.id) } }
@@ -93,11 +96,13 @@ object LinkPicker {
         val p = providers(r.loc.provider) ?: error("Unknown provider ${r.loc.provider}")
         val acc = accounts[p.id] ?: throw AuthException("Sign in to ${p.name} for ${r.name}")
         val pinned = r.loc.pinned
+        // A pinned server starts from its last refreshed copy, so going offline never brings back older details.
+        val loc = pinned?.let { pin -> last[cacheKey(r)]?.server?.takeIf { it.host == pin.host }?.let { r.loc.copy(pinned = it) } } ?: r.loc
         val l = try {
-            again(p, r, acc, last, used) ?: p.connect(r.loc, acc)
+            again(p, r, acc, last, used) ?: p.connect(loc, acc)
         } catch (e: Exception) {
-            if (e is AuthException) throw e
-            last[cacheKey(r)]?.takeIf { trusted(it, r, accounts, providers) } ?: throw if (pinned != null) Fail("${r.name}: ${pinned.name} is unreachable") else e
+            if (e is AuthException || e is app.unbraid.data.NoLongerOffered) throw e
+            last[cacheKey(r)]?.takeIf { pinned == null || it.server.host == pinned.host }?.takeIf { trusted(it, r, accounts, providers) } ?: throw if (pinned != null) Fail("${r.name}: ${pinned.name} is unreachable") else e
         }
         if (pinned != null || "${p.id}|${serverId(l.server)}" !in used) return l
         val other = runCatching {
