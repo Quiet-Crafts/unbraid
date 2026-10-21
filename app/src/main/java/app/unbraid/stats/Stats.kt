@@ -9,6 +9,8 @@ import android.util.Log
 import androidx.core.database.sqlite.transaction
 import app.unbraid.Unbraid
 import app.unbraid.data.DIRECT
+import app.unbraid.data.Route
+import app.unbraid.data.Setup
 import app.unbraid.vpn.Compiler
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState.Phase
@@ -120,21 +122,52 @@ object Stats {
     private fun clearPending() { hourly.clear(); daily.clear(); servers.clear() }
 
     /** Exits keep the label they had when used, so history survives renames and removed routes. */
-    private fun labelExits(d: SQLiteDatabase, ids: List<String>) {
-        val setup = Unbraid.store.setup.value
-        ids.distinct().forEach { id ->
-            val r = setup.route(id)
-            val v = ContentValues()
-            when {
-                r != null -> { v.put("code", r.code); v.put("name", r.name); v.put("hue", r.hue); v.put("via", r.source) }
-                id == HOME -> { v.put("code", "HM"); v.put("name", "Home network"); v.put("hue", 3); v.put("via", listOfNotNull("Tailscale".takeIf { setup.tailscale }, "WireGuard".takeIf { setup.home.wg != null }).joinToString(" & ").ifEmpty { "Tailscale" }) }
-                id.startsWith(SpeedTest.NODE) -> { v.put("code", "TS"); v.put("name", UnbraidVpn.state.value.tsExitNodes.firstOrNull { SpeedTest.NODE + it.ip == id }?.name ?: id.removePrefix(SpeedTest.NODE)); v.put("hue", -1); v.put("via", "Tailscale") }
-                else -> return@forEach
-            }
-            v.put("id", id)
-            d.insertWithOnConflict("exit", null, v, SQLiteDatabase.CONFLICT_REPLACE)
-        }
+    private fun labelExits(d: SQLiteDatabase, ids: List<String>) = ids.distinct().forEach { id ->
+        val e = labels[id] ?: return@forEach
+        val v = ContentValues()
+        v.put("id", id); v.put("code", e.code); v.put("name", e.name); v.put("hue", e.hue); v.put("via", e.via)
+        d.insertWithOnConflict("exit", null, v, SQLiteDatabase.CONFLICT_REPLACE)
     }
+
+    /** Each exit's label as last noted, taken when its connections open or its test starts, not when the bytes are written. */
+    private val labels = java.util.concurrent.ConcurrentHashMap<String, Exit>()
+
+    /** Notes the label of exit [routeId] as [setup] has it, and returns the id its usage is recorded under ([idOf]). */
+    fun note(routeId: String, setup: Setup): String {
+        val r = setup.route(routeId)
+        val id = r?.let(::idOf) ?: routeId
+        when {
+            r != null -> Exit(id, r.code, r.name, r.hue, r.source)
+            id == HOME -> Exit(id, "HM", "Home network", 3, listOfNotNull("Tailscale".takeIf { setup.tailscale }, "WireGuard".takeIf { setup.home.wg != null }).joinToString(" & ").ifEmpty { "Tailscale" })
+            id.startsWith(SpeedTest.NODE) -> Exit(id, "TS", UnbraidVpn.state.value.tsExitNodes.firstOrNull { SpeedTest.NODE + it.ip == id }?.name ?: id.removePrefix(SpeedTest.NODE), -1, "Tailscale")
+            else -> null
+        }?.let { labels[id] = it }
+        return id
+    }
+
+    /** The id route [routeId] of [setup] is recorded under. */
+    fun idOf(routeId: String, setup: Setup) = setup.route(routeId)?.let(::idOf) ?: routeId
+
+    /**
+     * A route's id plus a digest of what carries it (provider and place, or the imported server), so a route moved to
+     * another provider or server starts a new history instead of relabelling the old one. Name, colour and the filter
+     * don't count. Only addresses, names and public keys go in, never a private key or password.
+     */
+    internal fun idOf(r: Route): String {
+        val l = r.loc
+        val what = when {
+            r.wg != null -> listOf("wg", r.wg.endpoint, r.wg.publicKey)
+            r.ovpn != null -> listOf("ovpn") + app.unbraid.data.Manual.ovpnServers(r.ovpn)
+            r.ss != null -> listOf("ss", r.ss.server, "${r.ss.port}")
+            r.tsExit != null -> listOf("ts", r.tsExit)
+            else -> listOf(l.provider, l.countryCode, l.countryId, l.cityId, l.city, l.region, l.group, l.protocol, l.pinned?.host).map { "$it" }
+        }
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(what.joinToString("\u0000").toByteArray())
+        return r.id + "@" + digest.take(5).joinToString("") { "%02x".format(it) }
+    }
+
+    /** Recorded before ids carried [idOf]'s digest: which provider or server carried it isn't known. */
+    fun legacy(id: String) = '@' !in id && id != HOME && id != DIRECT && !id.startsWith(SpeedTest.NODE)
 
     /** Worker only: keeps what the consent text promises, whatever else happens. */
     internal fun pruneNow() {
@@ -265,6 +298,11 @@ internal object Collector {
     private class Ev(val type: Long, val id: String, val total: Pair<Long, Long>?, val delta: Pair<Long, Long>, val uid: Int, val tag: String?, val closed: Boolean, val created: Long, val own: Boolean, val pkg: String?)
 
     private var client: CommandClient? = null
+    /**
+     * What the engine ran when this subscription began (the service resubscribes after each engine start): events
+     * still queued from the engine before are labelled by its setup, not the next one's.
+     */
+    private var engine = Triple(app.unbraid.data.Setup(), emptyMap<String, String>(), emptyMap<String, app.unbraid.data.Server>())
     private var interval = 0L
     private val seen = HashMap<String, Conn>()
     private var lastFlush = 0L
@@ -293,6 +331,7 @@ internal object Collector {
         // replay lands); a fresh start baselines what's open.
         countFrom = if (retime && client != null) minOf(countFrom, (heard.takeIf { it > 0 } ?: now) - 2_000) else Long.MAX_VALUE
         stopClient()
+        engine = Triple(UnbraidVpn.running ?: Unbraid.store.setup.value, UnbraidVpn.tags, UnbraidVpn.state.value.servers)
         startedAt = now
         interval = if (Stats.watching) 1_000_000_000L else 15_000_000_000L
         val c = Libbox.newCommandClient(Handler(Stats.gen), CommandClientOptions().apply {
@@ -368,13 +407,11 @@ internal object Collector {
      */
     private fun apply(events: List<Ev>, reset: Boolean) {
         val now = System.currentTimeMillis()
-        val setup = UnbraidVpn.running ?: Unbraid.store.setup.value
-        val servers = UnbraidVpn.state.value.servers
-        val tags = UnbraidVpn.tags
+        val (setup, tags, servers) = engine
         val open = { e: Ev ->
             val app = if (e.own) Stats.ctx.packageName else appOf(e)
             val exit = (if (e.own) SpeedTest.exitOn(e.tag) else null) ?: exitOf(e.tag, app, setup, tags)
-            Conn(app, exit, servers[exit]?.name, 0, 0)
+            Conn(app, Stats.note(exit, setup), servers[exit]?.name, 0, 0)
         }
         val replayed = HashSet<String>()
         var batch = false

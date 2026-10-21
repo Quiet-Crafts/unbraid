@@ -173,12 +173,14 @@ private fun load(p: Period, ui: Ui): View {
     val from = a.toEpochDay(); val to = b.toEpochDay()
     val setup = ui.setup.value
     val stored = Stats.exits()
-    val exits = (stored.keys + setup.routes.map { it.id } + DIRECT).associateWith { id ->
-        val r = setup.route(id); val s = stored[id]
+    // History is keyed by what carried it: today's routes label only their own ids, older ones keep their stored label.
+    val current = (setup.routes + UnbraidVpn.running?.routes.orEmpty()).associateBy { Stats.idOf(it) }
+    val exits = (stored.keys + current.keys + DIRECT).associateWith { id ->
+        val r = current[id]; val s = stored[id]
         when {
             r != null -> Ex(id, r.code, r.name, r.source, Ink.route(r.hue))
             id == DIRECT -> Ex(id, "··", "Direct", "outside the VPN", Ink.direct)
-            s != null -> Ex(id, s.code, s.name, s.via, if (s.hue < 0) Ink.text else Ink.route(s.hue))
+            s != null -> Ex(id, s.code, s.name, if (Stats.legacy(id)) "Unknown (older data)" else s.via, if (s.hue < 0) Ink.text else Ink.route(s.hue))
             else -> Ex(id, "?", id, "", Ink.faint)
         }
     }
@@ -735,7 +737,8 @@ private fun Legend2(c: Color, t: String) = Row(verticalAlignment = Alignment.Cen
 private fun Tunnels(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, go: (String?) -> Unit) {
     // Every exit in use or tested: fastest download test first, the rest by name.
     val fastest = v::fastestDown
-    val ids = (UnbraidVpn.tags.keys.filter { it != DIRECT } + v.tests.keys).distinct()
+    val running = UnbraidVpn.running ?: Unbraid.store.setup.value
+    val ids = (UnbraidVpn.tags.keys.filter { it != DIRECT }.map { Stats.idOf(it, running) } + v.tests.keys).distinct()
         .sortedWith(compareByDescending<String> { fastest(it) }.thenBy { v.exits[it]?.name ?: it })
     val top = ids.maxOfOrNull(fastest)?.coerceAtLeast(1) ?: 1
     val bestTest = v.tests.values.maxByOrNull { it.down }
@@ -812,7 +815,9 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
     val setup by ui.setup.collectAsStateWithLifecycle()
     // Routed exits by name, then the tailnet's other exit nodes (tested by switching Tailscale to them for the test).
     val options = remember(vpn.phase, vpn.tsExitNodes, v.exits) {
-        UnbraidVpn.tags.keys.filter { it != DIRECT }.map { v.exits[it] ?: Ex(it, "?", it, "", Ink.faint) }.sortedBy { it.name } +
+        // Tests start by route id; the label is that of the route's current history.
+        val running = UnbraidVpn.running ?: setup
+        UnbraidVpn.tags.keys.filter { it != DIRECT }.map { (v.exits[Stats.idOf(it, running)] ?: Ex(it, "?", it, "", Ink.faint)).copy(id = it) }.sortedBy { it.name } +
             SpeedTest.nodes().map { Ex(SpeedTest.NODE + it.ip, "TS", it.name, "Tailscale", Ink.text) }
     }
     var chosen by rememberSaveable { mutableStateOf(options.firstOrNull()?.id) }

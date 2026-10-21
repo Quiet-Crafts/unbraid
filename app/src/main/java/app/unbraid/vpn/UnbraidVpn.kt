@@ -350,7 +350,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         var input = input(setup, links, blocked)
         var json = Compiler.compile(input)
         // A favourite, a rename or a second sign-in changes the setup but not what the engine runs: keep every tunnel up.
-        if (json != lastGood) {
+        val fresh = json != lastGood
+        if (fresh) {
             // Every engine start gets a new loopback port and password: while an old engine lets go of its port, a local
             // app could take it over and see that engine's password, which no later engine accepts. The app's own tests
             // get the new pair only once the new engine runs.
@@ -370,12 +371,15 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             lastInput = input
             // The new engine numbers its connections afresh; stats read the new servers when they first see them.
             state.update { it.copy(servers = links.mapValues { l -> l.value.server }) }
-            app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() }
         }
         lastGood = json
         tunnelDns = runCatching { Compiler.probeDns(json) }.getOrDefault(emptyMap())
         tags = Compiler.shared(setup, links, blocked) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG }
+        val was = running
         running = setup
+        // After tags and running, which stats label new connections by; also when only the setup changed (a city that
+        // resolves to the same server is still another place in the history).
+        if (fresh || was != setup) app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() }
         applied = setup
         appliedAccounts = accounts
         rejected = null

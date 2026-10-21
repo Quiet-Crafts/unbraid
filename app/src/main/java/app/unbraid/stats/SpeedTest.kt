@@ -59,7 +59,8 @@ object SpeedTest {
         val tag = if (node != null) Compiler.TS_TAG else UnbraidVpn.tags[exit] ?: return false
         cancel()
         if (Unbraid.store.testsToday >= PER_DAY) { _run.value = Run(exit, Phase.Failed, error = "M-Lab allows $PER_DAY tests a day. Try again tomorrow."); return false }
-        val route = Unbraid.store.setup.value.route(exit)
+        val setup = UnbraidVpn.running ?: Unbraid.store.setup.value // what the engine runs, for the label and the record
+        val route = setup.route(exit)
         val vpnServer = UnbraidVpn.state.value.servers[exit]
         val via = node?.let { "Tailscale" } ?: route?.source.orEmpty()
         val name = node?.name ?: vpnServer?.name ?: route?.name.orEmpty()
@@ -67,6 +68,7 @@ object SpeedTest {
         // Provider routes know their country; imported servers and Tailscale nodes are located by their address alone.
         val country = route?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()?.takeIf { !anywhere }
         val epoch = Stats.epoch
+        val recordAs = Stats.note(exit, setup)
         val mine = synchronized(lock) { _run.value = Run(exit); ++attempt }
         val stop = { attempt != mine }
         val set = { f: (Run) -> Run -> synchronized(lock) { if (!stop()) _run.value?.let { _run.value = f(it) } } }
@@ -87,9 +89,11 @@ object SpeedTest {
                 set { it.copy(phase = Phase.Upload, down = down, now = 0) }
                 val up = Ndt7.upload(tag, server.upload, stop) { bps -> set { it.copy(now = bps, elapsedMs = elapsed()) } }
                 if (stop()) return@Runnable
+                // Moved to another provider or server meanwhile: the numbers belong to neither.
+                if (Stats.idOf(exit, UnbraidVpn.running ?: setup) != recordAs) { set { it.copy(phase = Phase.Failed, error = "The route changed during the test. Try again.") }; return@Runnable }
                 set { it.copy(phase = Phase.Done, up = up, now = 0, elapsedMs = MAX_SECONDS * 1000L) }
                 val done = _run.value ?: return@Runnable
-                Stats.saveTest(Stats.Test(System.currentTimeMillis(), exit, via, name, ip, down, up, done.ping?.median ?: 0, 0, 0), epoch)
+                Stats.saveTest(Stats.Test(System.currentTimeMillis(), recordAs, via, name, ip, down, up, done.ping?.median ?: 0, 0, 0), epoch)
             } catch (e: Exception) {
                 set { it.copy(phase = Phase.Failed, error = "The test couldn't finish. Check the connection and try again.") }
             } finally {
