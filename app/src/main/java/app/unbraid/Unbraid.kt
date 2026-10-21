@@ -35,8 +35,8 @@ class Unbraid : Application() {
         // Files other Tailscale devices sent before receiving them was turned off: the engine no longer accepts any.
         if (!java.io.File(filesDir, "box/Taildrop").deleteRecursively()) android.util.Log.w("Unbraid", "old received files not deleted")
         app.unbraid.data.Snapshot.dir = filesDir
-        // The home-screen widget mirrors every connection change.
-        UnbraidVpn.state.map { it.phase }.distinctUntilChanged().onEach { StatusWidget.update(this) }.launchIn(MainScope())
+        // The home-screen widget mirrors every connection change, and whether running protects anything.
+        combine(UnbraidVpn.state.map { it.phase }, store.setup.map { it.directOnly }) { p, d -> p to d }.distinctUntilChanged().onEach { StatusWidget.update(this) }.launchIn(MainScope())
         // Statistics follow the connection while they're on: sessions from the phase, traffic from the running engine.
         Stats.init(this)
         combine(UnbraidVpn.state.map { it.phase }, store.setup.map { it.prefs.stats }) { p, on -> p to on }.distinctUntilChanged().onEach { (p, on) ->

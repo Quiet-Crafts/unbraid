@@ -128,6 +128,8 @@ data class Setup(
     val tsExit get() = activeRoutes.firstNotNullOfOrNull { it.tsExit }
     /** Tailscale runs for home access or for an exit-node route. */
     val tailscale get() = home.tailscale || tsExit != null
+    /** Nothing goes through a VPN (Direct default, no app on a route, no home tunnel): running protects nothing. */
+    val directOnly get() = defaultRoute == DIRECT && apps.values.all { it == DIRECT } && home.wg == null && !home.tailscale
 }
 
 @Serializable

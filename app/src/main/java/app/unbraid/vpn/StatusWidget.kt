@@ -49,7 +49,7 @@ class StatusWidget : AppWidgetProvider() {
 
         private fun views(ctx: Context): RemoteViews {
             val l = when (UnbraidVpn.state.value.phase) {
-                Phase.On -> Look(GOOD, R.drawable.ic_tile, "Pause", TOP, TEXT, "pause", "protected")
+                Phase.On -> Look(GOOD, R.drawable.ic_tile, "Pause", TOP, TEXT, "pause", if (app.unbraid.Unbraid.store.setup.value.directOnly) "connected" else "protected")
                 Phase.Connecting -> Look(TOP, R.drawable.ic_tile, "Connecting", TOP, TEXT, null, "connecting")
                 Phase.Paused -> Look(ACCENT, R.drawable.ic_w_pause, "Resume", ACCENT, ON_ACCENT, "connect", "paused")
                 Phase.Off -> Look(BAD, R.drawable.ic_w_off, "Connect", ACCENT, ON_ACCENT, "connect", "not protected")

@@ -132,7 +132,7 @@ private fun bytes(b: Long): Pair<String, String> = when {
  * Tailscale, or the home network. Drawn in neutral tones: route colours mean exits only.
  */
 private fun providerOf(id: String, ex: Ex?): String = when {
-    id == DIRECT -> "Direct, no VPN" // only counted under lockdown, when Direct goes through the app
+    id == DIRECT -> "Direct, no VPN" // apps following a Direct default, and Direct apps under lockdown
     id == Stats.HOME -> "Home network"
     ex == null || ex.via.isEmpty() -> "Other"
     ex.via in setOf("WireGuard", "OpenVPN", "Shadowsocks") -> "Own servers"
@@ -180,7 +180,9 @@ private fun load(p: Period, ui: Ui): View {
         when {
             r != null -> Ex(id, r.code, r.name, r.source, Ink.route(r.hue))
             id == DIRECT -> Ex(id, "··", "Direct", "outside the VPN", Ink.direct)
-            s != null -> Ex(id, s.code, s.name, if (Stats.legacy(id)) "Unknown (older data)" else s.via, if (s.hue < 0) Ink.text else Ink.route(s.hue))
+            // Older rows of a route sit beside its new history: their name says so, or both would read the same.
+            s != null && Stats.legacy(id) -> Ex(id, s.code, "${s.name} (older data)", "Unknown (older data)", if (s.hue < 0) Ink.text else Ink.route(s.hue))
+            s != null -> Ex(id, s.code, s.name, s.via, if (s.hue < 0) Ink.text else Ink.route(s.hue))
             else -> Ex(id, "?", id, "", Ink.faint)
         }
     }

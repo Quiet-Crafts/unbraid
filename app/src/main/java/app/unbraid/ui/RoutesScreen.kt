@@ -167,9 +167,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     Screen(
         overline = "",
         overlineContent = { Status(vpn) },
-        // Running with only Direct in use (no app on a VPN, no home tunnel) protects nothing: it says connected.
         title = when (vpn.phase) {
-            Phase.On -> if (setup.defaultRoute == DIRECT && setup.apps.values.all { it == DIRECT } && setup.home.wg == null && !setup.home.tailscale) "Connected" else "Protected"
+            Phase.On -> if (setup.directOnly) "Connected" else "Protected"
             Phase.Paused -> "Paused"; Phase.Connecting -> "Connecting"; Phase.Off -> "Unprotected"
         },
         subColor = if (vpn.error != null) Ink.bad else Ink.dim,
