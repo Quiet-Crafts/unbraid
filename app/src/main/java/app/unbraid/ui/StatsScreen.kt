@@ -737,8 +737,8 @@ private fun Legend2(c: Color, t: String) = Row(verticalAlignment = Alignment.Cen
 private fun Tunnels(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, go: (String?) -> Unit) {
     // Every exit in use or tested: fastest download test first, the rest by name.
     val fastest = v::fastestDown
-    val running = UnbraidVpn.running ?: Unbraid.store.setup.value
-    val ids = (UnbraidVpn.tags.keys.filter { it != DIRECT }.map { Stats.idOf(it, running) } + v.tests.keys).distinct()
+    val inUse = UnbraidVpn.running?.let { r -> UnbraidVpn.tags.keys.filter { it != DIRECT }.map { Stats.idOf(it, r) } }.orEmpty()
+    val ids = (inUse + v.tests.keys).distinct()
         .sortedWith(compareByDescending<String> { fastest(it) }.thenBy { v.exits[it]?.name ?: it })
     val top = ids.maxOfOrNull(fastest)?.coerceAtLeast(1) ?: 1
     val bestTest = v.tests.values.maxByOrNull { it.down }
