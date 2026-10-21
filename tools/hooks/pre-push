@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Guard for the public repo: refuses the pre-publication history and any commit whose tree holds internal, secret or
+build-output paths. Anything it can't read is refused too. Install once per clone: git config core.hooksPath tools/hooks"""
+import re
+import subprocess
+import sys
+
+OLD_ROOT = "52c2d10a10df2711dd7b3ac158c2ae743d29d6cf"
+BAD = re.compile(
+    r"(^|/)(_INTERNAL|docs|\.secrets|\.claude|\.playwright-mcp|probe|dist)/"
+    r"|(^|/)(CHANGELOG\.md|AGENTS\.md|CLAUDE\.md|local\.properties|\.DS_Store)$"
+    r"|\.(jks|keystore|p12|pfx|pem|key|conf|ovpn|apk|aab|aar|bundle)$")
+# Synthetic configs the import tests read.
+FIXTURE = re.compile(r"^app/src/test/resources/ovpn/[^/]+\.ovpn$")
+
+
+def git(*args, ok=(0,)):
+    # Replacement refs could show a clean stand-in for what the push actually sends.
+    r = subprocess.run(["git", "--no-replace-objects", *args], capture_output=True)
+    if r.returncode not in ok:
+        raise RuntimeError(f"git {' '.join(args)}: {r.stderr.decode(errors='replace').strip()}")
+    return r
+
+
+def commit_of(sha):
+    kind = git("cat-file", "-t", sha).stdout.decode().strip()
+    if kind == "tag":
+        sha, kind = git("rev-parse", f"{sha}^{{}}").stdout.decode().strip(), None
+        kind = git("cat-file", "-t", sha).stdout.decode().strip()
+    if kind != "commit":
+        raise RuntimeError(f"{sha} is a {kind}, not a commit")
+    return sha
+
+
+def problems(lref, lsha):
+    if git("rev-parse", "--is-shallow-repository").stdout.strip() != b"false":
+        raise RuntimeError("a shallow clone can't show the whole history")
+    sha = commit_of(lsha)
+    if git("cat-file", "-e", OLD_ROOT, ok=(0, 1, 128)).returncode == 0 and \
+            git("merge-base", "--is-ancestor", OLD_ROOT, sha, ok=(0, 1)).returncode == 0:
+        return [f"{lref} is built on the pre-publication history"]
+    out = []
+    for c in git("rev-list", sha).stdout.decode().split():
+        names = git("ls-tree", "-r", "-z", "--name-only", c).stdout.decode(errors="surrogateescape").split("\0")
+        hits = [n for n in names if n and BAD.search(n) and not FIXTURE.fullmatch(n)]
+        if hits:
+            out.append(f"{c} ({lref}) contains internal or secret paths: " + ", ".join(map(repr, hits[:5])))
+    return out
+
+
+def main():
+    status = 0
+    for line in sys.stdin:
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            lref, lsha = parts[0], parts[1]
+            if set(lsha) == {"0"}:
+                continue  # a deletion publishes nothing
+            found = problems(lref, lsha)
+        except (IndexError, RuntimeError) as e:
+            found = [f"can't check {line.strip()!r}: {e}"]
+        for p in found:
+            print(f"pre-push: {p}; not pushing.", file=sys.stderr)
+            status = 1
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())
