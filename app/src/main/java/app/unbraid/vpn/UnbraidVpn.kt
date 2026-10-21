@@ -415,7 +415,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         probe = null
         val last = lastInput ?: return false
         val next = newProbe()
-        val input = Compiler.Input(last.setup, last.links, last.selfPackage, last.lockdown, last.tsDir, last.cacheFile, last.tsSuffix, next, last.fakeBlock, last.blocked, last.tsLoginPending)
+        // What ran, but never with tailnet DNS authority or a sign-in way around the exit that was taken back since.
+        val now = store.setup.value.home
+        val input = Compiler.Input(last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = now.tsSuffixAllowed)), last.links, last.selfPackage, last.lockdown,
+            last.tsDir, last.cacheFile, store.tsSuffix, next, last.fakeBlock, last.blocked, last.tsLoginPending && tsLoginPending)
         val json = Compiler.compile(input)
         srv.startOrReloadService(json, OverrideOptions())
         lastBlock = input.fakeBlock

@@ -41,13 +41,14 @@ object Surfshark : KeyProvider() {
     override val defaultMtu = 1280
 
     internal var catalogue: () -> List<Catalog.Entry> = { Catalog.fetch("surfshark", "wireguard") }
-        set(v) { field = v; synchronized(this) { addressList = null } } // another source: read it afresh
+        set(v) { field = v; synchronized(this) { addressList = null; triedAt = 0 } } // another source: read it afresh
 
     /** The last address list read, kept for when the catalogue can't be read. */
     internal var addressBook: Snapshot = Snapshot.file("addresses-surfshark.json")
     private val book = MapSerializer(String.serializer(), ListSerializer(String.serializer()))
     private var addressList: Map<String, List<String>>? = null
     private var addressesAt = 0L
+    private var triedAt = 0L
 
     /**
      * Host name → IPv4 addresses from gluetun's catalogue, read at most once a day; the last copy when it can't be read,
@@ -56,6 +57,9 @@ object Surfshark : KeyProvider() {
     @Synchronized
     internal fun addresses(now: Long = System.currentTimeMillis()): Map<String, List<String>> {
         addressList?.takeIf { now - addressesAt < 86_400_000 }?.let { return it }
+        // A failed read waits 15 minutes before the next, also with nothing kept to fall back on.
+        if (addressList == null && now - triedAt < 15 * 60_000) throw IOException("Surfshark's server addresses can't be read right now")
+        triedAt = now
         val fresh = try { literal(fallback(catalogue()).associate { it.hostname to it.ips }) } catch (_: IOException) { null }
         if (!fresh.isNullOrEmpty()) { addressList = fresh; addressesAt = now; addressBook.write(NordApi.json.encodeToString(book, fresh)) }
         else {

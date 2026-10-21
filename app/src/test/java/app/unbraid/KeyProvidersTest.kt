@@ -251,6 +251,17 @@ class KeyProvidersTest {
         Surfshark.live = { throw IOException("offline") }
     }
 
+    /** With nothing kept and the catalogue down, it is asked again only after 15 minutes. */
+    @Test fun surfsharkWaitsBeforeAskingAFailedCatalogueAgain() {
+        var reads = 0
+        Surfshark.catalogue = { reads++; throw IOException("offline") }
+        val t = System.currentTimeMillis()
+        repeat(3) { try { Surfshark.addresses(t + it * 60_000L); fail() } catch (_: IOException) {} }
+        assertEquals(1, reads)
+        try { Surfshark.addresses(t + 16 * 60_000L) } catch (_: IOException) {}
+        assertEquals(2, reads)
+    }
+
     @Test fun surfsharkSkipsHostsWithoutAnAddress() {
         val wanted = clusters.last { it.place == "Germany" }
         Surfshark.catalogue = { listOf(Catalog.Entry("wireguard", "Germany", hostname = wanted.hostname, wgpubkey = "unused", ips = listOf("198.51.100.9"))) }
