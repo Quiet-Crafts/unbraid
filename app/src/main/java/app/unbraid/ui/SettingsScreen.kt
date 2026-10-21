@@ -214,7 +214,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     val tips = ui.tips?.tips?.collectAsStateWithLifecycle()?.value.orEmpty()
     val thanked = ui.tips?.thanked?.collectAsStateWithLifecycle()?.value == true
     LaunchedEffect(thanked) { if (thanked) { delay(6_000); ui.tips?.thanked?.value = false } }
-    // The store is contacted only while the tip screen is open.
+    // unbraid asks the store for prices and open purchases when this page opens or comes back.
     LifecycleResumeEffect(page) { if (page == "about") ui.tips?.refresh(); onPauseOrDispose {} }
 
     val customDns = prefs.customDns.isNotEmpty()

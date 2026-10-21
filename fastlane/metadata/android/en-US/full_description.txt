@@ -28,9 +28,9 @@ FEATURES
 - A low-load server chosen automatically for providers that publish server load.
 - Choose a country or city, or pin one server. Favourites stay on top.
 - Per-route ad and tracker blocking with the provider's own blocking DNS, where it has one.
-- Pause for 5 minutes to an hour; it reconnects by itself.
+- Pause for 5 minutes to an hour; it reconnects by itself (Android may delay it).
 - Home-screen widget and quick-settings tile.
-- Custom DNS and local network access.
+- Custom DNS (it replaces provider blocking) and local network access.
 
 LIMITS
 - Android allows one active VPN at a time. unbraid cannot run next to another VPN app, including the official apps of the providers above.
@@ -38,14 +38,16 @@ LIMITS
 - Needs Android 13 or later. The build is for 64-bit ARM devices.
 
 PRIVACY
-There are no ads or analytics, and you don't need an unbraid account. unbraid has no servers. It connects to:
+No ads and no unbraid account. We add no analytics of our own. unbraid has no servers. It connects to:
 - the VPN services and servers you choose;
 - DNS from your provider or config, the DNS you set, or Quad9 as a fallback (your phone's own DNS for server addresses, local names and Direct apps);
 - Tailscale's servers and relays, if you turn Tailscale on;
-- Google and Cloudflare, for connection checks through the provider tunnels it picks;
+- Google and Cloudflare, for connection checks through the provider tunnels it picks (Google also over your own connection if all fail);
 - GitHub, for some public server lists;
 - M-Lab, only when you start a speed test;
-- Google Play, in the Google Play version, when you open About & support. Passwords, tokens and keys are stored encrypted with an Android Keystore key, and are sent only to the service they belong to, to sign in or connect. The list of installed apps is read on the device only to let you assign routes, and is never sent anywhere. Privacy policy: https://unbraid.app/privacy
+- Google Play for optional tips in the Play version. Google's Billing library may also send technical data in the background.
+
+Logins and keys are encrypted with an Android Keystore key and sent only to the service they belong to. Your installed-app list stays on your phone. Privacy policy: https://unbraid.app/privacy
 
 PERMISSIONS
 unbraid asks to see all installed apps, because per-app routing needs the full list. It uses a foreground service and a notification while the VPN runs.

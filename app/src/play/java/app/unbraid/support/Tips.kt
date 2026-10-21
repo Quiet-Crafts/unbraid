@@ -35,7 +35,9 @@ object Tips {
 
 /**
  * Tips are consumable one-time products: each purchase is consumed right away so the same tip can be given again,
- * and nothing is unlocked. Play is contacted only once the tip screen opens ([refresh]), never at app start.
+ * and nothing is unlocked. The client is built when the interface starts; it connects, checks open purchases and loads
+ * prices ([refresh]) when About & support opens or comes back, and during a purchase. It stays connected until the
+ * interface is cleared ([close]), and Google's library may do work of its own meanwhile.
  * Purchases that completed while the app was away (pending payments, an interrupted flow) are consumed the next time
  * that screen opens; unconsumed ones Play refunds after three days.
  */

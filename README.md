@@ -31,7 +31,8 @@ apps -> TUN -> sing-box -> rules: DNS, home, LAN, the app's route, default
 ```
 
 Each TCP and UDP connection is routed by the app that owns it, which Android reports through
-`ConnectivityManager.getConnectionOwnerUid`. Ping has no owning app, so it follows the default route (when Direct is the default and other apps use VPN routes, internet ping is blocked instead). DNS is answered with fake addresses and looked up again on the exit
+`ConnectivityManager.getConnectionOwnerUid`. When an app hands a connection to another app or system service, such as
+for a download, a browser tab or a push message, that connection follows the other app or service's route. Ping has no owning app, so it follows the default route (when Direct is the default and other apps use VPN routes, internet ping is blocked instead). DNS is answered with fake addresses and looked up again on the exit
 the app really uses, so a site sees the country you picked for that app. Apps you set to Direct are left out of the
 VPN by Android itself; apps that only follow a Direct default route still go through unbraid. If you turn on "Block connections without VPN", they are sent out directly from inside the
 app instead. Only the default route and the routes your apps use are connected.
@@ -71,7 +72,8 @@ exists, so a plain checkout builds an unsigned APK.
 
 ## Privacy
 
-There are no ads or analytics, and you don't need an unbraid account. Your provider credentials are encrypted with
+We add no advertising or analytics of our own. The Play version includes Google's Billing library for optional tips.
+You don't need an unbraid account. Your provider credentials are encrypted with
 an Android Keystore key and are only sent to the service they belong to. The list of installed apps is read on the
 phone so you can assign routes, and it never leaves the phone. App data is excluded from backups. The privacy
 policy, with every service the app talks to, is at [unbraid.app/privacy](https://unbraid.app/privacy).
