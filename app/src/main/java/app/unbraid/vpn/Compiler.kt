@@ -115,6 +115,8 @@ object Compiler {
         val homeTs = s.home.tailscale
         // A route on its OpenVPN server's pushed DNS asks that tunnel's one DNS server (the engine allows one per tunnel).
         val ovpnDns = { id: String -> i.links[id] is OvpnLink && s.route(id)?.let(pushedDns) == true }
+        // A filter reached by name, on an imported OpenVPN route, is looked up with that tunnel's pushed DNS (it may only be known there).
+        val ovpnBoot = { id: String -> filterRoutes && filter != null && Filters.byName(filter) && i.links[id] is OvpnLink && s.route(id)?.imported == true }
         val dnsFor = { id: String -> if (id == FILTERED) "dns-filter" else if (id == DIRECT) "local" else if (ovpnDns(id)) "dns-ovpn-${tag(id)}" else "dns-r-$id" }
         val directFiltered = filter != null && s.prefs.filter.direct && s.defaultRoute == DIRECT
         val defaultDns = if (directFiltered && !defaultBlocked) "dns-filter" else if (s.defaultRoute == DIRECT || defaultBlocked || active.isEmpty()) "local" else dnsFor(s.defaultRoute)
@@ -143,7 +145,8 @@ object Compiler {
                         val own = obj("type" to "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))
                         if (filter == null || !filterRoutes) add(own) else {
                             // A filter reached by name is looked up first through the same tunnel, with the route's own resolver.
-                            if (Filters.byName(filter)) add(JsonObject(own + ("tag" to JsonPrimitive("boot-r-${r.id}"))))
+                            if (ovpnBoot(r.id)) add(obj("type" to "openvpn", "tag" to "boot-r-${r.id}", "endpoint" to tag(r.id), "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9"))
+                            else if (Filters.byName(filter)) add(JsonObject(own + ("tag" to JsonPrimitive("boot-r-${r.id}"))))
                             add(filterDns(filter, "dns-r-${r.id}", tag(r.id), "boot-r-${r.id}"))
                         }
                     }
@@ -210,7 +213,7 @@ object Compiler {
                     when (val l = i.links.getValue(r.id)) {
                         is WgLink -> add(wg(tag(r.id), l.peer, r.name))
                         // Keeps the pushed DNS if any route on this tunnel uses it, not only the route that owns it.
-                        is OvpnLink -> Manual.ovpnEndpoint(tag(r.id), l.profile).let { e -> add(if (active.any { tag(it.id) == tag(r.id) && ovpnDns(it.id) }) openVpn(e) else e) }
+                        is OvpnLink -> Manual.ovpnEndpoint(tag(r.id), l.profile).let { e -> add(if (active.any { tag(it.id) == tag(r.id) && (ovpnDns(it.id) || ovpnBoot(it.id)) }) openVpn(e) else e) }
                         is SsLink, is TsLink -> Unit
                     }
                 }

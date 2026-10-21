@@ -63,7 +63,7 @@ object Filters {
     fun own(text: String): Dns? {
         val t = text.trim()
         if (IPV4.matches(t)) return Dns(OWN, t, "", t, null, null)
-        val m = Regex("(https|tls)://([A-Za-z0-9.-]+)(?::(\\d{1,5}))?(/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?").matchEntire(t) ?: return null
+        val m = Regex("(https|tls)://([A-Za-z0-9.-]+)(?::(\\d{1,5}))?(/(?:[A-Za-z0-9._~!$&'()*+,;=:@/-]|%[0-9A-Fa-f]{2})*)?").matchEntire(t) ?: return null
         val (scheme, rawHost, port, path) = m.destructured
         val host = rawHost.lowercase().trimEnd('.')
         if (!IPV4.matches(host) && !HOST.matches(host)) return null

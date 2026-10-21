@@ -418,17 +418,20 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 if (filterDns != null) {
                     val providers = signedIn.mapNotNull { pr -> pr.protection?.takeIf { setup.opt(pr.id, app.unbraid.data.PROTECT) == "on" }?.label }
                     group("Where it applies", listOf(
-                        Item("VPN routes", if (filter.routes) "Replaces the protection set on each provider" + (if (providers.isNotEmpty()) " (${providers.joinToString()})" else "") + ". Asked through each route's own tunnel"
+                        Item("VPN routes", if (filter.routes) "Replaces each provider's own blocking" + (if (providers.isNotEmpty()) " (${providers.joinToString()})" else "")
                             else "Off · each route uses its provider's own DNS and blocking", { setFilter { it.copy(routes = !it.routes) } }, checked = filter.routes) { Toggle(filter.routes) },
                         Item("Direct traffic through $APP", "Apps that follow a Direct default route", { setFilter { it.copy(direct = !it.direct) } }, checked = filter.direct) { Toggle(filter.direct) },
                     ))
                     group("Apps set to Direct", listOf(
                         Item("Outside $APP", "They never touch the VPN and use the phone's DNS", { setFilter { it.copy(directApps = false) } }, selected = !filter.directApps) { Radio(!filter.directApps) },
-                        Item("Through $APP", "Still straight out, not through a tunnel, but their lookups use this filter. They can see a VPN is on, which some banking and streaming apps refuse",
+                        Item("Through $APP", "Traffic still goes straight out; lookups use this filter",
                             { setFilter { it.copy(directApps = true) } }, selected = filter.directApps) { Radio(filter.directApps) },
                     ))
-                    caption(if (vpn.lockdown && running) "Block connections without VPN is on, so every app passes through $APP: apps kept outside use the phone's DNS until it is off."
-                        else "Each Direct app can be set on its own in Apps.")
+                    caption(listOfNotNull(
+                        "On VPN routes the filter is asked inside each route's own tunnel.".takeIf { filter.routes },
+                        "Apps that pass through can see a VPN is on, which some banking and streaming apps refuse.".takeIf { filter.directApps },
+                        if (vpn.lockdown && running) "Block connections without VPN is on, so every app passes through $APP: apps kept outside use the phone's DNS until it is off." else "Each Direct app can be set on its own in Apps.",
+                    ).joinToString(" "))
                     filterDns.privateDns?.takeIf { !filter.directApps }?.let { host ->
                         group(null, listOf(Item("Private DNS for apps outside $APP", "Android can send them to $host. It then applies to every app, and apps on routes skip their routes' DNS. Tap to copy it and open Android settings", {
                             context.getSystemService(android.content.ClipboardManager::class.java)?.setPrimaryClip(android.content.ClipData.newPlainText("Private DNS", host))
