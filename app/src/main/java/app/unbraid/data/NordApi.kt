@@ -33,7 +33,7 @@ object NordApi {
             when (c.responseCode) {
                 200 -> return c.inputStream.use { String(it.readNBytes(MAX_BODY + 1).also { b -> if (b.size > MAX_BODY) throw IOException("Response too large") }) }
                 401 -> throw AuthException("NordVPN rejected the token. Sign in again.")
-                else -> throw IOException("NordVPN API ${c.responseCode}")
+                else -> throw Http.Status(c.responseCode, "NordVPN API ${c.responseCode}")
             }
         } finally {
             c.disconnect()
@@ -43,7 +43,7 @@ object NordApi {
     /** NordLynx private key plus the service username/password OpenVPN needs. */
     fun credentials(token: String): Triple<String, String, String> {
         val o = Http.parsed("NordVPN") { json.parseToJsonElement(get("/users/services/credentials", token)).jsonObject }
-        fun f(k: String) = o[k]!!.jsonPrimitive.content
+        fun f(k: String) = o[k]?.jsonPrimitive?.content ?: throw app.unbraid.vpn.Fail("Unexpected reply from NordVPN. Try again later")
         return Triple(f("nordlynx_private_key"), f("username"), f("password"))
     }
 

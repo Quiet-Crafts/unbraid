@@ -138,8 +138,11 @@ class Ui(app: Application) : AndroidViewModel(app) {
                 refreshCountries(id)
                 null
             }.getOrElse { Http.explain(it, provider.name) }
-            if (!dismissed.remove(id)) error?.let { formError[id] = it }
-            _signing.update { it - id }
+            // On the main thread, like Back: a form closed now never gets this attempt's error.
+            withContext(Dispatchers.Main) {
+                if (!dismissed.remove(id)) error?.let { formError[id] = it }
+                _signing.update { it - id }
+            }
         }
     }
 

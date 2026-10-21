@@ -77,6 +77,14 @@ object Ivpn : Provider {
         false
     }
 
+    /** IVPN's session status answers 601 (session not found) once the session was logged out elsewhere. */
+    override fun revoked(account: String): Boolean = try {
+        sessionGone(postJsonRaw("$API/v4/session/status", buildJsonObject { put("session_token", account(account).sessionToken) }.toString()))
+    } catch (e: IOException) { false }
+
+    internal fun sessionGone(reply: Pair<Int, String>) =
+        (runCatching { NordApi.json.decodeFromString(SessionReply.serializer(), reply.second).status }.getOrNull() ?: reply.first).let { it == 601 || it == 401 }
+
     internal fun session(reply: Pair<Int, String>, account: String, privateKey: String): String {
         val (code, body) = reply
         val o = Http.parsed("IVPN") { NordApi.json.decodeFromString(SessionReply.serializer(), body) }
@@ -87,10 +95,10 @@ object Ivpn : Provider {
             702 -> throw AuthException("This IVPN account isn't active. Renew it first.")
             70001, 70002 -> throw AuthException("IVPN is asking for a captcha. Log in once on ivpn.net or in the IVPN app, then try again.")
             70011, 70012 -> throw AuthException("This IVPN account uses two-factor authentication, which $APP can't complete yet.")
-            else -> throw IOException("IVPN error $status")
+            else -> throw Http.Status(status, "IVPN error $status")
         }
-        val ip = o.wireguard?.ipAddress ?: throw IOException("IVPN didn't assign a WireGuard address")
-        val token = o.token ?: throw IOException("IVPN didn't return a session")
+        val ip = o.wireguard?.ipAddress ?: throw app.unbraid.vpn.Fail("IVPN didn't assign a WireGuard address. Try again later")
+        val token = o.token ?: throw app.unbraid.vpn.Fail("IVPN didn't return a session. Try again later")
         return NordApi.json.encodeToString(Account.serializer(), Account(account, token, privateKey, ip.substringBefore('/')))
     }
 

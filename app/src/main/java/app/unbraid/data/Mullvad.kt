@@ -141,6 +141,13 @@ object Mullvad : Provider {
         false
     }
 
+    /** Mullvad answers 404 for a device removed from the account. */
+    override fun revoked(account: String): Boolean = try {
+        val a = account(account)
+        Http.get("$API/accounts/v1/devices/${Http.enc(a.deviceId)}", bearer(accessToken(a.account)))
+        false
+    } catch (e: Http.Status) { e.code == 404 } catch (e: AuthException) { true } catch (e: IOException) { false }
+
     private fun bearer(token: String) = mapOf("Authorization" to "Bearer $token")
 
     private fun accessToken(account: String) = token(postJsonRaw("$API/auth/v1/token", """{"account_number":"$account"}"""))
@@ -159,7 +166,7 @@ object Mullvad : Provider {
     internal fun token(reply: Pair<Int, String>): String {
         val (code, body) = reply
         if (code == 400 && "INVALID_ACCOUNT" in body || code == 401 || code == 403) throw AuthException("Mullvad doesn't recognise that account number")
-        if (code !in 200..299) throw IOException("Mullvad API $code")
+        if (code !in 200..299) throw Http.Status(code, "Mullvad API $code")
         return Http.parsed("Mullvad") { NordApi.json.decodeFromString(TokenReply.serializer(), body) }.accessToken
     }
 
@@ -167,7 +174,7 @@ object Mullvad : Provider {
         val (code, body) = reply
         if ("MAX_DEVICES_REACHED" in body) throw AuthException("This Mullvad account already has 5 devices. Remove one at mullvad.net/account/devices and sign in again.")
         if (code == 401 || code == 403) throw AuthException("Mullvad refused the device registration")
-        if (code != 201) throw IOException("Mullvad API $code")
+        if (code != 201) throw Http.Status(code, "Mullvad API $code")
         return blob(account, privateKey, Http.parsed("Mullvad") { NordApi.json.decodeFromString(DeviceReply.serializer(), body) })
     }
 

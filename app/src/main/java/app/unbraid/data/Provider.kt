@@ -69,6 +69,12 @@ interface Provider {
     fun signOut(account: String): Boolean = true
 
     /**
+     * True only when the provider confirms this phone's device or session is gone (removed on its website, say), so its
+     * tunnels can't work until a new sign-in. A check that fails or isn't clear is false. Asked only after a tunnel died.
+     */
+    fun revoked(account: String): Boolean = false
+
+    /**
      * Whether a saved tunnel ([link], e.g. kept from an earlier connection or cached for when the provider can't be
      * reached) may be reused. Providers whose server keys must come from a trusted source check the saved key here.
      */

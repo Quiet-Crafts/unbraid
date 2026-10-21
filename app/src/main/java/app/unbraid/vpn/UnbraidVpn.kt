@@ -507,7 +507,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val byTag = lock.withLock {
                 seen = links
                 val s = running ?: return@withLock emptyMap()
-                links.keys.filter { id -> s.route(id)?.let { !it.imported && it.loc.pinned == null && it.loc.group != app.unbraid.data.Nord.DEDICATED_IP } == true }
+                // Pinned and Dedicated IP routes are checked too (to notice a removed device), but never moved.
+                links.keys.filter { id -> s.route(id)?.imported == false }
                     .groupBy { tags[it] }.filterKeys { it != null && it != Compiler.TS_TAG }
                     .also { m -> servers = m.mapValues { (_, ids) -> ids.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } } } }
             }
@@ -527,14 +528,25 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 val dead = byTag.filterKeys { (fails[it] ?: 0) >= 3 }.values.flatten()
                 if (dead.isEmpty()) return@withLock null
                 dead.forEach { fails.remove(tags[it]) }
-                Log.w(TAG, "health: ${dead.size} route(s) stopped answering, moving to another server")
                 val s = running ?: return@withLock null
-                Triple(links - dead.toSet(), dead.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } }.toSet(), generation)
+                val movable = dead.filter { id -> s.route(id)?.loc?.let { it.pinned == null && it.group != app.unbraid.data.Nord.DEDICATED_IP } == true }
+                Log.w(TAG, "health: ${dead.size} route(s) stopped answering, ${movable.size} to move to another server")
+                Move(links - movable.toSet(), movable.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } }.toSet(), generation,
+                    dead.mapNotNull { id -> s.route(id)?.loc?.provider }.toSet(), movable.isNotEmpty())
+            } ?: continue
+            // A dead tunnel can mean the provider dropped this phone (its device removed on the website): then its routes
+            // wait blocked for a new sign-in instead of trying server after server.
+            val accounts = store.accounts.value
+            val dropped = move.providers.filter { p -> accounts[p]?.let { Providers.get(p)?.revoked(it) } == true }
+            if (dropped.isNotEmpty()) lock.withLock {
+                dropped.forEach { p -> refusals = refusals + (p to (accounts[p] to AuthException("${Providers.get(p)?.name ?: p} no longer has this phone (it was removed from your account). Sign in again"))) }
             }
             // The newest setup, not the running one: a change still waiting to apply must never be undone here.
-            move?.let { (keep, avoid, gen) -> reload(keep, avoid, gen) }
+            if (move.anyMovable || dropped.isNotEmpty()) reload(move.keep, move.avoid, move.generation)
         }
     }
+
+    private class Move(val keep: Map<String, Link>, val avoid: Set<String>, val generation: Int, val providers: Set<String>, val anyMovable: Boolean)
 
     /** Tunnels the engine runs now, per route id. */
     private var links: Map<String, Link> = emptyMap()

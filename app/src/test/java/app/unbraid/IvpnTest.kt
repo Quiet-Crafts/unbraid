@@ -55,6 +55,15 @@ class IvpnTest {
         assertTrue(l.server.host.startsWith("us-ny"))
     }
 
+    /** Only IVPN's own "session not found" (or a refused login) counts as removed; anything unclear doesn't. */
+    @Test fun aSessionLoggedOutElsewhereIsSeen() {
+        assertEquals(true, Ivpn.sessionGone(200 to "{\"status\":601,\"message\":\"Session not found\"}"))
+        assertEquals(true, Ivpn.sessionGone(401 to "not json"))
+        assertEquals(false, Ivpn.sessionGone(200 to "{\"status\":200}"))
+        assertEquals(false, Ivpn.sessionGone(500 to "<html>"))
+        assertEquals(false, Ivpn.sessionGone(429 to "{\"status\":429}"))
+    }
+
     @Test fun pinnedServerNeedsNoList() {
         val sv = Ivpn.link(list, Location("ivpn", countryCode = "SE"), acct).server
         assertEquals(sv, Ivpn.link(null, Location("ivpn", pinned = sv), acct).server)
