@@ -1,6 +1,7 @@
 package app.unbraid.vpn
 
 import app.unbraid.data.AuthException
+import app.unbraid.data.DIRECT
 import app.unbraid.data.Link
 import app.unbraid.data.OvpnLink
 import app.unbraid.data.Provider
@@ -13,7 +14,8 @@ import app.unbraid.data.WgLink
 
 /** Chooses the tunnel each active route runs. Kept free of Android so it can be tested. */
 object LinkPicker {
-    class Result(val links: Map<String, Link>, val remember: Map<String, Link>)
+    /** [blocked]: routes that got no tunnel, with why; their apps are blocked until one is found ([Compiler.Input.blocked]). */
+    class Result(val links: Map<String, Link>, val remember: Map<String, Link>, val blocked: Map<String, Exception> = emptyMap())
 
     /** Fallback-cache key: a pinned route is its own entry, so it can never inherit another server's tunnel. */
     fun serverKey(r: Route, l: Link) = "${r.loc.provider}|${serverId(l.server)}"
@@ -26,7 +28,8 @@ object LinkPicker {
      * Imported configs as they are; provider routes keep the current server if the route's location didn't change, else
      * get their last one while it is still among the best (one-key providers, [again]), else the best now, falling back
      * to the last good one if the API is down. An unpinned route that lands on a server another route already uses is moved to a different server of
-     * its location. A pinned route is never moved: it shares that server's tunnel (see [Compiler]) or fails.
+     * its location. A pinned route is never moved: it shares that server's tunnel (see [Compiler]) or fails. A route that
+     * fails (signed out, refused, unreachable) is [Result.blocked]: the others still run.
      */
     fun pick(
         setup: Setup,
@@ -37,12 +40,18 @@ object LinkPicker {
         last: Map<String, Link>,
         /** Servers ("provider|ip") to stay away from: ones that just stopped answering. */
         avoid: Set<String> = emptySet(),
+        /** Routes whose provider refused the account it still has: blocked as they are, never given a cached tunnel. */
+        refused: Map<String, Exception> = emptyMap(),
+        /** No provider calls: a route without a tunnel it can keep is blocked, for a policy to install before them. */
+        offline: Boolean = false,
         providers: (String) -> Provider?,
     ): Result {
         val used = avoid.toMutableSet()
         val out = linkedMapOf<String, Link>()
+        val blocked = linkedMapOf<String, Exception>()
         for (r in setup.activeRoutes) {
-            val link = when {
+            refused[r.id]?.let { blocked[r.id] = it; continue }
+            val link = try { when {
                 r.wg != null -> WgLink(Server(r.wg.name, r.wg.endpoint.substringBeforeLast(':'), "", r.wg.publicKey, 0), r.wg)
                 r.ovpn != null -> OvpnLink(Server(r.ovpn.name, r.ovpn.name, "", "", 0), r.ovpn)
                 r.ss != null -> SsLink(Server(r.ss.name, r.ss.server, r.ss.server, "", 0), r.ss)
@@ -50,13 +59,21 @@ object LinkPicker {
                 else -> keep[r.id]?.takeIf {
                     applied?.route(r.id)?.let { a -> !a.imported && a.loc == r.loc } == true && appliedAccounts[r.loc.provider] == accounts[r.loc.provider] &&
                         trusted(it, r, accounts, providers)
-                } ?: fresh(r, accounts, last, used, providers)
-            }
+                } ?: if (offline) throw Fail("waiting for a server") else fresh(r, accounts, last, used, providers)
+            } } catch (e: Exception) { blocked[r.id] = e; continue }
             if (!r.imported) used += "${r.loc.provider}|${serverId(link.server)}"
             out[r.id] = link
         }
+        // A provider that refused its account refuses it for every route: none of them keeps a tunnel on it.
+        val refusedBy = blocked.entries.filter { it.value is AuthException }.mapNotNull { (id, e) -> setup.route(id)?.takeIf { !it.imported }?.let { it.loc.provider to e } }.toMap()
+        setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> refusedBy[r.loc.provider]?.let { blocked[r.id] = it; out.remove(r.id) } }
         val remember = setup.activeRoutes.filter { !it.imported }.mapNotNull { r -> out[r.id]?.let { cacheKey(r) to it } }.toMap()
-        return Result(out, remember)
+        return Result(out, remember, blocked)
+    }
+
+    /** True if an app that went Direct under [old] goes to one of [routes] under [new] (explicitly or by default). */
+    fun leavesDirect(old: Setup?, new: Setup, routes: Set<String>): Boolean = old != null && routes.any { id ->
+        (old.apps.keys + new.apps.keys).any { new.routeOf(it) == id && old.routeOf(it) == DIRECT } || (new.defaultRoute == id && old.defaultRoute == DIRECT)
     }
 
     /** A kept or cached tunnel is reused only if its provider still vouches for its server key ([Provider.trusts]). */
@@ -79,7 +96,7 @@ object LinkPicker {
         if (pinned != null || "${p.id}|${serverId(l.server)}" !in used) return l
         val other = runCatching {
             p.servers(r.loc, acc, 10).firstOrNull { "${p.id}|${serverId(it)}" !in used }?.let { p.connect(r.loc.copy(pinned = it), acc) }
-        }.getOrNull()
+        }.onFailure { if (it is AuthException) throw it }.getOrNull()
         return other ?: l
     }
 

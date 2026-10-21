@@ -2,6 +2,7 @@ package app.unbraid
 
 import app.unbraid.data.AuthException
 import app.unbraid.data.Country
+import app.unbraid.data.DIRECT
 import app.unbraid.data.Field
 import app.unbraid.data.Link
 import app.unbraid.data.Location
@@ -14,6 +15,7 @@ import app.unbraid.data.WgPeer
 import app.unbraid.vpn.Fail
 import app.unbraid.vpn.LinkPicker
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -65,7 +67,9 @@ class LinkPickerTest {
         val p = Fake(listOf(a, b), online = false)
         val loc = Location("fake", countryCode = "NL", pinned = a)
         val other = LinkPicker.cacheKey(Route("x", Location("fake", countryCode = "NL", pinned = b))) to link(b)
-        try { pick(setup(Route("1", loc)), p, mapOf(other)); fail("expected failure") } catch (e: Fail) { assertEquals("Fastest: a is unreachable", e.message) }
+        val failed = pick(setup(Route("1", loc)), p, mapOf(other))
+        assertTrue("1" !in failed.links)
+        assertEquals("Fastest: a is unreachable", (failed.blocked.getValue("1") as Fail).message)
         val same = LinkPicker.cacheKey(Route("1", loc)) to link(a)
         assertEquals(a, pick(setup(Route("1", loc)), p, mapOf(same)).links.getValue("1").server)
     }
@@ -79,7 +83,9 @@ class LinkPickerTest {
     @Test fun anUntrustedCachedTunnelIsNotReused() {
         val p = Fake(listOf(a), online = false, trusted = false)
         val r = Route("1", Location("fake", countryCode = "NL"))
-        try { pick(setup(r), p, mapOf(LinkPicker.cacheKey(r) to link(a))); fail("an untrusted cached tunnel was reused") } catch (e: java.io.IOException) { assertEquals("down", e.message) }
+        val out = pick(setup(r), p, mapOf(LinkPicker.cacheKey(r) to link(a)))
+        assertTrue("an untrusted cached tunnel was reused", out.links.isEmpty())
+        assertEquals("down", out.blocked.getValue("1").message)
     }
 
     @Test fun anUntrustedKeptTunnelIsReplaced() {
@@ -129,7 +135,57 @@ class LinkPickerTest {
         assertEquals("a", pick(setup(first, r), p, last).links.getValue("1").server.name)
     }
 
-    @Test fun signedOutProviderFails() {
-        try { LinkPicker.pick(setup(Route("1", Location("fake"))), emptyMap(), null, emptyMap(), emptyMap(), emptyMap()) { Fake(listOf(a)) }; fail() } catch (e: AuthException) {}
+    /** A refusal holds: the route stays blocked, and neither the provider nor its cached tunnel is tried again. */
+    @Test fun aRefusedRouteStaysBlockedWithoutACachedTunnel() {
+        val p = Fake(listOf(a), online = false)
+        val r = Route("1", Location("fake", countryCode = "NL"))
+        val refusal = AuthException("Sign-in was refused")
+        val out = LinkPicker.pick(setup(r), emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), mapOf(LinkPicker.cacheKey(r) to link(a)), refused = mapOf("1" to refusal)) { p }
+        assertTrue(out.links.isEmpty())
+        assertTrue(out.blocked.getValue("1") === refusal)
+    }
+
+    /** Offline, only tunnels kept as they are and imports come out; everything needing the provider waits blocked. */
+    @Test fun offlinePickingNeverCallsTheProvider() {
+        val p = Fake(listOf(a), online = false)
+        val kept = Route("1", Location("fake", countryCode = "NL"))
+        val s = setup(kept, Route("2", Location("fake", countryCode = "DE")))
+        val out = LinkPicker.pick(s, mapOf("1" to link(a) as Link), s, mapOf("fake" to "acc"), mapOf("fake" to "acc"), emptyMap(), offline = true) { p }
+        assertEquals(a, out.links.getValue("1").server)
+        assertTrue(out.blocked.getValue("2") is Fail)
+    }
+
+    /** One refusal blocks every route of that provider, also one that could keep its running tunnel. */
+    @Test fun aRefusalBlocksTheProvidersOtherRoutesToo() {
+        val refusing = object : Provider by Fake(listOf(a)) { override fun connect(loc: Location, account: String): Link = throw AuthException("Sign-in was refused") }
+        val kept = Route("1", Location("fake", countryCode = "NL"))
+        val s = setup(kept, Route("2", Location("fake", countryCode = "DE")))
+        val out = LinkPicker.pick(s, mapOf("1" to link(a) as Link), s, mapOf("fake" to "acc"), mapOf("fake" to "acc"), emptyMap()) { refusing }
+        assertTrue(out.links.isEmpty() && out.remember.isEmpty())
+        assertEquals(setOf("1", "2"), out.blocked.keys)
+    }
+
+    @Test fun leavingDirectIsSeenExplicitlyAndByDefault() {
+        val vpn = Route("v", Location("fake"))
+        val directDefault = Setup(routes = listOf(vpn), defaultRoute = DIRECT, apps = mapOf("a" to "v"))
+        // Following a Direct default, now sent to the route.
+        assertTrue(LinkPicker.leavesDirect(directDefault, directDefault.copy(apps = mapOf("a" to "v", "b" to "v")), setOf("v")))
+        // Explicitly Direct, now following a default that is the route (its entry is gone from apps).
+        val vpnDefault = Setup(routes = listOf(vpn), defaultRoute = "v", apps = mapOf("b" to DIRECT))
+        assertTrue(LinkPicker.leavesDirect(vpnDefault, vpnDefault.copy(apps = emptyMap()), setOf("v")))
+        // The default itself turns from Direct to the route.
+        assertTrue(LinkPicker.leavesDirect(directDefault, directDefault.copy(defaultRoute = "v"), setOf("v")))
+        // Already on the route, or another route waits: nothing leaves Direct for it.
+        assertFalse(LinkPicker.leavesDirect(directDefault, directDefault, setOf("v")))
+        assertFalse(LinkPicker.leavesDirect(null, directDefault, setOf("v")))
+    }
+
+    @Test fun aSignedOutProvidersRouteIsBlockedAndTheOthersStillRun() {
+        val other = object : Provider by Fake(listOf(b)) { override val id = "other" }
+        val s = setup(Route("1", Location("fake", countryCode = "NL")), Route("2", Location("other", countryCode = "DE")))
+        val r = LinkPicker.pick(s, emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), emptyMap()) { if (it == "fake") Fake(listOf(a)) else other }
+        assertEquals(a, r.links.getValue("1").server)
+        assertTrue(r.blocked.getValue("2") is AuthException)
+        assertTrue("2" !in r.links && "2" !in r.remember.values.map { it.server.name })
     }
 }

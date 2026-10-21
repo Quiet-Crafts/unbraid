@@ -51,6 +51,8 @@ object Compiler {
         val probe: Pair<Int, String>? = null,
         /** Index into [FAKE_RANGES] of the half this engine hands out; the other half is refused. */
         val fakeHalf: Int = 0,
+        /** Routes with no tunnel right now (signed out, unreachable): their apps' traffic and lookups are refused. */
+        val blocked: Set<String> = emptySet(),
     )
 
     /**
@@ -61,9 +63,9 @@ object Compiler {
     const val PROBE = "probe"
 
     /** Route id → the tunnel tag it runs on: routes that resolve to one server with one login share a tunnel. */
-    fun shared(s: Setup, links: Map<String, Link>): Map<String, String> {
+    fun shared(s: Setup, links: Map<String, Link>, blocked: Set<String> = emptySet()): Map<String, String> {
         val owners = HashMap<String, String>()
-        return s.activeRoutes.filter { it.tsExit == null }.associate { r ->
+        return s.activeRoutes.filter { it.tsExit == null && it.id !in blocked }.associate { r ->
             val link = links[r.id] ?: error("No server for ${r.name}")
             r.id to owners.getOrPut(linkKey(r, link)) { "r-${r.id}" }
         }
@@ -71,11 +73,13 @@ object Compiler {
 
     fun compile(i: Input): String {
         val s = i.setup
-        val active = s.activeRoutes
+        // Blocked routes get no tunnel, DNS server or probe; their apps still match, to be refused.
+        val active = s.activeRoutes.filter { it.id !in i.blocked }
+        val defaultBlocked = s.defaultRoute in i.blocked
         require(active.mapNotNull { it.tsExit }.distinct().size <= 1) { "Tailscale allows one exit node at a time. Use the same node for every Tailscale route." }
         // Tailscale-exit routes have no tunnel of their own: they ride the Tailscale endpoint, whose exit node is set below.
         // Routes that resolve to the same server with the same credentials share one tunnel: two with one key would fight over it.
-        val shared = shared(s, i.links)
+        val shared = shared(s, i.links, i.blocked)
         val tag = { id: String -> if (id == DIRECT) "direct" else if (s.route(id)?.tsExit != null) TS_TAG else shared[id] ?: "r-$id" }
         val tsDomains = listOfNotNull("ts.net", tsSuffix(i.tsSuffix)).distinct()
         // OpenVPN routes use the DNS their server pushes, except NordVPN's own routes: those keep Nord's
@@ -87,13 +91,13 @@ object Compiler {
         // An exit keeps the endpoint running, but only the home toggle grants every app tailnet access.
         val homeTs = s.home.tailscale
         val dnsFor = { id: String -> if (id == DIRECT) "local" else "dns-r-$id" }
-        val defaultDns = if (s.defaultRoute == DIRECT || active.isEmpty()) "local" else dnsFor(s.defaultRoute)
+        val defaultDns = if (s.defaultRoute == DIRECT || defaultBlocked || active.isEmpty()) "local" else dnsFor(s.defaultRoute)
         // Every tunnel the app can test, with the DNS of a route on it; Tailscale even without an exit route (its nodes).
         val probeTags = active.groupBy { tag(it.id) }.mapValues { (_, rs) -> dnsFor(rs.first().id) }.toMutableMap()
             .apply { if (s.tailscale) putIfAbsent(TS_TAG, defaultDns); if (app.unbraid.BuildConfig.DEBUG) put("direct", "local") } // debug: the line itself, for comparisons
         // Apps with their own route, grouped. Direct only appears here under lockdown (otherwise excluded at OS level).
         val perApp = s.apps.entries.groupBy({ it.value }, { it.key }).toSortedMap()
-            .filterKeys { id -> id != s.defaultRoute && if (id == DIRECT) i.lockdown else active.any { it.id == id } }
+            .filterKeys { id -> id != s.defaultRoute && if (id == DIRECT) i.lockdown else s.activeRoutes.any { it.id == id } }
             .mapValues { (_, p) -> JsonArray(p.sorted().map(::JsonPrimitive)) }
         // Destination rules that beat any app rule. Repeated after every resolve, because fake-IP connections
         // only get a real address there.
@@ -121,7 +125,9 @@ object Compiler {
                     if (s.prefs.lan) add(obj("domain_suffix" to arr("local", "lan", "home.arpa", "fritz.box"), "server" to "local"))
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
                     // Other query types (HTTPS, SVCB, TXT…) go to the asking app's own exit, never the ISP.
-                    for ((id, pkgs) in perApp) add(obj("package_name" to pkgs, "server" to dnsFor(id)))
+                    for ((id, pkgs) in perApp) add(if (id in i.blocked) obj("package_name" to pkgs, "action" to "reject") else obj("package_name" to pkgs, "server" to dnsFor(id)))
+                    // A blocked default never falls back to another resolver: the phone's network would see the names.
+                    if (defaultBlocked) add(obj("action" to "reject"))
                 }
                 put("final", defaultDns)
                 put("strategy", "ipv4_only")
@@ -211,12 +217,15 @@ object Compiler {
                     )
                     val onTs = { id: String -> s.route(id)?.tsExit != null }
                     for ((id, p) in perApp) {
+                        if (id in i.blocked) { add(obj("package_name" to p, "action" to "reject", "no_drop" to true)); continue }
                         // Before its exit's DNS, which an exit node not yet signed in can't answer; Direct resolves locally.
                         if (onTs(id)) tsLogin.forEach { add(obj("package_name" to p, it, "outbound" to "direct")) }
                         add(obj("package_name" to p, "action" to "resolve", "server" to dnsFor(id)))
                         network.forEach { add(it) }
                         add(obj("package_name" to p, "outbound" to tag(id)))
                     }
+                    // Everything left follows the default: refused while it has no tunnel, after the LAN and home rules above.
+                    if (defaultBlocked) { add(obj("action" to "reject", "no_drop" to true)); return@putJsonArray }
                     if (onTs(s.defaultRoute)) tsLogin.forEach { add(obj(it, "outbound" to "direct")) }
                     add(obj("action" to "resolve", "server" to defaultDns))
                     network.forEach { add(it) }
@@ -225,7 +234,7 @@ object Compiler {
                     // after the LAN and home rules (names resolved), so pinging the router or a home box still works.
                     if (s.defaultRoute == DIRECT && perApp.keys.any { it != DIRECT }) add(obj("network" to "icmp", "action" to "reject"))
                 }
-                put("final", if (active.isEmpty()) "direct" else tag(s.defaultRoute))
+                put("final", if (active.isEmpty() || defaultBlocked) "direct" else tag(s.defaultRoute)) // blocked: never reached
                 put("auto_detect_interface", true)
                 put("default_domain_resolver", "local")
             }

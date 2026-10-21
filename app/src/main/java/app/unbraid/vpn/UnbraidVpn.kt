@@ -281,12 +281,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val accounts = store.accounts.value
             // The app's own tests get a fresh way in with each engine start (see apply); none until it runs.
             probe = null
-            val links = pickLinks(setup, emptyMap(), accounts)
+            val picked = pickLinks(setup, emptyMap(), accounts)
             if (destroyed) return // the service went away during the provider calls: start no engine for it
             forgetLookups(this)
             val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
-            apply(srv, setup, links, accounts)
-            state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), links.mapValues { it.value.server }, lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn)
+            apply(srv, setup, picked, accounts)
+            state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn)
             stopWanted = false
             notify(setup)
             if (setup.tailscale) watchTailscale()
@@ -294,7 +294,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // Setup edits and sign-ins/outs both change what the engine must run.
             health = scope.launch { watchHealth() }
             watch = combine(store.setup, store.accounts) { s, a -> s to a }.debounce(400).onEach { (s, a) ->
-                lock.withLock { if ((s != applied || a != appliedAccounts) && (s to a) != rejected) reload(s) }
+                lock.withLock { if ((s != applied || a != appliedAccounts) && (s to a) != rejected) reload(store.setup.value) }
             }.launchIn(scope)
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${Redact.log(e)}")
@@ -304,8 +304,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** Validates first, so a bad config never replaces a working engine. */
     /** [accounts] is the snapshot [links] were picked with: a sign-out after it differs, so the watcher reloads again. */
-    private fun apply(srv: CommandServer, setup: Setup, links: Map<String, Link>, accounts: Map<String, String>) {
-        var input = input(setup, links)
+    private fun apply(srv: CommandServer, setup: Setup, picked: LinkPicker.Result, accounts: Map<String, String>) {
+        val links = picked.links
+        val blocked = picked.blocked.keys
+        var input = input(setup, links, blocked)
         var json = Compiler.compile(input)
         // A favourite, a rename or a second sign-in changes the setup but not what the engine runs: keep every tunnel up.
         if (json != lastGood) {
@@ -313,7 +315,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // app could take it over and see that engine's password, which no later engine accepts. The app's own tests
             // get the new pair only once the new engine runs.
             val next = newProbe()
-            input = input(setup, links, next)
+            input = input(setup, links, blocked, next)
             json = Compiler.compile(input)
             engine("The connection engine rejected this setup.") { Libbox.checkConfig(json) }
             restarting = true
@@ -330,12 +332,35 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() }
         }
         lastGood = json
-        tags = Compiler.shared(setup, links) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG }
+        tags = Compiler.shared(setup, links, blocked) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG }
         running = setup
         applied = setup
         appliedAccounts = accounts
         rejected = null
         this.links = links
+        retryBlocked(picked.blocked)
+    }
+
+    private var retry: Job? = null
+    private var retries = 0
+
+    /**
+     * Routes blocked for a passing reason (no network, provider unreachable) try again after 5 s, 15 s, 30 s, 1 min,
+     * then every 5 min; signed-out or refused ones wait for a sign-in, which reloads by itself.
+     */
+    private fun retryBlocked(blocked: Map<String, Exception>) {
+        retry?.cancel(); retry = null
+        if (blocked.values.all { it is AuthException }) { retries = 0; return }
+        val wait = listOf(5, 15, 30, 60, 300)[minOf(retries++, 4)] * 1000L
+        retry = scope.launch {
+            kotlinx.coroutines.delay(wait)
+            lock.withLock { if (state.value.phase == VpnState.Phase.On) reload(store.setup.value) }
+        }
+    }
+
+    /** One line for Routes: which routes' apps are blocked and why. */
+    private fun blockedText(setup: Setup, blocked: Map<String, Exception>): String? = blocked.entries.firstOrNull()?.let { (_, e) ->
+        "Apps on ${blocked.keys.joinToString { setup.route(it)?.name ?: it }} are blocked: ${Redact.message(e, "no connection")}"
     }
 
     /**
@@ -346,7 +371,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         probe = null
         val last = lastInput ?: return false
         val next = newProbe()
-        val input = Compiler.Input(last.setup, last.links, last.selfPackage, last.lockdown, last.tsDir, last.cacheFile, last.tsSuffix, next, last.fakeHalf)
+        val input = Compiler.Input(last.setup, last.links, last.selfPackage, last.lockdown, last.tsDir, last.cacheFile, last.tsSuffix, next, last.fakeHalf, last.blocked)
         val json = Compiler.compile(input)
         srv.startOrReloadService(json, OverrideOptions())
         probe = next
@@ -369,14 +394,19 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val srv = server ?: return
         val accounts = store.accounts.value
         try {
-            val links = pickLinks(setup, keep, accounts, avoid)
-            apply(srv, setup, links, accounts)
-            state.update { it.copy(servers = links.mapValues { l -> l.value.server }, error = null) }
+            // While a provider is asked for a server, apps moving off Direct already leave through their new route, or
+            // wait blocked if that is the one still waiting: never on their real address for the time it takes.
+            val ready = pickLinks(setup, keep, accounts, avoid, offline = true)
+            if (ready.blocked.isNotEmpty() && LinkPicker.leavesDirect(applied, setup, setup.activeRoutes.mapTo(HashSet()) { it.id })) apply(srv, setup, ready, accounts)
+            // A route without a tunnel (signed out, refused, unreachable) is blocked; the others keep running. Tunnels
+            // come from the offline pass, which already dropped any a changed location or account can't keep.
+            val picked = pickLinks(setup, ready.links, accounts, avoid)
+            // Edited during the provider calls: the watcher reloads the newer setup, never this older one after it.
+            if (store.setup.value != setup || store.accounts.value != accounts) return
+            apply(srv, setup, picked, accounts)
+            state.update { it.copy(servers = picked.links.mapValues { l -> l.value.server }, error = blockedText(setup, picked.blocked)) }
             notify(setup)
             if (setup.tailscale && ts == null) watchTailscale()
-        } catch (e: AuthException) {
-            // A route lost its account (signed out or refused): never fall back to config holding those credentials.
-            teardown(Redact.message(e, "Sign in again"))
         } catch (e: Exception) {
             Log.e(TAG, "reload: ${Redact.log(e)}")
             rejected = setup to accounts // don't retry the same broken pair in a loop; [applied] stays what runs
@@ -420,7 +450,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             lock.withLock {
                 val s = running ?: return@withLock
                 val avoid = dead.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } }.toSet()
-                reload(s, links - dead.toSet(), avoid)
+                // The newest setup, not the running one: a change still waiting to apply must never be undone here.
+                reload(store.setup.value, links - dead.toSet(), avoid)
             }
         }
     }
@@ -428,14 +459,24 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** Tunnels the engine runs now, per route id. */
     private var links: Map<String, Link> = emptyMap()
 
-    private fun pickLinks(setup: Setup, keep: Map<String, Link>, accounts: Map<String, String>, avoid: Set<String> = emptySet()): Map<String, Link> {
-        val r = LinkPicker.pick(setup, keep, applied, appliedAccounts, accounts, store.lastLinks, avoid + failing, Providers::get)
-        store.rememberLinks(r.remember)
-        return r.links
+    private fun pickLinks(setup: Setup, keep: Map<String, Link>, accounts: Map<String, String>, avoid: Set<String> = emptySet(), offline: Boolean = false): LinkPicker.Result {
+        // A refusal holds until that provider's account changes (a sign-out or a new sign-in), whatever else retries meanwhile.
+        refusals = refusals.filter { (p, v) -> v.first == accounts[p] }
+        val refused = setup.activeRoutes.filter { !it.imported }.mapNotNull { r ->
+            refusals[r.loc.provider]?.takeIf { it.first == accounts[r.loc.provider] }?.let { r.id to it.second }
+        }.toMap()
+        val r = LinkPicker.pick(setup, keep, applied, appliedAccounts, accounts, store.lastLinks, avoid + failing, refused, offline, Providers::get)
+        r.blocked.forEach { (id, e) -> setup.route(id)?.takeIf { e is AuthException && !it.imported }?.let { refusals = refusals + (it.loc.provider to (accounts[it.loc.provider] to e)) } }
+        // Only a fallback cache: failing to write it never stops a connection.
+        if (!offline) runCatching { store.rememberLinks(r.remember) }.onFailure { Log.w(TAG, "last servers not saved") }
+        return r
     }
 
-    private fun input(setup: Setup, links: Map<String, Link>, p: Pair<Int, String>? = probe) =
-        Compiler.Input(setup, links, packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeHalf())
+    /** Providers that refused an account, with that account and why: their routes stay blocked until it changes. */
+    private var refusals: Map<String, Pair<String?, Exception>> = emptyMap()
+
+    private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
+        Compiler.Input(setup, links, packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeHalf(), blocked)
 
     /** The open table's fake-IP half for a reload; a new table takes the other one, refusing the old. */
     private fun fakeHalf() = (lastHalf ?: store.fakeHalf).let { if (synchronized(Companion) { tableOpen }) it else 1 - it }
@@ -485,6 +526,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun stopEngine() {
         watch?.cancel(); watch = null
         health?.cancel(); health = null
+        retry?.cancel(); retry = null; retries = 0; refusals = emptyMap()
         runCatching { ts?.close() }; ts = null
         runCatching { server?.closeService() }
         runCatching { tun?.close() }; tun = null

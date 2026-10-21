@@ -491,7 +491,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             val arg = d.substringAfter(':')
             when {
                 d.startsWith("signout:") -> Prompt("Sign out of ${Providers.get(arg)?.name ?: arg}?", "Sign out", { dialog = null; ui.signOut(arg) }, { dialog = null }, danger = true) {
-                    Text("Routes and app choices stay on this phone.", style = Type.sub)
+                    Text("Routes and app choices stay on this phone. While connected, apps on its routes are blocked until you sign in again or move them to another route.", style = Type.sub)
                 }
                 d.startsWith("guide:") -> Providers.imports.firstOrNull { it.id == arg }?.let { g ->
                     ModalBottomSheet({ dialog = null }, containerColor = Ink.surface, contentColor = Ink.text) {

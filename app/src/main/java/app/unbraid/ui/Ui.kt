@@ -188,9 +188,9 @@ class Ui(app: Application) : AndroidViewModel(app) {
         if (loggedOut == false) warn("Couldn't log this phone out of Tailscale. Remove it in your tailnet's admin console.")
     }
 
-    /** Nothing left to route through: back to the first-run screen. */
+    /** Nothing left to route through: back to the first-run screen, but never by stopping a running VPN (its apps stay blocked). */
     private fun resetIfEmpty() {
-        if (store.accounts.value.isEmpty() && store.setup.value.routes.none { it.imported } && store.setup.value.servers.isEmpty() && !store.setup.value.home.tailscale) signOut()
+        if (vpn.value.phase == VpnState.Phase.Off && store.accounts.value.isEmpty() && store.setup.value.routes.none { it.imported } && store.setup.value.servers.isEmpty() && !store.setup.value.home.tailscale) signOut()
     }
 
     /** A new control server or auth key means a new node: drop the old Tailscale state and reconnect fresh. */

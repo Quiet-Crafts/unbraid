@@ -53,9 +53,9 @@ class CompilerTest {
         }
     }
 
-    private fun compile(s: Setup, lockdown: Boolean = false, links: Map<String, Link> = links(s), tsSuffix: String? = null): JsonObject {
-        val out = Compiler.compile(Compiler.Input(s, links, "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db", tsSuffix))
-        File("build/compiled").apply { mkdirs() }.resolve("${s.hashCode()}-$lockdown.json").writeText(out)
+    private fun compile(s: Setup, lockdown: Boolean = false, links: Map<String, Link> = links(s), tsSuffix: String? = null, blocked: Set<String> = emptySet()): JsonObject {
+        val out = Compiler.compile(Compiler.Input(s, links - blocked, "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db", tsSuffix, blocked = blocked))
+        File("build/compiled").apply { mkdirs() }.resolve("${s.hashCode()}-$lockdown-${blocked.sorted()}.json").writeText(out)
         return Json.parseToJsonElement(out).jsonObject
     }
 
@@ -111,6 +111,32 @@ class CompilerTest {
         val c = compile(example, lockdown = true)
         assertEquals(listOf("app.unbraid"), c.excluded())
         assertTrue(c.rules().any { it["outbound"]?.jsonPrimitive?.content == "direct" && it["package_name"] != null })
+    }
+
+    /** A route without a tunnel refuses its apps' connections and lookups; the other routes keep running. */
+    @Test fun aBlockedRouteRefusesItsAppsOnly() = listOf(false, true).forEach { lockdown ->
+        val c = compile(example, lockdown, blocked = setOf("us"))
+        assertEquals(listOf("r-nl", "r-it", "home-ts"), c.endpointTags())
+        assertFalse(c.toString().contains("r-us"))
+        val refused = c.rules().single { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf("com.a") }
+        assertEquals("reject", refused["action"]!!.jsonPrimitive.content)
+        val dns = c["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
+        assertEquals("reject", dns.single { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf("com.a") }["action"]!!.jsonPrimitive.content)
+        assertTrue(c.rules().any { it["outbound"]?.jsonPrimitive?.content == "r-it" })
+        assertEquals("r-nl", c["route"]!!.jsonObject["final"]!!.jsonPrimitive.content)
+    }
+
+    /** A blocked default refuses everything not sent elsewhere, after the home and LAN rules, and never resolves it locally. */
+    @Test fun aBlockedDefaultRefusesTheRest() = listOf(false, true).forEach { lockdown ->
+        val c = compile(example, lockdown, blocked = setOf("nl"))
+        val rules = c.rules()
+        assertEquals(mapOf("action" to "reject", "no_drop" to "true"), rules.last().mapValues { it.value.jsonPrimitive.content })
+        assertTrue(rules.indexOfFirst { it["outbound"]?.jsonPrimitive?.content == "home-ts" } < rules.size - 1)
+        assertTrue(rules.any { it["outbound"]?.jsonPrimitive?.content == "r-us" } && rules.any { it["outbound"]?.jsonPrimitive?.content == "r-it" })
+        assertEquals(lockdown, rules.any { it["outbound"]?.jsonPrimitive?.content == "direct" && it["package_name"] != null })
+        assertEquals("reject", c["dns"]!!.jsonObject["rules"]!!.jsonArray.last().jsonObject["action"]!!.jsonPrimitive.content)
+        assertFalse(c.toString().contains("r-nl"))
+        assertEquals("direct", c["route"]!!.jsonObject["final"]!!.jsonPrimitive.content)
     }
 
     @Test fun unusedRoutesDoNotConnect() {
