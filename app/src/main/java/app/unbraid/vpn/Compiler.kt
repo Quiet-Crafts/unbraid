@@ -116,7 +116,7 @@ object Compiler {
         // only get a real address there.
         val network = buildList {
             homeWg?.let { w -> homeCidrs(w).takeIf { it.isNotEmpty() }?.let { add(obj("ip_cidr" to JsonArray(it.map(::JsonPrimitive)), "outbound" to "home-wg")) } }
-            if (homeTs) add(obj("ip_cidr" to JsonArray((listOf(TAILNET) + s.home.subnets.filter(::isPrivate)).map(::JsonPrimitive)), "outbound" to TS_TAG))
+            if (homeTs) add(obj("ip_cidr" to JsonArray((listOf(TAILNET) + homeSubnets(s)).map(::JsonPrimitive)), "outbound" to TS_TAG))
             if (s.prefs.lan) add(obj("ip_cidr" to JsonArray(LAN.map(::JsonPrimitive)), "outbound" to "direct"))
         }
 
@@ -168,7 +168,7 @@ object Compiler {
                     if (s.prefs.lan && !i.lockdown) {
                         // LAN never enters the tunnel: Android sends it straight to Wi-Fi. Home subnets reached
                         // through a tunnel stay routed, because the more specific route wins.
-                        val home = (if (homeTs) s.home.subnets.filter(::isPrivate) else emptyList()) + (homeWg?.let(::homeCidrs) ?: emptyList())
+                        val home = (if (homeTs) homeSubnets(s) else emptyList()) + (homeWg?.let(::homeCidrs) ?: emptyList())
                         put("route_address", JsonArray((listOf("0.0.0.0/0") + home).map(::JsonPrimitive)))
                         // Android applies exclusions after inclusions, so an exclusion equal to a home prefix would win.
                         put("route_exclude_address", JsonArray((LAN - home.toSet()).map(::JsonPrimitive)))
@@ -231,7 +231,14 @@ object Compiler {
                     // not-yet-signed-in exit node would otherwise block its own sign-in. Other apps keep their own exits.
                     val tsLogin = if (!ts) emptyList() else listOfNotNull(
                         ("domain_suffix" to arr("tailscale.com", "tailscale.io")).takeIf { s.tsExit != null },
-                        s.home.tsControlUrl?.let { u -> java.net.URI(u).host?.let { h -> if (h.first().isDigit()) "ip_cidr" to arr("$h/32") else "domain" to arr(h) } },
+                        // An address only when it truly is one (no lookup): "1hs.example.com" is a name.
+                        s.home.tsControlUrl?.let { u -> java.net.URI(u).host?.let { h ->
+                            when {
+                                ipv4(h) != null -> "ip_cidr" to arr("$h/32")
+                                h.startsWith("[") -> h.trim('[', ']').takeIf { '%' !in it }?.let { "ip_cidr" to arr("$it/128") } // a zone can't be routed on
+                                else -> "domain" to arr(h)
+                            }
+                        } },
                     )
                     val onTs = { id: String -> s.route(id)?.tsExit != null }
                     for ((id, p) in perApp) {
@@ -265,12 +272,26 @@ object Compiler {
     /** Private ranges only: a home tunnel must never capture public traffic meant for an exit. */
     private val PRIVATE = listOf("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")
 
-    private fun ipv4(cidr: String): Pair<Long, Int>? {
-        val (ip, len) = cidr.split('/').let { it[0] to (it.getOrNull(1)?.toIntOrNull() ?: 32) }
-        val o = ip.split('.').mapNotNull { it.toIntOrNull()?.takeIf { v -> v in 0..255 } }
-        if (o.size != 4 || len !in 0..32) return null
+    private val IPV4 = Regex("(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})(?:/(\\d{1,2}))?")
+
+    /** An IPv4 address or CIDR (no prefix = /32) as address and prefix length; null unless strictly that. */
+    fun ipv4(cidr: String): Pair<Long, Int>? {
+        val g = IPV4.matchEntire(cidr.trim())?.groupValues ?: return null
+        val o = g.subList(1, 5).map { it.toInt() }
+        val len = g[5].ifEmpty { "32" }.toInt()
+        // Leading zeros ("010") read as octal in some parsers and are refused by the engine's.
+        if (o.any { it > 255 } || len > 32 || g.subList(1, 6).any { it.length > 1 && it.startsWith('0') }) return null
         return o.fold(0L) { a, v -> a shl 8 or v.toLong() } to len
     }
+
+    /** [cidr] with its host bits cleared ("192.168.1.0/16" → "192.168.0.0/16"), as Android reads it; null if not IPv4. */
+    fun canonical(cidr: String): String? = ipv4(cidr)?.let { (a, len) ->
+        val v = if (len == 0) 0L else a and (0xFFFFFFFFL shl (32 - len)) and 0xFFFFFFFFL
+        (3 downTo 0).joinToString(".") { (v shr (it * 8) and 255).toString() } + "/$len"
+    }
+
+    /** Home subnets behind Tailscale, private only, as Android will route them. */
+    private fun homeSubnets(s: Setup) = s.home.subnets.mapNotNull(::canonical).filter(::isPrivate).distinct()
 
     /** True when the whole of [cidr] lies inside a private IPv4 range. */
     fun isPrivate(cidr: String): Boolean {
@@ -279,12 +300,8 @@ object Compiler {
     }
 
     /** Networks to send through the home tunnel: its private AllowedIPs; else the interface's own subnet. */
-    fun homeCidrs(p: WgPeer): List<String> = p.allowedIps.filter(::isPrivate).ifEmpty {
-        p.address.mapNotNull { a ->
-            val (ip, len) = a.split('/').let { it[0] to (it.getOrNull(1)?.toInt() ?: 32) }
-            val v = ip.split('.').fold(0L) { acc, o -> acc shl 8 or o.toLong() } and (0xFFFFFFFFL shl (32 - len))
-            ((3 downTo 0).joinToString(".") { (v shr (it * 8) and 255).toString() } + "/$len").takeIf(::isPrivate)
-        }
+    fun homeCidrs(p: WgPeer): List<String> = p.allowedIps.mapNotNull(::canonical).filter(::isPrivate).distinct().ifEmpty {
+        p.address.mapNotNull(::canonical).filter(::isPrivate).distinct()
     }
 
     /** Resolver inside a route's tunnel: custom DNS, else the provider's blocking resolver if asked, else the tunnel's own, else Nord's (filtering if TP Lite is on), else Quad9. */

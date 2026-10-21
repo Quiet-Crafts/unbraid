@@ -132,6 +132,41 @@ class CompilerTest {
         assertTrue(c.rules().any { it["outbound"]?.jsonPrimitive?.content == "direct" && it["package_name"] != null })
     }
 
+    /** Home subnets are used as Android reads them (host bits cleared), so the LAN exclusion never cancels one; bad ones go. */
+    @Test fun homeSubnetsAreCanonical() {
+        assertEquals("192.168.0.0/16", Compiler.canonical("192.168.1.0/16"))
+        assertEquals("10.0.0.0/8", Compiler.canonical("10.42.1.9/8"))
+        assertEquals("10.1.2.3/32", Compiler.canonical("10.1.2.3"))
+        for (bad in listOf("10.0.0.1/33", "1.2.3", "1.2.3.4.5", "256.1.1.1/8", "a.b.c.d", "10.0.0.0/8/8", " ", "１.2.3.4")) assertEquals(bad, null, Compiler.canonical(bad))
+        val s = example.copy(home = Home(tailscale = true, subnets = listOf("192.168.1.0/16", "192.168.0.0/16", "10.0.0.1/33", "8.8.8.0/24")))
+        val c = compile(s)
+        val tun = c["inbounds"]!!.jsonArray[0].jsonObject
+        assertEquals(listOf("0.0.0.0/0", "192.168.0.0/16"), tun["route_address"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertFalse(tun["route_exclude_address"]!!.jsonArray.any { it.jsonPrimitive.content == "192.168.0.0/16" })
+        assertEquals(listOf("100.64.0.0/10", "192.168.0.0/16"), c.rules().first { it["outbound"]?.jsonPrimitive?.content == "home-ts" }["ip_cidr"]!!.jsonArray.map { it.jsonPrimitive.content })
+        // A home WireGuard tunnel's ranges too, and its interface's own subnet when it lists no private ranges.
+        val fritz = WgConf.parse(FRITZ, "Home")
+        val wg = compile(example.copy(home = Home(wg = fritz.copy(allowedIps = listOf("192.168.1.0/16", "10.0.0.1/33")))))
+        assertEquals(listOf("192.168.0.0/16"), wg.rules().first { it["outbound"]?.jsonPrimitive?.content == "home-wg" }["ip_cidr"]!!.jsonArray.map { it.jsonPrimitive.content })
+        val wgTun = wg["inbounds"]!!.jsonArray[0].jsonObject
+        assertTrue(wgTun["route_address"]!!.jsonArray.any { it.jsonPrimitive.content == "192.168.0.0/16" })
+        assertFalse(wgTun["route_exclude_address"]!!.jsonArray.any { it.jsonPrimitive.content == "192.168.0.0/16" })
+        assertEquals(listOf("10.7.0.0/24"), Compiler.homeCidrs(fritz.copy(allowedIps = listOf("0.0.0.0/0"), address = listOf("10.7.0.5/24", "bad", "1.2.3.4/33"))))
+        assertEquals(listOf("192.168.1.0/24"), Compiler.homeCidrs(fritz.copy(allowedIps = listOf("010.0.0.0/8", "192.168.1.9/24"))))
+    }
+
+    /** A Headscale host is an address only when it truly is one: a name that starts with a digit stays a name. */
+    @Test fun controlHostAddressOrName() {
+        fun login(url: String): JsonObject {
+            val s = example.copy(home = Home(tsControlUrl = url), routes = example.routes + Route("ts", tsExit = "100.101.102.103", hue = 4), apps = example.apps + ("com.n" to "ts"))
+            return compile(s).rules().first { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf("com.n") && it["outbound"]?.jsonPrimitive?.content == "direct" && (it["domain"] != null || it["ip_cidr"] != null) }
+        }
+        assertEquals("1hs.example.com", login("https://1hs.example.com")["domain"]!!.jsonArray.single().jsonPrimitive.content)
+        assertEquals("10.1.2.3/32", login("https://10.1.2.3:8443")["ip_cidr"]!!.jsonArray.single().jsonPrimitive.content)
+        assertEquals("010.1.2.3", login("https://010.1.2.3")["domain"]!!.jsonArray.single().jsonPrimitive.content)
+        assertEquals("fd7a:115c::1/128", login("https://[fd7a:115c::1]")["ip_cidr"]!!.jsonArray.single().jsonPrimitive.content)
+    }
+
     /** Connections a VPN server or tailnet peer opens are refused first; only the phone's apps get DNS answered. */
     @Test fun tunnelsNeverOpenConnectionsIntoThePhone() {
         val home = example.copy(home = example.home.copy(wg = WgConf.parse(FRITZ, "Home")))

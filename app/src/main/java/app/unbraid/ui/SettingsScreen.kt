@@ -470,7 +470,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
         }
         "subnets" -> ListDialog(
             "Home subnets", "192.168.178.0/24", home.subnets, { cidr.matches(it) && app.unbraid.vpn.Compiler.isPrivate(it) }, "Private ranges only, in CIDR notation, e.g. 192.168.178.0/24",
-            note = "Separate several with commas.", onSave = { l -> ui.setHome { it.copy(subnets = l) } }, onDismiss = { dialog = null },
+            note = "Separate several with commas.", onSave = { l -> ui.setHome { it.copy(subnets = l.mapNotNull(app.unbraid.vpn.Compiler::canonical).distinct()) } }, onDismiss = { dialog = null },
         )
         "statsConsent" -> StatsConsent({ dialog = null }) { dialog = null; ui.setStats(true) }
         "statsDelete" -> Prompt("Delete statistics?", "Delete statistics", { dialog = null; ui.deleteStats() }, { dialog = null }, danger = true) {
