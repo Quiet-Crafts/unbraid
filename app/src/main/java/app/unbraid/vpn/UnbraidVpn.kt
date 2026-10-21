@@ -578,18 +578,22 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         stopEngine()
         stopWanted = false
         val until = if (minutes > 0) System.currentTimeMillis() + minutes * 60_000L else 0L
-        val at = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(until))
-        getSystemService(NotificationManager::class.java).notify(1, notification(if (until > 0) "Paused until $at" else "Paused", paused = true))
         // Short steps against the wall clock: a single delay doesn't count while the phone sleeps.
+        var exact = true
         if (until > 0) {
             resume = scope.launch {
                 while (System.currentTimeMillis() < until) kotlinx.coroutines.delay((until - System.currentTimeMillis()).coerceIn(1, 15_000))
                 lock.withLock { if (state.value.phase == VpnState.Phase.Paused) connect() }
             }
             // The coroutine stalls while the phone sleeps; this wakes it so background traffic doesn't stay unprotected.
-            getSystemService(AlarmManager::class.java)
-                .setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + minutes * 60_000L, resumeIntent)
+            // On time when Android allows exact alarms; otherwise it may come somewhat later, and the notice says so.
+            val am = getSystemService(AlarmManager::class.java)
+            val wake = SystemClock.elapsedRealtime() + minutes * 60_000L
+            exact = am.canScheduleExactAlarms() && runCatching { am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, wake, resumeIntent) }.isSuccess
+            if (!exact) am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, wake, resumeIntent)
         }
+        val at = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(until))
+        getSystemService(NotificationManager::class.java).notify(1, notification(if (until <= 0) "Paused" else if (exact) "Paused until $at" else "Paused until about $at", paused = true))
         // Last: whoever sees Paused (a resume refused for lack of consent) finds the alarm and notice to cancel.
         state.value = VpnState(VpnState.Phase.Paused, pausedUntil = until, pausedAt = System.currentTimeMillis(), lockdown = lockdown, alwaysOn = alwaysOn)
     }
