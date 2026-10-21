@@ -86,6 +86,8 @@ data class VpnState(
     val lockdown: Boolean = false,
     /** Android's "Always-on VPN" for this app; both are only known while the service runs. */
     val alwaysOn: Boolean = false,
+    /** Providers whose routes have no tunnel right now: provider id → whether it refused the account (the user must sign in again). */
+    val stuck: Map<String, Boolean> = emptyMap(),
 ) {
     enum class Phase { Off, Connecting, On, Paused }
 }
@@ -324,7 +326,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             forgetLookups(this)
             val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
             apply(srv, setup, picked, accounts)
-            state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn)
+            state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, stuck = stuck(setup, picked.blocked))
             stopWanted = false
             notify(setup)
             if (setup.tailscale) watchTailscale()
@@ -406,6 +408,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         net.onChange = { scope.launch { lock.withLock { retry?.cancel(); retry = null }; reload() } }
     }
 
+    /** Providers of [blocked] routes, and whether one refused its account. */
+    private fun stuck(setup: Setup, blocked: Map<String, Exception>) = blocked.entries.mapNotNull { (id, e) -> setup.route(id)?.takeIf { !it.imported }?.let { it.loc.provider to (e is AuthException) } }
+        .groupBy({ it.first }, { it.second }).mapValues { (_, v) -> v.any { it } }
+
     /** One line for Routes: which routes' apps are blocked and why. */
     private fun blockedText(setup: Setup, blocked: Map<String, Exception>): String? = blocked.entries.firstOrNull()?.let { (_, e) ->
         "Apps on ${blocked.keys.joinToString { setup.route(it)?.name ?: it }} are blocked: ${Redact.message(e, "no connection")}"
@@ -478,7 +484,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** Runs [picked] on the engine and shows it; on failure brings back what ran. False if it didn't apply. Caller holds [lock]. */
     private fun install(srv: CommandServer, setup: Setup, picked: LinkPicker.Result, accounts: Map<String, String>): Boolean = try {
         apply(srv, setup, picked, accounts)
-        state.update { it.copy(servers = picked.links.mapValues { l -> l.value.server }, error = blockedText(setup, picked.blocked)) }
+        state.update { it.copy(servers = picked.links.mapValues { l -> l.value.server }, error = blockedText(setup, picked.blocked), stuck = stuck(setup, picked.blocked)) }
         notify(setup)
         if (setup.tailscale && ts == null) watchTailscale()
         true

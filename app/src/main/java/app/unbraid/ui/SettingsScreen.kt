@@ -239,6 +239,9 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     val tsStatus = tailscaleSub(home.tailscale, vpn.phase == Phase.On, vpn.tsState)
     val homeVia = listOfNotNull("Tailscale".takeIf { home.tailscale }, "WireGuard".takeIf { home.wg != null }).joinToString(" and ").ifEmpty { null }
 
+    // A key's setup minute ends while Providers & servers may stay open.
+    var tick by remember { mutableStateOf(0) }
+    LaunchedEffect(accounts, page) { while (page == "providers" && app.unbraid.data.Providers.settingUp().isNotEmpty()) { delay(5_000); tick++ } }
     val play = firstShow("settings") // the hub's first rows rise in once per session, as on Routes and Stats
     val motion = androidx.compose.material3.MaterialTheme.motionScheme
     AnimatedContent(page, transitionSpec = { fadeIn(motion.fastEffectsSpec()) togetherWith fadeOut(motion.fastEffectsSpec()) }, label = "settings") { p ->
@@ -272,10 +275,22 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             }
 
             p == "providers" -> Page("Providers & servers", back) {
+                tick.let { }
                 notice(ui, notice)
                 group("VPN providers", signedIn.map { pr ->
                     val n = setup.routes.count { !it.imported && it.loc.provider == pr.id }
-                    Item(pr.name, "Signed in · ${if (n == 0) "not used" else "used by $n ${if (n == 1) "route" else "routes"}"}", { go("provider:${pr.id}") }) { Chevron() }
+                    val active = setup.activeRoutes.filter { !it.imported && it.loc.provider == pr.id }
+                    val on = vpn.phase == Phase.On && active.isNotEmpty()
+                    val (tone, words) = providerStatus(
+                        pr.name, n > 0, vpn.stuck[pr.id] == true, on && pr.id in app.unbraid.data.Providers.settingUp(), on && vpn.stuck[pr.id] == false,
+                        app.unbraid.Unbraid.store.countriesFresh(pr.id), on && active.all { it.id in vpn.servers },
+                    )
+                    Item(pr.name, words + if (n > 0) " · used by $n ${if (n == 1) "route" else "routes"}" else "", { go("provider:${pr.id}") }) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(10.dp).clip(androidx.compose.foundation.shape.CircleShape).background(when (tone) { Tone.Good -> Ink.good; Tone.Warn -> Ink.accent; Tone.Bad -> Ink.bad; Tone.Idle -> Ink.faint }))
+                            Gap(8.dp); Chevron()
+                        }
+                    }
                 }.ifEmpty { listOf(Item("No provider yet", "Sign in to one with Add connection", null)) })
                 if (setup.servers.isNotEmpty()) group("My servers", setup.servers.map { sv ->
                     val n = setup.routes.count { it.own == sv.id }
