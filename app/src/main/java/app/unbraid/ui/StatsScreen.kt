@@ -513,7 +513,7 @@ private fun Usage(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, go
             }
         })
     }
-    item(key = "note") { Caption("Data that passes through unbraid. Apps set to Direct skip it and aren't counted, unless connections without VPN are blocked. By exit and app: App flows.") }
+    item(key = "note") { Caption("Data that passes through unbraid. Apps you set to Direct skip it and aren't counted, unless connections without VPN are blocked. Apps that follow a Direct default route are counted. By exit and app: App flows.") }
     item(key = "links") { Row(Modifier.padding(start = Gutter, top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { LinkButton(Icons.flows, "App flows") { go("flows") }; LinkButton(Icons.tunnel, "Tunnels") { go("tunnels") } } }
 }
 

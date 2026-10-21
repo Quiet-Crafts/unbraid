@@ -302,7 +302,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             p == "tailscale" -> Page("Tailscale", back) {
                 notice(ui, notice)
                 group(null, listOfNotNull(
-                    Item("Reach your tailnet", if (home.tailscale) tsStatus else if (setup.tsExit != null) "Off · Tailscale still runs for your exit-node route" else "From every app, as with the Tailscale app", { setTailscale(!home.tailscale) }, checked = home.tailscale, icon = Icons.hub) { Toggle(home.tailscale) },
+                    Item("Reach your tailnet", if (home.tailscale) tsStatus else if (setup.tsExit != null) "Off · Tailscale still runs for your exit-node route" else "From apps routed through unbraid", { setTailscale(!home.tailscale) }, checked = home.tailscale, icon = Icons.hub) { Toggle(home.tailscale) },
                     vpn.tsLoginUrl?.let { url -> Item("Sign in to Tailscale", "Opens your browser", cta = true, onClick = { tsLogin(url) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } },
                 ))
                 if (setup.tailscale && vpn.tsExitNodes.isNotEmpty()) group("Exit nodes", vpn.tsExitNodes.sortedByDescending { it.online }.map { n ->
@@ -321,7 +321,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     Item(
                         "Allow Nearby devices",
                         when {
-                            home.tailscale -> "Tailscale is using a slow relay. Allow Nearby devices to reach home directly."
+                            setup.tailscale -> "Lets Tailscale reach devices on this network directly, not through a slower relay."
                             home.wg != null -> "Needed to reach a home tunnel on this network."
                             lockdownLan -> "Printers, casting and NAS need it while Block connections without VPN is on."
                             else -> "Needed to reach your own server on this network."
