@@ -132,6 +132,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
         private var engineReady = false
 
+        /** Serializes connect, reload, pause and teardown, across service instances too (an old one may still be stopping). */
+        private val lock = Mutex()
+        /** The live service instance, whose waiting commands a reset must not run ahead of. */
+        @Volatile private var current: UnbraidVpn? = null
+        /** The last destroyed instance's cleanup: a new instance handles nothing before it is done. */
+        @Volatile private var cleanup: Job? = null
+
+        /** Runs [f] only while the VPN is off with no command waiting, holding the lifecycle lock so none can start meanwhile. */
+        suspend fun <T> whileStopped(f: () -> T): T? = lock.withLock {
+            if (state.value.phase == VpnState.Phase.Off && (current?.waiting?.get() ?: 0) == 0) f() else null
+        }
+
         /**
          * Loads the engine (a 60 MB native library and the Go runtime) once, here rather than at app start: the UI,
          * the widget and the tile never need it, only a running tunnel does.
@@ -162,7 +174,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val lock = Mutex()
+    /** Start commands in arrival order, each with whether the phone was locked when it came. */
+    private val inbox = kotlinx.coroutines.channels.Channel<Pair<Intent?, Boolean>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    /** Commands not yet handled; main thread only. The service stops only when none is left ([stopIfIdle]). */
+    private var pending = 0
+    /** Commands not yet started (they wait for [lock]); see [whileStopped]. */
+    private val waiting = java.util.concurrent.atomic.AtomicInteger()
+    /** The newest start command: stopping with it never stops a service Android has already handed a later one. */
+    private var lastStartId = 0
+    /** The last thing handled ended the connection: the service may go once no command is pending. */
+    @Volatile private var stopWanted = false
+    @Volatile private var destroyed = false
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
     private val store get() = Unbraid.store
     private lateinit var cm: ConnectivityManager
     private lateinit var net: NetMonitor
@@ -177,43 +200,63 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         engineSetup(this)
         cm = getSystemService(ConnectivityManager::class.java)
         net = NetMonitor(cm)
+        current = this
+        scope.launch {
+            cleanup?.join()
+            for ((intent, locked) in inbox) {
+                lock.withLock { waiting.decrementAndGet(); handle(intent, locked) }
+                kotlinx.coroutines.withContext(Dispatchers.Main) { pending--; stopIfIdle() }
+            }
+        }
+    }
+
+    private fun stopIfIdle() {
+        if (pending > 0 || !stopWanted || destroyed) return
+        if (stopSelfResult(lastStartId)) { stopWanted = false; stopForeground(STOP_FOREGROUND_REMOVE) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Disconnecting and pausing drop protection: never from a locked phone, whoever holds the PendingIntent
         // (a notification listener, the widget host). The in-app controls are only reachable unlocked anyway.
+        lastStartId = startId
         val locked = getSystemService(KeyguardManager::class.java).isDeviceLocked
-        if (intent?.action == ACTION_FLAGS) {
-            val was = state.value.lockdown
-            state.update { if (it.phase == VpnState.Phase.On || it.phase == VpnState.Phase.Paused) it.copy(alwaysOn = isAlwaysOn, lockdown = isLockdownEnabled) else it }
-            // Lockdown decides which apps and networks the interface excludes: a change needs a rebuilt one.
-            if (was != isLockdownEnabled && state.value.phase == VpnState.Phase.On) scope.launch { lock.withLock { reload(store.setup.value) } }
-            return START_STICKY
+        if (intent?.action == null) {
+            // Another VPN app may have taken the slot since: Android then refuses this service type. Never crash on it.
+            val allowed = prepare(this) == null && runCatching {
+                // The systemExempted type exists from Android 14; on 13 a foreground service needs no type.
+                if (android.os.Build.VERSION.SDK_INT >= 34) startForeground(1, notification("Connecting…"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
+                else startForeground(1, notification("Connecting…"))
+            }.isSuccess
+            // Refused while off or paused, so no engine runs: stop now, as Android requires without startForeground.
+            if (!allowed && (state.value.phase == VpnState.Phase.Off || state.value.phase == VpnState.Phase.Paused)) {
+                cancelResume()
+                state.value = VpnState(error = "Open $APP to allow it as your VPN")
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
-        if (intent?.action == ACTION_STOP) {
-            if (locked) return START_STICKY // refused: the tunnel keeps running and keeps its restart policy
-            scope.launch { shutdown(null) }
-            return START_NOT_STICKY
-        }
-        if (intent?.action == ACTION_PAUSE) {
+        pending++
+        waiting.incrementAndGet()
+        inbox.trySend(intent to locked)
+        return if (intent?.action == ACTION_STOP && !locked) START_NOT_STICKY else START_STICKY
+    }
+
+    /** One start command, in arrival order; caller holds [lock]. */
+    private fun handle(intent: Intent?, locked: Boolean) {
+        when (intent?.action) {
+            ACTION_FLAGS -> {
+                // Raced a disconnect: don't leave an idle sticky service that a restart would turn into a connect.
+                if (state.value.phase == VpnState.Phase.Off) { stopWanted = true; return }
+                state.update { it.copy(alwaysOn = isAlwaysOn, lockdown = isLockdownEnabled) }
+                // Lockdown decides which apps and networks the interface excludes: a change needs a rebuilt one.
+                if (state.value.phase == VpnState.Phase.On && lastInput?.lockdown != isLockdownEnabled) reload(store.setup.value)
+            }
+            // Refused while locked: the tunnel keeps running and keeps its restart policy.
+            ACTION_STOP -> if (!locked) teardown(null)
             // Nothing to pause (stale widget or sheet): don't leave an idle sticky service that a restart would turn into a connect.
-            if (state.value.phase == VpnState.Phase.Off) { stopSelf(); return START_NOT_STICKY }
-            if (!locked) scope.launch { lock.withLock { pause(intent.getIntExtra(EXTRA_MINUTES, 15)) } }
-            return START_STICKY
+            ACTION_PAUSE -> if (state.value.phase == VpnState.Phase.Off) stopWanted = true else if (!locked) pause(intent.getIntExtra(EXTRA_MINUTES, 15))
+            else -> connect()
         }
-        // Another VPN app may have taken the slot since: Android then refuses this service type. Never crash on it.
-        val allowed = prepare(this) == null && runCatching {
-            // The systemExempted type exists from Android 14; on 13 a foreground service needs no type.
-            if (android.os.Build.VERSION.SDK_INT >= 34) startForeground(1, notification("Connecting…"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
-            else startForeground(1, notification("Connecting…"))
-        }.isSuccess
-        if (!allowed) {
-            state.value = VpnState(error = "Open $APP to allow it as your VPN")
-            stopSelf()
-            return START_NOT_STICKY
-        }
-        scope.launch { lock.withLock { connect() } }
-        return START_STICKY
     }
 
     /** Setup and config the engine is running right now. */
@@ -228,7 +271,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var lastInput: Compiler.Input? = null
 
     @OptIn(FlowPreview::class)
-    private suspend fun connect() {
+    private fun connect() {
         if (state.value.phase == VpnState.Phase.On) { notify(store.setup.value); return } // a stale "Connecting…" from a repeated start
         cancelResume()
         state.value = VpnState(VpnState.Phase.Connecting)
@@ -239,10 +282,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // The app's own tests get a fresh way in with each engine start (see apply); none until it runs.
             probe = null
             val links = pickLinks(setup, emptyMap(), accounts)
+            if (destroyed) return // the service went away during the provider calls: start no engine for it
             forgetLookups(this)
             val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
             apply(srv, setup, links, accounts)
             state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), links.mapValues { it.value.server }, lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn)
+            stopWanted = false
             notify(setup)
             if (setup.tailscale) watchTailscale()
             // Anything edited while connecting is picked up here: only the applied setup is skipped.
@@ -454,10 +499,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         cancelResume()
         stopEngine()
         state.value = VpnState(error = error)
-        stopForeground(STOP_FOREGROUND_REMOVE)
         // A failure in the background (resume after a pause, a revoked account) must not pass unnoticed.
         if (error != null) alert(error)
-        stopSelf()
+        // The service goes once no command is pending: a connect after this one keeps it and its notification.
+        stopWanted = true
+        main.post(::stopIfIdle)
     }
 
     private val resumeIntent get() = PendingIntent.getService(this, 4, Intent(this, UnbraidVpn::class.java), PendingIntent.FLAG_IMMUTABLE)
@@ -473,6 +519,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val lockdown = state.value.lockdown
         val alwaysOn = state.value.alwaysOn
         stopEngine()
+        stopWanted = false
         val until = if (minutes > 0) System.currentTimeMillis() + minutes * 60_000L else 0L
         state.value = VpnState(VpnState.Phase.Paused, pausedUntil = until, pausedAt = System.currentTimeMillis(), lockdown = lockdown, alwaysOn = alwaysOn)
         val at = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(until))
@@ -492,16 +539,27 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     override fun onRevoke() { scope.launch { shutdown(null) } }
 
     override fun onDestroy() {
-        // Killed without teardown: never leave a tunnel or an "On" state behind.
+        // Killed without teardown: never leave a tunnel or an "On" state behind. Cleanup waits for whatever holds the
+        // lifecycle lock (a connect finishing its provider calls), so nothing it starts afterwards survives.
+        destroyed = true
+        if (current === this) current = null
         cancelResume()
-        runCatching { tun?.close() }; tun = null
-        if (state.value.phase != VpnState.Phase.Off) state.value = VpnState()
-        net.quit()
-        runCatching { server?.close() }
-        server = null
-        openTable(false)
-        forgetLookups(this)
         scope.cancel()
+        val before = cleanup
+        cleanup = bg.launch {
+            before?.join() // an older instance's cleanup first, so it can never undo a newer engine's files
+            lock.withLock {
+                // Closing the command server alone leaves a running engine (and its own copy of the tunnel) alive.
+                runCatching { server?.closeService() }
+                runCatching { server?.close() }
+                server = null
+                runCatching { tun?.close() }; tun = null
+                net.quit()
+                openTable(false)
+                forgetLookups(this@UnbraidVpn)
+                if (state.value.phase != VpnState.Phase.Off) state.value = VpnState()
+            }
+        }
         super.onDestroy()
     }
 

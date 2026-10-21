@@ -180,6 +180,10 @@ class Ui(app: Application) : AndroidViewModel(app) {
         return out
     }
 
+    /** Runs [f] while the VPN is off and can't start, as deleting the engine's files needs; else asks the user to try [what] again. */
+    private suspend fun whileStopped(what: String, f: () -> Unit) =
+        (UnbraidVpn.whileStopped(f) != null).also { if (!it) notice.value = "Couldn't stop the VPN to $what. Try again." }
+
     private fun tailscaleLeft(loggedOut: Boolean?) {
         if (loggedOut == false) warn("Couldn't log this phone out of Tailscale. Remove it in your tailnet's admin console.")
     }
@@ -193,10 +197,13 @@ class Ui(app: Application) : AndroidViewModel(app) {
     /** Switches control server: the engine must be fully down before its Tailscale state is deleted. */
     fun setTailscaleServer(url: String?, authKey: String?) = viewModelScope.launch(Dispatchers.IO) {
         stopVpn(false)
-        if (vpn.value.phase != VpnState.Phase.Off) { notice.value = "Couldn't stop the VPN to switch servers. Try again."; return@launch }
-        File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
-        store.tsSuffix = null
-        val saved = store.update { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl })) }
+        var saved = false
+        // The new server is saved before the lock opens: a connect waiting for it starts with the new node, never the old one.
+        if (!whileStopped("switch servers") {
+            File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
+            store.tsSuffix = null
+            saved = store.update { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl })) }
+        }) return@launch
         if (saved) authKey?.let(::clearClipboardIf)
     }
 
@@ -205,17 +212,19 @@ class Ui(app: Application) : AndroidViewModel(app) {
         val had = setup.value.tailscale
         viewModelScope.launch(Dispatchers.IO) {
             val loggedOut = stopVpn(had)
-            store.update { s ->
-                val gone = s.routes.filter { it.tsExit != null }.map { it.id }.toSet()
-                val routes = s.routes.filter { it.id !in gone }
-                s.copy(
-                    routes = routes, home = s.home.copy(tailscale = false, tsAuthKey = null),
-                    defaultRoute = if (s.defaultRoute in gone) routes.firstOrNull()?.id ?: DIRECT else s.defaultRoute,
-                    apps = s.apps.filterValues { it !in gone },
-                )
-            }
-            File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
-            store.tsSuffix = null
+            if (!whileStopped("turn Tailscale off") {
+                store.update { s ->
+                    val gone = s.routes.filter { it.tsExit != null }.map { it.id }.toSet()
+                    val routes = s.routes.filter { it.id !in gone }
+                    s.copy(
+                        routes = routes, home = s.home.copy(tailscale = false, tsAuthKey = null),
+                        defaultRoute = if (s.defaultRoute in gone) routes.firstOrNull()?.id ?: DIRECT else s.defaultRoute,
+                        apps = s.apps.filterValues { it !in gone },
+                    )
+                }
+                File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
+                store.tsSuffix = null
+            }) return@launch
             tailscaleLeft(loggedOut)
             resetIfEmpty()
         }
@@ -225,9 +234,10 @@ class Ui(app: Application) : AndroidViewModel(app) {
         val accounts = store.accounts.value
         val tailscale = setup.value.tailscale
         viewModelScope.launch(Dispatchers.IO) {
-            val revoked = accounts.map { (id, blob) -> async { id to release(id, blob) } }
             val loggedOut = stopVpn(tailscale)
-            store.signOutAll()
+            if (!whileStopped("sign out", store::signOutAll)) return@launch
+            // Released only now: a running tunnel would lose its key while still carrying traffic.
+            val revoked = accounts.map { (id, blob) -> async { id to release(id, blob) } }
             form.clear(); formError.clear(); importDraft.clear()
             _signedIn.value = false
             tailscaleLeft(loggedOut)
