@@ -52,7 +52,11 @@ object Stats {
     /** Runs [f] on the worker; failures are logged, never thrown into the app. */
     internal fun post(f: () -> Unit) = worker.execute { runCatching(f).onFailure { Log.w("Unbraid", "stats: ${it.javaClass.simpleName}") } }
 
-    fun init(context: Context) { ctx = context.applicationContext }
+    /** Also when recording is off: what was kept goes when the consent text says, not only when Stats is used. */
+    fun init(context: Context) { ctx = context.applicationContext; maintain() }
+
+    /** Retention, once a day (the app start and every return to the app ask; a long-running process keeps asking). */
+    fun maintain() = post { maybePrune() }
 
     /** Local hour and day numbers, so "today" and "Monday" match the phone's calendar. */
     fun hourOf(ms: Long) = (ms + TimeZone.getDefault().getOffset(ms)) / HOUR
@@ -111,7 +115,7 @@ object Stats {
 
     private var prunedDay = -1L
     /** Retention runs once a day whatever else happens: on writes and before reads. */
-    private fun maybePrune() { val d = dayOf(System.currentTimeMillis()); if (d != prunedDay) { prunedDay = d; pruneNow() } }
+    private fun maybePrune() { val d = dayOf(System.currentTimeMillis()); if (d != prunedDay) { pruneNow(); prunedDay = d } }
 
     private fun clearPending() { hourly.clear(); daily.clear(); servers.clear() }
 
@@ -143,6 +147,8 @@ object Stats {
         d.execSQL("DELETE FROM peak") // speeds seen in use, no longer kept (the table stays for older databases)
         d.execSQL("DELETE FROM span WHERE start < ?", arrayOf<Any>(now - 400 * 24 * HOUR))
         d.execSQL("DELETE FROM test WHERE at < ? OR at NOT IN (SELECT at FROM test ORDER BY at DESC LIMIT $TESTS_KEPT)", arrayOf<Any>(now - 400 * 24 * HOUR))
+        // An exit's name and colour go with the last row that needs them.
+        d.execSQL("DELETE FROM exit WHERE id NOT IN (SELECT exit FROM hourly UNION SELECT exit FROM daily UNION SELECT exit FROM server UNION SELECT exit FROM test)")
     }
 
     // ---- sessions: protected and paused spans, from the service state ------------------------------------------

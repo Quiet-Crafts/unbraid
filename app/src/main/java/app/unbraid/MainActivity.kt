@@ -107,7 +107,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // Android's Always-on and Block connections, and the installed apps, can change while unbraid is in the background.
-    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); ui.refreshApps() }
+    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); ui.refreshApps(); app.unbraid.stats.Stats.maintain() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         window.setHideOverlayWindows(true) // no tapjacking over sign-in or connect
