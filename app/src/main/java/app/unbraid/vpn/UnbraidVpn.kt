@@ -95,6 +95,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val state = MutableStateFlow(VpnState())
         /** Route id → engine tunnel tag of the running setup (speed tests dial through it). */
         @Volatile var tags: Map<String, String> = emptyMap()
+        /** Tunnel tag → the DNS server that tunnel's own lookups use (health checks look their servers up there). */
+        @Volatile var tunnelDns: Map<String, String> = emptyMap()
         /** The setup the engine runs (not the one being edited): stats attribute traffic against it. */
         @Volatile var running: Setup? = null
         /** Loopback port and password of the app's own way into each exit ([Compiler.PROBE]); see [Probe]. */
@@ -371,6 +373,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() }
         }
         lastGood = json
+        tunnelDns = runCatching { Compiler.probeDns(json) }.getOrDefault(emptyMap())
         tags = Compiler.shared(setup, links, blocked) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG }
         running = setup
         applied = setup

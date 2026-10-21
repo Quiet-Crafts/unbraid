@@ -32,6 +32,8 @@ class Unbraid : Application() {
         // the domain table and the netmap cache older versions wrote.
         UnbraidVpn.forgetLookups(this)
         java.io.File(filesDir, "tailscale/profile-data").deleteRecursively()
+        // Files other Tailscale devices sent before receiving them was turned off: the engine no longer accepts any.
+        java.io.File(filesDir, "box/Taildrop").deleteRecursively()
         app.unbraid.data.Snapshot.dir = filesDir
         // The home-screen widget mirrors every connection change.
         UnbraidVpn.state.map { it.phase }.distinctUntilChanged().onEach { StatusWidget.update(this) }.launchIn(MainScope())

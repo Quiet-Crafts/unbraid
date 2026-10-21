@@ -62,9 +62,11 @@ tools/build-libbox.sh                 # builds app/libs/libbox.aar from sing-box
 ./gradlew :app:testFossDebugUnitTest
 ```
 
-The build script keeps its work files in `~/.cache/unbraid-libbox`. Set `WORK` to use another folder. The two
-patches stop libbox from writing the running configuration, which holds private keys, to disk, and seal the
-Tailscale node state with an Android Keystore key. A release build is signed only if `.secrets/signing.properties`
+The build script keeps its work files in `~/.cache/unbraid-libbox`. Set `WORK` to use another folder. The patches
+in `tools/` stop libbox from writing the running configuration, which holds private keys, to disk, seal the
+Tailscale node state with an Android Keystore key, refuse files sent through Taildrop, give an OpenVPN tunnel a
+resolver inside it when its server pushes none, and let the app's connection checks look up their servers through
+the tunnel being checked. A release build is signed only if `.secrets/signing.properties`
 exists, so a plain checkout builds an unsigned APK.
 
 ## Privacy

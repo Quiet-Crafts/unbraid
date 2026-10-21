@@ -43,7 +43,10 @@ object Health {
         }.getOrDefault(false)
     }
 
-    private suspend fun binding(server: String, tag: String): Boolean {
+    private suspend fun binding(stun: String, tag: String): Boolean {
+        // The STUN server's name is looked up through the tunnel's own DNS server, never the phone's network (an engine
+        // patch reads "<dns server>|<host:port>"); a tunnel whose DNS server isn't known goes straight to HTTPS.
+        val server = UnbraidVpn.tunnelDns[tag]?.let { "$it|$stun" } ?: return false
         val answer = CompletableDeferred<Boolean>()
         // Callbacks only hand the answer over: closing the session from inside one would wait for itself.
         val handler = object : STUNTestHandler {

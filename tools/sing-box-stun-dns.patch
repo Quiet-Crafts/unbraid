@@ -1,0 +1,31 @@
+diff --git a/daemon/started_service.go b/daemon/started_service.go
+index f1fb0f0..f695e9e 100644
+--- a/daemon/started_service.go
++++ b/daemon/started_service.go
+@@ -3,6 +3,7 @@ package daemon
+ import (
+ 	"context"
+ 	"net/netip"
++	"strings"
+ 	"os"
+ 	"runtime"
+ 	runtimeDebug "runtime/debug"
+@@ -1545,10 +1546,16 @@ func (s *StartedService) StartSTUNTest(
+ 		return err
+ 	}
+ 
+-	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, "", adapter.DNSQueryOptions{}, 0)
++	// Unbraid: "<DNS server tag>|<host:port>" looks the STUN host up through that DNS server (the tunnel's own), never
++	// the default one; an unknown tag fails the test instead of falling back.
++	dnsServer, stunServer := "", request.Server
++	if i := strings.IndexByte(stunServer, '|'); i >= 0 {
++		dnsServer, stunServer = stunServer[:i], stunServer[i+1:]
++	}
++	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, dnsServer, adapter.DNSQueryOptions{}, 0)
+ 
+ 	result, stunErr := stun.Run(stun.Options{
+-		Server:  request.Server,
++		Server:  stunServer,
+ 		Dialer:  resolvedDialer,
+ 		Context: server.Context(),
+ 		OnProgress: func(p stun.Progress) {

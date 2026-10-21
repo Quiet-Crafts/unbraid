@@ -1,0 +1,105 @@
+diff --git a/option/openvpn.go b/option/openvpn.go
+index d62aaf9..31f8fa8 100644
+--- a/option/openvpn.go
++++ b/option/openvpn.go
+@@ -207,4 +207,6 @@ type OpenVPNDNSServerOptions struct {
+ 	Endpoint               string `json:"endpoint,omitempty"`
+ 	AcceptDefaultResolvers bool   `json:"accept_default_resolvers,omitempty"`
+ 	AcceptSearchDomain     bool   `json:"accept_search_domain,omitempty"`
++	// Unbraid: resolver (IP address) asked through the tunnel when the server pushes no DNS configuration at all.
++	FallbackServer string `json:"fallback_server,omitempty"`
+ }
+diff --git a/protocol/openvpn/dns_fallback_test.go b/protocol/openvpn/dns_fallback_test.go
+new file mode 100644
+index 0000000..16ebedd
+--- /dev/null
++++ b/protocol/openvpn/dns_fallback_test.go
+@@ -0,0 +1,44 @@
++package openvpn
++
++import (
++	"context"
++	"net/netip"
++	"testing"
++
++	C "github.com/sagernet/sing-box/constant"
++	boxDNS "github.com/sagernet/sing-box/dns"
++	"github.com/sagernet/sing-box/log"
++	ovpntransport "github.com/sagernet/sing-box/transport/openvpn"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// Unbraid: the fallback resolver answers only when the server pushes no DNS configuration at all.
++func TestFallbackOnlyWithoutPushedDNS(t *testing.T) {
++	newTransport := func(fallback string) *DNSTransport {
++		d := &DNSTransport{
++			TransportAdapter: boxDNS.NewTransportAdapter(C.DNSTypeOpenVPN, "test", nil),
++			ctx:              context.Background(),
++			logger:           log.NewNOPFactory().NewLogger("test"),
++			dialer:           N.SystemDialer,
++		}
++		if fallback != "" {
++			d.fallback = netip.MustParseAddr(fallback)
++		}
++		return d
++	}
++	d := newTransport("9.9.9.9")
++	if err := d.updateResolvers(ovpntransport.Configuration{}); err != nil || len(d.defaultResolvers) != 1 {
++		t.Fatalf("no pushed DNS: want the fallback, got %d resolvers, err %v", len(d.defaultResolvers), err)
++	}
++	fallback := d.defaultResolvers[0]
++	if err := d.updateResolvers(ovpntransport.Configuration{DNS: []netip.Addr{netip.MustParseAddr("10.8.0.1")}}); err != nil || len(d.defaultResolvers) != 1 || d.defaultResolvers[0] == fallback {
++		t.Fatalf("pushed DNS must replace the fallback, err %v", err)
++	}
++	if err := d.updateResolvers(ovpntransport.Configuration{DNSRoutes: []string{"corp.example"}}); err == nil {
++		t.Fatal("domain routes without DNS servers must still fail, not use the fallback")
++	}
++	none := newTransport("")
++	if err := none.updateResolvers(ovpntransport.Configuration{}); err != nil || len(none.defaultResolvers) != 0 {
++		t.Fatalf("without a fallback nothing is added, got %d", len(none.defaultResolvers))
++	}
++}
+diff --git a/protocol/openvpn/dns_transport.go b/protocol/openvpn/dns_transport.go
+index 4146197..c35958f 100644
+--- a/protocol/openvpn/dns_transport.go
++++ b/protocol/openvpn/dns_transport.go
+@@ -51,13 +51,23 @@ type DNSTransport struct {
+ 	searchDomains          []string
+ 	defaultResolvers       []adapter.DNSTransport
+ 	resolverScope          *adapter.Scope
++	fallback               netip.Addr
+ }
+ 
+ func NewDNSTransport(ctx context.Context, logger log.ContextLogger, tag string, options option.OpenVPNDNSServerOptions) (adapter.DNSTransport, error) {
+ 	if options.Endpoint == "" {
+ 		return nil, E.New("missing endpoint tag")
+ 	}
++	var fallback netip.Addr
++	if options.FallbackServer != "" {
++		var err error
++		fallback, err = netip.ParseAddr(options.FallbackServer)
++		if err != nil {
++			return nil, E.Cause(err, "parse fallback_server")
++		}
++	}
+ 	return &DNSTransport{
++		fallback:               fallback,
+ 		TransportAdapter:       boxDNS.NewTransportAdapter(C.DNSTypeOpenVPN, tag, nil),
+ 		ctx:                    ctx,
+ 		logger:                 logger,
+@@ -184,6 +194,15 @@ func (t *DNSTransport) updateResolvers(configuration ovpntransport.Configuration
+ 		} else {
+ 			defaultResolvers = slices.Clone(selectedResolvers)
+ 		}
++		// Unbraid: no DNS configuration pushed at all: the fallback resolver, asked through the same tunnel.
++		if len(selectedResolvers) == 0 && len(configuration.DNSRoutes) == 0 && t.fallback.IsValid() {
++			resolver := dnsTransport.NewUDPRaw(t.logger, t.TransportAdapter, t.dialer, M.SocksaddrFrom(t.fallback, 53))
++			err := resolver.Start(adapter.StartStateStart, resolverScope)
++			if err != nil {
++				return t.failResolverUpdate(resolverScope, err)
++			}
++			defaultResolvers = []adapter.DNSTransport{resolver}
++		}
+ 	}
+ 	if len(searchDomains) > 0 && len(selectedResolvers) == 0 {
+ 		return t.failResolverUpdate(resolverScope, E.New("search domains require pushed DNS servers"))

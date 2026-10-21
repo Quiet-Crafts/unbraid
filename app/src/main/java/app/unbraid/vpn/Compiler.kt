@@ -134,7 +134,8 @@ object Compiler {
                     add(obj("type" to "local", "tag" to "local"))
                     active.filter { !ovpnDns(it.id) }.forEach { r -> add(obj("type" to "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))) }
                     active.filter { ovpnDns(it.id) }.map { tag(it.id) }.distinct().forEach { t ->
-                        add(obj("type" to "openvpn", "tag" to "dns-ovpn-$t", "endpoint" to t, "accept_default_resolvers" to true))
+                        // A server that pushes no DNS at all is answered by Quad9 through the same tunnel (an engine patch).
+                        add(obj("type" to "openvpn", "tag" to "dns-ovpn-$t", "endpoint" to t, "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9"))
                     }
                     if (homeTs) add(obj("type" to "tailscale", "tag" to "dns-tailnet", "endpoint" to TS_TAG, "accept_default_resolvers" to false))
                 }
@@ -370,6 +371,13 @@ object Compiler {
     fun trustedSuffix(raw: String?, h: Home) = tsSuffix(raw)?.takeIf { if (officialTs(h)) it.endsWith(".ts.net") else it == h.tsSuffixAllowed }
 
     private fun sha(s: String) = MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
+
+    /** Tunnel tag → the DNS server its probe user resolves with, read back from a compiled [config]. */
+    fun probeDns(config: String): Map<String, String> = kotlinx.serialization.json.Json.parseToJsonElement(config).let { c ->
+        ((c as JsonObject)["route"] as JsonObject)["rules"].let { it as JsonArray }.map { it as JsonObject }
+            .filter { it["inbound"] == JsonPrimitive(PROBE) && it["action"] == JsonPrimitive("resolve") }
+            .associate { ((it["auth_user"] as JsonArray)[0] as JsonPrimitive).content to (it["server"] as JsonPrimitive).content }
+    }
 
     /** Same key = same physical exit with the same credentials, whichever route asked for it. */
     internal fun linkKey(r: Route, l: Link): String = when (l) {

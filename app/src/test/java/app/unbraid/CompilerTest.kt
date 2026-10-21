@@ -95,6 +95,15 @@ class CompilerTest {
         assertEquals((0 until 8).map { base + it * 16384L }, starts)
     }
 
+    /** Health checks look their STUN servers up through each tunnel's own DNS server, read back from the config. */
+    @Test fun eachTunnelsDnsServerIsKnown() {
+        val raw = Compiler.compile(Compiler.Input(example, links(example), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", probe = 40000 to "pw"))
+        val dns = Compiler.probeDns(raw)
+        for (t in listOf("r-nl", "r-us", "r-it")) assertEquals(t, "dns-r-${t.removePrefix("r-")}", dns[t])
+        val servers = Json.parseToJsonElement(raw).jsonObject["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }
+        for ((t, d) in dns.filterKeys { it.startsWith("r-") }) assertEquals(t, servers.single { it["tag"]!!.jsonPrimitive.content == d }["detour"]!!.jsonPrimitive.content)
+    }
+
     /** A new probe pair always changes the config (so every engine start gets one), the same pair never. */
     @Test fun theProbePairIsPartOfTheConfig() {
         fun raw(p: Pair<Int, String>?) = Compiler.compile(Compiler.Input(example, links(example), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", null, p))
@@ -582,6 +591,8 @@ class CompilerTest {
         val c = compile(s, links = mapOf("x" to OvpnLink(sv("x"), s.routes[0].ovpn!!)))
         val dns = c.dnsServer("dns-ovpn-r-x")
         assertEquals("openvpn", dns["type"]!!.jsonPrimitive.content)
+        // A server that pushes no DNS is answered through the same tunnel, never not at all.
+        assertEquals("9.9.9.9", dns["fallback_server"]!!.jsonPrimitive.content)
         assertEquals("r-x", dns["endpoint"]!!.jsonPrimitive.content)
         val ep = c["endpoints"]!!.jsonArray[0].jsonObject
         assertFalse(ep.containsKey("route_no_pull"))

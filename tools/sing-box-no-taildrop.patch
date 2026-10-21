@@ -1,0 +1,53 @@
+diff --git a/protocol/tailscale/taildrop.go b/protocol/tailscale/taildrop.go
+index 78359a6..884f32b 100644
+--- a/protocol/tailscale/taildrop.go
++++ b/protocol/tailscale/taildrop.go
+@@ -72,15 +72,9 @@ func unregisterTaildropEndpoint(backend *ipnlocal.LocalBackend) {
+ 	taildropAccess.Unlock()
+ }
+ 
++// Unbraid: the phone never receives files; nothing is read from the request or stored.
+ func handleTaildropRequest(handler ipnlocal.PeerAPIHandler, w http.ResponseWriter, r *http.Request) {
+-	taildropAccess.RLock()
+-	endpoint := taildropEndpoints[handler.LocalBackend()]
+-	taildropAccess.RUnlock()
+-	if endpoint == nil {
+-		http.Error(w, "taildrop not available", http.StatusForbidden)
+-		return
+-	}
+-	endpoint.taildrop.handlePeerRequest(handler, w, r)
++	http.Error(w, "taildrop not available", http.StatusForbidden)
+ }
+ 
+ type taildropIncomingKey struct {
+diff --git a/protocol/tailscale/taildrop_disabled_test.go b/protocol/tailscale/taildrop_disabled_test.go
+new file mode 100644
+index 0000000..6c8a18a
+--- /dev/null
++++ b/protocol/tailscale/taildrop_disabled_test.go
+@@ -0,0 +1,25 @@
++//go:build with_gvisor
++
++package tailscale
++
++import (
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++)
++
++type failReader struct{ t *testing.T }
++
++func (f failReader) Read([]byte) (int, error) { f.t.Error("request body was read"); return 0, errors.New("read") }
++
++// Unbraid: every Taildrop upload is refused without reading it.
++func TestTaildropRefused(t *testing.T) {
++	for _, method := range []string{http.MethodPut, http.MethodGet, http.MethodPost} {
++		w := httptest.NewRecorder()
++		handleTaildropRequest(nil, w, httptest.NewRequest(method, "/v0/put/file.txt", failReader{t}))
++		if w.Code != http.StatusForbidden {
++			t.Fatalf("%s: got %d, want 403", method, w.Code)
++		}
++	}
++}
