@@ -303,6 +303,15 @@ class ManualTest {
         val subnet = WgConf.parse(conf("10.0.0.0/24, 192.168.1.0/24"), "x")
         assertEquals(listOf("10.0.0.0/24", "192.168.1.0/24"), subnet.allowedIps)
         rejects("only reaches 10.0.0.0/24, 192.168.1.0/24; import it under Settings → Home") { WgConf.requireFullTunnel(subnet) }
+        // Ranges that together cover every IPv4 address are a full tunnel too, in any order, overlapping or not.
+        for (all in listOf("0.0.0.0/1, 128.0.0.0/1", "128.0.0.0/1, 0.0.0.0/1", "0.0.0.0/2, 64.0.0.0/2, 128.0.0.0/2, 192.0.0.0/2", "0.0.0.0/1, 0.0.0.0/0", "0.0.0.0/1, 64.0.0.0/2, 128.0.0.0/1"))
+            WgConf.requireFullTunnel(WgConf.parse(conf(all), "x"))
+        // A malformed range is refused, never silently dropped.
+        rejects("invalid range: 999.1.1.1/32") { WgConf.requireFullTunnel(WgConf.parse(conf("0.0.0.0/1, 128.0.0.0/1, 999.1.1.1/32"), "x")) }
+        rejects("invalid range: 0.0.0.0/33") { WgConf.requireFullTunnel(WgConf.parse(conf("0.0.0.0/33"), "x")) }
+        // A gap of even one address, or the official app's "exclude private IPs" list, is not.
+        rejects("leaves out some addresses") { WgConf.requireFullTunnel(WgConf.parse(conf("0.0.0.0/1, 128.0.0.0/2, 192.0.0.0/3, 224.0.0.0/4, 240.0.0.0/5, 248.0.0.0/6, 252.0.0.0/7, 254.0.0.0/8, 255.0.0.0/9, 255.128.0.0/10, 255.192.0.0/11, 255.224.0.0/12, 255.240.0.0/13, 255.248.0.0/14, 255.252.0.0/15, 255.254.0.0/16, 255.255.0.0/17, 255.255.128.0/18, 255.255.192.0/19, 255.255.224.0/20, 255.255.240.0/21, 255.255.248.0/22, 255.255.252.0/23, 255.255.254.0/24, 255.255.255.0/25, 255.255.255.128/26, 255.255.255.192/27, 255.255.255.224/28, 255.255.255.240/29, 255.255.255.248/30, 255.255.255.252/31, 255.255.255.254/32"), "x")) }
+        rejects("leaves out some addresses") { WgConf.requireFullTunnel(WgConf.parse(conf("0.0.0.0/5, 8.0.0.0/7, 11.0.0.0/8, 12.0.0.0/6, 16.0.0.0/4, 32.0.0.0/3, 64.0.0.0/2, 128.0.0.0/3, 160.0.0.0/5, 168.0.0.0/6, 172.0.0.0/12, 172.32.0.0/11, 172.64.0.0/10, 172.128.0.0/9, 173.0.0.0/8, 174.0.0.0/7, 176.0.0.0/4, 192.0.0.0/9, 192.128.0.0/11, 192.160.0.0/13, 192.169.0.0/16, 192.170.0.0/15, 192.172.0.0/14, 192.176.0.0/12, 192.192.0.0/10, 193.0.0.0/8, 194.0.0.0/7, 196.0.0.0/6, 200.0.0.0/5, 208.0.0.0/4, 224.0.0.0/3"), "x")) }
         for (k in listOf("Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4", "I1", "I5")) {
             rejects("Obfuscated (AmneziaWG) configs aren't supported") { WgConf.parse(conf("0.0.0.0/0", "$k = 5"), "x") }
         }
