@@ -241,15 +241,20 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         return if (intent?.action == ACTION_STOP && !locked) START_NOT_STICKY else START_STICKY
     }
 
+    /** Android's Always-on and Block connections settings, which can change while connected. Caller holds [lock]. */
+    private fun readFlags() {
+        state.update { it.copy(alwaysOn = isAlwaysOn, lockdown = isLockdownEnabled) }
+        // Lockdown decides which apps and networks the interface excludes: a change needs a rebuilt one.
+        if (state.value.phase == VpnState.Phase.On && lastInput?.lockdown != isLockdownEnabled) reload(store.setup.value)
+    }
+
     /** One start command, in arrival order; caller holds [lock]. */
     private fun handle(intent: Intent?, locked: Boolean) {
         when (intent?.action) {
             ACTION_FLAGS -> {
                 // Raced a disconnect: don't leave an idle sticky service that a restart would turn into a connect.
                 if (state.value.phase == VpnState.Phase.Off) { stopWanted = true; return }
-                state.update { it.copy(alwaysOn = isAlwaysOn, lockdown = isLockdownEnabled) }
-                // Lockdown decides which apps and networks the interface excludes: a change needs a rebuilt one.
-                if (state.value.phase == VpnState.Phase.On && lastInput?.lockdown != isLockdownEnabled) reload(store.setup.value)
+                readFlags()
             }
             // Refused while locked: the tunnel keeps running and keeps its restart policy.
             ACTION_STOP -> if (!locked) teardown(null)
@@ -272,7 +277,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     @OptIn(FlowPreview::class)
     private fun connect() {
-        if (state.value.phase == VpnState.Phase.On) { notify(store.setup.value); return } // a stale "Connecting…" from a repeated start
+        if (state.value.phase == VpnState.Phase.On) { // a repeated start (Always-on, tile)
+            readFlags()
+            if (state.value.phase == VpnState.Phase.On) notify(store.setup.value) // a failed reload may have ended it
+            return
+        }
         cancelResume()
         state.value = VpnState(VpnState.Phase.Connecting)
         try {
@@ -558,8 +567,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** Traffic leaves without the VPN until resumed, by hand or after [minutes]. Caller holds [lock]. */
     private fun pause(minutes: Int) {
         if (state.value.phase != VpnState.Phase.On) return
-        val lockdown = state.value.lockdown
-        val alwaysOn = state.value.alwaysOn
+        // Read now: what the pause notice promises (apps offline or not) depends on them.
+        val lockdown = isLockdownEnabled
+        val alwaysOn = isAlwaysOn
         stopEngine()
         stopWanted = false
         val until = if (minutes > 0) System.currentTimeMillis() + minutes * 60_000L else 0L

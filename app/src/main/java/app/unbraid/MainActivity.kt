@@ -62,7 +62,6 @@ import app.unbraid.ui.needsLocalNetwork
 import android.content.Intent
 import android.provider.Settings
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.lifecycle.compose.LifecycleResumeEffect
 import app.unbraid.ui.AppsDisclosure
 import app.unbraid.ui.LeakSheet
 import app.unbraid.ui.Onboarding
@@ -106,6 +105,9 @@ class MainActivity : ComponentActivity() {
         if (ask.isNotEmpty()) permissions.launch(ask.toTypedArray())
         VpnService.prepare(this)?.let { vpnConsent.launch(it) } ?: ui.connect()
     }
+
+    // Android's Always-on and Block connections can change in its settings at any time: read them on every return.
+    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         window.setHideOverlayWindows(true) // no tapjacking over sign-in or connect
@@ -222,8 +224,6 @@ class MainActivity : ComponentActivity() {
                     )
                     "apps" -> AppsDisclosure(agree = { ui.acceptDisclosure(); sheet = null }, dismiss = { sheet = null })
                     "leak" -> {
-                        // Back from Android's VPN page: read both switches again.
-                        LifecycleResumeEffect(Unit) { UnbraidVpn.refreshFlags(this@MainActivity); onPauseOrDispose {} }
                         val both = vpn.alwaysOn && vpn.lockdown
                         LeakSheet(
                             vpn.alwaysOn, vpn.lockdown,

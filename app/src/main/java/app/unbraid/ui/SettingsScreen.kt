@@ -341,7 +341,6 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             }
 
             p == "behaviour" -> Page("VPN behaviour", back) {
-                item { LifecycleResumeEffect(Unit) { UnbraidVpn.refreshFlags(context); onPauseOrDispose {} } }
                 notice(ui, notice)
                 item {
                     Column(Modifier.padding(horizontal = Gutter).fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Ink.surfaceTop).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
