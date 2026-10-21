@@ -126,7 +126,7 @@ enum class TourStop(val tab: Tab, val title: String, val body: String) {
     DefaultRoute(Tab.Routes, "The default exit", "Every app goes here unless you give it an exception. Tap it to change the location."),
     AddRoute(Tab.Routes, "Add an exit", "Add route opens the picker: your provider's countries, or your own servers and Tailscale."),
     AppsList(Tab.Apps, "Choose per app", "Tap any app to pick its exit; Direct skips the VPN. Moved apps show on Routes as exceptions."),
-    StatsIntro(Tab.Stats, "Your numbers, if you want them", "Data per app and exit, flows and speed tests. Off until you turn it on; it never leaves this phone."),
+    StatsIntro(Tab.Stats, "Your numbers, if you want them", "Data per app and exit, flows and speed tests. Off until you turn it on. Statistics stay on this phone; M-Lab publishes speed test results."),
     Connections(Tab.Settings, "Add connections", "Sign in to more providers, or import WireGuard, OpenVPN and Shadowsocks servers."),
     LocalHome(Tab.Settings, "Home and local", "Printers and casting stay reachable. Reach home through Tailscale or your router's WireGuard."),
     About(Tab.Settings, "You're set", "The Quick Settings tile and the widget work without opening $APP. Replay this tour here, in About & support."),
