@@ -35,8 +35,20 @@ object Compiler {
     val FILTER_DNS = mapOf("mullvad" to "100.64.0.7", "pia" to "10.0.0.244", "ivpn" to "10.0.254.2")
     private val LAN = listOf("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255/32")
     private const val TAILNET = "100.64.0.0/10"
-    /** The fake-IP pool in two halves: each new domain table takes the other one ([Input.fakeHalf]). */
-    val FAKE_RANGES = listOf("198.18.0.0/16", "198.19.0.0/16")
+    /**
+     * The fake-IP pool (198.18.0.0/15) in eight blocks: each new domain table takes the next one and refuses the other
+     * seven ([Input.fakeBlock]), so an address an app kept from an old table names nothing until eight tables later. Each holds 16,381 addresses.
+     */
+    val FAKE_RANGES = (0 until 8).map { "198.${18 + it / 4}.${it % 4 * 64}.0/18" }
+
+    /** The block a new table takes after [last]; a reload of the [open] table keeps its own. */
+    fun nextBlock(last: Int, open: Boolean) = (if (open) last else last + 1).mod(FAKE_RANGES.size)
+
+    /**
+     * Older versions alternated two /16 halves: count the last one as its final block, so the next table starts in the
+     * other half and nothing an app kept from it is handed out again.
+     */
+    fun blockAfterHalf(half: Int?) = if (half == 1) FAKE_RANGES.size - 1 else FAKE_RANGES.size / 2 - 1
 
     class Input(
         val setup: Setup,
@@ -49,8 +61,8 @@ object Compiler {
         val tsSuffix: String? = null,
         /** Loopback port and password of the app's own way into each exit ([PROBE]); null = none. */
         val probe: Pair<Int, String>? = null,
-        /** Index into [FAKE_RANGES] of the half this engine hands out; the other half is refused. */
-        val fakeHalf: Int = 0,
+        /** Index into [FAKE_RANGES] of the block this engine hands out; the others are refused. */
+        val fakeBlock: Int = 0,
         /** Routes with no tunnel right now (signed out, unreachable): their apps' traffic and lookups are refused. */
         val blocked: Set<String> = emptySet(),
     )
@@ -111,7 +123,7 @@ object Compiler {
             putJsonObject("log") { put("level", "warn"); put("timestamp", false) }
             putJsonObject("dns") {
                 putJsonArray("servers") {
-                    add(obj("type" to "fakeip", "tag" to "fake", "inet4_range" to FAKE_RANGES[i.fakeHalf]))
+                    add(obj("type" to "fakeip", "tag" to "fake", "inet4_range" to FAKE_RANGES[i.fakeBlock]))
                     add(obj("type" to "local", "tag" to "local"))
                     active.forEach { r ->
                         val link = i.links[r.id]
@@ -202,7 +214,7 @@ object Compiler {
                     add(obj("port" to 53, "network" to "udp", "action" to "hijack-dns"))
                     // Fake IPs an app kept from the previous domain table name nothing now: refused at once, so the app
                     // looks the name up again instead of waiting on a dead address.
-                    add(obj("ip_cidr" to arr(FAKE_RANGES[1 - i.fakeHalf]), "action" to "reject", "no_drop" to true))
+                    add(obj("ip_cidr" to JsonArray((FAKE_RANGES - FAKE_RANGES[i.fakeBlock]).map(::JsonPrimitive)), "action" to "reject", "no_drop" to true))
                     // The app's own tests: each proxy user goes out through its exit only, names resolved there too.
                     if (i.probe != null) probeTags.forEach { (t, dns) -> // nothing to add when there is no tunnel
                         add(obj("inbound" to PROBE, "auth_user" to arr(t), "action" to "resolve", "server" to dns))

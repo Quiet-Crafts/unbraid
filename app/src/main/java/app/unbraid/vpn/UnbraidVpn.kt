@@ -102,14 +102,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         /**
          * The engine's cache: fake IP → domain, kept so connections survive a reload. It names every site the phone
          * looked up, so it never outlives a connection: deleted on disconnect, pause, connect and app start (for a killed
-         * run). Each new table hands out fake IPs afresh, from the other half of the pool ([Compiler.FAKE_RANGES]).
-         * Never deleted under a running engine: its next reload would start an empty table in the same half.
+         * run). Each new table hands out fake IPs afresh, from the next block of the pool ([Compiler.FAKE_RANGES]).
+         * Never deleted under a running engine: its next reload would start an empty table in the same block.
          */
         fun forgetLookups(ctx: Context) = synchronized(this) { !tableOpen && File(ctx.filesDir, "cache.db").delete() }
         /** An engine has cache.db open (see [forgetLookups]); set before it starts, cleared once it has stopped. */
         private var tableOpen = false
-        /** The fake-IP half of the open or last table; the store only carries it across process restarts. */
-        private var lastHalf: Int? = null
+        /** The fake-IP block of the open or last table; the store only carries it across process restarts. */
+        private var lastBlock: Int? = null
         private fun openTable(open: Boolean) = synchronized(this) { tableOpen = open }
         private const val ACTION_STOP = "app.unbraid.STOP"
         private const val ACTION_PAUSE = "app.unbraid.PAUSE"
@@ -334,15 +334,16 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             input = input(setup, links, blocked, next)
             json = Compiler.compile(input)
             engine("The connection engine rejected this setup.") { Libbox.checkConfig(json) }
+            // The block is spent before the engine can hand out any of it, also if the start fails or the app dies now:
+            // a new table that couldn't be noted down doesn't start, or the next process would hand it out again.
+            if (input.fakeBlock != lastBlock) engine("$APP couldn't save its state. Try again.") { store.fakeBlock = input.fakeBlock }
+            lastBlock = input.fakeBlock
             restarting = true
             openTable(true)
             engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
             restarting = false
             probe = next
             lastInput = input
-            // Only a table that ran counts: a failed start leaves the half as it was. Unsaved, only a restart forgets it.
-            lastHalf = input.fakeHalf
-            runCatching { store.fakeHalf = input.fakeHalf }.onFailure { Log.w(TAG, "fake-IP half not saved") }
             // The new engine numbers its connections afresh; stats read the new servers when they first see them.
             state.update { it.copy(servers = links.mapValues { l -> l.value.server }) }
             app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() }
@@ -387,9 +388,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         probe = null
         val last = lastInput ?: return false
         val next = newProbe()
-        val input = Compiler.Input(last.setup, last.links, last.selfPackage, last.lockdown, last.tsDir, last.cacheFile, last.tsSuffix, next, last.fakeHalf, last.blocked)
+        val input = Compiler.Input(last.setup, last.links, last.selfPackage, last.lockdown, last.tsDir, last.cacheFile, last.tsSuffix, next, last.fakeBlock, last.blocked)
         val json = Compiler.compile(input)
         srv.startOrReloadService(json, OverrideOptions())
+        lastBlock = input.fakeBlock
         probe = next
         lastGood = json
         lastInput = input
@@ -504,10 +506,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var refusals: Map<String, Pair<String?, Exception>> = emptyMap()
 
     private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
-        Compiler.Input(setup, links, packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeHalf(), blocked)
+        Compiler.Input(setup, links, packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked)
 
-    /** The open table's fake-IP half for a reload; a new table takes the other one, refusing the old. */
-    private fun fakeHalf() = (lastHalf ?: store.fakeHalf).let { if (synchronized(Companion) { tableOpen }) it else 1 - it }
+    /** The open table's fake-IP block for a reload; a new table takes the next one, refusing the rest. */
+    private fun fakeBlock() = Compiler.nextBlock(lastBlock ?: store.fakeBlock, synchronized(Companion) { tableOpen })
 
 
     /** The app's own way into each exit ([Compiler.PROBE]): a free loopback port and a 24-byte random password. */

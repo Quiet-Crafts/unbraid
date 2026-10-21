@@ -122,10 +122,10 @@ class Store(ctx: Context) {
         return plain
     }
 
-    /** Which half of the fake-IP pool the engine's last domain table used ([app.unbraid.vpn.Compiler.FAKE_RANGES]). */
-    var fakeHalf: Int
-        get() = read("fakehalf")?.toIntOrNull() ?: 0
-        set(v) = check(write("fakehalf", "$v"))
+    /** Which block of the fake-IP pool the engine's last domain table used ([app.unbraid.vpn.Compiler.FAKE_RANGES]). */
+    var fakeBlock: Int
+        get() = read("fakeblock")?.toIntOrNull() ?: app.unbraid.vpn.Compiler.blockAfterHalf(read("fakehalf")?.toIntOrNull())
+        set(v) = check(write("fakeblock", "$v"))
 
     /** The user agreed to M-Lab's terms for speed tests (results, with the exit's IP address, are published). */
     var mlabConsent: Boolean

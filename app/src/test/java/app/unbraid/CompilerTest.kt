@@ -63,16 +63,35 @@ class CompilerTest {
     private fun JsonObject.endpointTags() = this["endpoints"]!!.jsonArray.map { it.jsonObject["tag"]!!.jsonPrimitive.content }
     private fun JsonObject.excluded() = this["inbounds"]!!.jsonArray[0].jsonObject["exclude_package"]!!.jsonArray.map { it.jsonPrimitive.content }
 
-    /** Each new domain table hands out fake IPs from its half of the pool and refuses the other, before any exit is chosen. */
-    @Test fun aFakeIpFromTheOtherHalfIsRefused() = (0..1).forEach { h ->
-        val c = Json.parseToJsonElement(Compiler.compile(Compiler.Input(example, links(example), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", fakeHalf = h))).jsonObject
+    /** Each new domain table hands out fake IPs from its block of the pool and refuses the others, before any exit is chosen. */
+    @Test fun aFakeIpFromAnotherBlockIsRefused() = Compiler.FAKE_RANGES.indices.forEach { h ->
+        val raw = Compiler.compile(Compiler.Input(example, links(example), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", fakeBlock = h))
+        File("build/compiled").apply { mkdirs() }.resolve("fakeblock-$h.json").writeText(raw)
+        val c = Json.parseToJsonElement(raw).jsonObject
         val fake = c["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }.single { it["tag"]?.jsonPrimitive?.content == "fake" }
         assertEquals(Compiler.FAKE_RANGES[h], fake["inet4_range"]!!.jsonPrimitive.content)
         val rules = c.rules()
-        val refuse = rules.indexOfFirst { it["ip_cidr"]?.jsonArray?.map { r -> r.jsonPrimitive.content } == listOf(Compiler.FAKE_RANGES[1 - h]) }
+        val refuse = rules.indexOfFirst { it["ip_cidr"]?.jsonArray?.map { r -> r.jsonPrimitive.content } == Compiler.FAKE_RANGES - Compiler.FAKE_RANGES[h] }
         assertEquals("reject", rules[refuse]["action"]!!.jsonPrimitive.content)
         assertEquals("true", rules[refuse]["no_drop"]!!.jsonPrimitive.content) // refused every time, never silently dropped
         assertTrue(rules.take(refuse).all { it["action"]?.jsonPrimitive?.content == "hijack-dns" })
+    }
+
+    /** New tables walk through all eight blocks; a reload keeps its block; older versions' halves start in the other half. */
+    @Test fun fakeBlocksRotateAndMigrate() {
+        assertEquals(listOf(1, 2, 3, 4, 5, 6, 7, 0), (0 until 8).map { Compiler.nextBlock(it, open = false) })
+        assertEquals(5, Compiler.nextBlock(5, open = true))
+        // Half 0 was 198.18.0.0/16 (blocks 0 to 3), half 1 was 198.19.0.0/16 (blocks 4 to 7).
+        assertEquals(4, Compiler.nextBlock(Compiler.blockAfterHalf(0), open = false))
+        assertEquals(0, Compiler.nextBlock(Compiler.blockAfterHalf(1), open = false))
+        assertEquals(4, Compiler.nextBlock(Compiler.blockAfterHalf(null), open = false))
+    }
+
+    /** Eight equal blocks that tile 198.18.0.0/15 exactly. */
+    @Test fun fakeBlocksTileTheBenchmarkRange() {
+        val starts = Compiler.FAKE_RANGES.map { r -> assertTrue(r.endsWith("/18")); r.removeSuffix("/18").split('.').fold(0L) { a, o -> a shl 8 or o.toLong() } }
+        val base = (198L shl 24) or (18L shl 16)
+        assertEquals((0 until 8).map { base + it * 16384L }, starts)
     }
 
     /** A new probe pair always changes the config (so every engine start gets one), the same pair never. */
