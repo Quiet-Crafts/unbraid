@@ -86,9 +86,6 @@ object Stats {
     private val hourly = HashMap<Pair<Long, String>, Sum>()
     private val daily = HashMap<Triple<Long, String, String>, Sum>()
     private val servers = HashMap<Triple<Long, String, String>, Long>()
-    /** The busiest second per day and exit, download and upload apart (bits/s and when). */
-    data class Peak(val down: Long, val downAt: Long, val up: Long, val upAt: Long)
-    private val peaks = HashMap<Pair<Long, String>, Peak>()
 
     internal fun add(now: Long, app: String, exit: String, server: String?, up: Long, down: Long) {
         if (up <= 0 && down <= 0) return
@@ -98,26 +95,14 @@ object Stats {
         if (server != null) servers.merge(Triple(d, exit, server), up + down, Long::plus)
     }
 
-    internal fun peak(now: Long, exit: String, down: Long, up: Long) {
-        val k = dayOf(now) to exit
-        val p = peaks[k] ?: Peak(0, 0, 0, 0)
-        if (down > p.down || up > p.up) peaks[k] = Peak(maxOf(down, p.down), if (down > p.down) now else p.downAt, maxOf(up, p.up), if (up > p.up) now else p.upAt)
-    }
-
     /** Worker only: pending sums and the exits' labels in one transaction (explicit conflict targets: API 33's SQLite). */
     internal fun flushNow(force: Boolean = false) {
-        if ((!recording && !force) || (hourly.isEmpty() && daily.isEmpty() && peaks.isEmpty())) return
+        if ((!recording && !force) || (hourly.isEmpty() && daily.isEmpty())) return
         val d = db
         d.transaction {
             hourly.forEach { (k, s) -> d.execSQL("INSERT INTO hourly VALUES(?,?,?,?) ON CONFLICT(h, exit) DO UPDATE SET up=up+excluded.up, down=down+excluded.down", arrayOf<Any>(k.first, k.second, s.up, s.down)) }
             daily.forEach { (k, s) -> d.execSQL("INSERT INTO daily VALUES(?,?,?,?,?) ON CONFLICT(d, app, exit) DO UPDATE SET up=up+excluded.up, down=down+excluded.down", arrayOf<Any>(k.first, k.second, k.third, s.up, s.down)) }
             servers.forEach { (k, b) -> d.execSQL("INSERT INTO server VALUES(?,?,?,?) ON CONFLICT(d, exit, name) DO UPDATE SET bytes=bytes+excluded.bytes", arrayOf<Any>(k.first, k.second, k.third, b)) }
-            peaks.forEach { (k, p) ->
-                d.execSQL("INSERT INTO peak VALUES(?,?,?,?,?,?) ON CONFLICT(d, exit) DO UPDATE SET " +
-                    "at=CASE WHEN excluded.bps > peak.bps THEN excluded.at ELSE peak.at END, bps=MAX(peak.bps, excluded.bps), " +
-                    "up_at=CASE WHEN excluded.up > peak.up THEN excluded.up_at ELSE peak.up_at END, up=MAX(peak.up, excluded.up)",
-                    arrayOf<Any>(k.first, k.second, p.down, p.downAt, p.up, p.upAt))
-            }
             labelExits(d, daily.keys.map { it.third } + hourly.keys.map { it.second })
         }
         clearPending()
@@ -128,7 +113,7 @@ object Stats {
     /** Retention runs once a day whatever else happens: on writes and before reads. */
     private fun maybePrune() { val d = dayOf(System.currentTimeMillis()); if (d != prunedDay) { prunedDay = d; pruneNow() } }
 
-    private fun clearPending() { hourly.clear(); daily.clear(); servers.clear(); peaks.clear() }
+    private fun clearPending() { hourly.clear(); daily.clear(); servers.clear() }
 
     /** Exits keep the label they had when used, so history survives renames and removed routes. */
     private fun labelExits(d: SQLiteDatabase, ids: List<String>) {
@@ -154,7 +139,8 @@ object Stats {
         val today = dayOf(now)
         val d = db
         d.execSQL("DELETE FROM hourly WHERE h < ?", arrayOf<Any>((today - 8) * 24))
-        listOf("daily", "server", "peak").forEach { d.execSQL("DELETE FROM $it WHERE d < ?", arrayOf<Any>(today - 400)) }
+        listOf("daily", "server").forEach { d.execSQL("DELETE FROM $it WHERE d < ?", arrayOf<Any>(today - 400)) }
+        d.execSQL("DELETE FROM peak") // speeds seen in use, no longer kept (the table stays for older databases)
         d.execSQL("DELETE FROM span WHERE start < ?", arrayOf<Any>(now - 400 * 24 * HOUR))
         d.execSQL("DELETE FROM test WHERE at < ? OR at NOT IN (SELECT at FROM test ORDER BY at DESC LIMIT $TESTS_KEPT)", arrayOf<Any>(now - 400 * 24 * HOUR))
     }
@@ -238,11 +224,6 @@ object Stats {
     /** Bytes per app and exit over days [from, to], largest first. */
     fun apps(from: Long, to: Long) = rows("SELECT app, exit, SUM(up)+SUM(down) b FROM daily WHERE d BETWEEN ? AND ? GROUP BY app, exit ORDER BY b DESC", arrayOf("$from", "$to")) { Triple(it.getString(0), it.getString(1), it.getLong(2)) }
 
-    /** Observed peaks per exit per day: download and upload, bits per second. */
-    fun peaks(from: Long, to: Long) = rows("SELECT d, exit, bps, at, up, up_at FROM peak WHERE d BETWEEN ? AND ?", arrayOf("$from", "$to")) {
-        Triple(it.getLong(0), it.getString(1), Peak(it.getLong(2), it.getLong(3), it.getLong(4), it.getLong(5)))
-    }
-
     fun servers(exit: String, from: Long, to: Long) = rows("SELECT name, SUM(bytes) b FROM server WHERE exit = ? AND d BETWEEN ? AND ? GROUP BY name ORDER BY b DESC", arrayOf(exit, "$from", "$to")) { it.getString(0) to it.getLong(1) }
 
     /** Spans overlapping [from, to) ms: start, end, paused. The open span counts up to now. */
@@ -264,7 +245,7 @@ object Stats {
     internal val _live = MutableStateFlow(Live())
     val live = _live.asStateFlow()
 
-    /** Stats is on screen with the app in the foreground: sample every second (peaks, live chart), else every 15 s. */
+    /** Stats is on screen with the app in the foreground: sample every second (live chart), else every 15 s. */
     @Volatile var watching = false
         set(v) { if (field != v) { field = v; post { Collector.retimeNow() } } }
 }
@@ -275,12 +256,11 @@ object Stats {
  */
 internal object Collector {
     private class Conn(val app: String, val exit: String, val server: String?, var up: Long, var down: Long)
-    private class Ev(val type: Long, val id: String, val total: Pair<Long, Long>?, val delta: Pair<Long, Long>, val uid: Int, val tag: String?, val closed: Boolean, val created: Long, val own: Boolean)
+    private class Ev(val type: Long, val id: String, val total: Pair<Long, Long>?, val delta: Pair<Long, Long>, val uid: Int, val tag: String?, val closed: Boolean, val created: Long, val own: Boolean, val pkg: String?)
 
     private var client: CommandClient? = null
     private var interval = 0L
     private val seen = HashMap<String, Conn>()
-    private val owners = HashMap<Int, String>()
     private var lastFlush = 0L
     private var lastTick = 0L
     private val window = HashMap<String, Long>()
@@ -348,7 +328,8 @@ internal object Collector {
                 val e = it.next()
                 val c = e.connection
                 list += Ev(e.type.toLong(), e.id, c?.let { x -> x.uplinkTotal to x.downlinkTotal }, e.uplinkDelta to e.downlinkDelta,
-                    c?.processInfo?.userID ?: -1, c?.let { x -> first(x.chain()) }, (c?.closedAt ?: 0) > 0, c?.createdAt ?: 0, c?.inbound == Compiler.PROBE)
+                    c?.processInfo?.userID ?: -1, c?.let { x -> first(x.chain()) }, (c?.closedAt ?: 0) > 0, c?.createdAt ?: 0, c?.inbound == Compiler.PROBE,
+                    c?.processInfo?.packageNames()?.let { p -> buildList { while (p.hasNext()) add(p.next()) }.minOrNull() })
             }
             val reset = events.reset
             Stats.post { if (gen == Stats.gen) { heard = System.currentTimeMillis(); retries = 0; apply(list, reset) } }
@@ -386,7 +367,7 @@ internal object Collector {
         val servers = UnbraidVpn.state.value.servers
         val tags = UnbraidVpn.tags
         val open = { e: Ev ->
-            val app = if (e.own) Stats.ctx.packageName else appOf(e.uid)
+            val app = if (e.own) Stats.ctx.packageName else appOf(e)
             val exit = (if (e.own) SpeedTest.exitOn(e.tag) else null) ?: exitOf(e.tag, app, setup, tags)
             Conn(app, exit, servers[exit]?.name, 0, 0)
         }
@@ -433,7 +414,7 @@ internal object Collector {
             }
             Stats.add(now, c.app, c.exit, c.server, up, down)
             // The live window takes only what flowed just now: never a replay's catch-up or a New's backlog.
-            // unbraid's own traffic (speed tests, health checks) is drawn but never a "seen" peak: those are your apps'.
+            // unbraid's own traffic (speed tests, health checks) is drawn but counted apart: the live chart is your apps'.
             val own = c.app == Stats.ctx.packageName
             if (fast && !reset && c.exit != DIRECT) when {
                 own -> { closing.merge(c.exit, down, Long::plus); closingUp += up }
@@ -447,7 +428,7 @@ internal object Collector {
     }
 
     /**
-     * Closes the live window: the series, headline and peaks all come from it. The engine sends one traffic batch per
+     * Closes the live window: the series and headline come from it. The engine sends one traffic batch per
      * second with that second's bytes, so a batch is one sample whenever it arrives (timing it here would turn a late
      * batch and the one after into a spike and a gap). Quiet seconds send none: status ticks fill them in.
      */
@@ -457,7 +438,6 @@ internal object Collector {
         val down = (prev.keys + window.keys + closing.keys).associateWith { k ->
             val bps = (window[k] ?: 0L) * 8 / seconds
             val upBps = (windowUpBy[k] ?: 0L) * 8 / seconds
-            if (bps > 0 || upBps > 0) Stats.peak(now, k, bps, upBps)
             val shown = bps + (closing[k] ?: 0L) * 8 / seconds
             val series = prev[k] ?: FloatArray(60)
             series.copyOfRange(seconds.coerceAtMost(60), 60) + FloatArray(seconds.coerceAtMost(60)) { shown.toFloat() }
@@ -466,7 +446,8 @@ internal object Collector {
         window.clear(); windowUpBy.clear(); windowUp = 0; closing.clear(); closingUp = 0
     }
 
-    private fun appOf(uid: Int) = if (uid < 0) "?" else owners.getOrPut(uid) { Stats.ctx.packageManager.getPackagesForUid(uid)?.minOrNull() ?: "uid:$uid" }
+    /** The app as the engine found it for this connection; looked up afresh otherwise (a uid can change hands). */
+    private fun appOf(e: Ev) = e.pkg ?: if (e.uid < 0) "?" else Stats.ctx.packageManager.getPackagesForUid(e.uid)?.minOrNull() ?: "uid:${e.uid}"
 
     /** The tunnel tag says which tunnel; when routes share it, the app's own route among them says which route. */
     private fun exitOf(tag: String?, app: String, setup: app.unbraid.data.Setup, tags: Map<String, String>): String {
