@@ -118,7 +118,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
         /** Starting a foreground service that can't go foreground crashes the app, so consent is checked first. */
         fun start(ctx: Context) {
-            if (prepare(ctx) != null) { state.value = VpnState(error = "Open $APP to allow it as your VPN"); return }
+            if (prepare(ctx) != null) {
+                // Paused while another VPN app took over: the paused service ends itself on this start (alarm, notification).
+                if (state.value.phase == VpnState.Phase.Paused) runCatching { ctx.startService(Intent(ctx, UnbraidVpn::class.java)) }
+                state.value = VpnState(error = "Open $APP to allow it as your VPN")
+                return
+            }
             ctx.startForegroundService(Intent(ctx, UnbraidVpn::class.java))
         }
         fun stop(ctx: Context) = ctx.startService(Intent(ctx, UnbraidVpn::class.java).setAction(ACTION_STOP))
@@ -573,7 +578,6 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         stopEngine()
         stopWanted = false
         val until = if (minutes > 0) System.currentTimeMillis() + minutes * 60_000L else 0L
-        state.value = VpnState(VpnState.Phase.Paused, pausedUntil = until, pausedAt = System.currentTimeMillis(), lockdown = lockdown, alwaysOn = alwaysOn)
         val at = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(until))
         getSystemService(NotificationManager::class.java).notify(1, notification(if (until > 0) "Paused until $at" else "Paused", paused = true))
         // Short steps against the wall clock: a single delay doesn't count while the phone sleeps.
@@ -586,6 +590,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             getSystemService(AlarmManager::class.java)
                 .setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + minutes * 60_000L, resumeIntent)
         }
+        // Last: whoever sees Paused (a resume refused for lack of consent) finds the alarm and notice to cancel.
+        state.value = VpnState(VpnState.Phase.Paused, pausedUntil = until, pausedAt = System.currentTimeMillis(), lockdown = lockdown, alwaysOn = alwaysOn)
     }
 
     override fun onRevoke() { scope.launch { shutdown(null) } }
