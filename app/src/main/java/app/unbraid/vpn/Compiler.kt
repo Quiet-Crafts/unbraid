@@ -107,7 +107,9 @@ object Compiler {
         val ts = s.tailscale
         // An exit keeps the endpoint running, but only the home toggle grants every app tailnet access.
         val homeTs = s.home.tailscale
-        val dnsFor = { id: String -> if (id == DIRECT) "local" else "dns-r-$id" }
+        // A route on its OpenVPN server's pushed DNS asks that tunnel's one DNS server (the engine allows one per tunnel).
+        val ovpnDns = { id: String -> i.links[id] is OvpnLink && s.route(id)?.let(pushedDns) == true }
+        val dnsFor = { id: String -> if (id == DIRECT) "local" else if (ovpnDns(id)) "dns-ovpn-${tag(id)}" else "dns-r-$id" }
         val defaultDns = if (s.defaultRoute == DIRECT || defaultBlocked || active.isEmpty()) "local" else dnsFor(s.defaultRoute)
         // Every tunnel the app can test, with the DNS of a route on it; Tailscale even without an exit route (its nodes).
         val probeTags = active.groupBy { tag(it.id) }.mapValues { (_, rs) -> dnsFor(rs.first().id) }.toMutableMap()
@@ -130,10 +132,9 @@ object Compiler {
                 putJsonArray("servers") {
                     add(obj("type" to "fakeip", "tag" to "fake", "inet4_range" to FAKE_RANGES[i.fakeBlock]))
                     add(obj("type" to "local", "tag" to "local"))
-                    active.forEach { r ->
-                        val link = i.links[r.id]
-                        if (link is OvpnLink && pushedDns(r)) add(obj("type" to "openvpn", "tag" to "dns-r-${r.id}", "endpoint" to tag(r.id), "accept_default_resolvers" to true))
-                        else add(obj("type" to "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, link), "detour" to tag(r.id)))
+                    active.filter { !ovpnDns(it.id) }.forEach { r -> add(obj("type" to "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))) }
+                    active.filter { ovpnDns(it.id) }.map { tag(it.id) }.distinct().forEach { t ->
+                        add(obj("type" to "openvpn", "tag" to "dns-ovpn-$t", "endpoint" to t, "accept_default_resolvers" to true))
                     }
                     if (homeTs) add(obj("type" to "tailscale", "tag" to "dns-tailnet", "endpoint" to TS_TAG, "accept_default_resolvers" to false))
                 }
@@ -191,7 +192,8 @@ object Compiler {
                 active.filter { shared[it.id] == "r-${it.id}" }.forEach { r ->
                     when (val l = i.links.getValue(r.id)) {
                         is WgLink -> add(wg(tag(r.id), l.peer, r.name))
-                        is OvpnLink -> Manual.ovpnEndpoint(tag(r.id), l.profile).let { add(if (pushedDns(r)) openVpn(it) else it) }
+                        // Keeps the pushed DNS if any route on this tunnel uses it, not only the route that owns it.
+                        is OvpnLink -> Manual.ovpnEndpoint(tag(r.id), l.profile).let { e -> add(if (active.any { tag(it.id) == tag(r.id) && ovpnDns(it.id) }) openVpn(e) else e) }
                         is SsLink, is TsLink -> Unit
                     }
                 }

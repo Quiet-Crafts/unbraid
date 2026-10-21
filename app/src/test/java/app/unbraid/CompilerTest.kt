@@ -386,7 +386,7 @@ class CompilerTest {
         val c = compile(s, links = mapOf("nl" to app.unbraid.data.OvpnLink(sv("nl"), p), "ex" to app.unbraid.data.OvpnLink(sv("exx"), p.copy(username = "other"))))
         val dns = c["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }
         assertEquals("udp", dns.first { it["tag"]!!.jsonPrimitive.content == "dns-r-nl" }["type"]!!.jsonPrimitive.content)
-        assertEquals("openvpn", dns.first { it["tag"]!!.jsonPrimitive.content == "dns-r-ex" }["type"]!!.jsonPrimitive.content)
+        assertEquals("openvpn", dns.first { it["tag"]!!.jsonPrimitive.content == "dns-ovpn-r-ex" }["type"]!!.jsonPrimitive.content)
     }
 
     @Test fun homeTunnelNeverCatchesAll() {
@@ -504,6 +504,13 @@ class CompilerTest {
         val s = Setup(routes = listOf(a, b, c), defaultRoute = "a", apps = mapOf("com.b" to "b", "com.c" to "c"))
         val out = compile(s, links = s.routes.associate { it.id to OvpnLink(sv(it.id), it.ovpn!!) })
         assertEquals(listOf("r-a", "r-c"), out.endpointTags())
+        // One DNS server per tunnel, which the engine requires; every reference names one that exists.
+        val servers = out["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("r-a", "r-c"), servers.filter { it["type"]!!.jsonPrimitive.content == "openvpn" }.map { it["endpoint"]!!.jsonPrimitive.content })
+        val tags = servers.map { it["tag"]!!.jsonPrimitive.content }.toSet()
+        val used = (out["dns"]!!.jsonObject["rules"]!!.jsonArray + out["route"]!!.jsonObject["rules"]!!.jsonArray).mapNotNull { it.jsonObject["server"]?.jsonPrimitive?.content } + out["dns"]!!.jsonObject["final"]!!.jsonPrimitive.content
+        assertTrue(used.toString(), used.all { it in tags })
+        assertTrue(used.contains("dns-ovpn-r-a"))
     }
 
     @Test fun shadowsocksRoutesWithOtherPluginOptionsAreNotShared() {
@@ -540,7 +547,7 @@ class CompilerTest {
     @Test fun openVpnRoutesUseThePushedDnsButIgnorePushedRoutes() {
         val s = ovpnSetup()
         val c = compile(s, links = mapOf("x" to OvpnLink(sv("x"), s.routes[0].ovpn!!)))
-        val dns = c.dnsServer("dns-r-x")
+        val dns = c.dnsServer("dns-ovpn-r-x")
         assertEquals("openvpn", dns["type"]!!.jsonPrimitive.content)
         assertEquals("r-x", dns["endpoint"]!!.jsonPrimitive.content)
         val ep = c["endpoints"]!!.jsonArray[0].jsonObject
