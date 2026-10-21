@@ -9,11 +9,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * On-demand speed test through one exit with M-Lab's ndt7 ([Ndt7]), on a server in the exit's own country. Results go
+ * On-demand speed test through one exit with M-Lab's ndt7 ([Ndt7]), on a server in the exit's own country when known. Results go
  * to [Stats] with the exit, provider and VPN server they were taken on.
  *
  * A Tailscale exit node that no route uses is tested by switching Tailscale to it for the test and back afterwards
- * (Tailscale has one exit node at a time); [app.unbraid.data.Store.tsTestNode] remembers a switch a killed app couldn't undo.
+ * (Tailscale has one exit node at a time); [app.unbraid.data.Store.tsTestFrom] remembers a switch a killed app couldn't undo.
  */
 object SpeedTest {
     enum class Phase { Preparing, Download, Upload, Done, Failed }
@@ -38,6 +38,8 @@ object SpeedTest {
     private val _run = MutableStateFlow<Run?>(null)
     val run = _run.asStateFlow()
     @Volatile private var attempt = 0
+    /** Guards [attempt] with [_run]: a cancelled test can't publish once a newer one (or none) took over. */
+    private val lock = Any()
     /** Tailscale exit-node switches, in order: a restore never overtakes the next test's switch. */
     private val tsq = java.util.concurrent.Executors.newSingleThreadExecutor()
 
@@ -65,10 +67,9 @@ object SpeedTest {
         // Provider routes know their country; imported servers and Tailscale nodes are located by their address alone.
         val country = route?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()?.takeIf { !anywhere }
         val epoch = Stats.epoch
-        val mine = ++attempt
+        val mine = synchronized(lock) { _run.value = Run(exit); ++attempt }
         val stop = { attempt != mine }
-        val set = { f: (Run) -> Run -> if (!stop()) _run.value?.let { _run.value = f(it) } }
-        _run.value = Run(exit)
+        val set = { f: (Run) -> Run -> synchronized(lock) { if (!stop()) _run.value?.let { _run.value = f(it) } } }
         val test = Runnable {
             try {
                 val server = Ndt7.locate(tag, country)
@@ -95,14 +96,17 @@ object SpeedTest {
                 if (node != null) restoreNode()
             }
         }
-        if (node == null) Thread(test, "speedtest").start()
+        // A test through Tailscale's routed node first switches back from a tested node, so it never measures that one.
+        if (node == null) { if (tag == Compiler.TS_TAG) tsq.execute { if (stop()) return@execute; if (Unbraid.store.tsTestFrom != null) switchBack(); Thread(test, "speedtest").start() } else Thread(test, "speedtest").start() }
         else tsq.execute {
+            if (stop()) return@execute // cancelled before its turn: switch nothing
             // Switching is a blocking call; give Tailscale a moment to reach the new node before measuring.
-            Unbraid.store.tsTestNode = true
+            // The routed node's stable ID (the switch back needs one), noted with the route's setting it belongs to.
+            if (Unbraid.store.tsTestFrom == null) Unbraid.store.tsTestFrom = Unbraid.store.setup.value.tsExit?.let { r -> restoreTo(r, null, UnbraidVpn.state.value.tsExitNodes)?.let { "$r\n$it" } }.orEmpty()
             val ok = runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, node.id) }.isSuccess
             if (ok) Thread.sleep(1500)
             if (stop()) return@execute
-            if (ok) Thread(test, "speedtest").start() else { _run.value = Run(exit, Phase.Failed, error = "Tailscale couldn't switch to ${node.name}."); restoreNode() }
+            if (ok) Thread(test, "speedtest").start() else { set { it.copy(phase = Phase.Failed, error = "Tailscale couldn't switch to ${node.name}.") }; restoreNode() }
         }
         return true
     }
@@ -112,20 +116,43 @@ object SpeedTest {
 
     /** A test is under way (Tailscale may be on its test node on purpose). */
     val testing get() = _run.value?.phase.let { it == Phase.Preparing || it == Phase.Download || it == Phase.Upload }
-    @Volatile private var restoring = false
 
-    /** Puts Tailscale back on the exit node the routes use (or none). Safe to call any time; runs off the caller's thread. */
-    fun restoreNode() { if (restoring) return; restoring = true; tsq.execute {
-        val s = UnbraidVpn.state.value
-        val routed = Unbraid.store.setup.value.tsExit
-        // The routed node not in the list yet: keep the flag, the next Tailscale status retries.
-        val want = if (routed == null) "" else s.tsExitNodes.firstOrNull { it.ip == routed }?.id ?: run { restoring = false; return@execute }
-        if (runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, want) }.isSuccess) Unbraid.store.tsTestNode = false
-        restoring = false
-    } }
+    /**
+     * Puts Tailscale back on the exit node the routes use (or none). Safe to call any time; runs off the caller's thread.
+     * The node in use before the test comes back by its stable ID; failing that, the routed node by address or name. If
+     * neither is known yet Tailscale is left with no exit (apps on its route wait, never using the tested node) and
+     * the next Tailscale status tries again.
+     */
+    fun restoreNode() = tsq.execute {
+        if (synchronized(lock) { testing && _run.value?.exit?.startsWith(NODE) == true }) return@execute // that test switches back when it ends
+        switchBack()
+    }
+
+    /** On [tsq] only. */
+    private fun switchBack() {
+        val want = restoreTo(Unbraid.store.setup.value.tsExit, Unbraid.store.tsTestFrom, UnbraidVpn.state.value.tsExitNodes)
+        // A node Tailscale won't take back (gone, no longer an exit) is no reason to stay on the tested one: no exit then.
+        val set = { id: String -> runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, id) }.isSuccess }
+        if (set(want.orEmpty()) && want != null) Unbraid.store.tsTestFrom = null else if (want != "") set("")
+    }
+
+    /**
+     * The stable ID to switch back to, for the route's setting now ([routed], an address, ID or name): "" for no exit
+     * node; null when not known yet (then no exit meanwhile). A name counts only if one node has it; the [hint] noted at
+     * the test's start ("setting\nID") helps only while the setting is unchanged.
+     */
+    internal fun restoreTo(routed: String?, hint: String?, nodes: List<app.unbraid.vpn.TsNode>): String? {
+        if (routed == null) return ""
+        val r = routed.trimEnd('.')
+        nodes.firstOrNull { it.ip == r || it.id == r }?.let { return it.id }
+        val named = nodes.filter { it.name.equals(r, true) || it.name.equals(r.substringBefore('.'), true) }
+        if (named.size > 1) return null // two nodes by that name: neither is surely the one
+        named.singleOrNull()?.let { return it.id }
+        return hint?.takeIf { it.substringBefore('\n') == routed }?.substringAfter('\n')?.ifEmpty { null }
+    }
 
     /** Stops a running test; its sockets close as soon as they notice. */
-    fun cancel() {
+    fun cancel() = synchronized(lock) {
         val wasNode = _run.value?.exit?.startsWith(NODE) == true
         attempt++
         if (testing) {
@@ -136,5 +163,5 @@ object SpeedTest {
     }
 
     /** Leaving the result screen forgets the last run (it's in History if stats are on). */
-    fun clear() { if (!testing) _run.value = null }
+    fun clear() = synchronized(lock) { if (!testing) _run.value = null }
 }

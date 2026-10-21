@@ -155,10 +155,13 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
         get() = read("mlabday")?.split(' ')?.takeIf { it.getOrNull(0) == "${java.time.LocalDate.now().toEpochDay()}" }?.getOrNull(1)?.toIntOrNull() ?: 0
         set(v) { write("mlabday", "${java.time.LocalDate.now().toEpochDay()} $v") }
 
-    /** A speed test switched Tailscale to another exit node and hasn't switched it back yet. */
-    var tsTestNode: Boolean
-        get() = File(dir, "tstest").exists()
-        set(v) { if (v) write("tstest", "1") else File(dir, "tstest").delete() }
+    /**
+     * A speed test switched Tailscale to another exit node and hasn't switched it back yet: the stable ID of the node in
+     * use before ("" for none); null when nothing is to be undone. Older versions wrote "1", which is no node ID.
+     */
+    var tsTestFrom: String?
+        get() = read("tstest")?.takeIf { it != "1" } ?: if (File(dir, "tstest").exists()) "" else null
+        set(v) { if (v != null) write("tstest", v) else File(dir, "tstest").delete() }
 
     fun signOutAll() {
         _accounts.value.keys.toList().forEach { account(it, null) }

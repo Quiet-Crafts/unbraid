@@ -270,7 +270,6 @@ internal object Collector {
     private var lastFlush = 0L
     private var lastTick = 0L
     private val window = HashMap<String, Long>()
-    private val windowUpBy = HashMap<String, Long>()
     private var windowUp = 0L
     /** Drawn on the live chart but never a peak: bytes reported at a close (they span an unknown time), and our own. */
     private val closing = HashMap<String, Long>()
@@ -315,7 +314,7 @@ internal object Collector {
     private fun stopClient() {
         client?.let { c -> client = null; Thread { runCatching { c.disconnect() } }.start() }
         Stats.gen++
-        lastTick = 0; heard = 0; window.clear(); windowUpBy.clear(); windowUp = 0; closing.clear(); closingUp = 0
+        lastTick = 0; heard = 0; window.clear(); windowUp = 0; closing.clear(); closingUp = 0
         Stats._live.value = Stats.Live()
     }
 
@@ -424,7 +423,7 @@ internal object Collector {
             val own = c.app == Stats.ctx.packageName
             if (fast && !reset && c.exit != DIRECT) when {
                 own -> { closing.merge(c.exit, down, Long::plus); closingUp += up }
-                e.type == Libbox.ConnectionEventUpdate -> { window.merge(c.exit, down, Long::plus); windowUpBy.merge(c.exit, up, Long::plus); windowUp += up }
+                e.type == Libbox.ConnectionEventUpdate -> { window.merge(c.exit, down, Long::plus); windowUp += up }
                 e.type == Libbox.ConnectionEventClosed -> { closing.merge(c.exit, down, Long::plus); closingUp += up }
             }
         }
@@ -443,13 +442,12 @@ internal object Collector {
         val prev = Stats.live.value.down
         val down = (prev.keys + window.keys + closing.keys).associateWith { k ->
             val bps = (window[k] ?: 0L) * 8 / seconds
-            val upBps = (windowUpBy[k] ?: 0L) * 8 / seconds
             val shown = bps + (closing[k] ?: 0L) * 8 / seconds
             val series = prev[k] ?: FloatArray(60)
             series.copyOfRange(seconds.coerceAtMost(60), 60) + FloatArray(seconds.coerceAtMost(60)) { shown.toFloat() }
         }
         Stats._live.value = Stats.Live(down, down.values.sumOf { it.last().toDouble() }.toLong(), (windowUp + closingUp) * 8 / seconds)
-        window.clear(); windowUpBy.clear(); windowUp = 0; closing.clear(); closingUp = 0
+        window.clear(); windowUp = 0; closing.clear(); closingUp = 0
     }
 
     /** The app as the engine found it for this connection; looked up afresh otherwise (a uid can change hands). */

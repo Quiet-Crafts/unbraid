@@ -90,11 +90,15 @@ class Ui(app: Application) : AndroidViewModel(app) {
     /** Last sign-in error per provider id. */
     val formError = mutableStateMapOf<String, String>()
 
+    /** Files being read into a form, per provider: closing the form or picking another file makes an older read moot. Main thread. */
+    private val reads = HashMap<String, Int>()
+
     /**
      * Forgets a provider's half-filled sign-in form, on an explicit Back or Close. Leaving the
      * app keeps it, so the user can fetch a key from the browser and come back.
      */
     fun discardForm(id: String) {
+        reads[id] = (reads[id] ?: 0) + 1
         // A sign-in in flight still finishes (a device slot it registers must be saved), but its form is gone for good.
         if (id in signing.value) dismissed += id
         form.keys.filter { it.startsWith("$id:") }.forEach { form.remove(it) }
@@ -133,12 +137,15 @@ class Ui(app: Application) : AndroidViewModel(app) {
                 }
                 _signedIn.value = true
                 if (saved) input.values.forEach(::clearClipboardIf)
-                form.keys.filter { it.startsWith("$id:") }.forEach { form.remove(it) }
                 refreshCountries(id)
                 null
             }.getOrElse { Http.explain(it, provider.name) }
             // On the main thread, like Back: a form closed now never gets this attempt's error.
             withContext(Dispatchers.Main) {
+                if (error == null) { // a file still being read must not refill the form just used
+                    reads[id] = (reads[id] ?: 0) + 1
+                    form.keys.filter { it.startsWith("$id:") }.forEach { form.remove(it) }
+                }
                 if (!dismissed.remove(id)) error?.let { formError[id] = it }
                 _signing.update { it - id }
             }
@@ -268,20 +275,34 @@ class Ui(app: Application) : AndroidViewModel(app) {
     fun refreshApps() { if (disclosed.value) loadApps() }
     @Volatile private var appsAsked = 0
 
-    private fun loadApps() = (++appsAsked).let { n -> viewModelScope.launch(Dispatchers.IO) {
+    private fun loadApps() = (++appsAsked).let { n -> viewModelScope.launch {
         val self = getApplication<Application>().packageName
-        val all = pm.getInstalledApplications(0)
-        // One query for every app allowed online, not one permission check per app.
-        val online = pm.getPackagesHoldingPermissions(arrayOf(android.Manifest.permission.INTERNET), 0).mapTo(HashSet()) { it.packageName }
-        val list = all.filter { it.packageName != self && it.packageName in online }
-            .map { AppInfo(it.packageName, it.loadLabel(pm).toString(), it.flags and ApplicationInfo.FLAG_SYSTEM != 0 && pm.getLaunchIntentForPackage(it.packageName) == null) }
-            .sortedBy { it.label.lowercase() }
-        if (n != appsAsked) return@launch // a newer read is under way
+        // A failed read keeps the list as it was.
+        val (list, installed) = withContext(Dispatchers.IO) {
+            runCatching {
+                val all = pm.getInstalledApplications(0)
+                // One query for every app allowed online, not one permission check per app.
+                val online = pm.getPackagesHoldingPermissions(arrayOf(android.Manifest.permission.INTERNET), 0).mapTo(HashSet()) { it.packageName }
+                all.filter { it.packageName != self && it.packageName in online }
+                    .map { AppInfo(it.packageName, it.loadLabel(pm).toString(), it.flags and ApplicationInfo.FLAG_SYSTEM != 0 && pm.getLaunchIntentForPackage(it.packageName) == null) }
+                    .sortedBy { it.label.lowercase() } to all.mapTo(HashSet()) { it.packageName }
+            }.getOrNull()
+        } ?: return@launch
+        if (n != appsAsked) return@launch // a newer read is under way (checked and applied here, on the main thread)
         _apps.value = list
         // An uninstalled app must not keep its route (and a tunnel) alive.
-        val installed = all.mapTo(HashSet()) { it.packageName }
         if (store.setup.value.apps.keys.any { it !in installed }) store.update { s -> s.copy(apps = s.apps.filterKeys { it in installed }) }
     } }
+
+    /** A config file picked in a sign-in form, read here so a rotation during a slow read doesn't lose it. */
+    fun loadFormFile(uri: android.net.Uri, formKey: String, provider: String) = viewModelScope.launch {
+        val mine = (reads[provider] ?: 0) + 1
+        reads[provider] = mine
+        val text = withContext(Dispatchers.IO) { readCapped(getApplication<Application>().contentResolver, uri) }
+        if (reads[provider] != mine) return@launch // the form was closed, or another file chosen, meanwhile
+        if (text == null) formError[provider] = "Couldn't read that file. Config files must be under 64 KB."
+        else { form[formKey] = text; formError.remove(provider) }
+    }
 
     private val icons = LruCache<String, Bitmap>(200)
 

@@ -1,13 +1,8 @@
 package app.unbraid.ui
 
 import app.unbraid.WORDMARK
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.Dispatchers
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalContext
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.BackHandler
@@ -84,8 +79,6 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
     val busy = provider.id in signing
     val error = ui.formError[provider.id]
     fun key(f: Field) = "${provider.id}:${f.key}"
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     // The field's key, saved: the picker may outlive this activity (rotation), and its file must still land.
     var fileFor by rememberSaveable(provider.id) { mutableStateOf<String?>(null) }
     // Config files keep their line breaks only when loaded from a file; a pasted .conf in one line can't be parsed.
@@ -93,12 +86,8 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
         val f = provider.fields.firstOrNull { it.key == fileFor } ?: return@rememberLauncherForActivityResult
         fileFor = null
         if (uri == null) return@rememberLauncherForActivityResult
-        // Off the main thread: a slow document provider must not freeze the app.
-        scope.launch {
-            val text = withContext(Dispatchers.IO) { readCapped(context.contentResolver, uri) }
-            if (text == null) ui.formError[provider.id] = "Couldn't read that file. Config files must be under 64 KB."
-            else { ui.form[key(f)] = text; ui.formError.remove(provider.id) }
-        }
+        // In the view model, off the main thread: a slow document provider neither freezes the app nor loses the file on rotation.
+        ui.loadFormFile(uri, key(f), provider.id)
     }
     val ready = provider.fields.all { ui.form[key(it)].orEmpty().isNotBlank() }
     // The sign-in runs in the view model; when it lands, this form is done.

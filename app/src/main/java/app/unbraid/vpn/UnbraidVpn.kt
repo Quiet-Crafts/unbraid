@@ -631,7 +631,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     tsLoginPending = TsLogin.pending(ep.authURL, ep.backendState, tsLoginPending)
                     if (lastInput?.let { it.tsLoginPending != tsLoginPending } == true) scope.launch { reload() }
                     // A speed test that was cut off left Tailscale on its test node: put the configured one back.
-                    if (ep.backendState == "Running" && store.tsTestNode && !SpeedTest.testing) SpeedTest.restoreNode()
+                    if (ep.backendState == "Running" && store.tsTestFrom != null && !SpeedTest.testing) SpeedTest.restoreNode()
                     // The tailnet's own domain is only known once signed in: reload once so DNS routes it to Tailscale.
                     if (ep.backendState == "Running" && suffix != store.tsSuffix) {
                         store.tsSuffix = suffix
