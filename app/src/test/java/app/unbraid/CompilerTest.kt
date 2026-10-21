@@ -53,9 +53,9 @@ class CompilerTest {
         }
     }
 
-    private fun compile(s: Setup, lockdown: Boolean = false, links: Map<String, Link> = links(s), tsSuffix: String? = null, blocked: Set<String> = emptySet()): JsonObject {
-        val out = Compiler.compile(Compiler.Input(s, links - blocked, "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db", tsSuffix, blocked = blocked))
-        File("build/compiled").apply { mkdirs() }.resolve("${s.hashCode()}-$lockdown-${blocked.sorted()}.json").writeText(out)
+    private fun compile(s: Setup, lockdown: Boolean = false, links: Map<String, Link> = links(s), tsSuffix: String? = null, blocked: Set<String> = emptySet(), login: Boolean = false): JsonObject {
+        val out = Compiler.compile(Compiler.Input(s, links - blocked, "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db", tsSuffix, blocked = blocked, tsLoginPending = login))
+        File("build/compiled").apply { mkdirs() }.resolve("${s.hashCode()}-$lockdown-${blocked.sorted()}-$login.json").writeText(out)
         return Json.parseToJsonElement(out).jsonObject
     }
 
@@ -159,7 +159,7 @@ class CompilerTest {
     @Test fun controlHostAddressOrName() {
         fun login(url: String): JsonObject {
             val s = example.copy(home = Home(tsControlUrl = url), routes = example.routes + Route("ts", tsExit = "100.101.102.103", hue = 4), apps = example.apps + ("com.n" to "ts"))
-            return compile(s).rules().first { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf("com.n") && it["outbound"]?.jsonPrimitive?.content == "direct" && (it["domain"] != null || it["ip_cidr"] != null) }
+            return compile(s, login = true).rules().first { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf("com.n") && it["outbound"]?.jsonPrimitive?.content == "direct" && (it["domain"] != null || it["ip_cidr"] != null) }
         }
         assertEquals("1hs.example.com", login("https://1hs.example.com")["domain"]!!.jsonArray.single().jsonPrimitive.content)
         assertEquals("10.1.2.3/32", login("https://10.1.2.3:8443")["ip_cidr"]!!.jsonArray.single().jsonPrimitive.content)
@@ -254,15 +254,19 @@ class CompilerTest {
 
     /** With a Tailscale exit carrying traffic, its login must not ride that exit; otherwise those sites follow each app. */
     @Test fun tailscaleLoginGoesDirectOnlyWithAnExitNode() {
-        fun direct(s: Setup) = compile(s).rules().firstOrNull { it["domain_suffix"]?.toString()?.contains("tailscale.com") == true }
+        fun direct(s: Setup, login: Boolean = true) = compile(s, login = login).rules().firstOrNull { it["domain_suffix"]?.toString()?.contains("tailscale.com") == true }
         assertEquals(null, direct(example))
         val withExit = example.copy(routes = example.routes + Route("ts", tsExit = "100.101.102.103", hue = 4), apps = example.apps + ("com.n" to "ts"))
+        // Only while a sign-in waits: once signed in, tailscale.com follows the app's exit like any site.
+        assertEquals(null, direct(withExit, login = false))
+        // A Headscale tailnet signs in on its own server: Tailscale's sites never skip the exit.
+        assertEquals(null, direct(withExit.copy(home = withExit.home.copy(tsControlUrl = "https://hs.example.org"))))
         assertEquals("direct", direct(withExit)!!["outbound"]!!.jsonPrimitive.content)
         // Only for the apps on that exit: a browser on another VPN keeps its own exit for tailscale.com.
         assertEquals("[\"com.n\"]", direct(withExit)!!["package_name"].toString())
-        assertEquals(1, compile(withExit).rules().count { it["domain_suffix"]?.toString()?.contains("tailscale.com") == true })
+        assertEquals(1, compile(withExit, login = true).rules().count { it["domain_suffix"]?.toString()?.contains("tailscale.com") == true })
         // Ahead of that app's resolve through the exit, which can't answer before the exit node is signed in.
-        val rules = compile(withExit).rules()
+        val rules = compile(withExit, login = true).rules()
         assertTrue(rules.indexOf(direct(withExit)) < rules.indexOfFirst { it["package_name"].toString() == "[\"com.n\"]" && it["action"]?.jsonPrimitive?.content == "resolve" })
     }
 

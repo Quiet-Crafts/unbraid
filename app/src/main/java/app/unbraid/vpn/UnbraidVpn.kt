@@ -300,7 +300,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var restarting = false
     private var lastGood: String? = null
     /** What [lastGood] was compiled from, so a failed reload can bring exactly that back with a new probe pair. */
-    private var lastInput: Compiler.Input? = null
+    @Volatile private var lastInput: Compiler.Input? = null
 
     @OptIn(FlowPreview::class)
     private fun connect() {
@@ -412,7 +412,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         probe = null
         val last = lastInput ?: return false
         val next = newProbe()
-        val input = Compiler.Input(last.setup, last.links, last.selfPackage, last.lockdown, last.tsDir, last.cacheFile, last.tsSuffix, next, last.fakeBlock, last.blocked)
+        val input = Compiler.Input(last.setup, last.links, last.selfPackage, last.lockdown, last.tsDir, last.cacheFile, last.tsSuffix, next, last.fakeBlock, last.blocked, last.tsLoginPending)
         val json = Compiler.compile(input)
         srv.startOrReloadService(json, OverrideOptions())
         lastBlock = input.fakeBlock
@@ -555,11 +555,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         setup.route(id)?.takeIf { e is AuthException && !it.imported }?.let { refusals = refusals + (it.loc.provider to (accounts[it.loc.provider] to e)) }
     }
 
+    /** Tailscale gave a sign-in link and waits for the user ([Compiler.Input.tsLoginPending]). */
+    @Volatile private var tsLoginPending = false
+
     /** Providers that refused an account, with that account and why: their routes stay blocked until it changes. */
     private var refusals: Map<String, Pair<String?, Exception>> = emptyMap()
 
     private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
-        Compiler.Input(setup, links, packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked)
+        Compiler.Input(setup, links, packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending)
 
     /** The open table's fake-IP block for a reload; a new table takes the next one, refusing the rest. */
     private fun fakeBlock() = Compiler.nextBlock(lastBlock ?: store.fakeBlock, synchronized(Companion) { tableOpen })
@@ -592,6 +595,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     val suffix = Compiler.tsSuffix(ep.magicDNSSuffix)
                     val reported = if (ep.backendState == "Running") suffix else store.tsSuffix
                     state.update { s -> s.copy(tsLoginUrl = ep.authURL.ifEmpty { null }, tsState = ep.backendState, tsExitNodes = nodes, tsSuffix = reported) }
+                    // The sign-in pages' way around the exit opens with a sign-in link and closes only once signed in: a
+                    // restarted engine reports no link at first, which must not close it (each reload restarts Tailscale).
+                    // Compared with what the engine runs, so a reload that failed is tried again on the next status.
+                    tsLoginPending = TsLogin.pending(ep.authURL, ep.backendState, tsLoginPending)
+                    if (lastInput?.let { it.tsLoginPending != tsLoginPending } == true) scope.launch { reload() }
                     // A speed test that was cut off left Tailscale on its test node: put the configured one back.
                     if (ep.backendState == "Running" && store.tsTestNode && !SpeedTest.testing) SpeedTest.restoreNode()
                     // The tailnet's own domain is only known once signed in: reload once so DNS routes it to Tailscale.

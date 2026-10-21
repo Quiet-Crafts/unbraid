@@ -11,6 +11,15 @@ import org.junit.Test
 class TsLoginTest {
     private fun v(url: String, control: String? = null) = TsLogin.check(url, control).verdict
 
+    @Test fun aSignInWaitsFromItsLinkUntilRunning() {
+        assertEquals(true, TsLogin.pending("https://login.tailscale.com/a/1", "NeedsLogin", false))
+        // A restarted engine: no link yet, not signed in. The sign-in still waits.
+        assertEquals(true, TsLogin.pending("", "NoState", true))
+        assertEquals(true, TsLogin.pending("", "Starting", true))
+        assertEquals(false, TsLogin.pending("", "Running", true))
+        assertEquals(false, TsLogin.pending("", "Starting", false))
+    }
+
     @Test fun tailscaleLinksOpenWithTheDefaultServer() {
         assertEquals(OPEN, v("https://login.tailscale.com/a/1a2b3c"))
         assertEquals(OPEN, v("https://LOGIN.Tailscale.com./a/1a2b3c"))

@@ -16,6 +16,12 @@ object TsLogin {
 
     private val TAILSCALE_CONTROL = setOf("controlplane.tailscale.com", "login.tailscale.com")
 
+    /**
+     * Whether a sign-in waits, from a Tailscale status: yes with a sign-in link, no once signed in (Running), else as
+     * [was]. A restarted engine reports no link at first: that alone never ends a sign-in.
+     */
+    fun pending(authUrl: String, backend: String?, was: Boolean) = when { authUrl.isNotEmpty() -> true; backend == "Running" -> false; else -> was }
+
     fun check(url: String, controlUrl: String?): Result {
         val refuse = Result(Verdict.REFUSE, null, null)
         val u = runCatching { URI(url.trim()) }.getOrNull() ?: return refuse

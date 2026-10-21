@@ -66,6 +66,8 @@ object Compiler {
         val fakeBlock: Int = 0,
         /** Routes with no tunnel right now (signed out, unreachable): their apps' traffic and lookups are refused. */
         val blocked: Set<String> = emptySet(),
+        /** Tailscale asks the user to sign in (it gave a login link): only then do its sign-in pages skip the exit. */
+        val tsLoginPending: Boolean = false,
     )
 
     /**
@@ -227,10 +229,11 @@ object Compiler {
                         add(obj("inbound" to PROBE, "auth_user" to arr(t), "outbound" to t))
                     }
                     network.forEach { add(it) }
-                    // Tailscale's control plane and login pages never ride the tailnet for apps on a Tailscale exit: a
-                    // not-yet-signed-in exit node would otherwise block its own sign-in. Other apps keep their own exits.
-                    val tsLogin = if (!ts) emptyList() else listOfNotNull(
-                        ("domain_suffix" to arr("tailscale.com", "tailscale.io")).takeIf { s.tsExit != null },
+                    // While Tailscale waits for a sign-in, its login pages skip the tailnet for apps on a Tailscale exit: the
+                    // exit node can't carry them before the sign-in. Other apps keep their own exits, and once signed in
+                    // these sites follow the exit too (the engine's own control traffic never needs the rule).
+                    val tsLogin = if (!ts || !i.tsLoginPending) emptyList() else listOfNotNull(
+                        ("domain_suffix" to arr("tailscale.com", "tailscale.io")).takeIf { s.tsExit != null && officialTs(s.home) },
                         // An address only when it truly is one (no lookup): "1hs.example.com" is a name.
                         s.home.tsControlUrl?.let { u -> java.net.URI(u).host?.let { h ->
                             when {
