@@ -39,8 +39,8 @@ const val ENTRY_OPT = "entry"
  */
 data class Opt(val key: String, val label: String, val sub: String, val choices: List<Pair<String, String>> = emptyList(), val advanced: Boolean = false)
 
-/** What a provider says about the device slot this phone holds: one line, and where the user sees all their devices. */
-data class Device(val line: String, val url: String? = null)
+/** What a provider says about the device slot this phone holds: one line, where the user sees all their devices, and how many the account has in use, if it says. */
+data class Device(val line: String, val url: String? = null, val used: Int? = null)
 
 /** A ready tunnel for one exit, produced at connect time. */
 @Serializable

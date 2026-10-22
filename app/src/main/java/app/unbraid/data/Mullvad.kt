@@ -159,7 +159,7 @@ object Mullvad : Provider {
         false
     } catch (e: Http.Status) { e.code == 404 } catch (e: AuthException) { true } catch (e: IOException) { false }
 
-    /** This phone's device and how many of the slots are taken; offline, the name saved at sign-in. */
+    /** This phone's device and how many of the slots are taken (the page's device count); offline, the name saved at sign-in. */
     override fun device(account: String): Device {
         val a = account(account)
         val list = try { devices(Http.get("$API/accounts/v1/devices", bearer(accessToken(a.account)))) } catch (e: IOException) { null }
@@ -170,8 +170,7 @@ object Mullvad : Provider {
 
     internal fun deviceLine(a: Account, list: List<DeviceReply>?): Device {
         val name = (list?.firstOrNull { it.id == a.deviceId }?.name ?: a.device).split(' ').joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
-        val used = list?.let { " ${it.size} of $SLOTS devices in use." }.orEmpty()
-        return Device("Its own device${if (name.isNotBlank()) ", $name" else ""}, removed when you sign out.$used See all your devices on mullvad.net", DEVICES)
+        return Device("Its own device${if (name.isNotBlank()) ", $name" else ""}, removed when you sign out", DEVICES, list?.size)
     }
 
     override fun plan(account: String): String? = expiry(Http.get("$API/accounts/v1/accounts/me", bearer(accessToken(account(account).account))))?.let(Plans::line)

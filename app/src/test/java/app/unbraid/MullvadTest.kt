@@ -152,9 +152,9 @@ class MullvadTest {
 
     @Test fun deviceLineCountsSlotsAndNamesOurs() {
         val list = Mullvad.devices("""[{"id":"d-1","name":"tidy cat","pubkey":"a","ipv4_address":"10.68.0.1/32"},{"id":"dev-1","name":"rapid otter","pubkey":"b","ipv4_address":"10.68.0.2/32"}]""")
-        assertEquals("Its own device, Rapid Otter, removed when you sign out. 2 of 5 devices in use. See all your devices on mullvad.net", Mullvad.deviceLine(acct, list).line)
-        assertEquals("Its own device, Old Name, removed when you sign out. See all your devices on mullvad.net", Mullvad.deviceLine(acct.copy(device = "old name"), null).line)
-        assertEquals("Its own device, removed when you sign out. See all your devices on mullvad.net", Mullvad.deviceLine(acct, null).line)
+        assertEquals(app.unbraid.data.Device("Its own device, Rapid Otter, removed when you sign out", "https://mullvad.net/account/devices", 2), Mullvad.deviceLine(acct, list))
+        assertEquals(app.unbraid.data.Device("Its own device, Old Name, removed when you sign out", "https://mullvad.net/account/devices"), Mullvad.deviceLine(acct.copy(device = "old name"), null))
+        assertEquals("Its own device, removed when you sign out", Mullvad.deviceLine(acct, null).line)
     }
 
     @Test fun expiryIsReadFromAccountReply() {

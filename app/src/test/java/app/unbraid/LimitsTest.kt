@@ -21,6 +21,8 @@ class LimitsTest {
     @Test fun fixedWording() {
         assertEquals("Proton VPN Free allows 1 connection. unbraid is using 2. Your other devices aren't counted.", Limits.line("Proton VPN Free", 1, "connection", 2))
         assertEquals("IVPN allows 5 devices. unbraid is using 1. Your other devices aren't counted.", Limits.line("IVPN", 5, "device", 1))
+        assertEquals("Mullvad allows 5 devices. 1 is in use, by unbraid.", Limits.line("Mullvad", 5, "device", 1, all = 1))
+        assertEquals("Mullvad allows 5 devices. 3 are in use, 1 of them by unbraid.", Limits.line("Mullvad", 5, "device", 1, all = 3))
         assertEquals("unbraid is using 2 PIA connections. Check how many your plan allows: over the limit, routes can stop working without an error.", Limits.line("PIA", null, "connection", 2))
         assertEquals("unbraid is using 1 Proton VPN connection. Check how many your plan allows: over the limit, routes can stop working without an error.", Limits.line("Proton VPN", null, "connection", 1))
         assertEquals("NordVPN allows 10 connections. This would make it 11. Over the limit, routes can stop working without an error.", Limits.warning("NordVPN", 10, "connection", 11))

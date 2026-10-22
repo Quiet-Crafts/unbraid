@@ -341,7 +341,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     val tunnels = if (running) UnbraidVpn.tags.filterKeys { id -> UnbraidVpn.running?.route(id)?.let { !it.imported && it.loc.provider == pr.id } == true }.values.toSet().size else 0
                     // The same line for every provider: its limit (the user's own first), and what unbraid uses of it.
                     val lim = pr.limit(acc)
-                    val counted = Item(if (lim.unit == "device") "Devices" else "Connections", app.unbraid.data.Limits.line(pr.name, app.unbraid.data.Limits.effective(lim, setup.opt(pr.id, app.unbraid.data.LIMIT_OPT)), lim.unit, if (lim.perTunnel) tunnels else 1),
+                    val counted = Item(if (lim.unit == "device") "Devices" else "Connections", app.unbraid.data.Limits.line(pr.name, app.unbraid.data.Limits.effective(lim, setup.opt(pr.id, app.unbraid.data.LIMIT_OPT)), lim.unit, if (lim.perTunnel) tunnels else 1, device?.used),
                         { dialog = "limit:${pr.id}" }, icon = Icons.phone) { Chevron() }
                     // A provider whose only server list is gluetun's public one: how old it is.
                     val list = pr.listSource?.let { c -> Item("Server list", "From gluetun's public list" + (app.unbraid.Unbraid.store.catalogDates.value[c]?.let { ", published ${publishedOn(it)}" } ?: ""), null, icon = Icons.dns) }
