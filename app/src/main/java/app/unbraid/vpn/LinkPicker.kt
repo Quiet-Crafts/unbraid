@@ -81,8 +81,8 @@ object LinkPicker {
     }
 
     /**
-     * [links] with each provider WireGuard tunnel on the port its provider page asks for: a fixed one, or with Automatic
-     * the [step]-th of the server's ports (a step per provider moves on when its tunnels stop answering).
+     * [links] with each provider WireGuard tunnel on the entry address and port its provider page asks for: a fixed port,
+     * or with Automatic the [step]-th of the server's ports (a step per provider moves on when its tunnels stop answering).
      */
     fun ported(setup: Setup, links: Map<String, Link>, step: Map<String, Int>): Map<String, Link> {
         val provider = { id: String -> setup.route(id)?.takeIf { !it.imported }?.loc?.provider }
@@ -93,9 +93,10 @@ object LinkPicker {
 
     private fun portedOne(setup: Setup, p: String?, l: Link, lists: Map<String?, List<Int>>, step: Map<String, Int>): Link {
         if (l !is WgLink || p == null) return l
+        val host = setup.opt(p, app.unbraid.data.ENTRY_OPT)?.toIntOrNull()?.let { l.entries.getOrNull(it - 1) } ?: l.peer.endpoint.substringBeforeLast(':')
         val port = setup.opt(p, app.unbraid.data.PORT_OPT)?.toIntOrNull()?.takeIf { it in 1..65535 }
-            ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[(step[p] ?: 0) % it.size] } ?: return l
-        return l.copy(peer = l.peer.copy(endpoint = "${l.peer.endpoint.substringBeforeLast(':')}:$port"))
+            ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[(step[p] ?: 0) % it.size] } ?: l.peer.endpoint.substringAfterLast(':')
+        return l.copy(peer = l.peer.copy(endpoint = "$host:$port"))
     }
 
     /** True if an app that went Direct under [old] goes to one of [routes] under [new] (explicitly or by default). */

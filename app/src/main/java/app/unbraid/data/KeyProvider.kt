@@ -5,8 +5,9 @@ import java.io.IOException
 
 /**
  * Providers where the user downloads one WireGuard key (or .conf) from the website and that single key serves every
- * server: sign-in is local, there is no API to check it against. The tunnel settings come from the pasted .conf when
- * there is one, else from the provider's documented defaults; the server list comes from [entries].
+ * server: sign-in is local, with no API to check it against (AirVPN's can also fetch the .conf with an API key). The
+ * tunnel settings come from the pasted .conf when there is one, else from the provider's documented defaults; the
+ * server list comes from [entries].
  */
 abstract class KeyProvider : Provider {
     @Serializable
@@ -21,6 +22,10 @@ abstract class KeyProvider : Provider {
         val publicKey: String? = null,
         /** Settings the provider wrote into a pasted .conf as comments ([configFacts]); null when only a key was pasted. */
         val facts: Map<String, String>? = null,
+        /** For a key the provider's API made: the API key, and the name and public key of the device it belongs to. */
+        val apiKey: String? = null,
+        val device: String? = null,
+        val deviceKey: String? = null,
     )
 
     /** Comment lines ("# NetShield = 0") a provider writes into its configs that say how the key was made, to show them. */
@@ -39,6 +44,10 @@ abstract class KeyProvider : Provider {
     protected abstract val defaultPort: Int
     protected open val defaultMtu = 1420
     protected open val presharedRequired = false
+    /** Every port its servers take, best first; the account's own port is always tried first. */
+    protected open val ports: List<Int> = emptyList()
+    /** A server's entry addresses for [WgLink.entries]; none unless the provider has an entry setting. */
+    protected open fun addresses(e: Catalog.Entry): List<String> = emptyList()
 
     protected abstract fun entries(a: Account): List<Catalog.Entry>
 
@@ -103,19 +112,19 @@ abstract class KeyProvider : Provider {
      * country), else by IP. The pinned values stand in only when the list can't be read; a server the list no longer
      * has is an error rather than a stale endpoint.
      */
-    private fun refreshed(p: Server, loc: Location, a: Account, entries: () -> List<Catalog.Entry>): Server {
-        val all = try { entries() } catch (e: IOException) { if (trustsKey(peerKey(p, a), a)) return p else throw e }
+    private fun refreshed(p: Server, loc: Location, a: Account, entries: () -> List<Catalog.Entry>): Pair<Server, Catalog.Entry?> {
+        val all = try { entries() } catch (e: IOException) { if (trustsKey(peerKey(p, a), a)) return p to null else throw e }
         val found = all.filter { it.hostname == p.host && (it.serverName ?: it.hostname.substringBefore('.')) == p.name }
             .ifEmpty { all.filter { p.ip in it.ips } }
         if (found.isEmpty()) throw NoLongerOffered(p)
         // No address for it now: keep the pinned one, but with the list's current key.
         val live = try { usable(found, Location(loc.provider)).firstOrNull { it.hostname == found.first().hostname } } catch (_: IOException) { null }
-            ?: return found.first().wgpubkey?.let { p.copy(publicKey = it) } ?: p
-        return Catalog.server(live, p.name)
+            ?: return (found.first().wgpubkey?.let { p.copy(publicKey = it) } ?: p) to null
+        return Catalog.server(live, p.name) to live
     }
 
     internal fun link(loc: Location, a: Account, entries: () -> List<Catalog.Entry>): WgLink {
-        val sv = loc.pinned?.let { refreshed(it, loc, a, entries) } ?: usable(entries(), loc).firstOrNull()?.let { Catalog.server(it) }
+        val (sv, e) = loc.pinned?.let { refreshed(it, loc, a, entries) } ?: usable(entries(), loc).firstOrNull()?.let { Catalog.server(it) to it }
             ?: throw IOException("No $name server for ${loc.label}")
         return WgLink(
             sv,
@@ -123,6 +132,8 @@ abstract class KeyProvider : Provider {
                 name = sv.name, privateKey = a.privateKey, address = a.address, publicKey = peerKey(sv, a), presharedKey = a.presharedKey,
                 endpoint = "${sv.ip}:${a.port}", allowedIps = listOf("0.0.0.0/0"), dns = a.dns, mtu = a.mtu,
             ),
+            if (ports.isEmpty()) emptyList() else (listOf(a.port) + ports).distinct(),
+            e?.let(::addresses).orEmpty(),
         )
     }
 

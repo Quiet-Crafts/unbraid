@@ -240,6 +240,19 @@ class LinkPickerTest {
         assertTrue("2" !in r.links && "2" !in r.remember.values.map { it.server.name })
     }
 
+    /** The entry address the provider page picks, by number; a tunnel without that many entries keeps its own. */
+    @Test fun entryFollowsTheProviderPage() {
+        val peer = WgPeer("x", "k", listOf("10.0.0.2/32"), "p", endpoint = "198.51.100.1:1637", allowedIps = listOf("0.0.0.0/0"))
+        val s = setup(Route("1", Location("fake", countryCode = "NL")), Route("2", Location("fake", countryCode = "DE")))
+        val links = mapOf("1" to WgLink(a, peer, listOf(1637, 47107), listOf("198.51.100.1", "198.51.100.3")), "2" to WgLink(a, peer))
+        fun at(s: Setup, step: Map<String, Int> = emptyMap()) = LinkPicker.ported(s, links, step).mapValues { (it.value as WgLink).peer.endpoint }
+        assertEquals(mapOf("1" to "198.51.100.1:1637", "2" to "198.51.100.1:1637"), at(s))
+        val alt = s.copy(opts = mapOf("fake" to mapOf("entry" to "2")))
+        assertEquals(mapOf("1" to "198.51.100.3:1637", "2" to "198.51.100.1:1637"), at(alt))
+        assertEquals("198.51.100.3:47107", at(alt, mapOf("fake" to 1))["1"])
+        assertEquals("198.51.100.1:1637", at(s.copy(opts = mapOf("fake" to mapOf("entry" to "9"))))["1"])
+    }
+
     /** A fixed port wins; Automatic walks the server's ports one step at a time, per provider; imports keep theirs. */
     @Test fun portsFollowTheProviderPage() {
         val peer = WgPeer("x", "k", listOf("10.0.0.2/32"), "p", endpoint = "198.51.100.1:2049", allowedIps = listOf("0.0.0.0/0"))

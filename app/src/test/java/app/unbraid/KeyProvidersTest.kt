@@ -69,6 +69,7 @@ class KeyProvidersTest {
     @Before fun noNetwork() {
         Surfshark.addressBook = Snapshot.memory()
         Surfshark.catalogue = { throw IOException("offline") }
+        AirVpn.api = { _, _, _ -> throw IOException("offline") }
     }
 
     private fun cityLoc(provider: String, entries: List<Catalog.Entry>): Location {
@@ -189,7 +190,8 @@ class KeyProvidersTest {
         for (p in listOf(Proton, ProtonFree, Surfshark, AirVpn)) {
             assertRejected(p, "")
             assertRejected(p, "hello")
-            assertRejected(p, "a".repeat(64))
+            // 64 hex digits are an AirVPN API key, sent to AirVPN rather than refused here.
+            if (p != AirVpn) assertRejected(p, "a".repeat(64))
             assertRejected(p, priv.dropLast(1))
             assertRejected(p, "!" + priv.drop(1))
             assertRejected(p, conf("10.2.0.2/32", "10.2.0.1", "1.2.3.4:51820").replace(priv, "short"))
@@ -332,7 +334,7 @@ class KeyProvidersTest {
 
     @Test fun airvpnLiveListUsesHealthyIpv4Entries() {
         assertTrue(nodes.isNotEmpty())
-        assertTrue(nodes.all { it.vpn == "wireguard" && it.ips.size == 1 && '.' in it.ips[0] && it.wgpubkey == serverKey && it.hostname.endsWith(".vpn.airdns.org") })
+        assertTrue(nodes.all { it.vpn == "wireguard" && it.ips.size == 2 && it.ips.all { ip -> '.' in ip } && it.wgpubkey == serverKey && it.hostname.endsWith(".vpn.airdns.org") })
         val cs = Catalog.countries(nodes)
         assertTrue(cs.any { it.name == "Netherlands" && it.code == "NL" })
         assertTrue(cs.all { iso.matches(it.code) })

@@ -30,6 +30,9 @@ const val PROTECT = "protect"
 const val PORT_OPT = "port"
 const val AUTO = "auto"
 
+/** Key of a provider's entry address setting: the number of one of a server's [WgLink.entries], from 1. */
+const val ENTRY_OPT = "entry"
+
 /**
  * A setting on a provider's page, saved in [Setup.opts]. No [choices] = an on/off switch ("on"/"off"). [advanced]: one
  * most people never need, which can stop routes connecting: listed under the page's Advanced settings.
@@ -45,9 +48,12 @@ sealed interface Link {
     val server: Server
 }
 
-/** [ports]: the server's other ports, best first, for a network that blocks the one in [WgPeer.endpoint]. */
+/**
+ * [ports]: the server's other ports, best first, for a network that blocks the one in [WgPeer.endpoint]. [entries]: the
+ * server's entry addresses in the order its provider page numbers them ([ENTRY_OPT]); empty = only the endpoint's.
+ */
 @Serializable
-data class WgLink(override val server: Server, val peer: WgPeer, val ports: List<Int> = emptyList()) : Link
+data class WgLink(override val server: Server, val peer: WgPeer, val ports: List<Int> = emptyList(), val entries: List<String> = emptyList()) : Link
 
 @Serializable
 data class OvpnLink(override val server: Server, val profile: OvpnProfile) : Link
