@@ -21,4 +21,12 @@ class StatusTest {
         assertEquals(Tone.Good, tone())
         assertEquals("Setting up your key", providerStatus("IVPN", true, false, true, false, true, true).second)
     }
+
+    /** A route that keeps dropping is a passing issue: below a refusal or blocked routes, above an old list. */
+    @Test fun droppingWarns() {
+        val d = "Netherlands keeps dropping. Proton VPN Free may be over its connection limit."
+        assertEquals(Tone.Warn to d, providerStatus("Proton VPN Free", true, false, false, false, false, true, d))
+        assertEquals(Tone.Bad, providerStatus("Proton VPN Free", true, true, false, false, true, true, d).first)
+        assertEquals(Tone.Good, providerStatus("Proton VPN Free", true, false, false, false, true, true, null).first)
+    }
 }

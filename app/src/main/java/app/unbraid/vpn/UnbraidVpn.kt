@@ -88,6 +88,8 @@ data class VpnState(
     val alwaysOn: Boolean = false,
     /** Providers whose routes have no tunnel right now: provider id → whether it refused the account (the user must sign in again). */
     val stuck: Map<String, Boolean> = emptyMap(),
+    /** Routes whose tunnel keeps dropping ([app.unbraid.vpn.Health.dropping]). */
+    val dropping: Set<String> = emptySet(),
 ) {
     enum class Phase { Off, Connecting, On, Paused }
 }
@@ -509,6 +511,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      */
     private suspend fun watchHealth() {
         val fails = HashMap<String, Int>()
+        val history = HashMap<String, List<Boolean>>() // tag → its latest checks, for routes that keep dropping
         var slow = 1
         var last: Pair<Map<String, Link>, android.net.Network?>? = null // the tunnels and network the streaks are about
         while (true) {
@@ -535,14 +538,16 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val down = Health.blame(checked.filter { !Health.reachable(it) }.toSet(), checked) { Health.direct(network) }
             val move = lock.withLock {
                 // Stopped, reloaded or moved to another network meanwhile: start counting afresh.
-                if (state.value.phase != VpnState.Phase.On || links !== seen || net.network != network) { fails.clear(); failing = emptySet(); last = null; return@withLock null }
+                if (state.value.phase != VpnState.Phase.On || links !== seen || net.network != network) { fails.clear(); history.clear(); failing = emptySet(); last = null; return@withLock null }
                 // Other tunnels or another network than the last round's: their streaks and blame don't carry over.
-                if (last != (seen to network)) { fails.clear(); failing = emptySet(); slow = 1; last = seen to network }
+                if (last != (seen to network)) { fails.clear(); history.clear(); failing = emptySet(); slow = 1; last = seen to network }
                 if (down == null) { fails.clear(); failing = emptySet(); slow = minOf(slow * 2, 8); return@withLock null }
                 slow = 1
                 // The next connect, even a manual one, avoids them.
                 failing = down.flatMap { servers[it].orEmpty() }.toSet()
-                checked.forEach { t -> fails[t] = if (t in down) (fails[t] ?: 0) + 1 else 0 }
+                checked.forEach { t -> fails[t] = if (t in down) (fails[t] ?: 0) + 1 else 0; history[t] = Health.record(history[t].orEmpty(), t !in down) }
+                val dropping = byTag.filterKeys { it != null && Health.dropping(history[it].orEmpty()) }.values.flatten().toSet()
+                if (dropping != state.value.dropping) state.update { it.copy(dropping = dropping) }
                 val dead = byTag.filterKeys { (fails[it] ?: 0) >= 3 }.values.flatten()
                 if (dead.isEmpty()) return@withLock null
                 dead.forEach { fails.remove(tags[it]) }

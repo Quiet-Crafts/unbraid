@@ -306,6 +306,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         refreshed.let { app.unbraid.Unbraid.store.countriesFresh(pr.id) },
                         // Only the setup the engine runs counts: a route just moved to this provider isn't connected yet.
                         on && active.all { r -> r.id in vpn.servers && UnbraidVpn.running?.route(r.id)?.loc == r.loc },
+                        active.firstOrNull { it.id in vpn.dropping }?.takeIf { on }?.let { r -> app.unbraid.data.Limits.dropping(r.name, pr.name, pr.limit(accounts.getValue(pr.id)).unit) },
                     )
                     Item(pr.name, words + if (n > 0) " · used by $n ${if (n == 1) "route" else "routes"}" else "", { go("provider:${pr.id}") }) {
                         Row(verticalAlignment = Alignment.CenterVertically) {

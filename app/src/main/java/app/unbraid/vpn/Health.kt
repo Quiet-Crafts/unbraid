@@ -33,6 +33,18 @@ object Health {
     suspend fun blame(down: Set<String>, checked: Set<String>, direct: suspend () -> Boolean): Set<String>? =
         if (down.isNotEmpty() && down == checked && !direct()) null else down
 
+    /**
+     * A tunnel's latest checks, oldest first ([true] = answered), as kept for [dropping]: the last six.
+     */
+    fun record(history: List<Boolean>, ok: Boolean) = (history + ok).takeLast(6)
+
+    /**
+     * A tunnel that keeps dropping: three or more of its last six checks failed and it hasn't answered three in a row
+     * since. One failing three in a row is moved to another server instead; this catches the ones that come and go,
+     * like two tunnels taking turns on an account with one connection.
+     */
+    fun dropping(history: List<Boolean>) = history.count { !it } >= 3 && !(history.size >= 3 && history.takeLast(3).all { it })
+
     /** One HTTPS request over [network] itself, past every tunnel. */
     suspend fun direct(network: android.net.Network?) = withContext(Dispatchers.IO) {
         runCatching {

@@ -26,4 +26,15 @@ class HealthTest {
         assertEquals(setOf("a"), blame(setOf("a"), setOf("a", "b"), direct = false))
         assertEquals(emptySet<String>(), blame(emptySet(), setOf("a"), direct = false))
     }
+
+    /** On and off counts once three of the last six checks failed, and clears after three answers in a row. */
+    @Test fun keepsDropping() {
+        fun h(vararg ok: Boolean) = ok.fold(emptyList<Boolean>()) { acc, b -> Health.record(acc, b) }
+        assertEquals(false, Health.dropping(h(true, false, true, false, true)))
+        assertEquals(true, Health.dropping(h(true, false, true, false, true, false)))
+        assertEquals(true, Health.dropping(h(false, true, false, true, false)))
+        assertEquals(false, Health.dropping(h(false, true, false, true, false, true, true, true)))
+        assertEquals(true, Health.dropping(h(false, false, false))) // dead too: moved by the other rule, flagged meanwhile
+        assertEquals(6, h(true, true, true, true, true, true, true, false).size)
+    }
 }
