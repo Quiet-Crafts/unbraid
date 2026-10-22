@@ -74,6 +74,12 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
     @Synchronized
     fun countries(provider: String, v: List<Country>) = write("countries-$provider.json", json.encodeToString(countriesSer, v))
 
+    /** When each gluetun catalogue last read was published (epoch seconds, [Catalog.published]); kept across restarts. */
+    fun catalogDates(): Map<String, Long> = read("catalog-dates.json")?.let { runCatching { json.decodeFromString(datesSer, it) }.getOrNull() }.orEmpty()
+
+    @Synchronized
+    fun catalogDate(name: String, epochSeconds: Long) { catalogDates().let { if (it[name] != epochSeconds) write("catalog-dates.json", json.encodeToString(datesSer, it + (name to epochSeconds))) } }
+
     /** Last tunnel that worked per "provider|location", used when a provider's API is unreachable. Holds keys, so sealed. */
     val lastLinks: Map<String, Link>
         get() = open("links.bin")?.let { runCatching { json.decodeFromString(linksSer, it) }.getOrNull() }.orEmpty()
@@ -220,6 +226,7 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
         val countriesSer = ListSerializer(Country.serializer())
         val linksSer = MapSerializer(String.serializer(), Link.serializer())
         val accountsSer = MapSerializer(String.serializer(), String.serializer())
+        val datesSer = MapSerializer(String.serializer(), Long.serializer())
 
         fun keystoreKey(): SecretKey {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

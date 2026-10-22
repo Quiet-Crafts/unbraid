@@ -295,6 +295,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             }
 
             p == "providers" -> Page("Providers & servers", back) {
+                val listDates = app.unbraid.Unbraid.store.catalogDates()
                 tick.let { }
                 notice(ui, notice)
                 group("VPN providers", signedIn.map { pr ->
@@ -307,6 +308,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         // Only the setup the engine runs counts: a route just moved to this provider isn't connected yet.
                         on && active.all { r -> r.id in vpn.servers && UnbraidVpn.running?.route(r.id)?.loc == r.loc },
                         active.firstOrNull { it.id in vpn.dropping }?.takeIf { on }?.let { r -> app.unbraid.data.Limits.dropping(r.name, pr.name, pr.limit(accounts.getValue(pr.id)).unit) },
+                        pr.listSource?.let { listDates[it] }?.takeIf { System.currentTimeMillis() - it * 1000 > OLD_LIST_MS }?.let(::publishedOn),
                     )
                     Item(pr.name, words + if (n > 0) " · used by $n ${if (n == 1) "route" else "routes"}" else "", { go("provider:${pr.id}") }) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -336,7 +338,9 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     val lim = pr.limit(accounts.getValue(pr.id))
                     val counted = Item(if (lim.unit == "device") "Devices" else "Connections", app.unbraid.data.Limits.line(pr.name, app.unbraid.data.Limits.effective(lim, setup.opt(pr.id, app.unbraid.data.LIMIT_OPT)), lim.unit, if (lim.perTunnel) tunnels else 1),
                         { dialog = "limit:${pr.id}" }, icon = Icons.phone) { Chevron() }
-                    group(null, listOfNotNull(Item("Account", "Signed in", null, icon = Icons.vpnKey), counted, device?.let { d ->
+                    // A provider whose only server list is gluetun's public one: how old it is.
+                    val list = pr.listSource?.let { c -> Item("Server list", "From gluetun's public list" + (app.unbraid.Unbraid.store.catalogDates()[c]?.let { ", published ${publishedOn(it)}" } ?: ""), null, icon = Icons.dns) }
+                    group(null, listOfNotNull(Item("Account", "Signed in", null, icon = Icons.vpnKey), counted, list, device?.let { d ->
                         Item("This phone", d.line, d.url?.let { u -> { context.openUrl(u) } }, icon = Icons.info) { if (d.url != null) Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) }
                     }))
                     val protect = pr.protection

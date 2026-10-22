@@ -34,14 +34,20 @@ object Catalog {
     }
 
     @Serializable
-    private data class File(val servers: List<Entry> = emptyList())
+    private data class File(val timestamp: Long = 0, val servers: List<Entry> = emptyList())
+
+    /** Told when a catalogue was published (its `timestamp`, epoch seconds) each time one is read, to keep the date. */
+    @Volatile var published: (name: String, epochSeconds: Long) -> Unit = { _, _ -> }
 
     /** [name] is the gluetun file name, e.g. "protonvpn". [vpn] keeps "wireguard" or "openvpn" servers with an IPv4. */
-    fun fetch(name: String, vpn: String): List<Entry> = parse(Http.get(BASE + Http.enc(name) + ".json"), vpn)
+    fun fetch(name: String, vpn: String): List<Entry> =
+        file(Http.get(BASE + Http.enc(name) + ".json")).also { if (it.timestamp > 0) published(name, it.timestamp) }.servers.usable(vpn)
 
-    internal fun parse(body: String, vpn: String): List<Entry> =
-        Http.parsed("the server catalogue") { NordApi.json.decodeFromString(File.serializer(), body) }.servers
-            .filter { it.vpn == vpn && it.ipv4 != null && it.place.isNotEmpty() && (vpn != "wireguard" || !it.wgpubkey.isNullOrEmpty()) }
+    internal fun parse(body: String, vpn: String): List<Entry> = file(body).servers.usable(vpn)
+    internal fun timestamp(body: String) = file(body).timestamp
+
+    private fun file(body: String) = Http.parsed("the server catalogue") { NordApi.json.decodeFromString(File.serializer(), body) }
+    private fun List<Entry>.usable(vpn: String) = filter { it.vpn == vpn && it.ipv4 != null && it.place.isNotEmpty() && (vpn != "wireguard" || !it.wgpubkey.isNullOrEmpty()) }
 
     /** Countries with their cities; ids are stable indexes, City.key = city name. */
     fun countries(entries: List<Entry>): List<Country> = entries.groupBy { it.place }.entries.sortedBy { it.key }

@@ -62,7 +62,8 @@ object ExpressVpn : Provider {
     override fun servers(loc: Location, account: String, limit: Int): List<Server> =
         Catalog.pick(fetch(), loc).take(limit).map { server(it, it.ips.filter(::isIpv4).random()) }
 
-    private fun fetch() = Catalog.fetch("expressvpn", "openvpn").filter { it.udp }
+    override val listSource = "expressvpn"
+    private fun fetch() = Catalog.fetch(listSource, "openvpn").filter { it.udp }
 
     internal fun countries(entries: List<Catalog.Entry>): List<Country> = Catalog.countries(entries)
 

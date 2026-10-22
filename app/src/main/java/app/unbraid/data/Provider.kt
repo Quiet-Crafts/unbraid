@@ -106,6 +106,8 @@ interface Provider {
 
     /** Its own blocking switch ([PROTECT]), first on its page and per route in the picker. */
     val protection: Opt? get() = null
+    /** The gluetun catalogue that is its only server list, if any: its page and status show how old it is. */
+    val listSource: String? get() = null
     /** Without [protection]: what its page says about the provider's own blocking instead of a switch. */
     val blockingNote: String get() = "$APP can't turn it on or off. Use $APP's Protection filter instead"
     /** The other settings on this provider's page; may block on the network for values from its server list. */

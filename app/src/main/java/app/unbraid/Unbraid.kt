@@ -28,6 +28,7 @@ class Unbraid : Application() {
     override fun onCreate() {
         super.onCreate()
         store = Store(this)
+        app.unbraid.data.Catalog.published = store::catalogDate
         // A new process runs no engine yet (the VPN service lives in this one): what a crash or a reboot left goes now,
         // the domain table and the netmap cache older versions wrote.
         UnbraidVpn.forgetLookups(this)

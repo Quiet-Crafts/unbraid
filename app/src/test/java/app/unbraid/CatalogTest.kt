@@ -24,4 +24,10 @@ class CatalogTest {
             assertEquals("$p: $bad", emptyList<String>(), bad)
         }
     }
+
+    /** The catalogue's publication time is read with it; a catalogue without one says 0 (unknown). */
+    @Test fun publicationTime() {
+        assertEquals(1785990858L, Catalog.timestamp(javaClass.getResource("/catalog_protonvpn.json")!!.readText()))
+        assertEquals(0L, Catalog.timestamp("""{"servers":[]}"""))
+    }
 }

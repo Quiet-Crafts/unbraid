@@ -35,7 +35,8 @@ open class ProtonVpn(private val free: Boolean) : KeyProvider() {
 
     private val SECURE_CORE = Regex("^(CH|IS|SE)-[A-Z]{2}#")
 
-    override fun entries(a: Account) = filtered(Catalog.fetch("protonvpn", "wireguard"))
+    override val listSource = "protonvpn"
+    override fun entries(a: Account) = filtered(Catalog.fetch(listSource, "wireguard"))
 
     internal fun filtered(all: List<Catalog.Entry>) = all.filter { e ->
         val n = e.serverName.orEmpty()

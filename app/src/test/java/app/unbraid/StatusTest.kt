@@ -29,4 +29,10 @@ class StatusTest {
         assertEquals(Tone.Bad, providerStatus("Proton VPN Free", true, true, false, false, true, true, d).first)
         assertEquals(Tone.Good, providerStatus("Proton VPN Free", true, false, false, false, true, true, null).first)
     }
+
+    /** A provider's only server list published long ago warns, after a dropping route, with its date. */
+    @Test fun oldListWarns() {
+        assertEquals(Tone.Warn to "Its server list is from 6 Aug 2026 and may be out of date", providerStatus("Proton VPN Free", true, false, false, false, true, true, null, "6 Aug 2026"))
+        assertEquals("6 Aug 2026", app.unbraid.ui.publishedOn(1785990858))
+    }
 }
