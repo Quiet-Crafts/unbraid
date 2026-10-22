@@ -26,6 +26,9 @@ open class ProtonVpn(private val free: Boolean) : KeyProvider() {
     override val blockingNote = if (free) "None on the Free plan. Use $APP's Protection filter instead"
         else "NetShield is chosen when you make a config at Proton. Or use $APP's Protection filter instead"
 
+    /** Proton's plans: Free one connection at a time, Plus and Unlimited ten; a manual key counts per tunnel (tested live). */
+    override fun limit(account: String) = Limit("connection", perTunnel = true, if (free) 1 else 10)
+
     override val defaultAddress = listOf("10.2.0.2/32")
     override val defaultDns = listOf("10.2.0.1")
     override val defaultPort = 51820

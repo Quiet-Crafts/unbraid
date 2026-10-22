@@ -18,7 +18,7 @@ object Nord : Provider {
 
     override val protection = Opt(PROTECT, "Threat Protection Lite", "Ads and malicious domains")
     override val defaults = mapOf(PROTECT to "on")
-    override val connections = 10
+    override fun limit(account: String) = Limit("connection", perTunnel = true, 10)
     override fun blockingDns(opts: (String) -> String?) = app.unbraid.vpn.Compiler.NORD_TP
 
     override fun signIn(input: Map<String, String>): String {

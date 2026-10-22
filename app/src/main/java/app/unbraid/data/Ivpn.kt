@@ -116,9 +116,10 @@ object Ivpn : Provider {
         val now = runCatching { NordApi.json.decodeFromString(SessionReply.serializer(), postJsonRaw("$API/v4/session/status", buildJsonObject { put("session_token", a.sessionToken) }.toString()).second) }
             .getOrNull()?.takeIf { it.status == 200 }
         val name = now?.device ?: a.device
-        val limit = now?.service?.deviceLimit?.takeIf { it > 0 } ?: a.limit
-        return Device("$APP uses 1 of your ${if (limit > 0) "$limit " else ""}devices${if (name.isNotBlank()) ", named $name" else ""}. See them all in the IVPN client area.", CLIENT_AREA)
+        return Device("${if (name.isNotBlank()) "Named $name. " else ""}See all your devices in the IVPN client area", CLIENT_AREA)
     }
+    /** The plan's device limit as read at sign-in; unbraid always holds one session. */
+    override fun limit(account: String) = Limit("device", perTunnel = false, runCatching { account(account).limit }.getOrDefault(0).takeIf { it > 0 })
     /** A block list is saved as its two resolvers, "normal|hardcore", so a route needs no server list to use it. */
     override fun blockingDns(opts: (String) -> String?) =
         (opts(LIST) ?: OISD).split('|').getOrNull(if (opts(HARDCORE) == "on") 1 else 0)?.takeIf { app.unbraid.vpn.Compiler.ipv4(it)?.second == 32 && '/' !in it } ?: OISD.substringBefore('|')
@@ -177,7 +178,7 @@ object Ivpn : Provider {
             200 -> Unit
             401 -> throw AuthException("IVPN doesn't recognise that account ID")
             602 -> o.data?.deviceLimit?.takeIf { it > 0 }.let { n ->
-                throw AuthException("All ${n ?: "the"} devices on this IVPN account are in use. Log one out in the IVPN client area, then sign in again.", CLIENT_AREA)
+                throw AuthException(Limits.full(name, n, "device"), CLIENT_AREA)
             }
             702 -> throw AuthException("This IVPN account isn't active. Renew it first.")
             70001, 70002 -> {

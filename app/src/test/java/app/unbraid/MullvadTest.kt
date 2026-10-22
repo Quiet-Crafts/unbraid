@@ -134,7 +134,7 @@ class MullvadTest {
         for (r in listOf(400 to """{"code":"INVALID_ACCOUNT","error":"Bad account number"}""", 401 to "")) {
             try { Mullvad.token(r); fail() } catch (e: AuthException) { }
         }
-        try { Mullvad.device(400 to """{"code":"MAX_DEVICES_REACHED","error":"x"}""", "1", "p"); fail() } catch (e: AuthException) { assertTrue("5 devices" in e.message!!) }
+        try { Mullvad.device(400 to """{"code":"MAX_DEVICES_REACHED","error":"x"}""", "1", "p"); fail() } catch (e: AuthException) { assertTrue("All 5 Mullvad devices are in use" in e.message!!) }
         try { Mullvad.device(500 to "", "1", "p"); fail() } catch (e: IOException) { assertFalse(e is AuthException) }
     }
 

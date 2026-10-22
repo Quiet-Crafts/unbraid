@@ -331,7 +331,10 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     notice(ui, notice)
                     // Providers that count connections, not devices: each separate tunnel to one of its servers is one.
                     val tunnels = if (running) UnbraidVpn.tags.filterKeys { id -> UnbraidVpn.running?.route(id)?.let { !it.imported && it.loc.provider == pr.id } == true }.values.toSet().size else 0
-                    val counted = Item("This phone", "$APP is using $tunnels of your ${pr.connections} ${pr.name} connections. Your other devices aren't counted.", null, icon = Icons.info).takeIf { pr.connections > 0 }
+                    // The same line for every provider: its limit (the user's own first), and what unbraid uses of it.
+                    val lim = pr.limit(accounts.getValue(pr.id))
+                    val counted = Item(if (lim.unit == "device") "Devices" else "Connections", app.unbraid.data.Limits.line(pr.name, app.unbraid.data.Limits.effective(lim, setup.opt(pr.id, app.unbraid.data.LIMIT_OPT)), lim.unit, if (lim.perTunnel) tunnels else 1),
+                        { dialog = "limit:${pr.id}" }, icon = Icons.phone) { Chevron() }
                     group(null, listOfNotNull(Item("Account", "Signed in", null, icon = Icons.vpnKey), counted, device?.let { d ->
                         Item("This phone", d.line, d.url?.let { u -> { context.openUrl(u) } }, icon = Icons.info) { if (d.url != null) Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) }
                     }))
@@ -611,6 +614,15 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                                 GroupRow(i, o.choices.size, label, null, onClick = { shown?.let { ui.setOpt(it.id, o.key, value) }; dialog = null; Unit }, selected = v == value, trailing = { Radio(v == value) })
                             }
                         }
+                    }
+                }
+                d.startsWith("limit:") -> Providers.get(arg)?.takeIf { it.id in accounts }?.let { pr ->
+                    val lim = pr.limit(accounts.getValue(pr.id))
+                    var text by rememberSaveable(arg) { mutableStateOf(setup.opt(pr.id, app.unbraid.data.LIMIT_OPT).orEmpty()) }
+                    Prompt("Your plan's limit", "Save", { dialog = null; ui.setOpt(pr.id, app.unbraid.data.LIMIT_OPT, text) }, { dialog = null }) {
+                        Text("How many ${lim.unit}s your ${pr.name} plan allows at once. $APP warns before a change would go over it. " +
+                            (lim.value?.let { "Leave empty for ${pr.name}'s own figure, $it." } ?: "${pr.name} doesn't tell $APP, so leave empty if you don't know."), style = Type.sub)
+                        DialogField(text, { t -> text = t.filter(Char::isDigit).take(3) }, "${lim.unit.replaceFirstChar(Char::uppercase)}s", lim.value?.toString() ?: "e.g. 5")
                     }
                 }
                 d.startsWith("signout:") -> Prompt("Sign out of ${Providers.get(arg)?.name ?: arg}?", "Sign out", { dialog = null; ui.signOut(arg) }, { dialog = null }, danger = true) {

@@ -116,8 +116,8 @@ interface Provider {
     fun blockingDns(opts: (String) -> String?): String? = null
     /** This phone's device slot, if the provider reports one; may block on the network. */
     fun device(account: String): Device? = null
-    /** Simultaneous connections the account allows, counted per tunnel, when the provider limits those rather than devices (0 = neither). */
-    val connections: Int get() = 0
+    /** What the account may use at once ([Limits]); unknown unless the provider says or documents it. */
+    fun limit(account: String): Limit = Limit("connection", perTunnel = true)
     /** After a sign-in, how long the provider may take to accept the new key on every server (ms). */
     val keySetup: Long get() = 0
 }

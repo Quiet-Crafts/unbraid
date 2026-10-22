@@ -120,6 +120,8 @@ object Mullvad : Provider {
     override val protection = Opt(PROTECT, "DNS content blocking", "Ads, trackers and malware")
     override val defaults = mapOf(PROTECT to "off")
     override fun blockingDns(opts: (String) -> String?) = "100.64.0.7"
+    /** Five device slots per account; unbraid registers one. */
+    override fun limit(account: String) = Limit("device", perTunnel = false, 5)
     override val fields = listOf(Field("account", "Account number", hint = "16 digits"))
     override val help = "Your 16-digit account number: shown when you created the account, and at mullvad.net/account after logging in. Each account has 5 device slots; $APP uses one."
 
@@ -175,7 +177,7 @@ object Mullvad : Provider {
 
     internal fun device(reply: Pair<Int, String>, account: String, privateKey: String): String {
         val (code, body) = reply
-        if ("MAX_DEVICES_REACHED" in body) throw AuthException("This Mullvad account already has 5 devices. Remove one at mullvad.net/account/devices and sign in again.")
+        if ("MAX_DEVICES_REACHED" in body) throw AuthException(Limits.full(name, 5, "device"))
         if (code == 401 || code == 403) throw AuthException("Mullvad refused the device registration")
         if (code != 201) throw Http.Status(code, "Mullvad API $code")
         return blob(account, privateKey, Http.parsed("Mullvad") { NordApi.json.decodeFromString(DeviceReply.serializer(), body) })

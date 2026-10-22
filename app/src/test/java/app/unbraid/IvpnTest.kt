@@ -119,7 +119,7 @@ class IvpnTest {
         assertEquals("Brave Owl" to 5, Ivpn.account(named).let { it.device to it.limit })
         // A full account says how many devices and links to where they are listed.
         val full = try { Ivpn.session(400 to """{"status":602,"message":"You've reached the maximum number of connected devices","data":{"limit":5}}""", "a", "p"); null } catch (e: AuthException) { e }
-        assertEquals("All 5 devices on this IVPN account are in use. Log one out in the IVPN client area, then sign in again.", full!!.message)
+        assertEquals("All 5 IVPN devices are in use. Sign out another device, then try again.", full!!.message)
         assertTrue(full.url!!.startsWith("https://www.ivpn.net/"))
         for (body in listOf("""{"status":401,"message":"The provided Account ID is not valid"}""", """{"status":702,"message":"inactive"}""", """{"status":70001}""")) {
             try { Ivpn.session(400 to body, "a", "p"); fail() } catch (e: AuthException) { }
