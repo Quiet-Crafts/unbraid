@@ -22,10 +22,15 @@ abstract class KeyProvider : Provider {
         val publicKey: String? = null,
         /** Settings the provider wrote into a pasted .conf as comments ([configFacts]); null when only a key was pasted. */
         val facts: Map<String, String>? = null,
-        /** For a key the provider's API made: the API key, and the name and public key of the device it belongs to. */
+        /**
+         * For a key the provider's API made: the API key, and the name, public key and id of the device it belongs to;
+         * [ownDevice] when the app made that device itself, so signing out removes it.
+         */
         val apiKey: String? = null,
         val device: String? = null,
         val deviceKey: String? = null,
+        val deviceId: String? = null,
+        val ownDevice: Boolean = false,
     )
 
     /** Comment lines ("# NetShield = 0") a provider writes into its configs that say how the key was made, to show them. */

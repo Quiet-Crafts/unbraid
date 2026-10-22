@@ -114,12 +114,14 @@ interface Provider {
     val protection: Opt? get() = null
     /** How the account's key was made, as its config says (Proton's options), for its page; null = nothing to show, "" = not known. */
     fun facts(account: String): String? = null
-    /** Help about the provider's config files (expiry, say) and where to manage them, for its page. */
+    /** Help about what is managed in the provider's own account (config expiry, forwarded ports) and where, for its page. */
     val configHelp: Pair<String, String>? get() = null
     /** The gluetun catalogue that is its only server list, if any: its page and status show how old it is. */
     val listSource: String? get() = null
     /** Without [protection]: what its page says about the provider's own blocking instead of a switch. */
     val blockingNote: String get() = "$APP can't turn it on or off. Use $APP's Protection filter instead"
+    /** Where the provider's own blocking is set when $APP can't switch it: its row opens this page instead of the filter. */
+    val blockingUrl: String? get() = null
     /** The other settings on this provider's page; may block on the network for values from its server list. */
     fun options(account: String): List<Opt> = emptyList()
     /** Every [options] key's value until the user picks one. */
@@ -128,10 +130,21 @@ interface Provider {
     fun blockingDns(opts: (String) -> String?): String? = null
     /** This phone's device slot, if the provider reports one; may block on the network. */
     fun device(account: String): Device? = null
+    /** The account's plan as the provider reports it ([Plans.line]); null = not known. May block on the network. */
+    fun plan(account: String): String? = null
     /** What the account may use at once ([Limits]); unknown unless the provider says or documents it. */
     fun limit(account: String): Limit = Limit("connection", perTunnel = true)
     /** After a sign-in, how long the provider may take to accept the new key on every server (ms). */
     val keySetup: Long get() = 0
+}
+
+object Plans {
+    /** "Paid until 22 Nov 2026", "Ended on …" once past, or "No active plan" when [paidUntil] (epoch seconds) is null. */
+    fun line(paidUntil: Long?, now: Long = System.currentTimeMillis() / 1000): String {
+        if (paidUntil == null) return "No active plan"
+        val date = java.time.Instant.ofEpochSecond(paidUntil).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.MEDIUM))
+        return if (paidUntil < now) "Ended on $date" else "Paid until $date"
+    }
 }
 
 /** Providers that only offer downloadable configs: the user imports one file per location. */

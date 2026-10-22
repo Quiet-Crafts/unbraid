@@ -251,6 +251,9 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     val device by androidx.compose.runtime.produceState<app.unbraid.data.Device?>(null, shown, shownAcc) {
         value = shownAcc?.let { a -> withContext(Dispatchers.IO) { runCatching { shown.device(a) }.getOrNull() } }
     }
+    val plan by androidx.compose.runtime.produceState<String?>(null, shown, shownAcc) {
+        value = shownAcc?.let { a -> withContext(Dispatchers.IO) { runCatching { shown.plan(a) }.getOrNull() } }
+    }
     var statsSize by remember { mutableStateOf(Stats.size()) }
     // Deleting runs on the stats thread: read the size again once it has had time to finish.
     LaunchedEffect(prefs.stats, dialog, page) { statsSize = Stats.size(); delay(800); statsSize = Stats.size() }
@@ -342,7 +345,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         { dialog = "limit:${pr.id}" }, icon = Icons.phone) { Chevron() }
                     // A provider whose only server list is gluetun's public one: how old it is.
                     val list = pr.listSource?.let { c -> Item("Server list", "From gluetun's public list" + (app.unbraid.Unbraid.store.catalogDates.value[c]?.let { ", published ${publishedOn(it)}" } ?: ""), null, icon = Icons.dns) }
-                    group(null, listOfNotNull(Item("Account", "Signed in", null, icon = Icons.vpnKey), counted, list, device?.let { d ->
+                    group(null, listOfNotNull(Item("Account", listOfNotNull("Signed in", plan).joinToString(" · "), null, icon = Icons.vpnKey), counted, list, device?.let { d ->
                         Item("This phone", d.line, d.url?.let { u -> { context.openUrl(u) } }, icon = Icons.info) { if (d.url != null) Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) }
                     }))
                     val protect = pr.protection
@@ -357,7 +360,11 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     val blocking = when {
                         protect != null -> Item("${pr.name} blocking", if (customDns) "Off while $APP's filter is on for VPN routes" else "${protect.label}: ${protect.sub.replaceFirstChar(Char::lowercase)}",
                             { ui.setOpt(pr.id, app.unbraid.data.PROTECT, if (on) "off" else "on"); Unit }.takeUnless { customDns }, checked = on, icon = Icons.shield) { Toggle(on, enabled = !customDns) }
-                        else -> Item("${pr.name} blocking", if (customDns) "$APP's filter is on for VPN routes" else pr.blockingNote, { go("dns") }, icon = Icons.shield) { Chevron() }
+                        else -> pr.blockingUrl?.takeUnless { customDns }.let { u ->
+                            Item("${pr.name} blocking", if (customDns) "$APP's filter is on for VPN routes" else pr.blockingNote, { if (u != null) context.openUrl(u) else go("dns") }, icon = Icons.shield) {
+                                if (u != null) Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) else Chevron()
+                            }
+                        }
                     }
                     val shownOpts = opts.filter { it.key != app.unbraid.data.PROTECT }
                     group("${pr.name} settings", listOf(blocking) + shownOpts.filter { !it.advanced }.map(optItem))
@@ -374,7 +381,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         (adv.map { o -> setup.opt(pr.id, o.key).let { v -> "${o.label}: ${o.choices.firstOrNull { it.first == v }?.second ?: v}" } } + listOfNotNull(facts?.let { "Set in your config: ${it.ifEmpty { "not known" }}" })).joinToString(" · "),
                         adv.map(optItem) + listOfNotNull(
                             facts?.let { Item("Set in your config", it.ifEmpty { "Not known: sign in with the whole .conf to see them" }) },
-                            pr.configHelp?.let { (text, url) -> Item("Your config", text, { context.openUrl(url) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } },
+                            pr.configHelp?.let { (text, url) -> Item("In your ${pr.name} account", text, { context.openUrl(url) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } },
                         ))
                     group(null, listOf(Item("Sign out of ${pr.name}", when {
                         accounts.size == 1 && setup.servers.isEmpty() && setup.routes.none { it.imported } && !home.tailscale -> "It's your only connection: you'll be back at sign-in"
