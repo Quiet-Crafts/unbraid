@@ -307,7 +307,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         refreshed.let { app.unbraid.Unbraid.store.countriesFresh(pr.id) },
                         // Only the setup the engine runs counts: a route just moved to this provider isn't connected yet.
                         on && active.all { r -> r.id in vpn.servers && UnbraidVpn.running?.route(r.id)?.loc == r.loc },
-                        active.firstOrNull { it.id in vpn.dropping }?.takeIf { on }?.let { r -> app.unbraid.data.Limits.dropping(r.name, pr.name, pr.limit(accounts.getValue(pr.id)).unit) },
+                        active.firstOrNull { it.id in vpn.dropping }?.takeIf { on }?.let { r -> app.unbraid.data.Limits.dropping(r.name, pr.name, accounts[pr.id]?.let { a -> pr.limit(a).unit } ?: "connection") },
                         pr.listSource?.let { listDates[it] }?.takeIf { System.currentTimeMillis() - it * 1000 > OLD_LIST_MS }?.let(::publishedOn),
                     )
                     Item(pr.name, words + if (n > 0) " · used by $n ${if (n == 1) "route" else "routes"}" else "", { go("provider:${pr.id}") }) {
@@ -328,14 +328,16 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
 
             p.startsWith("provider:") -> {
                 val pr = Providers.get(p.removePrefix("provider:"))
-                if (pr == null || pr.id !in accounts) { LaunchedEffect(Unit) { back() }; return@AnimatedContent }
+                // Read once: after a sign-out the list still lays out this page's rows for a moment, with the account gone.
+                val acc = pr?.let { accounts[it.id] }
+                if (pr == null || acc == null) { LaunchedEffect(Unit) { back() }; return@AnimatedContent }
                 val routes = setup.routes.filter { !it.imported && it.loc.provider == pr.id }
                 Page(pr.name, back, over = "Providers & servers") {
                     notice(ui, notice)
                     // Providers that count connections, not devices: each separate tunnel to one of its servers is one.
                     val tunnels = if (running) UnbraidVpn.tags.filterKeys { id -> UnbraidVpn.running?.route(id)?.let { !it.imported && it.loc.provider == pr.id } == true }.values.toSet().size else 0
                     // The same line for every provider: its limit (the user's own first), and what unbraid uses of it.
-                    val lim = pr.limit(accounts.getValue(pr.id))
+                    val lim = pr.limit(acc)
                     val counted = Item(if (lim.unit == "device") "Devices" else "Connections", app.unbraid.data.Limits.line(pr.name, app.unbraid.data.Limits.effective(lim, setup.opt(pr.id, app.unbraid.data.LIMIT_OPT)), lim.unit, if (lim.perTunnel) tunnels else 1),
                         { dialog = "limit:${pr.id}" }, icon = Icons.phone) { Chevron() }
                     // A provider whose only server list is gluetun's public one: how old it is.
@@ -367,7 +369,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     })
                     val adv = shownOpts.filter { it.advanced }
                     // How the key was made, read from its config, and where configs are managed: shown, never changed here.
-                    val facts = pr.facts(accounts.getValue(pr.id))
+                    val facts = pr.facts(acc)
                     advanced(advOpen, { advOpen = !advOpen },
                         (adv.map { o -> setup.opt(pr.id, o.key).let { v -> "${o.label}: ${o.choices.firstOrNull { it.first == v }?.second ?: v}" } } + listOfNotNull(facts?.let { "Set in your config: ${it.ifEmpty { "not known" }}" })).joinToString(" · "),
                         adv.map(optItem) + listOfNotNull(
@@ -628,8 +630,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         }
                     }
                 }
-                d.startsWith("limit:") -> Providers.get(arg)?.takeIf { it.id in accounts }?.let { pr ->
-                    val lim = pr.limit(accounts.getValue(pr.id))
+                d.startsWith("limit:") -> Providers.get(arg)?.let { pr -> accounts[pr.id]?.let { pr to it } }?.let { (pr, acc) ->
+                    val lim = pr.limit(acc)
                     var text by rememberSaveable(arg) { mutableStateOf(setup.opt(pr.id, app.unbraid.data.LIMIT_OPT).orEmpty()) }
                     Prompt("Your plan's limit", "Save", { dialog = null; ui.setOpt(pr.id, app.unbraid.data.LIMIT_OPT, text) }, { dialog = null }, enabled = text.isEmpty() || (text.toIntOrNull() ?: 0) in 1..999) {
                         Text("How many ${lim.unit}s your ${pr.name} plan allows at once. $APP warns before a change would go over it. " +
