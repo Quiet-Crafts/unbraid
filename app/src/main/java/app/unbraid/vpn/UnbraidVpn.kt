@@ -538,9 +538,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val down = Health.blame(checked.filter { !Health.reachable(it) }.toSet(), checked) { Health.direct(network) }
             val move = lock.withLock {
                 // Stopped, reloaded or moved to another network meanwhile: start counting afresh.
-                if (state.value.phase != VpnState.Phase.On || links !== seen || net.network != network) { fails.clear(); history.clear(); failing = emptySet(); last = null; return@withLock null }
+                if (state.value.phase != VpnState.Phase.On || links !== seen || net.network != network) { fails.clear(); history.clear(); undrop(); failing = emptySet(); last = null; return@withLock null }
                 // Other tunnels or another network than the last round's: their streaks and blame don't carry over.
-                if (last != (seen to network)) { fails.clear(); history.clear(); failing = emptySet(); slow = 1; last = seen to network }
+                if (last != (seen to network)) { fails.clear(); history.clear(); undrop(); failing = emptySet(); slow = 1; last = seen to network }
                 if (down == null) { fails.clear(); failing = emptySet(); slow = minOf(slow * 2, 8); return@withLock null }
                 slow = 1
                 // The next connect, even a manual one, avoids them.
@@ -571,6 +571,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (move.anyMovable || dropped.isNotEmpty()) reload(move.keep, move.avoid, move.generation)
         }
     }
+
+    /** Health history starts again: no route is flagged as dropping until new checks say so. */
+    private fun undrop() { if (state.value.dropping.isNotEmpty()) state.update { it.copy(dropping = emptySet()) } }
 
     private class Move(val keep: Map<String, Link>, val avoid: Set<String>, val generation: Int, val providers: Set<String>, val anyMovable: Boolean)
 

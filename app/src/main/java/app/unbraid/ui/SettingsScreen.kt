@@ -295,7 +295,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             }
 
             p == "providers" -> Page("Providers & servers", back) {
-                val listDates = app.unbraid.Unbraid.store.catalogDates()
+                val listDates = app.unbraid.Unbraid.store.catalogDates.value
                 tick.let { }
                 notice(ui, notice)
                 group("VPN providers", signedIn.map { pr ->
@@ -339,7 +339,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     val counted = Item(if (lim.unit == "device") "Devices" else "Connections", app.unbraid.data.Limits.line(pr.name, app.unbraid.data.Limits.effective(lim, setup.opt(pr.id, app.unbraid.data.LIMIT_OPT)), lim.unit, if (lim.perTunnel) tunnels else 1),
                         { dialog = "limit:${pr.id}" }, icon = Icons.phone) { Chevron() }
                     // A provider whose only server list is gluetun's public one: how old it is.
-                    val list = pr.listSource?.let { c -> Item("Server list", "From gluetun's public list" + (app.unbraid.Unbraid.store.catalogDates()[c]?.let { ", published ${publishedOn(it)}" } ?: ""), null, icon = Icons.dns) }
+                    val list = pr.listSource?.let { c -> Item("Server list", "From gluetun's public list" + (app.unbraid.Unbraid.store.catalogDates.value[c]?.let { ", published ${publishedOn(it)}" } ?: ""), null, icon = Icons.dns) }
                     group(null, listOfNotNull(Item("Account", "Signed in", null, icon = Icons.vpnKey), counted, list, device?.let { d ->
                         Item("This phone", d.line, d.url?.let { u -> { context.openUrl(u) } }, icon = Icons.info) { if (d.url != null) Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) }
                     }))

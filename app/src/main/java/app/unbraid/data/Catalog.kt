@@ -43,7 +43,7 @@ object Catalog {
     fun fetch(name: String, vpn: String): List<Entry> =
         file(Http.get(BASE + Http.enc(name) + ".json")).also { f ->
             // Only a time that can be true is kept: after 2020, before tomorrow.
-            if (f.timestamp in 1_577_836_800..System.currentTimeMillis() / 1000 + 86_400) published(name, f.timestamp)
+            if (f.timestamp in 1_577_836_800..System.currentTimeMillis() / 1000 + 86_400) runCatching { published(name, f.timestamp) } // only a date: never fails a lookup
         }.servers.usable(vpn)
 
     internal fun parse(body: String, vpn: String): List<Entry> = file(body).servers.usable(vpn)
