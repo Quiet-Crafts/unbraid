@@ -5,11 +5,14 @@ import app.unbraid.APP
 import app.unbraid.stats.Stats
 import app.unbraid.support.Tips
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import app.unbraid.vpn.UnbraidVpn
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
@@ -101,6 +104,8 @@ private class Item(
     val selected: Boolean? = null,
     /** The tour stop this row is the anchor of. */
     val anchor: TourStop? = null,
+    /** Read out after the title, e.g. whether a collapsible group is open. */
+    val state: String? = null,
     val trailing: (@Composable () -> Unit)? = null,
 )
 
@@ -126,7 +131,7 @@ private fun LazyListScope.group(title: String?, items: List<Item>, rise: Pair<Bo
             GroupRow(
                 i, items.size, r.title, r.sub, if (r.danger) Ink.bad else if (r.cta) Ink.accent else Ink.text, r.onClick, checked = r.checked, selected = r.selected,
                 leading = r.icon?.let { ic -> { Box(Modifier.size(40.dp).clip(RoundedCornerShape(14.dp)).background(Ink.surfaceTop), Alignment.Center) { Icon(ic, null, Modifier.size(22.dp), tint = Ink.text) } } },
-                trailing = r.trailing, modifier = r.anchor?.let { tourAnchor(it) } ?: Modifier,
+                trailing = r.trailing, modifier = (r.anchor?.let { tourAnchor(it) } ?: Modifier).then(r.state?.let { st -> Modifier.semantics { stateDescription = st } } ?: Modifier),
             )
           }
         }
@@ -144,6 +149,18 @@ private fun LazyListScope.notice(ui: Ui, text: String?) = text?.let { n ->
 }
 
 private fun LazyListScope.caption(text: String) = item { Caption(text, modifier = Modifier.padding(top = 4.dp)) }
+
+/**
+ * The same collapsible "Advanced settings" group on every page that has settings most people never need, just above the
+ * page's sign-out: closed it sums up what's set ([summary]), open it lists [rows] under a warning.
+ */
+private fun LazyListScope.advanced(open: Boolean, toggle: () -> Unit, summary: String, rows: List<Item>) {
+    if (rows.isEmpty()) return
+    group(null, listOf(Item("Advanced settings", if (open) "For when something doesn't work. A wrong choice can stop connections" else summary, toggle, icon = Icons.sliders, state = if (open) "Expanded" else "Collapsed") {
+        val turn by androidx.compose.animation.core.animateFloatAsState(if (open) 180f else 0f, androidx.compose.material3.MaterialTheme.motionScheme.fastSpatialSpec(), label = "advanced")
+        Icon(Icons.expand, null, Modifier.size(24.dp).rotate(turn), tint = Ink.dim)
+    }) + if (open) rows else emptyList())
+}
 
 private val octet = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)"
 private val cidr = Regex("$octet(\\.$octet){3}/([12]?\\d|3[0-2])")
@@ -177,6 +194,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     val go = { p: String -> stack = stack + p; path = stack }
     val back = { stack = stack.dropLast(1); path = stack }
     var dialog by rememberSaveable { mutableStateOf<String?>(null) }
+    // Each page's Advanced settings start closed.
+    var advOpen by rememberSaveable(page) { mutableStateOf(false) }
     var wgError by remember { mutableStateOf<String?>(null) }
     BackHandler(page != null) { back() }
     // Own servers are added here and only picked in the location picker.
@@ -317,20 +336,29 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         Item("This phone", d.line, d.url?.let { u -> { context.openUrl(u) } }, icon = Icons.info) { if (d.url != null) Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) }
                     }))
                     val protect = pr.protection
-                    if (opts.isNotEmpty()) group("${pr.name} settings", opts.map { o ->
+                    val optItem = { o: app.unbraid.data.Opt ->
                         val v = setup.opt(pr.id, o.key)
-                        // unbraid's filter on VPN routes replaces the provider's blocking resolver: shown off, the choice kept.
-                        val off = customDns && o.key == app.unbraid.data.PROTECT
-                        if (o.choices.isEmpty()) Item(o.label, if (off) "Off while unbraid's filter is on for VPN routes" else o.sub, { ui.setOpt(pr.id, o.key, if (v == "on") "off" else "on"); Unit }.takeUnless { off },
-                            checked = v == "on" && !off, icon = Icons.shield.takeIf { o.key == app.unbraid.data.PROTECT }) { Toggle(v == "on" && !off, enabled = !off) }
+                        if (o.choices.isEmpty()) Item(o.label, o.sub, { ui.setOpt(pr.id, o.key, if (v == "on") "off" else "on"); Unit }, checked = v == "on") { Toggle(v == "on") }
                         else Item(o.label, o.choices.firstOrNull { it.first == v }?.second ?: o.sub, { dialog = "opt:${pr.id}:${o.key}" }) { Chevron() }
-                    })
+                    }
+                    // Every provider's own blocking under one name and in one place; unbraid's filter on VPN routes replaces it
+                    // (shown off, the choice kept). Without a switch the row leads to the filter.
+                    val on = protect != null && setup.opt(pr.id, app.unbraid.data.PROTECT) == "on" && !customDns
+                    val blocking = when {
+                        protect != null -> Item("${pr.name} blocking", if (customDns) "Off while $APP's filter is on for VPN routes" else "${protect.label}: ${protect.sub.replaceFirstChar(Char::lowercase)}",
+                            { ui.setOpt(pr.id, app.unbraid.data.PROTECT, if (on) "off" else "on"); Unit }.takeUnless { customDns }, checked = on, icon = Icons.shield) { Toggle(on, enabled = !customDns) }
+                        else -> Item("${pr.name} blocking", if (customDns) "$APP's filter is on for VPN routes" else pr.blockingNote, { go("dns") }, icon = Icons.shield) { Chevron() }
+                    }
+                    val shownOpts = opts.filter { it.key != app.unbraid.data.PROTECT }
+                    group("${pr.name} settings", listOf(blocking) + shownOpts.filter { !it.advanced }.map(optItem))
                     if (routes.isNotEmpty()) group("Used by", routes.map { r ->
                         val apps = setup.apps.count { it.value == r.id }
                         // A route that turned the provider's blocking on or off for itself says so.
                         val own = r.filter?.takeIf { protect != null }?.let { "${protect!!.label} ${if (it) "on" else "off"} here" }
                         Item(r.name, listOfNotNull(if (r.id == setup.defaultRoute) "Default route" else "$apps ${if (apps == 1) "app" else "apps"}", vpn.servers[r.id]?.name, own).joinToString(" · ")) { Code(r.code, Ink.route(r.hue)) }
                     })
+                    val adv = shownOpts.filter { it.advanced }
+                    advanced(advOpen, { advOpen = !advOpen }, adv.joinToString(" · ") { o -> setup.opt(pr.id, o.key).let { v -> "${o.label}: ${o.choices.firstOrNull { it.first == v }?.second ?: v}" } }, adv.map(optItem))
                     group(null, listOf(Item("Sign out of ${pr.name}", when {
                         accounts.size == 1 && setup.servers.isEmpty() && setup.routes.none { it.imported } && !home.tailscale -> "It's your only connection: you'll be back at sign-in"
                         routes.isEmpty() -> "No route uses it"
@@ -352,7 +380,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 if (setup.tailscale) caption("Pick an exit node for a route in Routes. Reaching your home network through Tailscale is under Local & home access.")
                 // A Headscale server can name any domain: its devices' names answer apps only once the user allows that suffix.
                 val sfx = vpn.tsSuffix?.takeIf { home.tailscale && !app.unbraid.vpn.Compiler.officialTs(home) }
-                if (setup.tailscale) group("Advanced", listOfNotNull(
+                if (setup.tailscale) advanced(advOpen, { advOpen = !advOpen }, "Control server: ${home.tsControlUrl ?: "Tailscale"}", listOfNotNull(
                     Item("Control server", home.tsControlUrl ?: "Tailscale (default)", { dialog = "tsserver" }, icon = Icons.dns) { Chevron() },
                     sfx?.let { d ->
                         val on = home.tsSuffixAllowed == d
@@ -383,10 +411,12 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     Item("Home WireGuard tunnel", home.wg?.let { "${it.name} · ${it.endpoint}" } ?: "Not set up · import your router's .conf", { pickConfig.launch(arrayOf("*/*")) }, icon = Icons.tunnel) {
                         if (home.wg != null) Secondary("Remove", { wgError = null; ui.setHome { it.copy(wg = null) } }, color = Ink.bad) else Chevron()
                     },
-                    Item("Home subnets through Tailscale", home.subnets.joinToString(", ").ifEmpty { "None" } + " · a WireGuard tunnel uses its own config's ranges", { dialog = "subnets" }, icon = Icons.router) { Chevron() },
                 ))
                 wgError?.let { e -> item { Text(e, style = Type.caption, color = Ink.bad, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 8.dp)) } }
                 caption("Reach home from anywhere through Tailscale, or a WireGuard tunnel to your router (e.g. a FRITZ!Box).")
+                advanced(advOpen, { advOpen = !advOpen }, "Home subnets through Tailscale: ${home.subnets.joinToString(", ").ifEmpty { "none" }}", listOf(
+                    Item("Home subnets through Tailscale", home.subnets.joinToString(", ").ifEmpty { "None" } + " · a WireGuard tunnel uses its own config's ranges", { dialog = "subnets" }, icon = Icons.router) { Chevron() },
+                ))
             }
 
             p == "behaviour" -> Page("VPN behaviour", back) {

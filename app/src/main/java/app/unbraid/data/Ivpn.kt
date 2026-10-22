@@ -101,7 +101,7 @@ object Ivpn : Provider {
     /** Every host in IVPN's list carries its load, and the app picks the lowest. */
     override val hasLoad = true
     override val name = "IVPN"
-    override val protection = Opt(PROTECT, "AntiTracker", "IVPN's ad and tracker blocking, on every IVPN route")
+    override val protection = Opt(PROTECT, "AntiTracker", "Ads and trackers")
     // AntiTracker's block list until one is picked: OISD Big, the one IVPN's plain AntiTracker uses.
     private const val OISD = "10.0.254.2|10.0.254.3"
     private const val LIST = "list"
@@ -130,9 +130,9 @@ object Ivpn : Provider {
     internal fun options(l: ServerList) = listOfNotNull(
         Opt(LIST, "Block list", "What AntiTracker blocks, from IVPN's own lists", l.config.antitracker.lists.map { "${it.normal}|${it.hardcore}" to it.name })
             .takeIf { it.choices.isNotEmpty() },
-        Opt(HARDCORE, "Hardcore mode", "Also blocks Google and Facebook, and sites that need them"),
+        Opt(HARDCORE, "Hardcore mode", "Also blocks Google and Facebook, and sites that need them", advanced = true),
         Opt(PORT_OPT, "Port", "Automatic tries 2049 first, then other ports when a network blocks it",
-            listOf(AUTO to "Automatic") + l.ports.sorted().map { "$it" to "UDP $it" }),
+            listOf(AUTO to "Automatic") + l.ports.sorted().map { "$it" to "UDP $it" }, advanced = true),
     )
     override val fields = listOf(Field("account", "Account ID", hint = "i-XXXX-XXXX-XXXX", qr = true))
     override val help = "Your account ID (i-XXXX-XXXX-XXXX, or ivpn plus 8 characters on older accounts): in the IVPN client area, or on any device already logged in. " +

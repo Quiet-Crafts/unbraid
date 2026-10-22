@@ -408,7 +408,8 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
                         val on = setup.protects(r)
                         item { SectionLabel("Protection") }
                         item {
-                            GroupRow(0, 1, o.label, if (custom) "Off while unbraid's filter is on for VPN routes" else if (r.filter == null) "As set for ${Providers.get(provider.orEmpty())?.name} in Settings" else "For this route only",
+                            val name = Providers.get(provider.orEmpty())?.name
+                            GroupRow(0, 1, "$name blocking", if (custom) "Off while unbraid's filter is on for VPN routes" else "${o.label} · " + if (r.filter == null) "as set for $name in Settings" else "for this route only",
                                 onClick = { ui.setFilter(r.id, !on); Unit }.takeUnless { custom }, checked = on && !custom, trailing = { Toggle(on && !custom, enabled = !custom) })
                         }
                         item { Gap(16.dp) }

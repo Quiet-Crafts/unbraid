@@ -1,5 +1,7 @@
 package app.unbraid.data
 
+import app.unbraid.APP
+
 /**
  * Proton VPN over WireGuard. Sign-in is local: the private key (or the whole .conf) of a config downloaded at
  * account.protonvpn.com → Downloads → WireGuard configuration. gluetun's wiki confirms that one key works on every server.
@@ -20,6 +22,9 @@ open class ProtonVpn(private val free: Boolean) : KeyProvider() {
     } else {
         "The same key works on every Proton server. A Free plan's key works only on Proton's free servers: choose Proton VPN Free for those."
     }
+
+    override val blockingNote = if (free) "None on the Free plan. Use $APP's Protection filter instead"
+        else "NetShield is chosen when you make a config at Proton. Or use $APP's Protection filter instead"
 
     override val defaultAddress = listOf("10.2.0.2/32")
     override val defaultDns = listOf("10.2.0.1")

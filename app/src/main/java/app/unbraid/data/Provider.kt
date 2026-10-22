@@ -1,5 +1,6 @@
 package app.unbraid.data
 
+import app.unbraid.APP
 import kotlinx.serialization.Serializable
 import java.io.IOException
 
@@ -29,8 +30,11 @@ const val PROTECT = "protect"
 const val PORT_OPT = "port"
 const val AUTO = "auto"
 
-/** A setting on a provider's page, saved in [Setup.opts]. No [choices] = an on/off switch ("on"/"off"). */
-data class Opt(val key: String, val label: String, val sub: String, val choices: List<Pair<String, String>> = emptyList())
+/**
+ * A setting on a provider's page, saved in [Setup.opts]. No [choices] = an on/off switch ("on"/"off"). [advanced]: one
+ * most people never need, which can stop routes connecting: listed under the page's Advanced settings.
+ */
+data class Opt(val key: String, val label: String, val sub: String, val choices: List<Pair<String, String>> = emptyList(), val advanced: Boolean = false)
 
 /** What a provider says about the device slot this phone holds: one line, and where the user sees all their devices. */
 data class Device(val line: String, val url: String? = null)
@@ -102,6 +106,8 @@ interface Provider {
 
     /** Its own blocking switch ([PROTECT]), first on its page and per route in the picker. */
     val protection: Opt? get() = null
+    /** Without [protection]: what its page says about the provider's own blocking instead of a switch. */
+    val blockingNote: String get() = "$APP can't turn it on or off. Use $APP's Protection filter instead"
     /** The other settings on this provider's page; may block on the network for values from its server list. */
     fun options(account: String): List<Opt> = emptyList()
     /** Every [options] key's value until the user picks one. */
