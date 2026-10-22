@@ -541,7 +541,11 @@ class Ui(app: Application) : AndroidViewModel(app) {
     }
 
     /** One setting on [provider]'s page. */
-    fun setOpt(provider: String, key: String, value: String) = store.update { s -> s.copy(opts = s.opts + (provider to (s.opts[provider].orEmpty() + (key to value)))) }
+    /** A page setting can change which servers a provider lists (Mullvad-owned only), so its countries are read again. */
+    fun setOpt(provider: String, key: String, value: String) {
+        store.update { s -> s.copy(opts = s.opts + (provider to (s.opts[provider].orEmpty() + (key to value)))) }
+        refreshCountries(provider)
+    }
 
     fun toggleFavorite(loc: Location) = store.update { s ->
         val l = loc.favKey()

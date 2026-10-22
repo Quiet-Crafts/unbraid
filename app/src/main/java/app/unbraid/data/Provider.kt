@@ -156,6 +156,9 @@ object Providers {
     /** Providers whose key is still being set up at [now]. */
     fun settingUp(now: Long = System.currentTimeMillis()) = signedInAt.filter { (id, t) -> now - t < (get(id)?.keySetup ?: 0) }.keys
 
+    /** A provider page setting's saved value, for choices made outside [Provider.connect]'s arguments; set by the app at start. */
+    @Volatile var opt: (provider: String, key: String) -> String? = { p, k -> get(p)?.defaults?.get(k) }
+
     val all: List<Provider> by lazy { listOf(Nord, Mullvad, Pia, Ivpn, Proton, ProtonFree, Surfshark, ExpressVpn, Windscribe, AirVpn) }
     fun get(id: String) = all.firstOrNull { it.id == id }
 

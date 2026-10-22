@@ -29,6 +29,7 @@ class Unbraid : Application() {
         super.onCreate()
         store = Store(this)
         app.unbraid.data.Catalog.published = store::catalogDate
+        app.unbraid.data.Providers.opt = { p, k -> store.setup.value.opt(p, k) }
         // A new process runs no engine yet (the VPN service lives in this one): what a crash or a reboot left goes now,
         // the domain table and the netmap cache older versions wrote.
         UnbraidVpn.forgetLookups(this)

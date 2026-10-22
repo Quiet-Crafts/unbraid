@@ -119,6 +119,24 @@ class MullvadTest {
         assertEquals("${sv.ip}:51820", l.peer.endpoint)
     }
 
+    @Test fun ownedOnlyLeavesOutRentedServers() {
+        val us = { owned: Boolean -> Mullvad.countries(list, owned).first { it.code == "US" }.cities.map { it.key } }
+        assertEquals(listOf("us-lax", "us-nyc"), us(false))
+        assertEquals(listOf("us-nyc"), us(true))
+        assertTrue((1..30).all { Mullvad.link(list, Location("mullvad", countryCode = "US"), acct, Random(it), ownedOnly = true).server.host.startsWith("us-nyc-") })
+        try { Mullvad.link(list, Location("mullvad", countryCode = "US", region = "us-lax"), acct, ownedOnly = true); fail() } catch (e: IOException) { assertTrue("Mullvad-owned" in e.message!!) }
+        val rented = Mullvad.link(list, Location("mullvad", countryCode = "US", region = "us-lax"), acct).server
+        assertEquals(rented, Mullvad.link(list, Location("mullvad", pinned = rented), acct, ownedOnly = true).server)
+    }
+
+    @Test fun automaticPortsAndBlockingCategories() {
+        assertEquals(listOf(51820, 53, 123, 4500), Mullvad.link(list, Location("mullvad", countryCode = "NL"), acct).ports)
+        assertEquals("100.64.0.7", Mullvad.blockingDns { null })
+        assertEquals("100.64.0.47", Mullvad.blockingDns { if (it == "adult" || it == "social") "on" else "off" })
+        assertEquals("100.64.0.63", Mullvad.blockingDns { "on" })
+        assertEquals(listOf("adult", "gambling", "social", "owned", "port"), Mullvad.options("").map { it.key })
+    }
+
     @Test fun unknownCountryFails() {
         try { Mullvad.link(list, Location("mullvad", countryCode = "ZZ"), acct); fail() } catch (e: IOException) { }
     }

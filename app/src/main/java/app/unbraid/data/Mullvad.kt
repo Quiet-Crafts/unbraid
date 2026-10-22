@@ -73,6 +73,8 @@ internal fun postJsonRaw(url: String, body: String, headers: Map<String, String>
  * `access_token`; `POST accounts/v1/devices {pubkey, hijack_dns}` with `Authorization: Bearer` returns 201 with the
  * device `id` and `ipv4_address`. One device (one of the account's 5) serves every relay.
  * Server list: `GET /public/relays/wireguard/v2`; port 51820 and DNS 10.64.0.1 as in Mullvad's own mullvad-wg.sh.
+ * Every relay takes WireGuard on any port in the list's `port_ranges`; [PORTS] are the ones Automatic tries.
+ * Blocking DNS is 100.64.0.N, N the sum of the categories (ads 1, trackers 2, malware 4, adult 8, gambling 16, social 32).
  * Sign-out frees the slot: `DELETE accounts/v1/devices/{id}` (204) with a fresh token. A device reply lost in transit
  * would orphan a slot, so a transport failure on the POST is reconciled by listing `GET accounts/v1/devices` and adopting
  * the entry with our public key.
@@ -104,6 +106,7 @@ object Mullvad : Provider {
         @SerialName("public_key") val publicKey: String,
         @SerialName("include_in_country") val inCountry: Boolean = true,
         val weight: Int = 0,
+        val owned: Boolean = false,
     )
 
     @Serializable
@@ -118,14 +121,23 @@ object Mullvad : Provider {
     private const val API = "https://api.mullvad.net"
     private const val DNS = "10.64.0.1"
     private const val PORT = 51820
+    /** Automatic's order: the standard port, then ones restrictive networks tend to leave open. All inside Mullvad's ranges. */
+    private val PORTS = listOf(PORT, 53, 123, 4500)
+    private const val OWNED = "owned"
+    /** Categories added to the base ads, trackers and malware (7), with their bit in the blocking address. */
+    private val EXTRA = listOf(Triple("adult", 8, "Adult content"), Triple("gambling", 16, "Gambling"), Triple("social", 32, "Social media"))
     private const val SLOTS = 5
     private const val DEVICES = "https://mullvad.net/account/devices"
 
     override val id = "mullvad"
     override val name = "Mullvad"
     override val protection = Opt(PROTECT, "DNS content blocking", "Ads, trackers and malware")
-    override val defaults = mapOf(PROTECT to "off")
-    override fun blockingDns(opts: (String) -> String?) = "100.64.0.7"
+    override val defaults = mapOf(PROTECT to "off", PORT_OPT to AUTO, OWNED to "off") + EXTRA.associate { it.first to "off" }
+    override fun blockingDns(opts: (String) -> String?) = "100.64.0.${7 + EXTRA.sumOf { (k, bit) -> if (opts(k) == "on") bit else 0 }}"
+    override fun options(account: String) = EXTRA.map { (k, _, label) -> Opt(k, label, "Also blocked while Mullvad blocking is on") } + listOf(
+        Opt(OWNED, "Mullvad-owned servers only", "Leaves out servers Mullvad rents. Servers you pinned stay"),
+        Opt(PORT_OPT, "Port", "Automatic tries 51820 first, then other ports when a network blocks it", listOf(AUTO to "Automatic") + PORTS.map { "$it" to "UDP $it" }, advanced = true),
+    )
     /** Five device slots per account; unbraid registers one. */
     override fun limit(account: String) = Limit("device", perTunnel = false, SLOTS)
     override val fields = listOf(Field("account", "Account number", hint = "16 digits"))
@@ -215,6 +227,8 @@ object Mullvad : Provider {
 
     override fun countries(account: String) = countries(fetch())
 
+    private fun ownedOnly() = Providers.opt(id, OWNED) == "on"
+
     /** A pinned server is looked up in the fresh list so a changed IP or key is picked up; if the list is unreachable the pinned values are used. */
     override fun connect(loc: Location, account: String): Link {
         val list = if (loc.pinned == null) fetch() else try { fetch() } catch (e: IOException) { null }
@@ -223,15 +237,15 @@ object Mullvad : Provider {
 
     override fun servers(loc: Location, account: String, limit: Int): List<Server> {
         val l = fetch()
-        return l.match(loc).sortedWith(compareByDescending<Relay> { it.weight }.thenBy { it.hostname }).take(limit).map { server(it, l) }
+        return l.match(loc, ownedOnly()).sortedWith(compareByDescending<Relay> { it.weight }.thenBy { it.hostname }).take(limit).map { server(it, l) }
     }
 
     private fun fetch() = parse(Http.get("$API/public/relays/wireguard/v2"))
 
     internal fun parse(body: String) = Http.parsed("Mullvad") { NordApi.json.decodeFromString(RelayList.serializer(), body) }
 
-    internal fun countries(l: RelayList): List<Country> {
-        val groups = l.usable.groupBy { it.location.substringBefore('-') }.toList().sortedBy { (_, rs) -> l.locations.getValue(rs.first().location).country }
+    internal fun countries(l: RelayList, ownedOnly: Boolean = ownedOnly()): List<Country> {
+        val groups = l.usable.filter { it.owned || !ownedOnly }.groupBy { it.location.substringBefore('-') }.toList().sortedBy { (_, rs) -> l.locations.getValue(rs.first().location).country }
         return groups.map { (cc, rs) ->
             val cities = rs.map { it.location }.distinct().map { it to l.locations.getValue(it).city }.sortedBy { it.second }
             Country(stableId(cc), l.locations.getValue(rs.first().location).country, cc.uppercase(), rs.size, cities.map { (code, city) -> City(stableId(code), city, code) })
@@ -239,8 +253,8 @@ object Mullvad : Provider {
     }
 
     /** Relays for [loc]: a city if [Location.region] is set, else its country; `include_in_country = false` relays only by city. */
-    internal fun RelayList.match(loc: Location) = usable.filter { r ->
-        when {
+    internal fun RelayList.match(loc: Location, ownedOnly: Boolean = false) = usable.filter { r ->
+        (r.owned || !ownedOnly) && when {
             loc.region != null -> r.location == loc.region
             loc.countryCode != null -> r.inCountry && r.location.substringBefore('-').equals(loc.countryCode, true)
             loc.country != null -> r.inCountry && locations[r.location]?.country == loc.country
@@ -248,10 +262,10 @@ object Mullvad : Provider {
         }
     }
 
-    internal fun link(l: RelayList?, loc: Location, a: Account, rnd: Random = Random): WgLink {
+    internal fun link(l: RelayList?, loc: Location, a: Account, rnd: Random = Random, ownedOnly: Boolean = ownedOnly()): WgLink {
         val sv = loc.pinned?.let { p -> if (l == null) p else current(l, p) } ?: run {
-            val rs = l!!.match(loc)
-            if (rs.isEmpty()) throw IOException("No active Mullvad server for ${loc.label}")
+            val rs = l!!.match(loc, ownedOnly)
+            if (rs.isEmpty()) throw IOException("No active ${if (ownedOnly) "Mullvad-owned" else "Mullvad"} server for ${loc.label}")
             server(pick(rs, rnd), l)
         }
         return WgLink(
@@ -260,6 +274,7 @@ object Mullvad : Provider {
                 name = sv.name, privateKey = a.privateKey, address = listOf(a.ipv4Address.substringBefore('/') + "/32"),
                 publicKey = sv.publicKey, endpoint = "${sv.ip}:$PORT", allowedIps = listOf("0.0.0.0/0"), dns = listOf(DNS),
             ),
+            PORTS,
         )
     }
 
