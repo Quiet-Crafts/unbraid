@@ -619,7 +619,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 d.startsWith("limit:") -> Providers.get(arg)?.takeIf { it.id in accounts }?.let { pr ->
                     val lim = pr.limit(accounts.getValue(pr.id))
                     var text by rememberSaveable(arg) { mutableStateOf(setup.opt(pr.id, app.unbraid.data.LIMIT_OPT).orEmpty()) }
-                    Prompt("Your plan's limit", "Save", { dialog = null; ui.setOpt(pr.id, app.unbraid.data.LIMIT_OPT, text) }, { dialog = null }) {
+                    Prompt("Your plan's limit", "Save", { dialog = null; ui.setOpt(pr.id, app.unbraid.data.LIMIT_OPT, text) }, { dialog = null }, enabled = text.isEmpty() || (text.toIntOrNull() ?: 0) in 1..999) {
                         Text("How many ${lim.unit}s your ${pr.name} plan allows at once. $APP warns before a change would go over it. " +
                             (lim.value?.let { "Leave empty for ${pr.name}'s own figure, $it." } ?: "${pr.name} doesn't tell $APP, so leave empty if you don't know."), style = Type.sub)
                         DialogField(text, { t -> text = t.filter(Char::isDigit).take(3) }, "${lim.unit.replaceFirstChar(Char::uppercase)}s", lim.value?.toString() ?: "e.g. 5")

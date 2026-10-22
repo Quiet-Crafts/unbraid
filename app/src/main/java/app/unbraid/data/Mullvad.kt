@@ -177,7 +177,7 @@ object Mullvad : Provider {
 
     internal fun device(reply: Pair<Int, String>, account: String, privateKey: String): String {
         val (code, body) = reply
-        if ("MAX_DEVICES_REACHED" in body) throw AuthException(Limits.full(name, 5, "device"))
+        if ("MAX_DEVICES_REACHED" in body) throw AuthException(Limits.full(name, 5, "device"), "https://mullvad.net/account/devices")
         if (code == 401 || code == 403) throw AuthException("Mullvad refused the device registration")
         if (code != 201) throw Http.Status(code, "Mullvad API $code")
         return blob(account, privateKey, Http.parsed("Mullvad") { NordApi.json.decodeFromString(DeviceReply.serializer(), body) })

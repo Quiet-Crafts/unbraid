@@ -33,4 +33,21 @@ object Limits {
 
     /** The limit that applies: the user's own ([LIMIT_OPT]) before the provider's. */
     fun effective(p: Limit, own: String?) = own?.toIntOrNull()?.takeIf { it in 1..999 } ?: p.value
+
+    /** A change that would give [provider] [n] separate tunnels, over its [limit]. */
+    data class Over(val provider: String, val limit: Int, val n: Int, val unit: String)
+
+    /**
+     * Separate tunnels [s] opens to [provider]: one per active route, since unpinned routes are spread over different
+     * servers ([app.unbraid.vpn.LinkPicker.pick]); routes pinned to one server share its tunnel.
+     */
+    fun tunnels(s: Setup, provider: String) = s.activeRoutes.filter { !it.imported && it.loc.provider == provider }.map { r -> r.loc.pinned?.host ?: r.id }.distinct().size
+
+    /** The first provider counted per tunnel that [new] takes over its known limit with more tunnels than [old] had. */
+    fun over(old: Setup, new: Setup, limit: (String) -> Limit?): Over? = new.activeRoutes.filter { !it.imported }.map { it.loc.provider }.distinct().firstNotNullOfOrNull { p ->
+        val l = limit(p)?.takeIf { it.perTunnel } ?: return@firstNotNullOfOrNull null
+        val max = effective(l, new.opt(p, LIMIT_OPT)) ?: return@firstNotNullOfOrNull null
+        val n = tunnels(new, p)
+        Over(p, max, n, l.unit).takeIf { n > max && n > tunnels(old, p) }
+    }
 }

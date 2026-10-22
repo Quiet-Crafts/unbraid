@@ -27,6 +27,7 @@ import app.unbraid.data.Providers
 import app.unbraid.data.Prefs
 import app.unbraid.data.Route
 import app.unbraid.data.Server
+import app.unbraid.data.Limits
 import app.unbraid.data.Setup
 import app.unbraid.data.WgConf
 import app.unbraid.vpn.UnbraidVpn
@@ -357,9 +358,35 @@ class Ui(app: Application) : AndroidViewModel(app) {
     private fun nextHue(s: Setup) = (0..6).firstOrNull { h -> s.routes.none { it.hue == h } } ?: s.routes.size
 
     /** Points route [id] at a provider location, dropping any imported source it had. */
-    fun setLocation(id: String, loc: Location) = store.update { s ->
+    fun setLocation(id: String, loc: Location) = guarded { s ->
         // A route's blocking choice belongs to its provider: another provider starts from its own page.
         s.copy(routes = s.routes.map { if (it.id == id) it.copy(loc = loc, wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null, filter = it.filter.takeIf { _ -> it.loc.provider == loc.provider && !it.imported }) else it })
+    }
+
+    /** A new route for [loc] (or the one already exiting there) for app [pkg], as one change. */
+    fun addRouteFor(pkg: String, loc: Location) = guarded { s ->
+        val r = s.routes.firstOrNull { !it.imported && it.loc.ident() == loc.ident() } ?: Route(newId(), loc, hue = nextHue(s))
+        s.copy(routes = if (r in s.routes) s.routes else s.routes + r, apps = s.apps + (pkg to r.id))
+    }
+
+    /** A route change that would take a provider over its connection limit, waiting for the user's answer. */
+    class LimitAsk(val text: String, val apply: () -> Unit, val share: Pair<String, () -> Unit>?)
+    val limitAsk = MutableStateFlow<LimitAsk?>(null)
+
+    /**
+     * Saves [f], unless it takes a provider over its limit ([Limits.over]): then nothing changes until the user answers
+     * [limitAsk]. With one route of that provider already on a server, it offers to put both routes on that server.
+     */
+    private fun guarded(f: (Setup) -> Setup) {
+        val old = setup.value
+        val acc = accounts.value
+        val o = Limits.over(old, f(old)) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } ?: run { store.update(f); return }
+        val name = Providers.get(o.provider)?.name ?: o.provider
+        val anchor = old.activeRoutes.singleOrNull { !it.imported && it.loc.provider == o.provider }
+        val server = anchor?.let { vpn.value.servers[it.id] }
+        limitAsk.value = LimitAsk(Limits.warning(name, o.limit, o.unit, o.n), { store.update(f) }, server?.let { sv ->
+            sv.name to { store.update { s -> f(s).let { n -> n.copy(routes = n.routes.map { r -> if (!r.imported && r.loc.provider == o.provider && n.activeRoutes.any { it.id == r.id }) r.copy(loc = anchor.loc.copy(pinned = sv)) else r }) } } }
+        })
     }
 
     // ---- own servers ----
@@ -495,10 +522,10 @@ class Ui(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    fun setDefault(id: String) = store.update { s -> s.copy(defaultRoute = id, apps = s.apps.filterValues { it != id }) }
+    fun setDefault(id: String) = guarded { s -> s.copy(defaultRoute = id, apps = s.apps.filterValues { it != id }) }
 
     /** [routeId] null or equal to the default → app follows the default. */
-    fun assign(pkg: String, routeId: String?) = store.update { s ->
+    fun assign(pkg: String, routeId: String?) = guarded { s ->
         s.copy(apps = if (routeId == null || routeId == s.defaultRoute) s.apps - pkg else s.apps + (pkg to routeId))
     }
 

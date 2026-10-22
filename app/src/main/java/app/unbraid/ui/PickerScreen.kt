@@ -163,7 +163,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         val loc = picked.copy(pinned = picked.pinned?.takeIf { picked.provider != "nord" || picked.protocol != null || it.publicKey.isNotEmpty() })
         when {
             target.isEmpty() -> ui.addRoute(loc)
-            target.startsWith("app:") -> ui.assign(target.removePrefix("app:"), ui.addRoute(loc))
+            target.startsWith("app:") -> ui.addRouteFor(target.removePrefix("app:"), loc)
             else -> ui.setLocation(target, loc)
         }
         close()

@@ -64,6 +64,7 @@ import android.provider.Settings
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import app.unbraid.ui.AppsDisclosure
 import app.unbraid.ui.LeakSheet
+import app.unbraid.ui.LimitSheet
 import app.unbraid.ui.Onboarding
 import app.unbraid.ui.TourStop
 import app.unbraid.ui.TourOverlay
@@ -221,6 +222,8 @@ class MainActivity : ComponentActivity() {
                     next = { if (tour == TourStop.entries.lastIndex) endTour() else tour++ },
                 )
                 }
+                // Asked before a route change goes over a provider's connection limit, wherever it was made.
+                LimitSheet(ui)
                 when (sheet) {
                     "vpn" -> VpnDisclosure(
                         agree = { Onboarding.acceptVpn(); sheet = null; if (connectAfter) { connectAfter = false; proceed() } },
