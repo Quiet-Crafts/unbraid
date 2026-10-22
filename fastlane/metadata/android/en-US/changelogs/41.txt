@@ -1,0 +1,4 @@
+• AirVPN: sign in with an API key. unbraid adds its own device and shows your plan's end date, with port and entry address choices.
+• Mullvad: block adult content, gambling and social media, use only Mullvad-owned servers, pick a port, and see your paid-until date and devices in use.
+• Limits: each provider page shows its connection or device limit, and unbraid asks before a change goes over it.
+• Settings: one layout for every provider page, with Advanced settings and an MTU choice.
