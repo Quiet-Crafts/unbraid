@@ -77,16 +77,20 @@ internal fun postJsonRaw(url: String, body: String, headers: Map<String, String>
  * would orphan a slot, so a transport failure on the POST is reconciled by listing `GET accounts/v1/devices` and adopting
  * the entry with our public key.
  * INVALID_ACCOUNT / MAX_DEVICES_REACHED are matched on the response body, not the HTTP status.
+ * Its page reads the paid-until date from `GET accounts/v1/accounts/me` and the device count from the device list.
  */
 object Mullvad : Provider {
     @Serializable
-    data class Account(val account: String, val privateKey: String, val ipv4Address: String, val deviceId: String)
+    data class Account(val account: String, val privateKey: String, val ipv4Address: String, val deviceId: String, val device: String = "")
 
     @Serializable
     private class TokenReply(@SerialName("access_token") val accessToken: String)
 
     @Serializable
-    internal class DeviceReply(val id: String, val pubkey: String = "", @SerialName("ipv4_address") val ipv4Address: String)
+    internal class DeviceReply(val id: String, val pubkey: String = "", @SerialName("ipv4_address") val ipv4Address: String, val name: String = "")
+
+    @Serializable
+    private class AccountReply(val expiry: String? = null)
 
     @Serializable
     internal data class Loc(val country: String, val city: String)
@@ -114,6 +118,8 @@ object Mullvad : Provider {
     private const val API = "https://api.mullvad.net"
     private const val DNS = "10.64.0.1"
     private const val PORT = 51820
+    private const val SLOTS = 5
+    private const val DEVICES = "https://mullvad.net/account/devices"
 
     override val id = "mullvad"
     override val name = "Mullvad"
@@ -121,7 +127,7 @@ object Mullvad : Provider {
     override val defaults = mapOf(PROTECT to "off")
     override fun blockingDns(opts: (String) -> String?) = "100.64.0.7"
     /** Five device slots per account; unbraid registers one. */
-    override fun limit(account: String) = Limit("device", perTunnel = false, 5)
+    override fun limit(account: String) = Limit("device", perTunnel = false, SLOTS)
     override val fields = listOf(Field("account", "Account number", hint = "16 digits"))
     override val help = "Your 16-digit account number: shown when you created the account, and at mullvad.net/account after logging in. Each account has 5 device slots; $APP uses one."
 
@@ -153,6 +159,27 @@ object Mullvad : Provider {
         false
     } catch (e: Http.Status) { e.code == 404 } catch (e: AuthException) { true } catch (e: IOException) { false }
 
+    /** This phone's device and how many of the slots are taken; offline, the name saved at sign-in. */
+    override fun device(account: String): Device {
+        val a = account(account)
+        val list = try { devices(Http.get("$API/accounts/v1/devices", bearer(accessToken(a.account)))) } catch (e: IOException) { null }
+        return deviceLine(a, list)
+    }
+
+    internal fun devices(body: String) = Http.parsed("Mullvad") { NordApi.json.decodeFromString(ListSerializer(DeviceReply.serializer()), body) }
+
+    internal fun deviceLine(a: Account, list: List<DeviceReply>?): Device {
+        val name = (list?.firstOrNull { it.id == a.deviceId }?.name ?: a.device).split(' ').joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
+        val used = list?.let { " ${it.size} of $SLOTS devices in use." }.orEmpty()
+        return Device("Its own device${if (name.isNotBlank()) ", $name" else ""}, removed when you sign out.$used See all your devices on mullvad.net", DEVICES)
+    }
+
+    override fun plan(account: String): String? = expiry(Http.get("$API/accounts/v1/accounts/me", bearer(accessToken(account(account).account))))?.let(Plans::line)
+
+    /** The paid-until time (epoch seconds) from an `accounts/me` reply, e.g. "2026-11-22T12:00:00+00:00". */
+    internal fun expiry(body: String) = Http.parsed("Mullvad") { NordApi.json.decodeFromString(AccountReply.serializer(), body) }
+        .expiry?.let { runCatching { java.time.OffsetDateTime.parse(it).toEpochSecond() }.getOrNull() }
+
     private fun bearer(token: String) = mapOf("Authorization" to "Bearer $token")
 
     private fun accessToken(account: String) = token(postJsonRaw("$API/auth/v1/token", """{"account_number":"$account"}"""))
@@ -165,8 +192,7 @@ object Mullvad : Provider {
     }
 
     internal fun adopt(list: String, account: String, keys: WgKeys.Keys): String? =
-        Http.parsed("Mullvad") { NordApi.json.decodeFromString(ListSerializer(DeviceReply.serializer()), list) }
-            .firstOrNull { it.pubkey == keys.public }?.let { blob(account, keys.private, it) }
+        devices(list).firstOrNull { it.pubkey == keys.public }?.let { blob(account, keys.private, it) }
 
     internal fun token(reply: Pair<Int, String>): String {
         val (code, body) = reply
@@ -177,14 +203,14 @@ object Mullvad : Provider {
 
     internal fun device(reply: Pair<Int, String>, account: String, privateKey: String): String {
         val (code, body) = reply
-        if ("MAX_DEVICES_REACHED" in body) throw AuthException(Limits.full(name, 5, "device"), "https://mullvad.net/account/devices")
+        if ("MAX_DEVICES_REACHED" in body) throw AuthException(Limits.full(name, SLOTS, "device"), DEVICES)
         if (code == 401 || code == 403) throw AuthException("Mullvad refused the device registration")
         if (code != 201) throw Http.Status(code, "Mullvad API $code")
         return blob(account, privateKey, Http.parsed("Mullvad") { NordApi.json.decodeFromString(DeviceReply.serializer(), body) })
     }
 
     private fun blob(account: String, privateKey: String, d: DeviceReply) =
-        NordApi.json.encodeToString(Account.serializer(), Account(account, privateKey, d.ipv4Address, d.id))
+        NordApi.json.encodeToString(Account.serializer(), Account(account, privateKey, d.ipv4Address, d.id, d.name))
 
     fun account(blob: String) = Http.parsed("Mullvad") { NordApi.json.decodeFromString(Account.serializer(), blob) }
 

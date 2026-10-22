@@ -126,7 +126,7 @@ class MullvadTest {
     @Test fun accountBlobRoundTrips() {
         val blob = Mullvad.device(201 to """{"id":"7e0cb5c6-0a0f-4f4a-9a61-0d2f0f0c0b8e","name":"x","pubkey":"k","ipv4_address":"10.68.1.2/32","ipv6_address":"fc00::2/128","hijack_dns":false,"created":"2026-10-18T00:00:00Z"}""", "1234567890123456", "priv")
         val a = Mullvad.account(blob)
-        assertEquals(Mullvad.Account("1234567890123456", "priv", "10.68.1.2/32", "7e0cb5c6-0a0f-4f4a-9a61-0d2f0f0c0b8e"), a)
+        assertEquals(Mullvad.Account("1234567890123456", "priv", "10.68.1.2/32", "7e0cb5c6-0a0f-4f4a-9a61-0d2f0f0c0b8e", "x"), a)
     }
 
     @Test fun tokenAndDeviceErrors() {
@@ -141,9 +141,27 @@ class MullvadTest {
     @Test fun lostRegistrationReplyIsReconciledByPublicKey() {
         val keys = WgKeys.Keys("priv", "ourpub")
         val devices = """[{"id":"d-1","name":"a","pubkey":"other","ipv4_address":"10.68.0.1/32"},{"id":"d-2","name":"b","pubkey":"ourpub","ipv4_address":"10.68.0.2/32","hijack_dns":false}]"""
-        assertEquals(Mullvad.Account("1234567890123456", "priv", "10.68.0.2/32", "d-2"), Mullvad.account(Mullvad.adopt(devices, "1234567890123456", keys)!!))
+        assertEquals(Mullvad.Account("1234567890123456", "priv", "10.68.0.2/32", "d-2", "b"), Mullvad.account(Mullvad.adopt(devices, "1234567890123456", keys)!!))
         assertNull(Mullvad.adopt("[]", "1234567890123456", keys))
         assertNull(Mullvad.adopt(devices, "1234567890123456", WgKeys.Keys("p", "unknown")))
+    }
+
+    @Test fun oldBlobWithoutDeviceNameStillLoads() {
+        assertEquals("", Mullvad.account("""{"account":"1","privateKey":"p","ipv4Address":"10.0.0.1/32","deviceId":"d"}""").device)
+    }
+
+    @Test fun deviceLineCountsSlotsAndNamesOurs() {
+        val list = Mullvad.devices("""[{"id":"d-1","name":"tidy cat","pubkey":"a","ipv4_address":"10.68.0.1/32"},{"id":"dev-1","name":"rapid otter","pubkey":"b","ipv4_address":"10.68.0.2/32"}]""")
+        assertEquals("Its own device, Rapid Otter, removed when you sign out. 2 of 5 devices in use. See all your devices on mullvad.net", Mullvad.deviceLine(acct, list).line)
+        assertEquals("Its own device, Old Name, removed when you sign out. See all your devices on mullvad.net", Mullvad.deviceLine(acct.copy(device = "old name"), null).line)
+        assertEquals("Its own device, removed when you sign out. See all your devices on mullvad.net", Mullvad.deviceLine(acct, null).line)
+    }
+
+    @Test fun expiryIsReadFromAccountReply() {
+        assertEquals(1795334400L, Mullvad.expiry("""{"id":"x","expiry":"2026-11-22T08:00:00+00:00","max_devices":5}"""))
+        assertEquals(1795334400L, Mullvad.expiry("""{"expiry":"2026-11-22T08:00:00Z"}"""))
+        assertNull(Mullvad.expiry("""{"id":"x"}"""))
+        assertNull(Mullvad.expiry("""{"expiry":"soon"}"""))
     }
 
     @Test fun parseFailuresDoNotQuoteTheReply() {
