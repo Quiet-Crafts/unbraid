@@ -145,7 +145,7 @@ data class Setup(
     val directOnly get() = defaultRoute == DIRECT && apps.values.all { it == DIRECT } && home.wg == null && !home.tailscale
 
     /** [provider]'s page setting [key], or its default. */
-    fun opt(provider: String, key: String) = opts[provider]?.get(key) ?: Providers.get(provider)?.defaults?.get(key)
+    fun opt(provider: String, key: String) = opts[provider]?.get(key) ?: Providers.get(provider)?.defaults?.get(key) ?: app.unbraid.data.COMMON_DEFAULTS[key]
 
     /** Whether route [r] uses its provider's own blocking: its own choice, else the provider page's. */
     fun protects(r: Route) = !r.imported && (r.filter ?: (opt(r.loc.provider, PROTECT) == "on"))

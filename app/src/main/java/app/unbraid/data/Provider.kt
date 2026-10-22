@@ -29,6 +29,17 @@ const val PROTECT = "protect"
 /** Key of a WireGuard provider's port setting: [AUTO] or a port number. */
 const val PORT_OPT = "port"
 const val AUTO = "auto"
+/** Key of every WireGuard provider's MTU setting: [AUTO] is 1280, as in Mullvad's Android app; else up to 1420. */
+const val MTU_OPT = "mtu"
+const val MTU_MIN = 1280
+const val MTU_MAX = 1420
+/** Settings every provider page has, with their defaults. */
+val COMMON_DEFAULTS = mapOf(MTU_OPT to AUTO)
+val MTU = Opt(MTU_OPT, "MTU", "Default works on every network. Larger can be faster on Wi-Fi but can stall uploads on mobile data",
+    listOf(AUTO to "Default ($MTU_MIN)") + listOf(1320, 1360, 1380, 1400, MTU_MAX).map { "$it" to "$it" }, advanced = true)
+
+/** The MTU a provider's tunnels use, from its page's [MTU_OPT]. */
+fun mtu(value: String?) = value?.toIntOrNull()?.takeIf { it in MTU_MIN..MTU_MAX } ?: MTU_MIN
 
 /** Key of a provider's entry address setting: the number of one of a server's [WgLink.entries], from 1. */
 const val ENTRY_OPT = "entry"

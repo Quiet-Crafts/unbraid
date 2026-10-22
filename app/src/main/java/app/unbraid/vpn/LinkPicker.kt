@@ -81,8 +81,9 @@ object LinkPicker {
     }
 
     /**
-     * [links] with each provider WireGuard tunnel on the entry address and port its provider page asks for: a fixed port,
+     * [links] with each provider WireGuard tunnel on the entry address, port and MTU its provider page asks for: a fixed port,
      * or with Automatic the [step]-th of the server's ports (a step per provider moves on when its tunnels stop answering).
+     * Imported configs keep their own MTU, at most [app.unbraid.data.MTU_MIN].
      */
     fun ported(setup: Setup, links: Map<String, Link>, step: Map<String, Int>): Map<String, Link> {
         val provider = { id: String -> setup.route(id)?.takeIf { !it.imported }?.loc?.provider }
@@ -92,11 +93,12 @@ object LinkPicker {
     }
 
     private fun portedOne(setup: Setup, p: String?, l: Link, lists: Map<String?, List<Int>>, step: Map<String, Int>): Link {
-        if (l !is WgLink || p == null) return l
+        if (l !is WgLink) return l
+        if (p == null) return l.copy(peer = l.peer.copy(mtu = minOf(l.peer.mtu, app.unbraid.data.MTU_MIN)))
         val host = setup.opt(p, app.unbraid.data.ENTRY_OPT)?.toIntOrNull()?.let { l.entries.getOrNull(it - 1) } ?: l.peer.endpoint.substringBeforeLast(':')
         val port = setup.opt(p, app.unbraid.data.PORT_OPT)?.toIntOrNull()?.takeIf { it in 1..65535 }
             ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[(step[p] ?: 0) % it.size] } ?: l.peer.endpoint.substringAfterLast(':')
-        return l.copy(peer = l.peer.copy(endpoint = "$host:$port"))
+        return l.copy(peer = l.peer.copy(endpoint = "$host:$port", mtu = app.unbraid.data.mtu(setup.opt(p, app.unbraid.data.MTU_OPT))))
     }
 
     /** True if an app that went Direct under [old] goes to one of [routes] under [new] (explicitly or by default). */

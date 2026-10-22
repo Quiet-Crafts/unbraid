@@ -246,7 +246,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     val shown = page?.removePrefix("provider:")?.takeIf { page.startsWith("provider:") }?.let(Providers::get)
     val shownAcc = shown?.let { accounts[it.id] }
     val opts by androidx.compose.runtime.produceState(emptyList<app.unbraid.data.Opt>(), shown, shownAcc) {
-        value = shownAcc?.let { a -> withContext(Dispatchers.IO) { listOfNotNull(shown.protection) + runCatching { shown.options(a) }.getOrDefault(emptyList()) } }.orEmpty()
+        value = shownAcc?.let { a -> withContext(Dispatchers.IO) { listOfNotNull(shown.protection) + runCatching { shown.options(a) }.getOrDefault(emptyList()) + listOfNotNull(app.unbraid.data.MTU.takeIf { shown.protocol != "OpenVPN" }) } }.orEmpty()
     }
     val device by androidx.compose.runtime.produceState<app.unbraid.data.Device?>(null, shown, shownAcc) {
         value = shownAcc?.let { a -> withContext(Dispatchers.IO) { runCatching { shown.device(a) }.getOrNull() } }

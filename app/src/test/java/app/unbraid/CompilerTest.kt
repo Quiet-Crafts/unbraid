@@ -605,6 +605,16 @@ class CompilerTest {
         assertEquals(setOf("a"), Compiler.clashes(s, mapOf("a" to WgLink(sv("a"), peer))))
     }
 
+    @Test fun tunnelMtuComesFromThePortedPeerAtMost1420() {
+        val peer = Nord.peer(sv("a"), key)
+        fun mtu(m: Int) = compile(Setup(routes = listOf(Route("a", Location("nord", 1, "NL", "Netherlands"))), defaultRoute = "a"),
+            links = mapOf("a" to WgLink(sv("a"), peer.copy(mtu = m))))["endpoints"]!!.jsonArray[0].jsonObject.str("mtu")
+        assertEquals("1400", mtu(1400))
+        assertEquals("1420", mtu(1500))
+        val home = Setup(routes = listOf(Route("a", Location("nord", 1, "NL", "Netherlands"))), defaultRoute = "a", home = Home(wg = peer.copy(endpoint = "10.1.1.1:51820", mtu = 1420)))
+        assertEquals("1280", compile(home, links = mapOf("a" to WgLink(sv("a"), peer)))["endpoints"]!!.jsonArray.map { it.jsonObject }.first { it.str("tag") == "home-wg" }.str("mtu"))
+    }
+
     private fun ovpnRoute(id: String, user: String) = Route(id, ovpn = Manual.parseOvpn(javaClass.getResource("/ovpn/expressvpn.ovpn")!!.readText(), id, user, "pw"))
 
     @Test fun sameOpenVpnRemoteAndUserShareOneEndpoint() {

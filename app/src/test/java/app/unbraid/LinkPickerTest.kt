@@ -272,4 +272,16 @@ class LinkPickerTest {
         val s3 = setup(Route("1", Location("fake", countryCode = "NL")), Route("3", Location("fake", countryCode = "DE")))
         assertEquals(setOf("198.51.100.1:443"), LinkPicker.ported(s3, offline, mapOf("fake" to 1)).values.map { (it as WgLink).peer.endpoint }.toSet())
     }
+
+    /** Provider tunnels take their page's MTU (1280 by default, 1280 to 1420); imports keep theirs, at most 1280. */
+    @Test fun mtuFollowsTheProviderPage() {
+        val peer = WgPeer("x", "k", listOf("10.0.0.2/32"), "p", endpoint = "198.51.100.1:51820", allowedIps = listOf("0.0.0.0/0"))
+        val s = setup(Route("1", Location("fake", countryCode = "NL")), Route("2", wg = peer), Route("3", wg = peer.copy(mtu = 1200)))
+        val links = mapOf("1" to WgLink(a, peer), "2" to WgLink(a, peer), "3" to WgLink(a, peer.copy(mtu = 1200)))
+        fun mtu(s: Setup) = LinkPicker.ported(s, links, emptyMap()).mapValues { (it.value as WgLink).peer.mtu }
+        assertEquals(mapOf("1" to 1280, "2" to 1280, "3" to 1200), mtu(s))
+        assertEquals(mapOf("1" to 1400, "2" to 1280, "3" to 1200), mtu(s.copy(opts = mapOf("fake" to mapOf("mtu" to "1400")))))
+        for (bad in listOf("9000", "1000", "x")) assertEquals(1280, mtu(s.copy(opts = mapOf("fake" to mapOf("mtu" to bad))))["1"])
+        assertEquals("auto", s.opt("anything", "mtu"))
+    }
 }
