@@ -366,7 +366,14 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         Item(r.name, listOfNotNull(if (r.id == setup.defaultRoute) "Default route" else "$apps ${if (apps == 1) "app" else "apps"}", vpn.servers[r.id]?.name, own).joinToString(" · ")) { Code(r.code, Ink.route(r.hue)) }
                     })
                     val adv = shownOpts.filter { it.advanced }
-                    advanced(advOpen, { advOpen = !advOpen }, adv.joinToString(" · ") { o -> setup.opt(pr.id, o.key).let { v -> "${o.label}: ${o.choices.firstOrNull { it.first == v }?.second ?: v}" } }, adv.map(optItem))
+                    // How the key was made, read from its config, and where configs are managed: shown, never changed here.
+                    val facts = pr.facts(accounts.getValue(pr.id))
+                    advanced(advOpen, { advOpen = !advOpen },
+                        (adv.map { o -> setup.opt(pr.id, o.key).let { v -> "${o.label}: ${o.choices.firstOrNull { it.first == v }?.second ?: v}" } } + listOfNotNull(facts?.let { "Set in your config: ${it.ifEmpty { "not known" }}" })).joinToString(" · "),
+                        adv.map(optItem) + listOfNotNull(
+                            facts?.let { Item("Set in your config", it.ifEmpty { "Not known: sign in with the whole .conf to see them" }) },
+                            pr.configHelp?.let { (text, url) -> Item("Your config", text, { context.openUrl(url) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } },
+                        ))
                     group(null, listOf(Item("Sign out of ${pr.name}", when {
                         accounts.size == 1 && setup.servers.isEmpty() && setup.routes.none { it.imported } && !home.tailscale -> "It's your only connection: you'll be back at sign-in"
                         routes.isEmpty() -> "No route uses it"

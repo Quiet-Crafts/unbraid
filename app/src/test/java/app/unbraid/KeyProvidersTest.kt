@@ -79,6 +79,32 @@ class KeyProvidersTest {
 
     // ---- Proton
 
+    /** Proton's options are read from a pasted .conf's comments, allowlisted and short; a bare key says where to see them. */
+    @Test fun protonConfigFacts() {
+        val conf = """
+            [Interface]
+            # Key for test
+            # Bouncing = 3
+            # NetShield = 0
+            # Moderate NAT = off
+            # NAT-PMP (Port Forwarding) = off
+            # VPN Accelerator = on
+            # Secret = $priv
+            PrivateKey = $priv
+            Address = 10.2.0.2/32
+            DNS = 10.2.0.1
+            [Peer]
+            PublicKey = $serverKey
+            AllowedIPs = 0.0.0.0/0
+            Endpoint = 1.2.3.4:51820
+        """.trimIndent()
+        val a = ProtonFree.signIn(mapOf("key" to conf))
+        assertEquals("VPN Accelerator on · NetShield off · Moderate NAT off · Port forwarding off", ProtonFree.facts(a))
+        assertEquals(false, "Bouncing" in a || "Secret" in a)
+        assertEquals("", ProtonFree.facts(ProtonFree.signIn(mapOf("key" to priv)))) // a bare key: not known
+        assertEquals(null, app.unbraid.data.Surfshark.facts(a))
+    }
+
     @Test fun protonDropsSecureCoreAndTor() {
         val raw = catalog("protonvpn")
         val kept = Proton.filtered(raw)

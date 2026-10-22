@@ -19,7 +19,19 @@ abstract class KeyProvider : Provider {
         val presharedKey: String? = null,
         /** The [Peer] key of a pasted .conf; only meaningful for providers whose servers all share one key. */
         val publicKey: String? = null,
+        /** Settings the provider wrote into a pasted .conf as comments ([configFacts]); null when only a key was pasted. */
+        val facts: Map<String, String>? = null,
     )
+
+    /** Comment lines ("# NetShield = 0") a provider writes into its configs that say how the key was made, to show them. */
+    protected open val configFacts: List<String> = emptyList()
+    /** How one of [configFacts] reads on the page. */
+    protected open fun fact(key: String, value: String) = "$key $value"
+
+    override fun facts(account: String): String? = configFacts.takeIf { it.isNotEmpty() }?.let {
+        val f = runCatching { account(account).facts }.getOrNull() ?: return ""
+        configFacts.mapNotNull { k -> f[k]?.let { fact(k, it) } }.joinToString(" · ").ifEmpty { "None in your config" }
+    }
 
     /** Tunnel address when only a bare key is pasted; null if the provider assigns it per device (the .conf is then required). */
     protected abstract val defaultAddress: List<String>?
@@ -68,6 +80,9 @@ abstract class KeyProvider : Provider {
             mtu = if (MTU.containsMatchIn(text)) p.mtu else defaultMtu,
             presharedKey = p.presharedKey,
             publicKey = p.publicKey,
+            facts = configFacts.takeIf { it.isNotEmpty() }?.let { keys ->
+                FACT.findAll(text).mapNotNull { m -> m.groupValues[1].trim().takeIf { it in keys }?.let { it to m.groupValues[2].trim().take(24) } }.toMap()
+            },
         )
     }
 
@@ -114,5 +129,6 @@ abstract class KeyProvider : Provider {
     private companion object {
         val KEY = Regex("[A-Za-z0-9+/]{43}=")
         val MTU = Regex("(?im)^\\s*mtu\\s*=")
+        val FACT = Regex("(?m)^\\s*#\\s*([A-Za-z][A-Za-z ()-]{0,40}?)\\s*=\\s*([A-Za-z0-9 .-]{1,40})\\s*$")
     }
 }

@@ -29,6 +29,15 @@ open class ProtonVpn(private val free: Boolean) : KeyProvider() {
     /** Proton's plans: Free one connection at a time, Plus and Unlimited ten; a manual key counts per tunnel (tested live). */
     override fun limit(account: String) = Limit("connection", perTunnel = true, if (free) 1 else 10)
 
+    /** The options Proton writes into each config it makes, as comments; changing one takes a new config. */
+    override val configFacts = listOf("VPN Accelerator", "NetShield", "Moderate NAT", "NAT-PMP (Port Forwarding)")
+    override fun fact(key: String, value: String) = when (key) {
+        "NetShield" -> "NetShield " + when (value) { "0" -> "off"; "1" -> "malware"; "2" -> "malware, ads and trackers"; else -> value }
+        "NAT-PMP (Port Forwarding)" -> "Port forwarding $value"
+        else -> "$key $value"
+    }
+    override val configHelp = "Proton configs expire. Extend yours at account.protonvpn.com, Downloads" to "https://account.protonvpn.com/downloads"
+
     override val defaultAddress = listOf("10.2.0.2/32")
     override val defaultDns = listOf("10.2.0.1")
     override val defaultPort = 51820

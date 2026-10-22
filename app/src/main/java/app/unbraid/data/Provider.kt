@@ -106,6 +106,10 @@ interface Provider {
 
     /** Its own blocking switch ([PROTECT]), first on its page and per route in the picker. */
     val protection: Opt? get() = null
+    /** How the account's key was made, as its config says (Proton's options), for its page; null = nothing to show, "" = not known. */
+    fun facts(account: String): String? = null
+    /** Help about the provider's config files (expiry, say) and where to manage them, for its page. */
+    val configHelp: Pair<String, String>? get() = null
     /** The gluetun catalogue that is its only server list, if any: its page and status show how old it is. */
     val listSource: String? get() = null
     /** Without [protection]: what its page says about the provider's own blocking instead of a switch. */

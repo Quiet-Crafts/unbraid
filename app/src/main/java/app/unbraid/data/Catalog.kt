@@ -41,7 +41,10 @@ object Catalog {
 
     /** [name] is the gluetun file name, e.g. "protonvpn". [vpn] keeps "wireguard" or "openvpn" servers with an IPv4. */
     fun fetch(name: String, vpn: String): List<Entry> =
-        file(Http.get(BASE + Http.enc(name) + ".json")).also { if (it.timestamp > 0) published(name, it.timestamp) }.servers.usable(vpn)
+        file(Http.get(BASE + Http.enc(name) + ".json")).also { f ->
+            // Only a time that can be true is kept: after 2020, before tomorrow.
+            if (f.timestamp in 1_577_836_800..System.currentTimeMillis() / 1000 + 86_400) published(name, f.timestamp)
+        }.servers.usable(vpn)
 
     internal fun parse(body: String, vpn: String): List<Entry> = file(body).servers.usable(vpn)
     internal fun timestamp(body: String) = file(body).timestamp

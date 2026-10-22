@@ -34,5 +34,6 @@ class StatusTest {
     @Test fun oldListWarns() {
         assertEquals(Tone.Warn to "Its server list is from 6 Aug 2026 and may be out of date", providerStatus("Proton VPN Free", true, false, false, false, true, true, null, "6 Aug 2026"))
         assertEquals("6 Aug 2026", app.unbraid.ui.publishedOn(1785990858))
+        assertEquals("an unknown date", app.unbraid.ui.publishedOn(Long.MAX_VALUE))
     }
 }

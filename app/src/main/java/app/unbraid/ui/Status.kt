@@ -22,8 +22,9 @@ fun providerStatus(name: String, used: Boolean, refused: Boolean, settingUp: Boo
 }
 
 /** A catalogue's publication date ([app.unbraid.data.Catalog.published], epoch seconds), e.g. "6 Aug 2026". */
-fun publishedOn(epochSeconds: Long): String = java.time.Instant.ofEpochSecond(epochSeconds).atZone(java.time.ZoneOffset.UTC).toLocalDate()
-    .format(java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy", java.util.Locale.ENGLISH))
+fun publishedOn(epochSeconds: Long): String = runCatching {
+    java.time.Instant.ofEpochSecond(epochSeconds).atZone(java.time.ZoneOffset.UTC).toLocalDate().format(java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy", java.util.Locale.ENGLISH))
+}.getOrDefault("an unknown date")
 
 /** Older than this, a provider's only server list turns its status amber. */
 const val OLD_LIST_MS = 60L * 86_400_000
