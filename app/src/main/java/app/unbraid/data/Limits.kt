@@ -39,9 +39,9 @@ object Limits {
 
     /**
      * Separate tunnels [s] opens to [provider]: one per active route, since unpinned routes are spread over different
-     * servers ([app.unbraid.vpn.LinkPicker.pick]); routes pinned to one server share its tunnel.
+     * servers ([app.unbraid.vpn.LinkPicker.pick]); routes pinned to one server over the same protocol share its tunnel.
      */
-    fun tunnels(s: Setup, provider: String) = s.activeRoutes.filter { !it.imported && it.loc.provider == provider }.map { r -> r.loc.pinned?.host ?: r.id }.distinct().size
+    fun tunnels(s: Setup, provider: String) = s.activeRoutes.filter { !it.imported && it.loc.provider == provider }.map { r -> r.loc.pinned?.let { "${it.host}|${r.loc.protocol}" } ?: r.id }.distinct().size
 
     /** The first provider counted per tunnel that [new] takes over its known limit with more tunnels than [old] had. */
     fun over(old: Setup, new: Setup, limit: (String) -> Limit?): Over? = new.activeRoutes.filter { !it.imported }.map { it.loc.provider }.distinct().firstNotNullOfOrNull { p ->

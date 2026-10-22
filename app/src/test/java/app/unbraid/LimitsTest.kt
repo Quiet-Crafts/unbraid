@@ -66,6 +66,9 @@ class LimitsTest {
         assertEquals(1, Limits.tunnels(s, "nord"))
         val pinned = s.copy(routes = listOf(nord, pf("a", "NO", no), pf("b", "NO", no)))
         assertEquals(1, Limits.tunnels(pinned, "proton-free"))
+        val nordPin = Server("nl1302", "nl1302.nordvpn.com", "1.1.1.1", "k", 4)
+        val protocols = Setup(routes = listOf(Route("x", Location("nord", pinned = nordPin)), Route("y", Location("nord", pinned = nordPin, protocol = "openvpn_udp"))), defaultRoute = "x", apps = mapOf("a" to "y"))
+        assertEquals(2, Limits.tunnels(protocols, "nord")) // one server, two protocols: two tunnels
     }
 
     /** Only a change that adds a tunnel over the limit asks; changes that keep or lower the count, or other providers, don't. */

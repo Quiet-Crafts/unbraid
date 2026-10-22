@@ -366,7 +366,8 @@ class Ui(app: Application) : AndroidViewModel(app) {
     /** A new route for [loc] (or the one already exiting there) for app [pkg], as one change. */
     fun addRouteFor(pkg: String, loc: Location) = guarded { s ->
         val r = s.routes.firstOrNull { !it.imported && it.loc.ident() == loc.ident() } ?: Route(newId(), loc, hue = nextHue(s))
-        s.copy(routes = if (r in s.routes) s.routes else s.routes + r, apps = s.apps + (pkg to r.id))
+        // As [assign]: an app given the default route follows the default.
+        s.copy(routes = if (r in s.routes) s.routes else s.routes + r, apps = if (r.id == s.defaultRoute) s.apps - pkg else s.apps + (pkg to r.id))
     }
 
     /** A route change that would take a provider over its connection limit, waiting for the user's answer. */
@@ -382,10 +383,15 @@ class Ui(app: Application) : AndroidViewModel(app) {
         val acc = accounts.value
         val o = Limits.over(old, f(old)) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } ?: run { store.update(f); return }
         val name = Providers.get(o.provider)?.name ?: o.provider
-        val anchor = old.activeRoutes.singleOrNull { !it.imported && it.loc.provider == o.provider }
+        // Only a route the engine runs as saved has a server worth sharing; checked again when the user answers.
+        val anchor = old.activeRoutes.singleOrNull { !it.imported && it.loc.provider == o.provider }?.takeIf { a -> UnbraidVpn.running?.route(a.id)?.loc == a.loc }
         val server = anchor?.let { vpn.value.servers[it.id] }
         limitAsk.value = LimitAsk(Limits.warning(name, o.limit, o.unit, o.n), { store.update(f) }, server?.let { sv ->
-            sv.name to { store.update { s -> f(s).let { n -> n.copy(routes = n.routes.map { r -> if (!r.imported && r.loc.provider == o.provider && n.activeRoutes.any { it.id == r.id }) r.copy(loc = anchor.loc.copy(pinned = sv)) else r }) } } }
+            sv.name to {
+                if (setup.value.route(anchor.id)?.loc == anchor.loc && vpn.value.servers[anchor.id] == sv) store.update { s ->
+                    f(s).let { n -> n.copy(routes = n.routes.map { r -> if (!r.imported && r.loc.provider == o.provider && n.activeRoutes.any { it.id == r.id }) r.copy(loc = anchor.loc.copy(pinned = sv)) else r }) }
+                }
+            }
         })
     }
 
