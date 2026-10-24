@@ -47,6 +47,8 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -57,7 +59,9 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import java.io.File
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -296,6 +300,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** Counts installs and stops: a reload's provider answers apply only if none happened since it asked ([reload]). */
     private var generation = 0
+    /** Counts engine starts, each of which restarts every tunnel: health checks about an earlier one no longer hold. */
+    private var starts = 0
 
     /** Setup and config the engine is running right now. */
     private var applied: Setup? = null
@@ -371,6 +377,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             openTable(true)
             engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
             restarting = false
+            starts++
             probe = next
             lastInput = input
             // The new engine numbers its connections afresh; stats read the new servers when they first see them.
@@ -433,6 +440,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             last.tsDir, last.cacheFile, store.tsSuffix, next, last.fakeBlock, last.blocked, last.tsLoginPending && tsLoginPending)
         val json = Compiler.compile(input)
         srv.startOrReloadService(json, OverrideOptions())
+        starts++
         lastBlock = input.fakeBlock
         probe = next
         lastGood = json
@@ -505,52 +513,87 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var health: Job? = null
 
     /**
-     * Every minute, checks each provider tunnel the app can move ([Health]); one that fails three checks in a row
-     * gets another server of its location. A round where every tunnel fails while the phone's own network does too is
-     * most likely that network: no server is blamed, and checks slow down (up to every ~8 min) until one works again.
+     * Checks each provider tunnel the app can move ([Health]) about once a minute. One that fails is checked again 10 s
+     * and 20 s later, then once more a minute after its first failure: WireGuard and OpenVPN usually come back on their
+     * own server within that minute. Still failing, it gets another server of its location. A round where every tunnel
+     * fails while the phone's own network does too is most likely that network: no server is blamed, and checks slow
+     * down (up to every ~8 min) until one works again. Nothing is judged for a while after a new network, an engine
+     * start or a sleep.
      */
     private suspend fun watchHealth() {
-        val fails = HashMap<String, Int>()
-        val history = HashMap<String, List<Boolean>>() // tag → its latest checks, for routes that keep dropping
+        val streaks = HashMap<String, Health.Streak>() // tag → its failed checks; tags that answered have none
+        val history = HashMap<String, List<Boolean>>() // tag → its latest regular checks, for routes that keep dropping
+        val holds = HashMap<String, Long>() // tag → when a dead tunnel there may be handled again; survives restarts
         var slow = 1
-        var last: Pair<Map<String, Link>, android.net.Network?>? = null // the tunnels and network the streaks are about
+        var grace = SystemClock.elapsedRealtime() + Health.GRACE // no check before this
+        var round = SystemClock.elapsedRealtime() + jitter() // the next regular round
+        var basis: Pair<Int, android.net.Network?>? = null // the engine start and network the streaks are about
+        fun restart(now: Long) { streaks.clear(); history.clear(); undrop(); failing = emptySet(); grace = now + Health.GRACE; round = grace }
         while (true) {
-            kotlinx.coroutines.delay((48_000L + kotlin.random.Random.nextLong(24_000)) * slow) // ~1 min, jittered
-            if (state.value.phase != VpnState.Phase.On || net.network == null || SpeedTest.testing) continue
-            var servers = emptyMap<String?, List<String>>() // tag → its servers as checked, before a reload can swap them
-            var seen = links // what was checked: results about other tunnels or another network are thrown away
+            val wake = maxOf(grace, streaks.entries.mapNotNull { (t, s) -> Health.due(s, holds[t] ?: 0) }.fold(round, ::minOf))
+            val slept = asleep()
+            // At least 5 s, then in slices: waits don't count deep sleep, and a sleep, an engine start or a new network
+            // ends one early.
+            kotlinx.coroutines.delay(5_000)
+            while (SystemClock.elapsedRealtime() < wake && asleep() - slept < Health.SLEPT && basis == (starts to net.network))
+                kotlinx.coroutines.delay((wake - SystemClock.elapsedRealtime()).coerceIn(1, 15_000))
+            var now = SystemClock.elapsedRealtime()
+            holds.values.removeIf { it <= now }
+            // A sleep in between (Doze, screen off) says nothing about the servers.
+            if (asleep() - slept >= Health.SLEPT) { restart(now); continue }
+            if (state.value.phase != VpnState.Phase.On || net.network == null || SpeedTest.testing) { if (now >= round) round = now + jitter(); continue }
             val network = net.network
             // Ports Automatic learned on another network don't hold here: back to each provider's first port.
             if (network != portNet) { portNet = network; if (portStep.isNotEmpty()) { portStep = emptyMap(); reload(); continue } }
+            var servers = emptyMap<String?, List<String>>() // tag → its servers as checked, before a reload can swap them
+            var engine = 0
             val byTag = lock.withLock {
-                seen = links
+                engine = starts
                 val s = running ?: return@withLock emptyMap()
                 // Pinned and Dedicated IP routes are checked too (to notice a removed device), but never moved.
                 links.keys.filter { id -> s.route(id)?.imported == false }
                     .groupBy { tags[it] }.filterKeys { it != null && it != Compiler.TS_TAG }
                     .also { m -> servers = m.mapValues { (_, ids) -> ids.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } } } }
             }
-            if (byTag.isEmpty()) continue
+            // Restarted tunnels or another network: earlier checks don't carry over, and the new ones get time to settle.
+            if (basis != (engine to network)) { val first = basis == null; basis = engine to network; if (!first) { slow = 1; restart(now); continue } }
+            if (now < grace) continue
+            val regular = now >= round
             // A provider whose new key is still reaching its servers isn't judged yet.
             val settingUp = Providers.settingUp()
-            val checked = byTag.filter { (_, ids) -> ids.none { running?.route(it)?.loc?.provider in settingUp } }.keys.filterNotNull().toSet()
-            if (checked.isEmpty()) continue
-            val down = Health.blame(checked.filter { !Health.reachable(it) }.toSet(), checked) { Health.direct(network) }
+            val eligible = byTag.filter { (_, ids) -> ids.none { running?.route(it)?.loc?.provider in settingUp } }.keys.filterNotNull()
+            // A regular round checks every tunnel, a quick one only those due again.
+            val checked = if (regular) eligible.toSet() else eligible.filterTo(HashSet()) { t -> streaks[t]?.let { Health.due(it, holds[t] ?: 0) }?.let { it <= now } == true }
+            if (checked.isEmpty()) { if (regular) round = now + jitter() * slow; continue }
+            val gate = Semaphore(4)
+            val answered = coroutineScope { checked.map { t -> async { gate.withPermit { t to Health.reachable(t) } } }.awaitAll() }.toMap()
+            val down = Health.blame(checked.filterTo(HashSet()) { answered[it] != true }, checked) { Health.direct(network) }
+            now = SystemClock.elapsedRealtime()
+            if (asleep() - slept >= Health.SLEPT) { restart(now); continue }
             val move = lock.withLock {
-                // Stopped, reloaded or moved to another network meanwhile: start counting afresh.
-                if (state.value.phase != VpnState.Phase.On || links !== seen || net.network != network) { fails.clear(); history.clear(); undrop(); failing = emptySet(); last = null; return@withLock null }
-                // Other tunnels or another network than the last round's: their streaks and blame don't carry over.
-                if (last != (seen to network)) { fails.clear(); history.clear(); undrop(); failing = emptySet(); slow = 1; last = seen to network }
-                if (down == null) { fails.clear(); failing = emptySet(); slow = minOf(slow * 2, 8); return@withLock null }
-                slow = 1
+                // Stopped, restarted or moved to another network meanwhile: this round says nothing (the next starts afresh).
+                if (state.value.phase != VpnState.Phase.On || starts != engine || net.network != network) return@withLock null
+                if (down == null) {
+                    // Most likely the phone's own network: no server is blamed for these checks.
+                    if (regular) { streaks.clear(); slow = minOf(slow * 2, 8) } else checked.forEach { streaks.remove(it) }
+                    failing = streaks.keys.flatMap { servers[it].orEmpty() }.toSet()
+                    return@withLock null
+                }
+                if (regular) slow = 1
+                checked.forEach { t ->
+                    val s = Health.next(streaks[t] ?: Health.Streak(), t !in down, now)
+                    if (s.fails == 0) streaks.remove(t) else { streaks[t] = s; Log.i(TAG, "health: $t failed ${s.fails}x, ${(now - s.since) / 1000} s") }
+                    // Quick re-checks don't count here: one outage would look like a tunnel that keeps dropping.
+                    if (regular) history[t] = Health.record(history[t].orEmpty(), t !in down)
+                }
                 // The next connect, even a manual one, avoids them.
-                failing = down.flatMap { servers[it].orEmpty() }.toSet()
-                checked.forEach { t -> fails[t] = if (t in down) (fails[t] ?: 0) + 1 else 0; history[t] = Health.record(history[t].orEmpty(), t !in down) }
+                failing = streaks.keys.flatMap { servers[it].orEmpty() }.toSet()
                 val dropping = byTag.filterKeys { it != null && Health.dropping(history[it].orEmpty()) }.values.flatten().toSet()
                 if (dropping != state.value.dropping) state.update { it.copy(dropping = dropping) }
-                val dead = byTag.filterKeys { (fails[it] ?: 0) >= 3 }.values.flatten()
-                if (dead.isEmpty()) return@withLock null
-                dead.forEach { fails.remove(tags[it]) }
+                val deadTags = checked.filter { t -> streaks[t]?.let { Health.dead(it, now, holds[t] ?: 0) } == true }
+                if (deadTags.isEmpty()) return@withLock null
+                deadTags.forEach { holds[it] = now + Health.COOLDOWN }
+                val dead = byTag.filterKeys { it in deadTags }.values.flatten()
                 val s = running ?: return@withLock null
                 // A dead tunnel on Automatic also tries its provider's next port: a failed check can't tell a blocked port from a dead server.
                 val stepped = dead.mapNotNull { id -> s.route(id)?.loc?.provider?.takeIf { p -> (links[id] as? app.unbraid.data.WgLink)?.ports.orEmpty().size > 1 && s.opt(p, app.unbraid.data.PORT_OPT) == app.unbraid.data.AUTO } }.toSet()
@@ -559,7 +602,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 Log.w(TAG, "health: ${dead.size} route(s) stopped answering, ${movable.size} to move to another server")
                 Move(links - movable.toSet(), movable.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } }.toSet(), generation,
                     dead.mapNotNull { id -> s.route(id)?.loc?.provider }.toSet(), movable.isNotEmpty() || stepped.isNotEmpty())
-            } ?: continue
+            }
+            if (regular) round = now + jitter() * slow
+            if (move == null) continue
             // A dead tunnel can mean the provider dropped this phone (its device removed on the website): then its routes
             // wait blocked for a new sign-in instead of trying server after server.
             val accounts = store.accounts.value
@@ -571,6 +616,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (move.anyMovable || dropped.isNotEmpty()) reload(move.keep, move.avoid, move.generation)
         }
     }
+
+    /** A regular round's wait: about a minute, spread so tunnels of many phones don't line up. */
+    private fun jitter() = 48_000L + kotlin.random.Random.nextLong(24_000)
+
+    /** How long the phone has slept since boot: it grows only while it sleeps. */
+    private fun asleep() = SystemClock.elapsedRealtime() - SystemClock.uptimeMillis()
 
     /** Health history starts again: no route is flagged as dropping until new checks say so. */
     private fun undrop() { if (state.value.dropping.isNotEmpty()) state.update { it.copy(dropping = emptySet()) } }

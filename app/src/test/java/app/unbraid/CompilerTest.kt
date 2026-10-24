@@ -33,6 +33,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -726,6 +727,21 @@ class CompilerTest {
         val ts = compile(s)["endpoints"]!!.jsonArray.map { it.jsonObject }.single { it["type"]!!.jsonPrimitive.content == "tailscale" }
         assertEquals("100.101.102.103", ts["exit_node"]!!.jsonPrimitive.content)
         assertEquals("nas", s.route("ts")!!.name)
+    }
+
+    /** A config's own PersistentKeepalive is kept (0 = none); without one, and for provider servers, 25 s. */
+    @Test fun keepaliveFollowsTheConfig() {
+        fun keepalive(text: String) = compile(example.copy(home = Home(wg = WgConf.parse(text, "Home")))).let { c ->
+            c["endpoints"]!!.jsonArray.map { it.jsonObject }.first { it["tag"]!!.jsonPrimitive.content == "home-wg" }["peers"]!!.jsonArray[0].jsonObject["persistent_keepalive_interval"]!!.jsonPrimitive.content
+        }
+        assertEquals("25", keepalive(FRITZ))
+        assertEquals("15", keepalive(FRITZ.replace("PersistentKeepalive = 25", "PersistentKeepalive = 15")))
+        assertEquals("0", keepalive(FRITZ.replace("PersistentKeepalive = 25", "PersistentKeepalive = off")))
+        assertEquals("25", keepalive(FRITZ.replace("PersistentKeepalive = 25", "")))
+        assertEquals(null, WgConf.parse(FRITZ.replace("PersistentKeepalive = 25", ""), "x").keepalive)
+        assertThrows(IllegalArgumentException::class.java) { WgConf.parse(FRITZ.replace("PersistentKeepalive = 25", "PersistentKeepalive = soon"), "x") }
+        val provider = compile(example)["endpoints"]!!.jsonArray.map { it.jsonObject }.first { it["type"]!!.jsonPrimitive.content == "wireguard" }
+        assertEquals("25", provider["peers"]!!.jsonArray[0].jsonObject["persistent_keepalive_interval"]!!.jsonPrimitive.content)
     }
 
     companion object {

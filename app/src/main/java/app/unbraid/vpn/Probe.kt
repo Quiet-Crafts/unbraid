@@ -20,10 +20,12 @@ object Probe {
         fun close() = runCatching { socket.close() }.let {}
     }
 
-    /** A TLS connection to [host] through the tunnel [tag]; throws if the VPN isn't on or the exit doesn't answer. */
-    fun open(tag: String, host: String, port: Int = 443, timeoutMs: Int = 10_000): Conn {
+    /**
+     * A TLS connection to [host] through the tunnel [tag]; throws if the VPN isn't on or the exit doesn't answer.
+     * Closing [raw] from another thread ends a blocked attempt at once.
+     */
+    fun open(tag: String, host: String, port: Int = 443, timeoutMs: Int = 10_000, raw: Socket = Socket()): Conn {
         val (proxyPort, password) = UnbraidVpn.probe ?: error("Connect first")
-        val raw = Socket()
         try {
             raw.connect(InetSocketAddress("127.0.0.1", proxyPort), timeoutMs)
             raw.soTimeout = timeoutMs

@@ -370,7 +370,8 @@ object Compiler {
                 put("public_key", p.publicKey)
                 p.presharedKey?.let { put("pre_shared_key", it) }
                 put("allowed_ips", arr("0.0.0.0/0"))
-                put("persistent_keepalive_interval", 25)
+                // Keeps the path's NAT open when idle; 25 s is WireGuard's own advice. An imported config's value wins.
+                put("persistent_keepalive_interval", keepalive(p))
             })
         }
     }
@@ -425,7 +426,8 @@ object Compiler {
 
     private fun wgIdentity(p: WgPeer) = listOf(p.endpoint.lowercase(), p.publicKey, sha(p.privateKey)).joinToString("|")
     // Address order too: the engine sends from the last IPv4 address.
-    private fun wgKey(p: WgPeer) = listOf("wg", wgIdentity(p), sha(p.presharedKey.orEmpty()), p.address.joinToString(","), minOf(p.mtu, app.unbraid.data.MTU_MIN)).joinToString("|")
+    private fun wgKey(p: WgPeer) = listOf("wg", wgIdentity(p), sha(p.presharedKey.orEmpty()), p.address.joinToString(","), minOf(p.mtu, app.unbraid.data.MTU_MIN), keepalive(p)).joinToString("|")
+    private fun keepalive(p: WgPeer) = p.keepalive ?: 25
 
     const val CLASH = "Another of your WireGuard connections uses this key on the same server with other settings. Use one config for both."
 

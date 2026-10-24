@@ -38,6 +38,9 @@ object WgConf {
             allowedIps = list("[peer].allowedips").filter { ':' !in it }.ifEmpty { throw IllegalArgumentException("Config has no IPv4 AllowedIPs") },
             dns = list("[interface].dns").filter { it.first().isDigit() && ':' !in it },
             mtu = kv["[interface].mtu"]?.toIntOrNull()?.coerceIn(1280, 1500) ?: 1420,
+            keepalive = kv["[peer].persistentkeepalive"]?.let { v ->
+                if (v.equals("off", ignoreCase = true)) 0 else v.toIntOrNull()?.takeIf { it in 0..65535 } ?: throw IllegalArgumentException("Invalid PersistentKeepalive in the config")
+            },
         )
     }
 

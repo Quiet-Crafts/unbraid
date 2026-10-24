@@ -39,6 +39,8 @@ data class WgPeer(
     val allowedIps: List<String>,
     val dns: List<String> = emptyList(),
     val mtu: Int = 1420,
+    /** Seconds between keepalives as an imported config asks (0 = none); null = unbraid's 25. */
+    val keepalive: Int? = null,
 )
 
 /** An imported OpenVPN profile (ExpressVPN, CyberGhost…): the raw .ovpn plus its login. */
