@@ -7,15 +7,12 @@ import io.nekohasekai.libbox.STUNTestResult
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.coroutines.resume
 
 /**
  * Whether a tunnel still carries traffic: a STUN binding round trip (a ~100-byte UDP query) through it to either of
@@ -49,17 +46,8 @@ object Health {
         }.firstOrNull { it }
     } == true
 
-    /**
-     * A TLS handshake with a well-known site through [tag], over the app's own way into that exit ([Probe]). Its socket
-     * blocks, so cancelling closes it rather than waiting for its timeouts.
-     */
-    private suspend fun https(tag: String): Boolean = suspendCancellableCoroutine { c ->
-        val raw = java.net.Socket()
-        c.invokeOnCancellation { runCatching { raw.close() } }
-        Dispatchers.IO.asExecutor().execute {
-            c.resume(runCatching { Probe.open(tag, "www.google.com", timeoutMs = 5_000, raw = raw).close(); true }.getOrDefault(false))
-        }
-    }
+    /** A TLS handshake with a well-known site through [tag], over the app's own way into that exit ([Probe]). */
+    private suspend fun https(tag: String) = runCatching { Probe.cancellable { raw -> Probe.open(tag, "www.google.com", timeoutMs = 5_000, raw = raw).close(); true } }.getOrDefault(false)
 
     /**
      * Tunnels a round's failures may be blamed on: none when every checked tunnel failed and so did a plain HTTPS

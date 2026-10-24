@@ -8,6 +8,9 @@ import java.util.Base64
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asExecutor
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
  * The app's own connections out through one chosen exit ([Compiler.PROBE]): an HTTP CONNECT to the engine's loopback
@@ -40,11 +43,21 @@ object Probe {
         } catch (e: Exception) { runCatching { raw.close() }; throw e }
     }
 
+    /**
+     * Runs the blocking [f] on a fresh socket, off the caller's thread; cancelling closes that socket, so [f] ends at
+     * once instead of after its timeouts.
+     */
+    suspend fun <T> cancellable(f: (Socket) -> T): T = suspendCancellableCoroutine { c ->
+        val raw = Socket()
+        c.invokeOnCancellation { runCatching { raw.close() } }
+        Dispatchers.IO.asExecutor().execute { c.resumeWith(runCatching { f(raw) }) }
+    }
+
     /** A small HTTPS GET through [tag]; the body as text, at most [max] bytes (the server is trusted no further). */
-    fun get(tag: String, host: String, path: String, max: Int = 256 * 1024): String {
-        val c = open(tag, host)
+    fun get(tag: String, host: String, path: String, max: Int = 256 * 1024, accept: String = "application/json", raw: Socket = Socket()): String {
+        val c = open(tag, host, raw = raw)
         try {
-            c.output.write("GET $path HTTP/1.0\r\nHost: $host\r\nUser-Agent: unbraid\r\nAccept: application/json\r\n\r\n".toByteArray())
+            c.output.write("GET $path HTTP/1.0\r\nHost: $host\r\nUser-Agent: unbraid\r\nAccept: $accept\r\n\r\n".toByteArray())
             val status = head(c.input).firstOrNull().orEmpty()
             if (status.split(' ').getOrNull(1) != "200") error("HTTP ${status.substringAfter(' ')}")
             val body = c.input.readNBytes(max + 1)

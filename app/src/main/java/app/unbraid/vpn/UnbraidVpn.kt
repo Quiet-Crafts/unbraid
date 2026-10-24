@@ -94,6 +94,8 @@ data class VpnState(
     val stuck: Map<String, Boolean> = emptyMap(),
     /** Routes whose tunnel keeps dropping ([app.unbraid.vpn.Health.dropping]). */
     val dropping: Set<String> = emptySet(),
+    /** Counts engine starts, each of which restarts every tunnel: what was observed of an earlier one no longer holds. */
+    val engine: Int = 0,
 ) {
     enum class Phase { Off, Connecting, On, Paused }
 }
@@ -154,6 +156,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         private val bg = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
         private var engineReady = false
+
+        /**
+         * Counts engine starts in this process, across service instances: each restarts every tunnel, so health checks
+         * and exit checks about an earlier one no longer hold ([VpnState.engine]).
+         */
+        @Volatile private var starts = 0
 
         /** Serializes connect, reload, pause and teardown, across service instances too (an old one may still be stopping). */
         private val lock = Mutex()
@@ -300,8 +308,6 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** Counts installs and stops: a reload's provider answers apply only if none happened since it asked ([reload]). */
     private var generation = 0
-    /** Counts engine starts, each of which restarts every tunnel: health checks about an earlier one no longer hold. */
-    private var starts = 0
 
     /** Setup and config the engine is running right now. */
     private var applied: Setup? = null
@@ -334,7 +340,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             forgetLookups(this)
             val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
             apply(srv, setup, picked, accounts)
-            state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, stuck = stuck(setup, picked.blocked))
+            state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, stuck = stuck(setup, picked.blocked), engine = starts)
             stopWanted = false
             notify(setup)
             if (setup.tailscale) watchTailscale()
@@ -380,14 +386,15 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             starts++
             probe = next
             lastInput = input
-            // The new engine numbers its connections afresh; stats read the new servers when they first see them.
-            state.update { it.copy(servers = links.mapValues { l -> l.value.server }) }
         }
         lastGood = json
         tunnelDns = runCatching { Compiler.probeDns(json) }.getOrDefault(emptyMap())
         tags = Compiler.shared(setup, LinkPicker.ported(setup, links, portStep), blocked) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG }
         val was = running
         running = setup
+        // Published after tags and running: whoever sees this engine number also sees the tunnels it runs. The new
+        // engine numbers its connections afresh; stats read the new servers when they first see them.
+        if (fresh) state.update { it.copy(servers = links.mapValues { l -> l.value.server }, engine = starts) }
         // After tags and running, which stats label new connections by; also when only the setup changed (a city that
         // resolves to the same server is still another place in the history).
         if (fresh || was != setup) app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() }
@@ -441,6 +448,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val json = Compiler.compile(input)
         srv.startOrReloadService(json, OverrideOptions())
         starts++
+        state.update { it.copy(engine = starts) }
         lastBlock = input.fakeBlock
         probe = next
         lastGood = json

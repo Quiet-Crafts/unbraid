@@ -79,6 +79,9 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.hideFromAccessibility
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -90,6 +93,7 @@ import app.unbraid.data.Providers
 import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.data.Setup
+import app.unbraid.vpn.ExitCheck
 import app.unbraid.vpn.VpnState
 import app.unbraid.vpn.VpnState.Phase
 import kotlinx.coroutines.delay
@@ -154,6 +158,11 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     // The default carries every app not sent elsewhere; its preview shows user apps, not system ones.
     val defaultPkgs = remember(apps, setup) { apps.filter { setup.routeOf(it.pkg) == setup.defaultRoute }.sortedBy { it.system }.map { it.pkg } }
     val server = vpn.servers[setup.defaultRoute]
+    val exits by ui.exits.collectAsStateWithLifecycle()
+    val checking by ui.checkingExits.collectAsStateWithLifecycle()
+    // A route's report holds only for the engine and server it was taken on.
+    val report = { id: String -> exits[id]?.takeIf { on && it.engine == vpn.engine && it.server == vpn.servers[id] } }
+    val exitLine = { id: String -> report(id)?.let { r -> @Composable { ExitLine(r, setup.route(id)?.let(ExitCheck::expected)) } } }
     // Right after a sign-in, a provider's new key may not reach all its servers for a minute: say so instead of nothing.
     val accounts by ui.accounts.collectAsStateWithLifecycle()
     val settingUp by produceState(emptySet<String>(), on, setup, accounts) {
@@ -224,6 +233,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                 title = route?.name ?: "Direct", meta = route?.let { place(it, live) } ?: "No VPN for these apps",
                 extra = if (on && route != null && server != null) serverId(route, server) else null,
                 border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (on) 0.45f else 0.25f),
+                below = exitLine(setup.defaultRoute),
             ) { sheet = setup.defaultRoute } }
         }
         // Android refused the VPN: most often another VPN app holds Always-on.
@@ -246,10 +256,24 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                 shape = groupShape(i, exceptions.size), fill = if (direct) Color.Transparent else Ink.surface,
                 border = null, dashed = direct, minHeight = 72.dp,
                 modifier = Modifier.padding(vertical = 1.dp), key = st.id.takeUnless { direct },
+                below = if (direct) null else exitLine(st.id),
             ) { sheet = st.id } }
         }
         if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {
             HomeRow(setup.home, lit = on, loginUrl = vpn.tsLoginUrl.takeIf { setup.home.tailscale }) { tsLogin(it) }
+        }
+        // Asked only on a tap, through each running route's own exit; Direct is never asked.
+        if (on && (vpn.servers.isNotEmpty() || setup.activeRoutes.any { it.tsExit != null })) item(key = "exits") {
+            val shown = (listOf(setup.defaultRoute) + exceptions.map { it.id }).mapNotNull(report)
+            val failed = shown.count { it.ip == null }
+            val note = shown.maxOfOrNull { it.at }?.let { at ->
+                "Checked at ${java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(at))} with Cloudflare." +
+                    (if (failed > 0) " ${if (failed == 1) "1 route" else "$failed routes"} couldn't be checked." else "")
+            } ?: "Ask Cloudflare, through each exit, which address and country it sees."
+            Row(Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(note, style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite })
+                Secondary(if (checking) "Checking…" else if (shown.isEmpty()) "Check exits" else "Check again", { ui.checkExits() }, Modifier.offset(x = 16.dp), enabled = !checking)
+            }
         }
         if (setup.activeRoutes.count { !it.imported && it.loc.provider == "nord" } > 6) item(key = "note") {
             Text(
@@ -412,7 +436,8 @@ private fun appsLabel(pkgs: List<String>, labels: Map<String, String>) = when {
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun DefaultTile(
-    key: String, apps: Int, code: String?, chip: Color, direct: Boolean, title: String, meta: String, extra: String?, border: Color, onClick: () -> Unit,
+    key: String, apps: Int, code: String?, chip: Color, direct: Boolean, title: String, meta: String, extra: String?, border: Color,
+    below: (@Composable () -> Unit)? = null, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
@@ -435,6 +460,7 @@ private fun DefaultTile(
             Text(meta, style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             extra?.let { Text(it, style = Type.code.copy(fontSize = 11.sp), color = Ink.dim, maxLines = 1) }
         }
+        below?.invoke()
     }
 }
 
@@ -444,31 +470,55 @@ private fun RouteRow(
     ui: Ui, pkgs: List<String>, labels: Map<String, String>, appsLabel: String,
     code: String?, chip: Color, direct: Boolean, title: String, meta: String,
     shape: Shape, fill: Color, border: Color?, minHeight: Dp, modifier: Modifier = Modifier,
-    dashed: Boolean = false, key: String? = null, onClick: () -> Unit,
+    dashed: Boolean = false, key: String? = null, below: (@Composable () -> Unit)? = null, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val press = squish(source)
-    Row(
+    // Anything [below] spans the whole row, under its apps and its exit.
+    Column(
     modifier.padding(horizontal = Gutter).graphicsLayer { scaleX = press.value; scaleY = press.value }
         .then(if (key != null) sharedRoute(key, shape) else Modifier)
         .fillMaxWidth().heightIn(min = minHeight).clip(shape).background(fill)
         .then(if (border != null) Modifier.border(1.dp, border, shape) else Modifier)
         .then(if (dashed) Modifier.dashed(shape) else Modifier)
         .clickable(source, ripple(), onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
-    verticalAlignment = Alignment.CenterVertically,
-    horizontalArrangement = Arrangement.spacedBy(12.dp),
+    verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterVertically),
 ) {
-    Column(Modifier.width(140.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        AppStack(ui, pkgs, labels, edge = if (fill == Color.Transparent) Ink.ground else fill)
-        Text(appsLabel, style = Type.caption, color = if (pkgs.isEmpty()) Ink.dim else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.width(140.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppStack(ui, pkgs, labels, edge = if (fill == Color.Transparent) Ink.ground else fill)
+            Text(appsLabel, style = Type.caption, color = if (pkgs.isEmpty()) Ink.dim else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        // The exit reads right-aligned beside its chip, which closes the row on the right.
+        Column(Modifier.weight(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, style = Type.title, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(meta, style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        RouteMark(code, chip, direct = direct)
     }
-    // The exit reads right-aligned beside its chip, which closes the row on the right.
-    Column(Modifier.weight(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(title, style = Type.title, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(meta, style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-    RouteMark(code, chip, direct = direct)
+    below?.invoke()
 }
+}
+
+/**
+ * What a route's exit reported ([ExitCheck]): its address and the country Cloudflare places it in. A country other
+ * than the route's own is said in words, with an icon, not by colour alone; geolocation can disagree, so it's a
+ * report, never a pass or a fail.
+ */
+@Composable
+private fun ExitLine(r: app.unbraid.vpn.ExitReport, expected: String?) {
+    val off = expected != null && r.country != null && r.country != expected
+    val text = androidx.compose.ui.text.buildAnnotatedString {
+        if (r.ip == null) { append("Couldn't check this exit"); return@buildAnnotatedString }
+        append("Reported ")
+        withStyle(Type.code.toSpanStyle().copy(color = Ink.text)) { append(r.ip) }
+        r.country?.let { append(" · ${ExitCheck.name(it)}") }
+        if (off) withStyle(androidx.compose.ui.text.SpanStyle(color = Ink.bad)) { append(", not ${ExitCheck.name(expected!!)}") }
+    }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (off) Icon(Icons.error, null, Modifier.size(16.dp), tint = Ink.bad)
+        Text(text, style = Type.caption, color = Ink.dim)
+    }
 }
 
 /** Up to five overlapping icons, then a "+N" pill; an empty slot when no app is assigned. */
