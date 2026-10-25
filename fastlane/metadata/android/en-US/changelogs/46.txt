@@ -1,0 +1,3 @@
+• Routes: each route with a VPN exit shows the address it has on the internet, checked when the routes connect and when a server changes.
+• Connections: a server that stops answering is noticed and replaced sooner. The route gets a minute to come back on the same server, then moves to another server of the same location.
+• Imports: WireGuard configs keep their own PersistentKeepalive.
