@@ -79,7 +79,6 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.hideFromAccessibility
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -91,7 +90,6 @@ import app.unbraid.data.Providers
 import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.data.Setup
-import app.unbraid.vpn.ExitCheck
 import app.unbraid.vpn.ExitReport
 import app.unbraid.vpn.VpnState
 import app.unbraid.vpn.VpnState.Phase
@@ -174,8 +172,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     // A route with a tunnel and no answer yet says it is being checked, so its card keeps its size meanwhile; it says it
     // couldn't be checked only once every attempt has failed.
     val exitLine = { id: String ->
-        (report(id) ?: ExitReport(null, null, 0, vpn.engine, null).takeIf { on && (id in vpn.servers || setup.route(id)?.tsExit != null) })
-            ?.let { r -> @Composable { ExitLine(r, setup.route(id)?.let(ExitCheck::expected), pending = r.ip == null && (asking || r.at == 0L)) } }
+        (report(id) ?: ExitReport(null, 0, vpn.engine, null).takeIf { on && (id in vpn.servers || setup.route(id)?.tsExit != null) })
+            ?.let { r -> @Composable { ExitLine(r, pending = r.ip == null && (asking || r.at == 0L)) } }
     }
     // Right after a sign-in, a provider's new key may not reach all its servers for a minute: say so instead of nothing.
     val accounts by ui.accounts.collectAsStateWithLifecycle()
@@ -501,26 +499,13 @@ private fun RouteRow(
 }
 }
 
-/**
- * What a route's exit reported ([ExitCheck]): its address and the country Cloudflare places it in. A country other
- * than the route's own is said in words, with an icon, not by colour alone; geolocation can disagree, so it's a
- * report, never a pass or a fail.
- */
+/** The address a route's exit reported ([app.unbraid.vpn.ExitCheck]), in the size of the server line above it. */
 @Composable
-private fun ExitLine(r: ExitReport, expected: String?, pending: Boolean = false) {
-    val off = expected != null && r.country != null && r.country != expected
-    val text = androidx.compose.ui.text.buildAnnotatedString {
-        if (r.ip == null) { append(if (pending) "Checking the exit…" else "Couldn't check this exit"); return@buildAnnotatedString }
-        // As small as the server line above it: a detail, not a headline.
-        withStyle(Type.code.copy(fontSize = 11.sp).toSpanStyle()) { append(r.ip) }
-        r.country?.let { append(" · ${ExitCheck.name(it)}") }
-        if (off) withStyle(androidx.compose.ui.text.SpanStyle(color = Ink.bad)) { append(", not ${ExitCheck.name(expected!!)}") }
-    }
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (off) Icon(Icons.error, null, Modifier.size(16.dp), tint = Ink.bad)
-        Text(text, style = Type.caption.copy(fontSize = 12.sp, lineHeight = 16.sp), color = Ink.dim)
-    }
-}
+private fun ExitLine(r: ExitReport, pending: Boolean) = Text(
+    r.ip ?: if (pending) "Checking the exit…" else "Couldn't check this exit",
+    style = if (r.ip != null) Type.code.copy(fontSize = 11.sp) else Type.caption.copy(fontSize = 12.sp, lineHeight = 16.sp),
+    color = Ink.dim,
+)
 
 /** Up to five overlapping icons, then a "+N" pill; an empty slot when no app is assigned. */
 @Composable

@@ -99,7 +99,7 @@ class Ui(app: Application) : AndroidViewModel(app) {
         tried.let { (e, n) -> if (e == now.engine && n >= 4) return@withContext false; tried = now.engine to (if (e == now.engine) n + 1 else 1) }
         val seen = app.unbraid.vpn.ExitCheck.ask(tags.values)
         val at = System.currentTimeMillis()
-        val reports = tags.mapValues { (id, t) -> seen[t].let { app.unbraid.vpn.ExitReport(it?.first, it?.second, at, now.engine, now.servers[id]) } }
+        val reports = tags.mapValues { (id, t) -> app.unbraid.vpn.ExitReport(seen[t], at, now.engine, now.servers[id]) }
         // On the main thread, like the clearing above: a restart while asking means these answers are already stale.
         withContext(Dispatchers.Main) {
             if (vpn.value.phase == VpnState.Phase.On && vpn.value.engine == now.engine) exits.value = exits.value.filterValues { it.engine == now.engine } + reports
