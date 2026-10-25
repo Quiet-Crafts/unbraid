@@ -19,7 +19,7 @@ data class ExitReport(val ip: String?, val country: String?, val at: Long, val e
 
 /**
  * Asks Cloudflare's trace page, through each exit (the app's own way in, [Probe]), which address and country it sees.
- * Only when the user asks; one request per tunnel. Cloudflare's country comes from its location database, which can
+ * While Routes is on screen, after a connect or a server change; one request per tunnel, never for Direct. Cloudflare's country comes from its location database, which can
  * disagree with a provider's: a report is what was seen, not proof.
  */
 object ExitCheck {

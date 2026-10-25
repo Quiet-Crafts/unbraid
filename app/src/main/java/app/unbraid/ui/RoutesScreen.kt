@@ -79,8 +79,6 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.hideFromAccessibility
-import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -94,6 +92,7 @@ import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.data.Setup
 import app.unbraid.vpn.ExitCheck
+import app.unbraid.vpn.ExitReport
 import app.unbraid.vpn.VpnState
 import app.unbraid.vpn.VpnState.Phase
 import kotlinx.coroutines.delay
@@ -159,10 +158,21 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     val defaultPkgs = remember(apps, setup) { apps.filter { setup.routeOf(it.pkg) == setup.defaultRoute }.sortedBy { it.system }.map { it.pkg } }
     val server = vpn.servers[setup.defaultRoute]
     val exits by ui.exits.collectAsStateWithLifecycle()
-    val checking by ui.checkingExits.collectAsStateWithLifecycle()
     // A route's report holds only for the engine and server it was taken on.
     val report = { id: String -> exits[id]?.takeIf { on && it.engine == vpn.engine && it.server == vpn.servers[id] } }
-    val exitLine = { id: String -> report(id)?.let { r -> @Composable { ExitLine(r, setup.route(id)?.let(ExitCheck::expected)) } } }
+    // A route with a tunnel and no answer yet says it is being checked, so its card keeps its size meanwhile.
+    val exitLine = { id: String ->
+        (report(id) ?: ExitReport(null, null, 0, vpn.engine, null).takeIf { on && (id in vpn.servers || setup.route(id)?.tsExit != null) })
+            ?.let { r -> @Composable { ExitLine(r, setup.route(id)?.let(ExitCheck::expected), pending = r.at == 0L) } }
+    }
+    // Each exit is asked once its tunnels have settled after a connect or a restart (a new server restarts them), and
+    // once more for any that didn't answer; only while Routes is on screen, and leaving it stops the asking.
+    val activeIds = remember(setup) { setup.activeRoutes.map { it.id } }
+    LaunchedEffect(on, vpn.engine, activeIds) {
+        if (!on) return@LaunchedEffect
+        delay(3_000); ui.checkExits()
+        delay(15_000); ui.checkExits()
+    }
     // Right after a sign-in, a provider's new key may not reach all its servers for a minute: say so instead of nothing.
     val accounts by ui.accounts.collectAsStateWithLifecycle()
     val settingUp by produceState(emptySet<String>(), on, setup, accounts) {
@@ -261,19 +271,6 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
         }
         if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {
             HomeRow(setup.home, lit = on, loginUrl = vpn.tsLoginUrl.takeIf { setup.home.tailscale }) { tsLogin(it) }
-        }
-        // Asked only on a tap, through each running route's own exit; Direct is never asked.
-        if (on && (vpn.servers.isNotEmpty() || setup.activeRoutes.any { it.tsExit != null })) item(key = "exits") {
-            val shown = (listOf(setup.defaultRoute) + exceptions.map { it.id }).mapNotNull(report)
-            val failed = shown.count { it.ip == null }
-            val note = shown.maxOfOrNull { it.at }?.let { at ->
-                "Checked at ${java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(at))} with Cloudflare." +
-                    (if (failed > 0) " ${if (failed == 1) "1 route" else "$failed routes"} couldn't be checked." else "")
-            } ?: "Ask Cloudflare, through each exit, which address and country it sees."
-            Row(Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(note, style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite })
-                Secondary(if (checking) "Checking…" else if (shown.isEmpty()) "Check exits" else "Check again", { ui.checkExits() }, Modifier.offset(x = 16.dp), enabled = !checking)
-            }
         }
         if (setup.activeRoutes.count { !it.imported && it.loc.provider == "nord" } > 6) item(key = "note") {
             Text(
@@ -506,18 +503,19 @@ private fun RouteRow(
  * report, never a pass or a fail.
  */
 @Composable
-private fun ExitLine(r: app.unbraid.vpn.ExitReport, expected: String?) {
+private fun ExitLine(r: ExitReport, expected: String?, pending: Boolean = false) {
     val off = expected != null && r.country != null && r.country != expected
     val text = androidx.compose.ui.text.buildAnnotatedString {
-        if (r.ip == null) { append("Couldn't check this exit"); return@buildAnnotatedString }
-        append("Reported ")
-        withStyle(Type.code.toSpanStyle().copy(color = Ink.text)) { append(r.ip) }
+        if (r.ip == null) { append(if (pending) "Checking the exit…" else "Couldn't check this exit"); return@buildAnnotatedString }
+        append("Cloudflare sees ")
+        // As small as the server line above it: a detail, not a headline.
+        withStyle(Type.code.copy(fontSize = 11.sp).toSpanStyle()) { append(r.ip) }
         r.country?.let { append(" · ${ExitCheck.name(it)}") }
         if (off) withStyle(androidx.compose.ui.text.SpanStyle(color = Ink.bad)) { append(", not ${ExitCheck.name(expected!!)}") }
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         if (off) Icon(Icons.error, null, Modifier.size(16.dp), tint = Ink.bad)
-        Text(text, style = Type.caption, color = Ink.dim)
+        Text(text, style = Type.caption.copy(fontSize = 12.sp, lineHeight = 16.sp), color = Ink.dim)
     }
 }
 

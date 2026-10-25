@@ -76,28 +76,26 @@ class Ui(app: Application) : AndroidViewModel(app) {
 
     /** Exit checks by route id ([app.unbraid.vpn.ExitCheck]): kept in memory only, and dropped when the VPN stops. */
     val exits = MutableStateFlow<Map<String, app.unbraid.vpn.ExitReport>>(emptyMap())
-    val checkingExits = MutableStateFlow(false)
 
-    private var exitJob: kotlinx.coroutines.Job? = null
+    // A stop or a restart retires every answer: they were about tunnels that no longer run.
+    init { viewModelScope.launch { vpn.collect { v -> if (v.phase != VpnState.Phase.On || exits.value.values.any { it.engine != v.engine }) exits.value = emptyMap() } } }
 
-    // A stop or a restart ends a check in flight and its results: they were about tunnels that no longer run.
-    init { viewModelScope.launch { vpn.collect { v -> if (v.phase != VpnState.Phase.On || exits.value.values.any { it.engine != v.engine }) { exitJob?.cancel(); exits.value = emptyMap() } } } }
-
-    /** Asks each running route's exit what it is seen as; routes sharing a tunnel share one request. */
-    fun checkExits() {
-        if (!checkingExits.compareAndSet(false, true)) return
-        exitJob = viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val now = vpn.value.takeIf { it.phase == VpnState.Phase.On } ?: return@launch
-                val running = UnbraidVpn.running ?: return@launch
-                val tags = UnbraidVpn.tags.filterKeys { id -> running.activeRoutes.any { it.id == id } }
-                val seen = app.unbraid.vpn.ExitCheck.ask(tags.values)
-                val at = System.currentTimeMillis()
-                val reports = tags.mapValues { (id, t) -> seen[t].let { app.unbraid.vpn.ExitReport(it?.first, it?.second, at, now.engine, now.servers[id]) } }
-                // On the main thread, like the clearing above: a restart while asking means the answers may be about
-                // tunnels that no longer run.
-                withContext(Dispatchers.Main) { if (vpn.value.phase == VpnState.Phase.On && vpn.value.engine == now.engine) exits.value = reports }
-            } finally { checkingExits.value = false }
+    /**
+     * Asks the exits of running routes that have no answer yet from the engine that runs now; routes sharing a tunnel
+     * share one request. Runs in the caller's scope, so leaving the screen stops it.
+     */
+    suspend fun checkExits() = withContext(Dispatchers.IO) {
+        val now = vpn.value.takeIf { it.phase == VpnState.Phase.On } ?: return@withContext
+        val running = UnbraidVpn.running ?: return@withContext
+        val answered = exits.value.filterValues { it.engine == now.engine && it.ip != null }
+        val tags = UnbraidVpn.tags.filterKeys { id -> id !in answered && running.activeRoutes.any { it.id == id } }
+        if (tags.isEmpty()) return@withContext
+        val seen = app.unbraid.vpn.ExitCheck.ask(tags.values)
+        val at = System.currentTimeMillis()
+        val reports = tags.mapValues { (id, t) -> seen[t].let { app.unbraid.vpn.ExitReport(it?.first, it?.second, at, now.engine, now.servers[id]) } }
+        // On the main thread, like the clearing above: a restart while asking means these answers are already stale.
+        withContext(Dispatchers.Main) {
+            if (vpn.value.phase == VpnState.Phase.On && vpn.value.engine == now.engine) exits.value = exits.value.filterValues { it.engine == now.engine } + reports
         }
     }
 
