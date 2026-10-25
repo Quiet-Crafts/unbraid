@@ -1,0 +1,3 @@
+• Routes: Check exits, under your routes while connected, shows the address and country Cloudflare sees for each route's exit, and says when it isn't the country you chose.
+• Connections: a server that stops answering is noticed and replaced sooner. The route gets a minute to come back on the same server, then moves to another server of the same location.
+• Imports: WireGuard configs keep their own PersistentKeepalive.
