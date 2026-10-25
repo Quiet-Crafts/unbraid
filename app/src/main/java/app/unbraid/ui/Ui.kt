@@ -77,19 +77,26 @@ class Ui(app: Application) : AndroidViewModel(app) {
     /** Exit checks by route id ([app.unbraid.vpn.ExitCheck]): kept in memory only, and dropped when the VPN stops. */
     val exits = MutableStateFlow<Map<String, app.unbraid.vpn.ExitReport>>(emptyMap())
 
+    /** Engine start and attempts asked of it: four at most, also when Routes is opened again. */
+    @Volatile private var tried = 0 to 0
+
+    /** Whether the engine that runs now may still be asked. */
+    fun exitTriesLeft() = vpn.value.engine.let { e -> tried.first != e || tried.second < 4 }
+
     // A stop or a restart retires every answer: they were about tunnels that no longer run.
     init { viewModelScope.launch { vpn.collect { v -> if (v.phase != VpnState.Phase.On || exits.value.values.any { it.engine != v.engine }) exits.value = emptyMap() } } }
 
     /**
      * Asks the exits of running routes that have no answer yet from the engine that runs now; routes sharing a tunnel
-     * share one request. Runs in the caller's scope, so leaving the screen stops it.
+     * share one request. Runs in the caller's scope, so leaving the screen stops it. True when every route has an answer.
      */
-    suspend fun checkExits() = withContext(Dispatchers.IO) {
-        val now = vpn.value.takeIf { it.phase == VpnState.Phase.On } ?: return@withContext
-        val running = UnbraidVpn.running ?: return@withContext
+    suspend fun checkExits(): Boolean = withContext(Dispatchers.IO) {
+        val now = vpn.value.takeIf { it.phase == VpnState.Phase.On } ?: return@withContext true
+        val running = UnbraidVpn.running ?: return@withContext true
         val answered = exits.value.filterValues { it.engine == now.engine && it.ip != null }
         val tags = UnbraidVpn.tags.filterKeys { id -> id !in answered && running.activeRoutes.any { it.id == id } }
-        if (tags.isEmpty()) return@withContext
+        if (tags.isEmpty()) return@withContext true
+        tried.let { (e, n) -> if (e == now.engine && n >= 4) return@withContext false; tried = now.engine to (if (e == now.engine) n + 1 else 1) }
         val seen = app.unbraid.vpn.ExitCheck.ask(tags.values)
         val at = System.currentTimeMillis()
         val reports = tags.mapValues { (id, t) -> seen[t].let { app.unbraid.vpn.ExitReport(it?.first, it?.second, at, now.engine, now.servers[id]) } }
@@ -97,6 +104,7 @@ class Ui(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.Main) {
             if (vpn.value.phase == VpnState.Phase.On && vpn.value.engine == now.engine) exits.value = exits.value.filterValues { it.engine == now.engine } + reports
         }
+        reports.values.all { it.ip != null }
     }
 
     fun acceptDisclosure() {

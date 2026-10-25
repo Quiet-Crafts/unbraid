@@ -160,18 +160,22 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     val exits by ui.exits.collectAsStateWithLifecycle()
     // A route's report holds only for the engine and server it was taken on.
     val report = { id: String -> exits[id]?.takeIf { on && it.engine == vpn.engine && it.server == vpn.servers[id] } }
-    // A route with a tunnel and no answer yet says it is being checked, so its card keeps its size meanwhile.
-    val exitLine = { id: String ->
-        (report(id) ?: ExitReport(null, null, 0, vpn.engine, null).takeIf { on && (id in vpn.servers || setup.route(id)?.tsExit != null) })
-            ?.let { r -> @Composable { ExitLine(r, setup.route(id)?.let(ExitCheck::expected), pending = r.at == 0L) } }
-    }
-    // Each exit is asked once its tunnels have settled after a connect or a restart (a new server restarts them), and
-    // once more for any that didn't answer; only while Routes is on screen, and leaving it stops the asking.
+    // Each exit is asked once its tunnels are up after a connect or a restart (a new server restarts them), then again
+    // for any that didn't answer yet: a tunnel can take some seconds to carry traffic. Only while Routes is on screen;
+    // leaving it stops the asking.
     val activeIds = remember(setup) { setup.activeRoutes.map { it.id } }
+    var asking by remember(on, vpn.engine, activeIds) { mutableStateOf(on && ui.exitTriesLeft()) }
     LaunchedEffect(on, vpn.engine, activeIds) {
         if (!on) return@LaunchedEffect
-        delay(3_000); ui.checkExits()
-        delay(15_000); ui.checkExits()
+        delay(3_000)
+        for (wait in listOf(10_000L, 20_000L, 40_000L)) { if (ui.checkExits() || !ui.exitTriesLeft()) break; delay(wait) }
+        if (!ui.checkExits()) asking = false
+    }
+    // A route with a tunnel and no answer yet says it is being checked, so its card keeps its size meanwhile; it says it
+    // couldn't be checked only once every attempt has failed.
+    val exitLine = { id: String ->
+        (report(id) ?: ExitReport(null, null, 0, vpn.engine, null).takeIf { on && (id in vpn.servers || setup.route(id)?.tsExit != null) })
+            ?.let { r -> @Composable { ExitLine(r, setup.route(id)?.let(ExitCheck::expected), pending = r.ip == null && (asking || r.at == 0L)) } }
     }
     // Right after a sign-in, a provider's new key may not reach all its servers for a minute: say so instead of nothing.
     val accounts by ui.accounts.collectAsStateWithLifecycle()
@@ -507,7 +511,6 @@ private fun ExitLine(r: ExitReport, expected: String?, pending: Boolean = false)
     val off = expected != null && r.country != null && r.country != expected
     val text = androidx.compose.ui.text.buildAnnotatedString {
         if (r.ip == null) { append(if (pending) "Checking the exit…" else "Couldn't check this exit"); return@buildAnnotatedString }
-        append("Cloudflare sees ")
         // As small as the server line above it: a detail, not a headline.
         withStyle(Type.code.copy(fontSize = 11.sp).toSpanStyle()) { append(r.ip) }
         r.country?.let { append(" · ${ExitCheck.name(it)}") }

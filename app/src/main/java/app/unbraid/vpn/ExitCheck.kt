@@ -23,7 +23,8 @@ data class ExitReport(val ip: String?, val country: String?, val at: Long, val e
  * disagree with a provider's: a report is what was seen, not proof.
  */
 object ExitCheck {
-    const val HOST = "www.cloudflare.com"
+    /** Cloudflare's own sites, tried in turn: a network or a site rule that stops one rarely stops both. */
+    val HOSTS = listOf("www.cloudflare.com", "one.one.one.one")
     private val IPV4 = Regex("""(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}""")
     private val ISO = Locale.getISOCountries().toHashSet()
 
@@ -56,15 +57,19 @@ object ExitCheck {
      */
     fun expected(r: Route) = r.loc.countryCode.takeIf { !r.imported && !(r.loc.provider == "nord" && r.loc.group in Nord.openVpnOnly) }?.let(::country)
 
-    /** Each tunnel's answer by tag, four at a time; null for one that didn't answer within 12 s. */
+    /** One trace through [tag] from [host]; null when it fails, logged by kind only (messages can hold addresses). */
+    private suspend fun trace(tag: String, host: String) = try {
+        Probe.cancellable { raw -> Probe.get(tag, host, "/cdn-cgi/trace", max = 4096, accept = "text/plain", raw = raw) }.let { parse(it) ?: error("unexpected answer") }
+    } catch (e: kotlinx.coroutines.CancellationException) { throw e
+    } catch (e: Exception) { android.util.Log.w("Unbraid", "exit check $tag via $host: ${e.javaClass.simpleName}"); null }
+
+    /** Each tunnel's answer by tag, four at a time; null for one that didn't answer within 20 s. */
     suspend fun ask(tags: Collection<String>): Map<String, Pair<String, String?>?> = coroutineScope {
         val gate = Semaphore(4)
         tags.distinct().map { t ->
             async {
                 t to gate.withPermit {
-                    withTimeoutOrNull(12_000) {
-                        runCatching { Probe.cancellable { raw -> parse(Probe.get(t, HOST, "/cdn-cgi/trace", max = 4096, accept = "text/plain", raw = raw)) } }.getOrNull()
-                    }
+                    withTimeoutOrNull(20_000) { HOSTS.firstNotNullOfOrNull { h -> trace(t, h) } }
                 }
             }
         }.awaitAll().toMap()
