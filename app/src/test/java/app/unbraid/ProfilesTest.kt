@@ -102,4 +102,115 @@ class ProfilesTest {
         assertNull(b2.profile) // its profile is gone by that name: none selected, the routes still as they ran
         assertEquals(emptyMap<String, String>(), b2.apps) // netflix's route was removed meanwhile
     }
+    @Test fun readinessAndSwitchingEmptyProfiles() {
+        assertEquals(false, Profile("Empty", "").ready)
+        assertEquals(true, Profile("Direct", DIRECT).ready)
+        assertEquals(true, Profile("Home", "nl").ready)
+        val s = base.saveAs("Home").add("Empty", true).add("Trip", false)
+            .copy(defaultRoute = "it", apps = mapOf("rai" to DIRECT))
+        assertEquals(s, s.use("Empty"))
+        val trip = s.use("Trip")
+        assertEquals("Trip", trip.profile)
+        assertEquals("nl", trip.defaultRoute)
+        assertEquals(base.apps, trip.apps)
+        assertEquals(Profile("Home", "it", mapOf("rai" to DIRECT)), trip.profiles[0])
+    }
+
+    @Test fun addCopiesLiveStateOrCreatesEmptyWithoutSwitching() {
+        val live = base.saveAs("Home").copy(defaultRoute = "it", apps = mapOf("rai" to DIRECT))
+        val copied = live.add("Copy", false)
+        assertEquals("Home", copied.profile)
+        assertEquals("it", copied.defaultRoute)
+        assertEquals(live.apps, copied.apps)
+        assertEquals(Profile("Home", "it", live.apps), copied.profiles[0])
+        assertEquals(Profile("Copy", "it", live.apps), copied.profiles[1])
+        val empty = live.add("Empty", true)
+        assertEquals("Home", empty.profile)
+        assertEquals("it", empty.defaultRoute)
+        assertEquals(live.apps, empty.apps)
+        assertEquals(Profile("Home", "it", live.apps), empty.profiles[0])
+        assertEquals(Profile("Empty", ""), empty.profiles[1])
+    }
+
+    @Test fun viewDraftAndFallbackToLiveSetup() {
+        val s = base.saveAs("Home").add("Trip", true)
+            .editing("Trip") { it.copy(defaultRoute = "it", apps = mapOf("rai" to DIRECT)) }
+            .copy(defaultRoute = "us", apps = mapOf("bank" to DIRECT))
+        assertEquals(s.copy(defaultRoute = "it", apps = mapOf("rai" to DIRECT)), s.viewAs("Trip"))
+        assertEquals(s, s.viewAs(null))
+        assertEquals(s, s.viewAs("Home"))
+        assertEquals(s, s.viewAs("Missing"))
+        assertEquals("", s.add("Empty", true).viewAs("Empty").defaultRoute)
+    }
+
+    @Test fun editDraftThenUseIt() {
+        val s = base.saveAs("Home").add("Trip", true)
+            .copy(defaultRoute = "us", apps = mapOf("bank" to DIRECT))
+        val draft = s.editing("Trip") { it.copy(defaultRoute = "it", apps = mapOf("rai" to "nl")) }
+        assertEquals(s.defaultRoute, draft.defaultRoute)
+        assertEquals(s.apps, draft.apps)
+        assertEquals(s.profiles[0], draft.profiles[0])
+        assertEquals(Profile("Trip", "it", mapOf("rai" to "nl")), draft.profiles[1])
+        val switched = draft.use("Trip")
+        assertEquals("Trip", switched.profile)
+        assertEquals("it", switched.defaultRoute)
+        assertEquals(mapOf("rai" to "nl"), switched.apps)
+        assertEquals(Profile("Home", "us", s.apps), switched.profiles[0])
+    }
+
+    @Test fun editLiveForNullCurrentAndUnknownNames() {
+        val s = base.saveAs("Home").add("Trip", true)
+        for (name in listOf(null, "Home", "Missing")) {
+            val edited = s.editing(name) { it.copy(defaultRoute = "it", apps = mapOf("rai" to DIRECT)) }
+            assertEquals("Home", edited.profile)
+            assertEquals("it", edited.defaultRoute)
+            assertEquals(mapOf("rai" to DIRECT), edited.apps)
+            assertEquals(s.profiles, edited.profiles)
+            assertEquals(Profile("Home", "it", edited.apps), edited.saved[0])
+        }
+    }
+
+    @Test fun tidyPreservesEmptyAndMendsRemovedRoutes() {
+        val s = base.copy(routes = listOf(nl, it), profiles = listOf(
+            Profile("Empty", ""),
+            Profile("Draft", "", mapOf("lost" to "us", "kept" to "it")),
+            Profile("Trip", "us", mapOf("lost" to "us", "kept" to "it")),
+        ))
+        val tidy = s.tidy()
+        assertEquals(Profile("Empty", ""), tidy.profiles[0])
+        assertEquals(Profile("Draft", "", mapOf("kept" to "it")), tidy.profiles[1])
+        assertEquals(Profile("Trip", "nl", mapOf("kept" to "it")), tidy.profiles[2])
+        assertEquals(tidy, tidy.tidy())
+    }
+
+    @Test fun backRestoresRunningProfileWithEmptyDraftPresent() {
+        val ran = base.saveAs("Home").add("Empty", true)
+        val refused = ran.add("Trip", false).use("Trip")
+            .copy(defaultRoute = "it", apps = mapOf("rai" to DIRECT))
+        val back = refused.back(ran)
+        assertEquals("Home", back.profile)
+        assertEquals("nl", back.defaultRoute)
+        assertEquals(base.apps, back.apps)
+        assertEquals(Profile("Empty", ""), back.profiles[1])
+        assertEquals(Profile("Trip", "it", mapOf("rai" to DIRECT)), back.profiles[2])
+    }
+
+    /** A refused switch keeps edits made meanwhile to the profile it goes back to: the routes run as before, unprofiled. */
+    @Test fun backKeepsEditsMadeMeanwhile() {
+        val ran = base.saveAs("Home").saveAs("Trip") // the engine runs Trip
+        val edited = ran.use("Home").editing("Trip") { it.copy(apps = mapOf("rai" to "it")) } // Trip edited while switching to Home
+        val back = edited.back(ran)
+        assertNull(back.profile)
+        assertEquals(ran.apps, back.apps)
+        assertEquals(mapOf("rai" to "it"), back.profiles.first { p -> p.name == "Trip" }.apps)
+    }
+
+    /** Names can't hide control or direction-override characters (they show in tiles and shortcuts). */
+    @Test fun namesRefuseControls() {
+        val s = base
+        assertNull(s.profileName("Ho\u202Eme"))
+        assertNull(s.profileName("Ho\nme"))
+        assertNull(s.profileName("Ho\u0000me"))
+        assertEquals("👨‍👩‍👧 Casa", s.profileName("👨‍👩‍👧 Casa")) // a joined emoji (zero-width joiners) stays allowed
+    }
 }

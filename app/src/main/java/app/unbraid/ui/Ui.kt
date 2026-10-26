@@ -40,6 +40,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -50,7 +52,7 @@ import kotlinx.coroutines.withContext
 data class AppInfo(val pkg: String, val label: String, val system: Boolean)
 
 /** The single screen-facing model. Thin: state lives in [app.unbraid.data.Store] and [UnbraidVpn.state]. */
-class Ui(app: Application) : AndroidViewModel(app) {
+class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : AndroidViewModel(app) {
     private val store = Unbraid.store
     private val pm = app.packageManager
 
@@ -399,12 +401,18 @@ class Ui(app: Application) : AndroidViewModel(app) {
         s.copy(routes = s.routes.map { if (it.id == id) it.copy(loc = loc, wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null, filter = it.filter.takeIf { _ -> it.loc.provider == loc.provider && !it.imported }) else it })
     }
 
-    /** A new route for [loc] (or the one already exiting there) for app [pkg], as one change. */
-    fun addRouteFor(pkg: String, loc: Location) = guarded { s ->
-        val r = s.routes.firstOrNull { !it.imported && it.loc.ident() == loc.ident() } ?: Route(newId(), loc, hue = nextHue(s))
-        // As [assign]: an app given the default route follows the default.
-        s.copy(routes = if (r in s.routes) s.routes else s.routes + r, apps = if (r.id == s.defaultRoute) s.apps - pkg else s.apps + (pkg to r.id))
+    /** A new route for [loc] (or the one already exiting there) for app [pkg], as one change; in the profile being viewed. */
+    fun addRouteFor(pkg: String, loc: Location) {
+        val f = { s: Setup ->
+            val r = s.routes.firstOrNull { !it.imported && it.loc.ident() == loc.ident() } ?: Route(newId(), loc, hue = nextHue(s))
+            // As [assign]: an app given the default route follows the default.
+            s.copy(routes = if (r in s.routes) s.routes else s.routes + r).editing(draft) { p -> p.copy(apps = if (r.id == p.defaultRoute) p.apps - pkg else p.apps + (pkg to r.id)) }
+        }
+        if (draft != null) store.update(f) else guarded(f = f)
     }
+
+    /** Sets the default route of the profile being viewed to [loc] (a route already exiting there, or a new one). */
+    fun chooseDefault(loc: Location) { if (draft != null) setDefault(addRoute(loc)) }
 
     /** A route change that would take a provider over its connection limit, waiting for the user's answer. */
     class LimitAsk(val text: String, val apply: () -> Unit, val share: Pair<String, () -> Unit>?)
@@ -503,7 +511,8 @@ class Ui(app: Application) : AndroidViewModel(app) {
             val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null) ?: Route(id, hue = nextHue(s))
             val r = source(blank)
             var next = s.copy(routes = if (s.route(id) != null) s.routes.map { if (it.id == id) r else it } else s.routes + r)
-            if (store.accounts.value.isEmpty()) {
+            // With no provider account left, provider routes go; not while editing a profile not in use (nothing live changes).
+            if (store.accounts.value.isEmpty() && draft == null) {
                 val dead = next.routes.filter { !it.imported }.map { it.id }.toSet()
                 next = next.copy(
                     routes = next.routes.filter { it.id !in dead },
@@ -523,6 +532,7 @@ class Ui(app: Application) : AndroidViewModel(app) {
      * one was. [ip] is the node's tailnet address (what Tailscale is told, unambiguous); [name] is only for display.
      */
     fun addTsExit(target: String, ip: String, name: String? = null): Boolean {
+        if (tsLock(ip) != null) return false
         val old = setup.value.routes.firstOrNull { it.tsExit != null }
         store.update { s -> s.copy(routes = s.routes.map { if (it.tsExit != null) it.copy(tsExit = ip, tsName = name) else it }) }
         val t = setup.value.route(target)
@@ -568,31 +578,97 @@ class Ui(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    fun setDefault(id: String) = guarded { s -> s.copy(defaultRoute = id, apps = s.apps.filterValues { it != id }) }
+    /** Makes route [id] the default of the profile being viewed (saved only, nothing connects) or of the live setup. */
+    fun setDefault(id: String) = editRoutes { p -> p.copy(defaultRoute = id, apps = p.apps.filterValues { it != id }) }
+
+    /** [f] on the profile being viewed when it isn't the one in use (nothing connects, no limit to check), else live and guarded. */
+    private fun editRoutes(f: (app.unbraid.data.Profile) -> app.unbraid.data.Profile) {
+        val d = draft
+        if (d != null) store.update { it.editing(d, f) } else guarded { it.editing(null, f) }
+    }
+
+    // ---- viewing a profile ----
+
+    /** The profile shown on Routes and Apps when it isn't the one in use; null = the one in use (the live setup). */
+    // Kept across process death: a picker or sheet restored for a profile not in use must not act on the live setup.
+    val viewing = state.getMutableStateFlow<String?>("viewing", null)
+    /** The setup as the viewed profile routes it: what Routes and Apps show. */
+    val shown = combine(setup, viewing) { s, v -> s.viewAs(v) }.stateIn(viewModelScope, SharingStarted.Eagerly, setup.value)
+    /** The viewed profile, if it exists and isn't the one in use: edits go to it alone. */
+    private val draft get() = viewing.value?.takeIf { n -> n != setup.value.profile && setup.value.profiles.any { it.name == n } }
+
+    /**
+     * Route [id], ready to be changed for the profile being viewed: if the live setup or another profile uses it too, the
+     * viewed one gets its own copy first (same exit, new id), so nothing live or elsewhere changes. Otherwise [id] itself.
+     */
+    fun ownRoute(id: String): String {
+        val d = draft ?: return id
+        val s = setup.value
+        // Shared with the live setup or another profile: those keep theirs.
+        val r = s.route(id)?.takeIf { s.activeRoutes.any { it.id == id } || s.saved.any { p -> p.name != d && (p.defaultRoute == id || id in p.apps.values) } } ?: return id
+        val copy = newId()
+        store.update { c ->
+            c.copy(routes = c.routes + r.copy(id = copy, hue = nextHue(c))).editing(d) { p ->
+                p.copy(defaultRoute = if (p.defaultRoute == id) copy else p.defaultRoute, apps = p.apps.mapValues { (_, v) -> if (v == id) copy else v })
+            }
+        }
+        return copy
+    }
+
+    /** Takes route [id] out of the profile being viewed: its apps there follow that profile's default. The route stays for others. */
+    fun dropRoute(id: String) { draft?.let { d -> store.update { it.editing(d) { p -> p.copy(apps = p.apps.filterValues { v -> v != id }) } } } }
+
+    /**
+     * While a profile not in use is edited: the live route through another Tailscale exit node, which keeps [ip] from
+     * being chosen (Tailscale uses one exit node at a time, and the live one must not change before Use).
+     */
+    fun tsLock(ip: String) = if (draft == null) null else setup.value.activeRoutes.firstOrNull { it.tsExit != null && it.tsExit != ip }
+
+    /** Shows profile [name] without using it: nothing reconnects until [useProfile]. */
+    fun view(name: String?) { viewing.value = name?.takeIf { it != setup.value.profile } }
 
     // ---- profiles ----
 
-    /** Set by a profile shortcut that should connect once switched; the activity on screen then connects. */
-    val connectWanted = MutableStateFlow(false)
+    /** Set by a profile shortcut: the activity on screen shows Routes (where the profile is shown, to be used). */
+    val routesWanted = MutableStateFlow(false)
     val switching = Profiles.switching
     val switchFailed = Profiles.refused
 
     /** Switches to profile [name]; [then] runs once it is saved (at once, or after the user's yes to a provider's limit). */
     fun useProfile(name: String, then: () -> Unit = {}) {
         switchFailed.value = null
-        if (setup.value.profiles.none { it.name == name }) return
-        if (setup.value.profile == name) return then()
-        guarded({ Profiles.started(name); then() }) { it.use(name) }
+        val p = setup.value.profiles.firstOrNull { it.name == name } ?: return
+        if (setup.value.profile == name) { viewing.value = null; return then() }
+        // An empty profile can't be used yet: it is shown, to be given a default route.
+        if (!p.ready) { viewing.value = name; return }
+        guarded({ viewing.value = null; Profiles.started(name); then() }) { it.use(name) }
     }
 
-    fun saveProfile(name: String) = store.update { s -> s.profileName(name)?.takeIf { s.profiles.size < MAX_PROFILES }?.let { s.saveAs(it) } ?: s }
-    fun renameProfile(old: String, name: String) = store.update { s -> s.profileName(name, except = old)?.let { s.rename(old, it) } ?: s }
-    fun forgetProfile(name: String) = store.update { it.forget(name) }
+    /**
+     * A new profile [raw]: with none in use, the current setup saved as it and in use (nothing reconnects); otherwise a
+     * copy of the current setup, or [empty], shown but not in use.
+     */
+    fun newProfile(raw: String, empty: Boolean) {
+        var added: String? = null
+        store.update { s ->
+            val n = s.profileName(raw)?.takeIf { s.profiles.size < MAX_PROFILES } ?: return@update s
+            if (s.profile == null && !empty) s.saveAs(n) else { added = n; s.add(n, empty) }
+        }
+        viewing.value = added
+    }
+
+    fun renameProfile(old: String, name: String) {
+        store.update { s -> s.profileName(name, except = old)?.let { s.rename(old, it) } ?: s }
+        // Renamed while shown: keep showing it under its new name.
+        if (viewing.value == old && setup.value.profiles.none { it.name == old }) viewing.value = name.trim()
+    }
+
+    fun forgetProfile(name: String) { store.update { it.forget(name) }; if (viewing.value == name) viewing.value = null }
     fun moveProfile(name: String, by: Int) = store.update { it.move(name, by) }
 
     /** [routeId] null or equal to the default → app follows the default. */
-    fun assign(pkg: String, routeId: String?) = guarded { s ->
-        s.copy(apps = if (routeId == null || routeId == s.defaultRoute) s.apps - pkg else s.apps + (pkg to routeId))
+    fun assign(pkg: String, routeId: String?) = editRoutes { p ->
+        p.copy(apps = if (routeId == null || routeId == p.defaultRoute) p.apps - pkg else p.apps + (pkg to routeId))
     }
 
     /** Route [id]'s own blocking choice; one equal to its provider page's is dropped, so the route follows the page again. */

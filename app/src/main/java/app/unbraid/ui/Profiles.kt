@@ -4,6 +4,12 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -88,12 +94,19 @@ fun AddMark(glyph: ImageVector, ink: Color, badge: Color, plus: Color, ring: Col
  * Not [lit], it greys but stays tappable, so it can say why nothing more can be added.
  */
 @Composable
-fun AddButton(glyph: ImageVector, label: String, modifier: Modifier = Modifier, lit: Boolean = true, onClick: () -> Unit) {
+fun AddButton(
+    glyph: ImageVector, label: String, modifier: Modifier = Modifier, lit: Boolean = true,
+    /** A long press, also offered to TalkBack as an action named [longLabel]. */
+    onLongClick: (() -> Unit)? = null, longLabel: String = "New empty profile", onClick: () -> Unit,
+) {
     val source = remember { MutableInteractionSource() }
     val press = squish(source)
+    val haptic = LocalHapticFeedback.current
     val fill = if (lit) Ink.accent else Ink.surfaceHigh
     Box(
-        modifier.size(56.dp, 48.dp).clickable(source, null, role = Role.Button, onClick = onClick).semantics { contentDescription = label },
+        modifier.size(56.dp, 48.dp)
+            .combinedClickable(source, null, role = Role.Button, onLongClick = onLongClick?.let { f -> { haptic.performHapticFeedback(HapticFeedbackType.LongPress); f() } }, onClick = onClick)
+            .semantics { contentDescription = label; onLongClick?.let { f -> customActions = listOf(CustomAccessibilityAction(longLabel) { f(); true }) } },
         contentAlignment = Alignment.Center,
     ) {
         Box(
@@ -118,9 +131,10 @@ fun Manage(onClick: () -> Unit) = Row(
  * being switched to, with a small loader in place of its check) is always scrolled fully into view.
  */
 @Composable
-fun ProfileStrip(setup: Setup, switching: String?, onUse: (String) -> Unit, onAdd: () -> Unit) {
+fun ProfileStrip(setup: Setup, switching: String?, viewing: String?, onView: (String) -> Unit, onAdd: (empty: Boolean) -> Unit) {
     val names = setup.profiles.map { it.name }
-    val selected = switching ?: setup.profile
+    val inUse = switching ?: setup.profile
+    val selected = viewing ?: inUse
     val list = rememberLazyListState()
     val clear = with(LocalDensity.current) { 28.dp.toPx() } // clear of the fade, with a neighbour peeking
     LaunchedEffect(selected, names) {
@@ -138,42 +152,88 @@ fun ProfileStrip(setup: Setup, switching: String?, onUse: (String) -> Unit, onAd
     Row(Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter - 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         Box(Modifier.weight(1f).height(48.dp)) {
             LazyRow(Modifier.fillMaxSize().selectableGroup(), state = list, horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-                itemsIndexed(names, key = { _, n -> n }) { i, n -> Segment(n, i, names.size, n == selected, busy = n == switching) { onUse(n) } }
+                itemsIndexed(names, key = { _, n -> n }) { i, n -> Segment(n, i, names.size, shown = n == selected, inUse = n == inUse, busy = n == switching) { onView(n) } }
             }
             // A fade where more profiles are hidden.
             val fade = { start: Boolean -> Brush.horizontalGradient(if (start) listOf(Ink.ground, Color.Transparent) else listOf(Color.Transparent, Ink.ground)) }
             if (list.canScrollBackward) Box(Modifier.align(Alignment.CenterStart).width(20.dp).fillMaxHeight().background(fade(true)))
             if (list.canScrollForward) Box(Modifier.align(Alignment.CenterEnd).width(20.dp).fillMaxHeight().background(fade(false)))
         }
-        AddButton(Icons.layers, if (names.size < MAX_PROFILES) "Add profile" else "Profile limit reached", lit = names.size < MAX_PROFILES, onClick = onAdd)
+        AddButton(Icons.layers, if (names.size < MAX_PROFILES) "Add profile" else "Profile limit reached", lit = names.size < MAX_PROFILES, onLongClick = { onAdd(true) }) { onAdd(false) }
     }
 }
 
-/** One profile: tinted with a check when selected (colour, not shape); corners follow its place in the group. */
+/**
+ * One profile; corners follow its place in the group, and state is colour, never shape. The one shown is tinted; the
+ * one in use carries the check (and a loader while it is being switched to).
+ */
 @Composable
-private fun Segment(name: String, i: Int, n: Int, selected: Boolean, busy: Boolean, onClick: () -> Unit) {
+private fun Segment(name: String, i: Int, n: Int, shown: Boolean, inUse: Boolean, busy: Boolean, onClick: () -> Unit) {
+    val selected = shown
     val source = remember { MutableInteractionSource() }
     val press = squish(source)
     val fill by animateColorAsState(if (selected) Ink.accentContainer else Ink.surfaceHigh, MaterialTheme.motionScheme.fastEffectsSpec(), label = "segment")
     val scale = LocalDensity.current.fontScale.coerceIn(1f, 2f) // larger text widens the segment rather than cutting the name
     val shape = RoundedCornerShape(if (i == 0) 22.dp else 8.dp, if (i == n - 1) 22.dp else 8.dp, if (i == n - 1) 22.dp else 8.dp, if (i == 0) 22.dp else 8.dp)
-    Box(Modifier.height(48.dp).selectable(selected, source, null, role = Role.Tab, onClick = onClick), contentAlignment = Alignment.Center) {
+    Box(
+        Modifier.height(48.dp).selectable(selected, source, null, role = Role.Tab, onClick = onClick).semantics { if (inUse) stateDescription = "In use" },
+        contentAlignment = Alignment.Center,
+    ) {
         Row(
             Modifier.graphicsLayer { scaleX = press.value; scaleY = press.value }.heightIn(min = 40.dp).widthIn(72.dp, 156.dp * scale).clip(shape).background(fill)
                 .indication(source, ripple()).padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
         ) {
             if (busy) CircularProgressIndicator(Modifier.size(16.dp), color = Ink.accent, strokeWidth = 2.dp, trackColor = Ink.accent.copy(alpha = 0.25f))
-            else if (selected) Icon(Icons.check, null, Modifier.size(18.dp), tint = Ink.accent)
+            else if (inUse) Icon(Icons.check, null, Modifier.size(18.dp), tint = Ink.accent)
             Text(name, style = Type.title.copy(fontSize = Type.sub.fontSize, fontWeight = if (selected) Type.title.fontWeight else Type.body.fontWeight),
                 color = if (selected) Ink.accent else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
 
+/**
+ * Under the strip while a profile is shown but not in use: what is in use, Back to it, and Use, the one thing that
+ * switches (every app reconnects). An empty profile can't be used until it has a default route.
+ */
+@Composable
+fun UseBar(name: String, inUse: String?, ready: Boolean, onBack: () -> Unit, onUse: () -> Unit) = Row(
+    Modifier.padding(horizontal = Gutter, vertical = 4.dp).fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Ink.surface)
+        .border(1.dp, Ink.line, RoundedCornerShape(20.dp)).padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp)
+        .semantics(mergeDescendants = false) { liveRegion = LiveRegionMode.Polite },
+    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
+) {
+    Column(Modifier.weight(1f).padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text("$name · not in use", style = Type.title.copy(fontSize = Type.sub.fontSize), color = Ink.text)
+        Text(if (!ready) "Choose a default route to use it" else inUse?.let { "$it is in use" } ?: "No profile is in use", style = Type.caption, color = Ink.dim)
+    }
+    Secondary(inUse?.let { "Back" } ?: "Close", onBack, color = Ink.dim)
+    Box(
+        Modifier.heightIn(min = 40.dp).clip(RoundedCornerShape(20.dp)).background(if (ready) Ink.accent else Ink.surfaceHigh)
+            .clickable(enabled = ready, role = Role.Button, onClickLabel = "Use $name", onClick = onUse).padding(horizontal = 16.dp),
+        contentAlignment = Alignment.Center,
+    ) { Text("Use", style = Type.title.copy(fontSize = Type.sub.fontSize), color = if (ready) Ink.onAccent else Ink.faint) }
+}
+
+/** The default route of an empty profile: not chosen yet, so it can't be used. Choose opens the picker. */
+@Composable
+fun NotSet(onChoose: () -> Unit) = Row(
+    Modifier.padding(horizontal = Gutter).fillMaxWidth().heightIn(min = 96.dp).clip(RoundedCornerShape(28.dp))
+        .border(1.5.dp, Ink.line, RoundedCornerShape(28.dp)).clickable(role = Role.Button, onClick = onChoose).padding(horizontal = 20.dp, vertical = 18.dp),
+    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+) {
+    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("ALL OTHER APPS", style = Type.overline, color = Ink.dim)
+        Text("Not set", style = Type.title.copy(fontSize = Type.headline.fontSize * 0.55f), color = Ink.text)
+        Text("Choose where apps go by default", style = Type.caption, color = Ink.dim)
+    }
+    Text("Choose", style = Type.title.copy(fontSize = Type.sub.fontSize), color = Ink.accent)
+}
+
 /** What a profile keeps, in words: "Netherlands · 3 exceptions". */
 fun summary(s: Setup, p: Profile): String {
     val n = p.apps.values.toSet().size
+    if (!p.ready) return "Empty · no default route yet"
     return "${s.route(p.defaultRoute)?.name ?: "Direct"} · ${if (n == 0) "no exceptions" else if (n == 1) "1 exception" else "$n exceptions"}"
 }
 
@@ -183,12 +243,21 @@ fun summary(s: Setup, p: Profile): String {
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ProfileSheet(setup: Setup, editing: String?, onSave: (String) -> Unit, onDelete: () -> Unit, onDismiss: () -> Unit) {
+fun ProfileSheet(setup: Setup, editing: String?, startEmpty: Boolean, onSave: (String, Boolean) -> Unit, onDelete: () -> Unit, onDismiss: () -> Unit) {
     var name by rememberSaveable { mutableStateOf(editing.orEmpty()) }
     var deleting by rememberSaveable { mutableStateOf(false) }
+    // New: the current setup (saved and in use when none is), a copy of the one in use, or empty; the last two not in use.
+    var empty by rememberSaveable { mutableStateOf(startEmpty) }
     val ok = setup.profileName(name, except = editing)
     val taken = name.isNotBlank() && ok == null && graphemes(name.trim()) <= PROFILE_NAME
-    val shown = setup.saved.firstOrNull { it.name == editing } ?: Profile("", setup.defaultRoute, setup.apps)
+    val shown = setup.saved.firstOrNull { it.name == editing } ?: if (empty) Profile("", "") else Profile("", setup.defaultRoute, setup.apps)
+    val title = when { editing != null -> "Edit profile"; setup.profile == null && !empty -> "Save this setup"; else -> "New profile" }
+    val sub = when {
+        editing != null -> "Rename it, or delete it"
+        empty -> "Empty, not in use until you tap Use"
+        setup.profile == null -> "Saves this setup so you can switch back in one tap"
+        else -> "A copy of ${setup.profile}, not in use until you tap Use"
+    }
     ModalBottomSheet(onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = Ink.surface, contentColor = Ink.text) {
         Column(Modifier.imePadding().verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -197,8 +266,21 @@ fun ProfileSheet(setup: Setup, editing: String?, onSave: (String) -> Unit, onDel
                     else Icon(Icons.layers, null, Modifier.size(24.dp), tint = Ink.accent)
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(if (editing == null) "New profile" else "Edit profile", style = Type.title.copy(fontSize = Type.headline.fontSize * 0.5f))
-                    Text(if (editing == null) "Saves this setup so you can switch back in one tap" else "Rename it, or delete it", style = Type.caption, color = Ink.dim)
+                    Text(title, style = Type.title.copy(fontSize = Type.headline.fontSize * 0.5f))
+                    Text(sub, style = Type.caption, color = Ink.dim)
+                }
+            }
+            if (editing == null) Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                listOf(false to (setup.profile?.let { "Copy of $it" } ?: "Current setup"), true to "Empty").forEachIndexed { i, (e, label) ->
+                    val on = empty == e
+                    Row(
+                        Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(if (i == 0) 22.dp else 8.dp, if (i == 1) 22.dp else 8.dp, if (i == 1) 22.dp else 8.dp, if (i == 0) 22.dp else 8.dp))
+                            .background(if (on) Ink.accentContainer else Ink.surfaceHigh).selectable(on, role = Role.Tab) { empty = e }.padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
+                    ) {
+                        if (on) Icon(Icons.check, null, Modifier.size(18.dp), tint = Ink.accent)
+                        Text(label, style = Type.title.copy(fontSize = Type.sub.fontSize), color = if (on) Ink.accent else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             }
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -213,7 +295,7 @@ fun ProfileSheet(setup: Setup, editing: String?, onSave: (String) -> Unit, onDel
             }
             Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Ink.surfaceHigh).padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("WHAT IT KEEPS", style = Type.overline, color = Ink.dim)
-                Keeps("Default route", listOf(setup.route(shown.defaultRoute)?.name ?: "Direct"))
+                Keeps("Default route", listOf(if (!shown.ready) "Not set" else setup.route(shown.defaultRoute)?.name ?: "Direct"))
                 val ex = shown.apps.entries.groupBy({ it.value }, { it.key }).map { (id, pkgs) -> "${if (id == DIRECT) "Direct" else setup.route(id)?.name ?: id} · ${if (pkgs.size == 1) "1 app" else "${pkgs.size} apps"}" }
                 Keeps("Exceptions", ex.take(3).ifEmpty { listOf("None") } + listOfNotNull(if (ex.size > 3) "+${ex.size - 3} more" else null))
             }
@@ -221,7 +303,7 @@ fun ProfileSheet(setup: Setup, editing: String?, onSave: (String) -> Unit, onDel
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                 if (editing != null) { Secondary("Delete", { deleting = true }, color = Ink.bad); Box(Modifier.weight(1f)) }
                 Secondary("Cancel", onDismiss, color = Ink.dim)
-                Primary(if (editing == null) "Save profile" else "Save", { ok?.let(onSave) }, Modifier.width(150.dp), enabled = ok != null)
+                Primary(if (editing == null) "Save profile" else "Save", { ok?.let { onSave(it, empty) } }, Modifier.width(150.dp), enabled = ok != null)
             }
         }
     }
@@ -238,7 +320,7 @@ private fun Keeps(label: String, lines: List<String>) = Row(Modifier.fillMaxWidt
 
 /** Manage profiles: rename or delete behind the pencil, drag the handle (or TalkBack's Move up / down) to reorder. */
 @Composable
-fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: () -> Unit, onEdit: (String) -> Unit) {
+fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: (empty: Boolean) -> Unit, onEdit: (String) -> Unit) {
     val profiles = setup.saved
     var dragging by remember { mutableStateOf<String?>(null) }
     var drift by remember { mutableFloatStateOf(0f) }
@@ -253,7 +335,8 @@ fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: () -> Unit, on
                 if (profiles.size >= MAX_PROFILES) Text("$MAX_PROFILES profiles is the most. Delete one to add another.", style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f))
                 Row(
                     Modifier.height(56.dp).clip(RoundedCornerShape(28.dp)).background(if (profiles.size < MAX_PROFILES) Ink.accent else Ink.surfaceHigh)
-                        .clickable(role = Role.Button, onClick = onAdd).padding(start = 18.dp, end = 22.dp),
+                        .combinedClickable(role = Role.Button, onLongClick = { onAdd(true) }, onClick = { onAdd(false) })
+                        .semantics { customActions = listOf(CustomAccessibilityAction("New empty profile") { onAdd(true); true }) }.padding(start = 18.dp, end = 22.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     val lit = profiles.size < MAX_PROFILES

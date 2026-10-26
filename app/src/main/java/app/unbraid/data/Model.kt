@@ -113,15 +113,23 @@ data class OwnServer(val id: String, val wg: WgPeer? = null, val ovpn: OvpnProfi
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OVPN"; else -> "SS" }
 }
 
-/** A saved setup, switched to in one tap: a default exit and app exceptions. Routes are shared by every profile. */
+/**
+ * A saved setup: a default exit and app exceptions. Routes are shared by every profile. An empty profile has no
+ * [defaultRoute] yet ("") and can't be used until it gets one.
+ */
 @Serializable
-data class Profile(val name: String, val defaultRoute: String, val apps: Map<String, String> = emptyMap())
+data class Profile(val name: String, val defaultRoute: String, val apps: Map<String, String> = emptyMap()) {
+    val ready get() = defaultRoute.isNotEmpty()
+}
 
 const val MAX_PROFILES = 20
 /** A profile name's length in characters people see: an emoji or an accented letter counts once. */
 const val PROFILE_NAME = 12
 
 private fun chars(s: String) = java.text.BreakIterator.getCharacterInstance().apply { setText(s) }
+
+/** Bidirectional controls and line separators, refused in profile names. */
+private const val BIDI = "\u200E\u200F\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069\u061C\u2028\u2029"
 
 /** Characters people see in [s] ([PROFILE_NAME] counts these, not UTF-16 units). */
 fun graphemes(s: String): Int = chars(s).let { b -> var n = 0; while (b.next() != java.text.BreakIterator.DONE) n++; n }
@@ -161,11 +169,23 @@ data class Setup(
     /** [profiles] as they stand: the one in use with the current default and exceptions. */
     val saved get() = profiles.map { if (it.name == profile) it.copy(defaultRoute = defaultRoute, apps = apps) else it }
 
-    /** Switches to profile [name]; the one in use keeps what it has now. */
-    fun use(name: String) = profiles.firstOrNull { it.name == name }?.let { p -> copy(profiles = saved, profile = p.name, defaultRoute = p.defaultRoute, apps = p.apps) } ?: this
+    /** Switches to profile [name] (not an empty one); the one in use keeps what it has now. */
+    fun use(name: String) = profiles.firstOrNull { it.name == name && it.ready }?.let { p -> copy(profiles = saved, profile = p.name, defaultRoute = p.defaultRoute, apps = p.apps) } ?: this
 
-    /** Saves the current setup as profile [name], now in use. */
+    /** Saves the current setup as profile [name], now in use (nothing changes on the connection). */
     fun saveAs(name: String) = copy(profiles = saved + Profile(name, defaultRoute, apps), profile = name)
+
+    /** Adds profile [name], not in use: a copy of the current setup, or [empty]. */
+    fun add(name: String, empty: Boolean) = copy(profiles = saved + if (empty) Profile(name, "") else Profile(name, defaultRoute, apps))
+
+    /** The setup as profile [name] routes it (its default and exceptions), for showing it; itself for the one in use or null. */
+    fun viewAs(name: String?) = profiles.firstOrNull { name != null && it.name == name && name != profile }?.let { copy(defaultRoute = it.defaultRoute, apps = it.apps) } ?: this
+
+    /** Changes the default and exceptions of profile [name] with [f]: only its saved copy, unless it is the one in use (or null). */
+    fun editing(name: String?, f: (Profile) -> Profile): Setup {
+        if (name == null || name == profile || profiles.none { it.name == name }) return f(Profile(profile.orEmpty(), defaultRoute, apps)).let { copy(defaultRoute = it.defaultRoute, apps = it.apps) }
+        return copy(profiles = profiles.map { if (it.name == name) f(it) else it })
+    }
 
     fun rename(old: String, new: String) = copy(profiles = profiles.map { if (it.name == old) it.copy(name = new) else it }, profile = if (profile == old) new else profile)
 
@@ -178,7 +198,9 @@ data class Setup(
      */
     fun back(ran: Setup): Setup {
         val ok = { id: String -> id == DIRECT || route(id) != null }
-        return copy(profiles = saved, profile = ran.profile?.takeIf { n -> profiles.any { it.name == n } },
+        // Its profile again only if still as it ran: one edited meanwhile keeps those edits, the routes run unprofiled.
+        val same = profiles.firstOrNull { it.name == ran.profile }?.takeIf { it.defaultRoute == ran.defaultRoute && it.apps == ran.apps }
+        return copy(profiles = saved, profile = same?.name,
             defaultRoute = ran.defaultRoute.takeIf(ok) ?: defaultRoute, apps = ran.apps.filterValues(ok))
     }
 
@@ -190,12 +212,14 @@ data class Setup(
 
     /** [raw] trimmed, if it can name a profile: not blank, at most [PROFILE_NAME] characters, not taken (but by [except]). */
     fun profileName(raw: String, except: String? = null) = raw.trim().takeIf { n ->
-        n.isNotEmpty() && graphemes(n) <= PROFILE_NAME && profiles.none { it.name != except && it.name.equals(n, ignoreCase = true) }
+        // No control or direction-override characters: a name shows in tiles and shortcuts, where they could disguise it.
+        n.isNotEmpty() && graphemes(n) <= PROFILE_NAME && n.none { it.isISOControl() || it in BIDI } &&
+            profiles.none { it.name != except && it.name.equals(n, ignoreCase = true) }
     }
 
     /** Profiles left pointing at a removed route: its apps follow the profile's default, a removed default becomes the first route. */
     fun tidy(): Setup {
-        val ok = { id: String -> id == DIRECT || routes.any { it.id == id } }
+        val ok = { id: String -> id == DIRECT || id.isEmpty() || routes.any { it.id == id } }
         if (profiles.all { p -> ok(p.defaultRoute) && p.apps.values.all(ok) }) return this
         val first = routes.firstOrNull()?.id ?: DIRECT
         return copy(profiles = profiles.map { p ->

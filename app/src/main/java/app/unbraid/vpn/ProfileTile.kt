@@ -55,22 +55,25 @@ object Profiles {
         refused.value = Refused(to, Unbraid.store.setup.value.profile)
     }.launchIn(scope)
 
-    /** Opens the app on profile [name]: it switches, and connects if nothing is running. */
-    fun intent(ctx: Context, name: String) = Intent(ctx, MainActivity::class.java).setAction(ACTION).putExtra("name", name).putExtra("key", key(ctx))
-
-    /** A secret of this install that only its own shortcuts and tiles carry: the app is exported, and no other app may switch profiles. */
-    fun key(ctx: Context): String = ctx.getSharedPreferences("profiles", Context.MODE_PRIVATE).run {
-        getString("key", null) ?: java.util.UUID.randomUUID().toString().also { edit().putString("key", it).apply() }
-    }
+    /** Opens the app on Routes with profile [name] shown; Use there switches. */
+    fun intent(ctx: Context, name: String) = Intent(ctx, MainActivity::class.java).setAction(ACTION).putExtra("name", name)
 
     /** Brings the shortcuts and the tiles in line with the saved profiles. */
     fun refresh(ctx: Context) {
         val s = Unbraid.store.setup.value
+        // Keyed by profile, not by place: a pinned shortcut never comes to open another profile after a reorder.
         val shortcuts = s.profiles.take(SLOTS).mapIndexed { i, p ->
-            ShortcutInfo.Builder(ctx, "profile:$i").setShortLabel(p.name).setLongLabel("Switch to ${p.name}")
+            ShortcutInfo.Builder(ctx, "profile:${p.name}").setShortLabel(p.name).setLongLabel("Open ${p.name}")
                 .setIcon(Icon.createWithResource(ctx, R.drawable.ic_profile)).setIntent(intent(ctx, p.name)).setRank(i).build()
         }
-        runCatching { ctx.getSystemService(ShortcutManager::class.java).setDynamicShortcuts(shortcuts) }
+        runCatching {
+            val m = ctx.getSystemService(ShortcutManager::class.java)
+            m.enableShortcuts(shortcuts.map { it.id }) // one pinned before, disabled while it wasn't among the first three
+            m.setDynamicShortcuts(shortcuts)
+            // A pinned shortcut of a profile now gone (deleted, renamed or not among the first three) stops working.
+            val gone = m.pinnedShortcuts.map { it.id }.filter { it.startsWith("profile:") && shortcuts.none { sc -> sc.id == it } }
+            if (gone.isNotEmpty()) m.disableShortcuts(gone, "This profile isn't among the first three any more")
+        }
         listOf(ProfileTile1::class.java, ProfileTile2::class.java, ProfileTile3::class.java).forEach {
             TileService.requestListeningState(ctx, ComponentName(ctx, it))
         }
@@ -104,13 +107,15 @@ abstract class ProfileTile(private val slot: Int) : TileService() {
     @android.annotation.SuppressLint("StartActivityAndCollapseDeprecated")
     private fun switch() {
         val old = Unbraid.store.setup.value
-        val name = old.profiles.getOrNull(slot)?.name ?: return
+        val profile = old.profiles.getOrNull(slot) ?: return
+        val name = profile.name
         if (old.profile == name && running()) { UnbraidVpn.pause(this, 15); return }
         // Over a provider's connection limit the app asks first, and Android's VPN consent needs the app too.
         val acc = Unbraid.store.accounts.value
         val ask = Limits.over(old, old.use(name)) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } != null
         when {
-            ask || VpnService.prepare(this) != null -> {
+            // An empty profile has no default route yet: the app shows it, to be given one.
+            ask || !profile.ready || VpnService.prepare(this) != null -> {
                 val open = Profiles.intent(this, name)
                 if (Build.VERSION.SDK_INT >= 34) startActivityAndCollapse(PendingIntent.getActivity(this, slot, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
                 else @Suppress("DEPRECATION") startActivityAndCollapse(open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))

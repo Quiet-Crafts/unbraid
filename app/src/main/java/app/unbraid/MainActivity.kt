@@ -114,15 +114,16 @@ class MainActivity : ComponentActivity() {
     // The open sheet and a connect waiting on it outlive a rotation (never a secret here); nothing connects by itself.
     override fun onSaveInstanceState(out: Bundle) { super.onSaveInstanceState(out); out.putString("sheet", sheet); out.putBoolean("connectAfter", connectAfter) }
 
-    // A profile shortcut (or a tile that needed the app): switch, and connect if nothing is running.
-    private fun useProfile(intent: Intent) {
-        if (intent.action != app.unbraid.vpn.Profiles.ACTION || intent.getStringExtra("key") != app.unbraid.vpn.Profiles.key(this)) return
-        val name = intent.getStringExtra("name") ?: return
-        // Connects once switched: at once, or after the user's yes to a provider's limit (maybe in a later activity).
-        ui.useProfile(name) { ui.connectWanted.value = true }
+    // A profile shortcut (or a tile that needed the app) opens Routes on that profile: it switches only on Use, so an
+    // intent from anywhere (a launcher fires shortcuts by itself) never changes routes on its own.
+    private fun showProfile(intent: Intent) {
+        if (intent.action != app.unbraid.vpn.Profiles.ACTION) return
+        val name = intent.getStringExtra("name")?.takeIf { n -> ui.setup.value.profiles.any { it.name == n } } ?: return
+        ui.view(name)
+        ui.routesWanted.value = true
     }
 
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); useProfile(intent) }
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); showProfile(intent) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         savedInstanceState?.let { sheet = it.getString("sheet"); connectAfter = it.getBoolean("connectAfter") }
@@ -133,7 +134,7 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         Onboarding.init(this)
-        if (savedInstanceState == null) useProfile(intent)
+        if (savedInstanceState == null) showProfile(intent)
         setContent {
             UnbraidTheme {
               if (!Onboarding.termsOk) {
@@ -149,11 +150,11 @@ class MainActivity : ComponentActivity() {
                 var adding by rememberSaveable { mutableStateOf(false) }
                 val vpn by ui.vpn.collectAsStateWithLifecycle()
                 val disclosed by ui.disclosed.collectAsStateWithLifecycle()
-                val connectWanted by ui.connectWanted.collectAsStateWithLifecycle()
-                LaunchedEffect(connectWanted) {
-                    if (!connectWanted) return@LaunchedEffect
-                    ui.connectWanted.value = false
-                    if (UnbraidVpn.state.value.phase.let { it == VpnState.Phase.Off || it == VpnState.Phase.Paused }) connect()
+                val routesWanted by ui.routesWanted.collectAsStateWithLifecycle()
+                LaunchedEffect(routesWanted) {
+                    if (!routesWanted) return@LaunchedEffect
+                    ui.routesWanted.value = false
+                    picker = null; adding = false; tab = Tab.Routes
                 }
 
                 // The tour: a stop index, -1 = off. A new install gets it once it is set up; Settings replays it.

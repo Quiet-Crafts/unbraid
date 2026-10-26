@@ -153,20 +153,28 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     // Profiles: the Manage page, the sheet ("" = new, else the name being edited), the note shown at the limit.
     var managing by rememberSaveable { mutableStateOf(false) }
     var profileSheet by rememberSaveable { mutableStateOf<String?>(null) }
+    var sheetEmpty by rememberSaveable { mutableStateOf(false) }
     var full by rememberSaveable { mutableStateOf(false) }
     val switching by ui.switching.collectAsStateWithLifecycle()
     val failed by ui.switchFailed.collectAsStateWithLifecycle()
-    val addProfile = { if (setup.profiles.size < MAX_PROFILES) { full = false; profileSheet = "" } else full = true }
+    val addProfile = { empty: Boolean -> if (setup.profiles.size < MAX_PROFILES) { full = false; sheetEmpty = empty; profileSheet = "" } else full = true }
     var newName by rememberSaveable { mutableStateOf("") }
     val on = vpn.phase == Phase.On
-    val byRoute = remember(setup) { setup.apps.entries.groupBy({ it.value }, { it.key }) }
-    val live = if (on) vpn.servers else emptyMap()
-    val list = remember(setup, live, byRoute) { stops(setup, live, byRoute) }
-    val exceptions = list.filter { it.id != setup.defaultRoute }
+    // A profile shown but not in use (a draft): the page shows its routes, the connection stays the live one's.
+    val viewing by ui.viewing.collectAsStateWithLifecycle()
+    val draft = viewing?.takeIf { n -> n != setup.profile && setup.profiles.any { it.name == n } }
+    val shown by ui.shown.collectAsStateWithLifecycle()
+    val lit = on && draft == null
+    val byRoute = remember(shown) { shown.apps.entries.groupBy({ it.value }, { it.key }) }
+    val live = if (lit) vpn.servers else emptyMap()
+    val list = remember(shown, live, byRoute) { stops(shown, live, byRoute) }
+    // A draft lists its own routes, and routes nothing uses yet (one just added), not every other profile's.
+    val others = remember(setup, draft) { draft?.let { d -> (setup.saved.filter { it.name != d }.flatMap { it.apps.values + it.defaultRoute } + setup.activeRoutes.map { it.id }).toSet() } }
+    val exceptions = list.filter { it.id != shown.defaultRoute && (others == null || it.id == DIRECT || it.pkgs.isNotEmpty() || it.id !in others) }
     val labels = remember(apps) { apps.associate { it.pkg to it.label } }
     // The default carries every app not sent elsewhere; its preview shows user apps, not system ones.
-    val defaultPkgs = remember(apps, setup) { apps.filter { setup.routeOf(it.pkg) == setup.defaultRoute }.sortedBy { it.system }.map { it.pkg } }
-    val server = vpn.servers[setup.defaultRoute]
+    val defaultPkgs = remember(apps, shown) { apps.filter { shown.routeOf(it.pkg) == shown.defaultRoute }.sortedBy { it.system }.map { it.pkg } }
+    val server = if (lit) vpn.servers[shown.defaultRoute] else null
     val exits by ui.exits.collectAsStateWithLifecycle()
     // A route's report holds only for the engine and server it was taken on.
     val report = { id: String -> exits[id]?.takeIf { on && it.engine == vpn.engine && it.server == vpn.servers[id] } }
@@ -183,7 +191,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     }
     // A route with a tunnel and no answer yet says it is being checked, so its card keeps its size meanwhile; it says it
     // couldn't be checked only once every attempt has failed.
-    val exitOf = { id: String -> report(id) ?: ExitReport(null, 0, vpn.engine, null).takeIf { on && (id in vpn.servers || setup.route(id)?.tsExit != null) } }
+    val exitOf = { id: String -> if (!lit) null else report(id) ?: ExitReport(null, 0, vpn.engine, null).takeIf { id in vpn.servers || setup.route(id)?.tsExit != null } }
     val pendingOf = { r: ExitReport? -> r != null && r.ip == null && (asking || r.at == 0L) }
     // Right after a sign-in, a provider's new key may not reach all its servers for a minute: say so instead of nothing.
     val accounts by ui.accounts.collectAsStateWithLifecycle()
@@ -208,7 +216,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     OnReselect(Tab.Routes) { if (managing) managing = false else scroll.animateScrollToItem(0) }
     BackHandler(managing) { managing = false }
     if (managing) {
-        ProfilesPage(ui, setup, onBack = { managing = false }, onAdd = addProfile, onEdit = { profileSheet = it })
+        ProfilesPage(ui, setup, onBack = { managing = false }, onAdd = { addProfile(it) }, onEdit = { profileSheet = it })
     } else Screen(
         state = scroll,
         overline = "",
@@ -254,8 +262,14 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
         item(key = "profiles") {
             if (setup.profiles.isEmpty()) Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = Gutter - 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Save this setup to switch back to it in one tap.", style = Type.sub, color = Ink.dim, modifier = Modifier.weight(1f))
-                AddButton(Icons.layers, "Add profile", onClick = addProfile)
-            } else ProfileStrip(setup, switching, { ui.useProfile(it) }, addProfile)
+                AddButton(Icons.layers, "Add profile", onLongClick = { addProfile(true) }) { addProfile(false) }
+            } else ProfileStrip(setup, switching, draft, { ui.view(it) }, { addProfile(it) })
+        }
+        // Shown, not in use: nothing reconnects until Use.
+        draft?.let { d ->
+            item(key = "useBar") {
+                UseBar(d, setup.profile, setup.profiles.first { it.name == d }.ready, onBack = { ui.view(null) }) { ui.useProfile(d) }
+            }
         }
         if (full && setup.profiles.size >= MAX_PROFILES) item(key = "full") {
             Notice(Icons.layers, Ink.dim, "$MAX_PROFILES profiles is the most. Delete one to add another.", "Manage", dismiss = { full = false }, live = true) { full = false; managing = true }
@@ -266,15 +280,17 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
             }
         }
         item(key = "default") {
-            val route = setup.route(setup.defaultRoute)
-            Rise("routes", 0, reveal) { DefaultTile(
-                key = setup.defaultRoute,
-                apps = defaultPkgs.size, code = route?.code, chip = if (on && route != null) Ink.route(route.hue) else Ink.faint, direct = route == null,
+            val route = setup.route(shown.defaultRoute)
+            // An empty profile has no default route yet: one to choose, never Direct by accident.
+            if (shown.defaultRoute.isEmpty()) NotSet { openPicker("default") }
+            else Rise("routes", 0, reveal) { DefaultTile(
+                key = shown.defaultRoute,
+                apps = defaultPkgs.size, code = route?.code, chip = if (lit && route != null) Ink.route(route.hue) else Ink.faint, direct = route == null,
                 title = route?.name ?: "Direct", meta = route?.let { place(it, live) } ?: "No VPN for these apps",
-                extra = if (on && route != null && server != null) serverId(route, server) else null,
-                border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (on) 0.45f else 0.25f),
-                exit = exitOf(setup.defaultRoute).let { r -> r?.let { it to pendingOf(it) } },
-            ) { sheet = setup.defaultRoute } }
+                extra = if (route != null && server != null) serverId(route, server) else null,
+                border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
+                exit = exitOf(shown.defaultRoute)?.let { it to pendingOf(it) },
+            ) { sheet = shown.defaultRoute } }
         }
         // Android refused the VPN: most often another VPN app holds Always-on.
         if (Onboarding.consentFailed && vpn.phase == Phase.Off) item(key = "consent") {
@@ -291,7 +307,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
             val direct = st.id == DIRECT
             Rise("routes", i + 1, reveal) { RouteRow(
                 ui, st.pkgs, labels, appsLabel(st.pkgs, labels),
-                code = st.code, chip = if (on || direct) st.color else Ink.faint, direct = direct,
+                code = st.code, chip = if (lit || direct) st.color else Ink.faint, direct = direct,
                 title = st.name, meta = st.detail,
                 shape = groupShape(i, exceptions.size), fill = if (direct) Color.Transparent else Ink.surface,
                 border = null, dashed = direct, minHeight = 72.dp,
@@ -300,7 +316,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
             ) { sheet = st.id } }
         }
         // Nothing set apart yet: say what that means instead of leaving the page empty.
-        if (setup.apps.isEmpty()) item(key = "allDefault") {
+        if (shown.apps.isEmpty() && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
             Text("All apps use the default route. Add a route to send some apps through another country.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp))
         }
         if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {
@@ -336,11 +352,21 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                     } else SheetAction("Disconnect", Ink.bad) { act { ui.disconnect() } }
                 } else if (id == DIRECT) {
                     Text("Apps here skip the VPN. Assign them in Apps.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
-                    if (setup.defaultRoute != DIRECT) SheetAction("Make default") { act { ui.setDefault(DIRECT) } }
+                    if (shown.defaultRoute != DIRECT) SheetAction("Make default") { act { ui.setDefault(DIRECT) } }
                 } else {
-                    SheetAction("Change location") { act { openPicker(id) } }
-                    setup.route(id)?.takeIf { it.imported }?.let { r -> SheetAction("Rename") { act { newName = r.name; renaming = id } } }
-                    if (id != setup.defaultRoute) {
+                    // In a profile not in use, a route the live setup uses too is copied first: nothing live changes.
+                    SheetAction("Change location") { act { openPicker(ui.ownRoute(id)) } }
+                    // Editing a profile not in use never reaches what is shared: no rename, no removal of the route itself.
+                    if (draft != null) {
+                        if (id != shown.defaultRoute) {
+                            SheetAction("Make default") { act { ui.setDefault(id) } }
+                            SheetAction("Remove from $draft", Ink.bad) { act { ui.dropRoute(id) } }
+                            Text("Its apps in $draft will use its default route. The route stays for other profiles.", style = Type.caption, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp))
+                        }
+                    } else {
+                        setup.route(id)?.takeIf { it.imported }?.let { r -> SheetAction("Rename") { act { newName = r.name; renaming = id } } }
+                    }
+                    if (draft == null && id != setup.defaultRoute) {
                         SheetAction("Make default") { act { ui.setDefault(id) } }
                         SheetAction("Remove route", Ink.bad) { act { ui.removeRoute(id) } }
                         val others = setup.saved.filter { p -> p.name != setup.profile && (p.defaultRoute == id || id in p.apps.values) }.map { it.name }
@@ -354,8 +380,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
         }
     }
     profileSheet?.let { editing ->
-        ProfileSheet(setup, editing.ifEmpty { null },
-            onSave = { n -> if (editing.isEmpty()) ui.saveProfile(n) else ui.renameProfile(editing, n); profileSheet = null },
+        ProfileSheet(setup, editing.ifEmpty { null }, sheetEmpty,
+            onSave = { n, empty -> if (editing.isEmpty()) ui.newProfile(n, empty) else ui.renameProfile(editing, n); profileSheet = null },
             onDelete = { ui.forgetProfile(editing); profileSheet = null }, onDismiss = { profileSheet = null })
     }
     renaming?.let { id ->
@@ -552,15 +578,16 @@ private fun RouteRow(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { apps() }
         Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) { where(false) }
-            RouteMark(code, chip, direct = direct)
+            Slot { RouteMark(code, chip, direct = direct) }
         }
     } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Column(Modifier.weight(1f, fill = false).widthIn(max = 136.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { apps() }
+        // Fixed width, so the exit column always takes the rest and every row's chip ends on the same edge.
+        Column(Modifier.width(AppsColumn), verticalArrangement = Arrangement.spacedBy(8.dp)) { apps() }
         // The exit reads right-aligned beside its chip, which closes the row on the right.
         Column(Modifier.weight(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) { where(true) }
-        RouteMark(code, chip, direct = direct)
+        Slot { RouteMark(code, chip, direct = direct) }
     }
-    exit?.takeIf { wide }?.let { (r, pending) -> Box(Modifier.fillMaxWidth().padding(end = 42.dp), contentAlignment = Alignment.CenterEnd) { ExitLine(r, pending) } }
+    exit?.takeIf { wide }?.let { (r, pending) -> Box(Modifier.fillMaxWidth().padding(end = 48.dp), contentAlignment = Alignment.CenterEnd) { ExitLine(r, pending) } }
 }
 }
 
@@ -603,21 +630,27 @@ private fun HomeRow(home: Home, lit: Boolean, loginUrl: String?, signIn: (String
             .padding(horizontal = 16.dp, vertical = 12.dp),
     ) {
         Row(Modifier.heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Column(Modifier.width(140.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.width(AppsColumn), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Box(Modifier.size(24.dp).clip(RoundedCornerShape(8.dp)).background(Ink.surfaceTop), Alignment.Center) { Icon(Icons.apps, null, Modifier.size(16.dp), tint = Ink.text) }
                 Text("Every app", style = Type.caption, color = Ink.text, maxLines = 1)
             }
-            Column(Modifier.weight(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Code("HM", if (lit) Ink.route(3) else Ink.faint)
-                    Text("Home network", style = Type.title.copy(fontSize = 16.sp), color = Ink.text, maxLines = 1)
-                }
+            // Laid out like the route rows: the chip closes the row on the right.
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("Home network", style = Type.title, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(listOfNotNull(via, home.subnets.joinToString(", ").ifBlank { null }).joinToString(" · "), style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            Slot { Code("HM", if (lit) Ink.route(3) else Ink.faint) }
         }
         loginUrl?.let { Secondary("Sign in to Tailscale", { signIn(it) }, Modifier.offset(x = (-16).dp)) }
     }
 }
+
+/** The apps column of every row on Routes: one width, so the exits and their chips line up. */
+private val AppsColumn = 136.dp
+
+/** The chip at a row's end, in one width whatever its code ("IT", "WG", Direct's glyph): the exits' text lines up too. */
+@Composable
+private fun Slot(chip: @Composable () -> Unit) = Box(Modifier.width(36.dp), contentAlignment = Alignment.CenterEnd) { chip() }
 
 /** Dashed outline: rows and slots that are outside the VPN or still empty. */
 private fun Modifier.dashed(shape: Shape) = drawBehind {

@@ -163,6 +163,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         val loc = picked.copy(pinned = picked.pinned?.takeIf { picked.provider != "nord" || picked.protocol != null || it.publicKey.isNotEmpty() })
         when {
             target.isEmpty() -> ui.addRoute(loc)
+            target == "default" -> ui.chooseDefault(loc)
             target.startsWith("app:") -> ui.addRouteFor(target.removePrefix("app:"), loc)
             else -> ui.setLocation(target, loc)
         }
@@ -172,9 +173,19 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     fun hit(s: String) = query.isEmpty() || s.contains(query, ignoreCase = true)
     val ownFavs = setup.favorites.filter { it.provider == provider && !stale(it) }.distinctBy { it.favKey() }
     val nodes = vpn.tsExitNodes.sortedByDescending { it.online }
+    var tsNote by remember { mutableStateOf<String?>(null) }
     val exitRoute = setup.routes.firstOrNull { it.tsExit != null }
     val exitNode = exitRoute?.let { it.tsName ?: it.tsExit }
-    fun exit(ip: String, name: String) { ui.addTsExit(target, ip, name); close() }
+    fun exit(ip: String, name: String) {
+        ui.tsLock(ip)?.let { r ->
+            tsNote = "${setup.profile ?: "The setup in use"} uses the Tailscale exit ${r.tsName ?: r.tsExit}. Tailscale uses one exit node at a time: pick that one here, or this one once this profile is in use."
+            return
+        }
+        ui.addTsExit(target, ip, name)
+        // addTsExit doesn't return the route; there is one Tailscale exit route at most, and it is the one just set.
+        if (target == "default") ui.setup.value.routes.firstOrNull { it.tsExit != null }?.let { ui.setDefault(it.id) }
+        close()
+    }
     // Protocol applies to this route at once, keeping its location; a server type narrows the list for the next pick.
     fun setProtocol(p: String?) {
         protocolChoice = p
@@ -269,7 +280,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         item(key = "savedLabel") { SectionLabel("Saved servers") }
         itemsIndexed(list, key = { _, s -> "own:${s.id}" }) { i, s ->
             GroupRow(
-                i, list.size, s.name, s.kind, onClick = { ui.useServer(target, s); close() },
+                i, list.size, s.name, s.kind, onClick = { ui.useServer(target, s).let { id -> if (target == "default") ui.setDefault(id) }; close() },
                 leading = { Code(s.code, Ink.dim, filled = false) },
                 trailing = { if (route?.own == s.id) Icon(Icons.checkCircle, "Selected", tint = tint, modifier = Modifier.size(22.dp)) },
             )
@@ -293,6 +304,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     }
 
     fun LazyListScope.myServers() {
+        tsNote?.let { item(key = "tsNote") { Caption(it, color = Ink.text) } }
         tailscale(nodes)
         saved(setup.servers)
         settingsNote(empty = !setup.tailscale && setup.servers.isEmpty())
@@ -337,7 +349,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     }
 
     Screen(
-        overline = if (route != null) "${route.code} route · location" else "New route",
+        overline = if (route != null) "${route.code} route · location" else if (target == "default") "Default route" else "New route",
         title = route?.name ?: "Choose a location",
         sub = when {
             route?.tsExit != null -> "Tailscale exit node"

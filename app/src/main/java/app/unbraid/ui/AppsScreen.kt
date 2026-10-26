@@ -72,18 +72,21 @@ private fun Setup.colorOf(id: String) = route(id)?.let { Ink.route(it.hue) } ?: 
 fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     val disclosed by ui.disclosed.collectAsStateWithLifecycle()
     val reveal = firstShow("apps")
-    val setup by ui.setup.collectAsStateWithLifecycle()
+    // The setup as the viewed profile routes it; its route list and prefs are the live ones.
+    val setup by ui.shown.collectAsStateWithLifecycle()
+    val viewing by ui.viewing.collectAsStateWithLifecycle()
     val apps by ui.apps.collectAsStateWithLifecycle()
     var q by rememberSaveable { mutableStateOf("") }
-    var filter by rememberSaveable { mutableStateOf<String?>(null) }
+    // What points at one profile's exits starts over when another is viewed; the search stays.
+    var filter by rememberSaveable(viewing) { mutableStateOf<String?>(null) }
     var showSystem by rememberSaveable { mutableStateOf(false) }
-    var open by rememberSaveable { mutableStateOf<String?>(null) }
+    var open by rememberSaveable(viewing) { mutableStateOf<String?>(null) }
     // The exit the open app had when it was opened: it keeps its place (and filter) until closed, then regroups.
-    var openedAs by rememberSaveable { mutableStateOf<String?>(null) }
+    var openedAs by rememberSaveable(viewing) { mutableStateOf<String?>(null) }
     fun placeOf(pkg: String) = openedAs?.takeIf { pkg == open } ?: setup.routeOf(pkg)
     // A closed row that changed exit lands in its new group; follow it there if that is off-screen.
     val list = rememberLazyListState()
-    var land by remember { mutableStateOf<String?>(null) }
+    var land by remember(viewing) { mutableStateOf<String?>(null) }
     // Tapping Apps again closes the open app and the exit filter; the search stays. With neither, it scrolls to the top.
     OnReselect(Tab.Apps) { if (open != null || filter != null) { open = null; openedAs = null; filter = null } else list.animateScrollToItem(0) }
 
@@ -115,7 +118,17 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     Screen(
         state = list,
         overline = "${apps.size} installed", title = "Apps", sub = "$routed routed · $direct direct",
-        search = { SearchField(q, { q = it }, "Search apps") },
+        search = {
+            if (viewing != null && viewing != setup.profile) Column(Modifier.padding(start = 24.dp, end = Gutter, bottom = 4.dp)) {
+                Text("Editing $viewing · not in use. ${setup.profile?.let { "$it is in use." } ?: "No profile is in use."}", style = Type.caption, color = Ink.dim)
+                if (setup.defaultRoute.isEmpty()) Text("Choose a default route on Routes", style = Type.caption, color = Ink.dim, modifier = Modifier.padding(top = 4.dp))
+                Row {
+                    Secondary("Back to ${setup.profile ?: "current setup"}", { ui.view(null) })
+                    if (setup.defaultRoute.isNotEmpty()) Secondary("Use $viewing", { ui.useProfile(viewing.orEmpty()) })
+                }
+            }
+            SearchField(q, { q = it }, "Search apps")
+        },
         belowSearch = {
             Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip("All", Ink.text, filter == null) { filter = null }
@@ -124,6 +137,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                     val label = if (setup.routes.count { it.code == r.code } > 1) "${r.code} · ${r.source}" else r.code
                     FilterChip(label, Ink.route(r.hue), filter == r.id) { filter = r.id }
                 }
+                if (setup.defaultRoute.isEmpty()) FilterChip("Not set", null, filter == "") { filter = "" }
                 FilterChip("Direct", Ink.direct, filter == DIRECT, direct = true) { filter = DIRECT }
                 FilterChip("System", null, showSystem, independent = true) { showSystem = !showSystem }
             }
@@ -144,7 +158,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                     AppRow(ui, a, setup, expanded = open == a.pkg, onToggle = {
                         if (open == a.pkg) { if (openedAs != setup.routeOf(a.pkg)) land = a.pkg; open = null; openedAs = null }
                         else { open = a.pkg; openedAs = setup.routeOf(a.pkg) }
-                    }, openPicker)
+                    }, openPicker, draft = viewing != null && viewing != setup.profile)
                 }
             }
         }
@@ -173,7 +187,7 @@ private fun FilterChip(label: String, dot: Color?, on: Boolean, direct: Boolean 
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle: () -> Unit, openPicker: (String) -> Unit) {
+private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle: () -> Unit, openPicker: (String) -> Unit, draft: Boolean = false) {
     val haptic = LocalHapticFeedback.current
     val explicit = setup.apps[a.pkg]
     val current = setup.routeOf(a.pkg)
@@ -189,7 +203,9 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle
                 Text(a.label, style = Type.body, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(a.pkg, style = Type.small, color = Ink.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            RouteMark(setup.codeOf(current), setup.colorOf(current), filled = explicit != null, direct = current == DIRECT)
+            // An empty profile has no default route yet: its unassigned apps have no exit.
+            if (current.isEmpty()) Text("Not set", style = Type.caption, color = Ink.dim)
+            else RouteMark(setup.codeOf(current), setup.colorOf(current), filled = explicit != null, direct = current == DIRECT)
         }
         // The exits spring open under the row and fade in; closing reverses it.
         AnimatedVisibility(
@@ -205,7 +221,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle
                 horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
             ) {
                 tiles.forEachIndexed { i, t ->
-                    val on = t.id == current
+                    val on = t.id.isNotEmpty() && t.id == current
                     ToggleButton(
                         checked = on,
                         onCheckedChange = {
@@ -244,7 +260,8 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle
         }
         // A Direct app's lookups: outside unbraid (the phone's DNS) or through it, with unbraid's filter.
         val f = setup.prefs.filter
-        if (expanded && explicit == DIRECT && f.server() != null) {
+        // A setting of every profile: not offered while editing a profile not in use.
+        if (expanded && explicit == DIRECT && f.server() != null && !draft) {
             val on = f.through(a.pkg)
             GroupRow(0, 1, "Filter its lookups", if (on) "Through $APP, with ${f.server()?.name}. The app can see a VPN is on" else "Outside $APP, with the phone's DNS",
                 onClick = { ui.setPrefs { p -> p.copy(filter = p.filter.copy(apps = if (!on == p.filter.directApps) p.filter.apps - a.pkg else p.filter.apps + (a.pkg to !on))) } },
