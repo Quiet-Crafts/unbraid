@@ -58,6 +58,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -194,7 +195,10 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     val leakDue = remember(resumed, tick, Onboarding.leak, Onboarding.leakUntil) { Onboarding.leakDue }
 
     val power = { if (vpn.phase == Phase.On || vpn.phase == Phase.Connecting) sheet = "power" else connect() }
+    val scroll = rememberLazyListState()
+    OnReselect(Tab.Routes) { scroll.animateScrollToItem(0) }
     Screen(
+        state = scroll,
         overline = "",
         overlineContent = { Status(vpn) },
         title = when (vpn.phase) {

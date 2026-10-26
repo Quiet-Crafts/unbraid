@@ -45,6 +45,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -198,6 +199,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     var advOpen by rememberSaveable(page) { mutableStateOf(false) }
     var wgError by remember { mutableStateOf<String?>(null) }
     BackHandler(page != null) { back() }
+    // Tapping Settings again goes back to the hub, as Back does; on the hub, it scrolls to the top.
+    OnReselect(Tab.Settings) { stack = emptyList(); settingsHub() }
     // Own servers are added here and only picked in the location picker.
     val importer = rememberImporter(ui, null) { dialog = null }
 
@@ -269,32 +272,36 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     val motion = androidx.compose.material3.MaterialTheme.motionScheme
     AnimatedContent(page, transitionSpec = { fadeIn(motion.fastEffectsSpec()) togetherWith fadeOut(motion.fastEffectsSpec()) }, label = "settings") { p ->
         when {
-            p == null -> Screen(overline = "Version ${BuildConfig.VERSION_NAME}", title = "Settings", sub = "", action = { Wordmark() }) {
-                notice(ui, notice)
-                val names = signedIn.map { it.name.removeSuffix(" VPN") }
-                group("Connections", rise = play to 0, items = listOf(
-                    Item("Providers & servers", listOfNotNull(
-                        (names.take(2).joinToString(", ") + if (names.size > 2) " +${names.size - 2}" else "").ifEmpty { "No provider yet" },
-                        setup.servers.size.takeIf { it > 0 }?.let { "$it ${if (it == 1) "server" else "servers"}" },
-                    ).joinToString(" · "), { go("providers") }, icon = Icons.vpnKey, anchor = TourStop.Connections) { Chevron() },
-                    Item("Tailscale", if (setup.tailscale) tsStatus else "Off", { go("tailscale") }, icon = Icons.hub) { Chevron() },
-                    Item("Local & home access", "Local network ${onOff(prefs.lan)} · ${homeVia?.let { "home via $it" } ?: "no home access"}", { go("local") }, icon = Icons.home, anchor = TourStop.LocalHome) { Chevron() },
-                ))
-                group("Safety", rise = play to 3, items = listOf(
-                    // Not leak-proof: the one warning left once the reminders are off.
-                    Item("VPN behaviour", when {
-                        running && !(vpn.alwaysOn && vpn.lockdown) -> "Not leak-proof: apps go online when $APP is off"
-                        running -> "Always-on on · blocking on"
-                        else -> "Always-on and blocking, set in Android"
-                    }, { go("behaviour") }, icon = Icons.tunnel, cta = running && !(vpn.alwaysOn && vpn.lockdown)) { Chevron() },
-                    Item("Protection", filterDns?.let { d -> listOfNotNull(d.name, "VPN routes".takeIf { filter.routes }, "Direct".takeIf { filter.direct || filter.directApps || filter.apps.containsValue(true) }).joinToString(" · ") } ?: "Each provider's own blocking", { go("dns") }, icon = Icons.dns) { Chevron() },
-                ))
-                group("This app", listOf(
-                    Item("Statistics", if (prefs.stats) "Recording · ${"%.1f".format(statsSize / 1e6)} MB" else if (statsSize > 0) "Off · ${"%.1f".format(statsSize / 1e6)} MB saved" else "Off", { go("stats") }, icon = Icons.stats) { Chevron() },
-                    Item("About & support", "Version ${BuildConfig.VERSION_NAME} · open source", { go("about") }, icon = Icons.info, anchor = TourStop.About) { Chevron() },
-                    Item("Legal", "Licences, terms and credits", { go("legal") }, icon = Icons.file) { Chevron() },
-                ))
-                item { Gap(24.dp) }
+            p == null -> {
+                val hub = rememberLazyListState()
+                OnReselect(Tab.Settings) { hub.animateScrollToItem(0) }
+                Screen(state = hub, overline = "Version ${BuildConfig.VERSION_NAME}", title = "Settings", sub = "", action = { Wordmark() }) {
+                    notice(ui, notice)
+                    val names = signedIn.map { it.name.removeSuffix(" VPN") }
+                    group("Connections", rise = play to 0, items = listOf(
+                        Item("Providers & servers", listOfNotNull(
+                            (names.take(2).joinToString(", ") + if (names.size > 2) " +${names.size - 2}" else "").ifEmpty { "No provider yet" },
+                            setup.servers.size.takeIf { it > 0 }?.let { "$it ${if (it == 1) "server" else "servers"}" },
+                        ).joinToString(" · "), { go("providers") }, icon = Icons.vpnKey, anchor = TourStop.Connections) { Chevron() },
+                        Item("Tailscale", if (setup.tailscale) tsStatus else "Off", { go("tailscale") }, icon = Icons.hub) { Chevron() },
+                        Item("Local & home access", "Local network ${onOff(prefs.lan)} · ${homeVia?.let { "home via $it" } ?: "no home access"}", { go("local") }, icon = Icons.home, anchor = TourStop.LocalHome) { Chevron() },
+                    ))
+                    group("Safety", rise = play to 3, items = listOf(
+                        // Not leak-proof: the one warning left once the reminders are off.
+                        Item("VPN behaviour", when {
+                            running && !(vpn.alwaysOn && vpn.lockdown) -> "Not leak-proof: apps go online when $APP is off"
+                            running -> "Always-on on · blocking on"
+                            else -> "Always-on and blocking, set in Android"
+                        }, { go("behaviour") }, icon = Icons.tunnel, cta = running && !(vpn.alwaysOn && vpn.lockdown)) { Chevron() },
+                        Item("Protection", filterDns?.let { d -> listOfNotNull(d.name, "VPN routes".takeIf { filter.routes }, "Direct".takeIf { filter.direct || filter.directApps || filter.apps.containsValue(true) }).joinToString(" · ") } ?: "Each provider's own blocking", { go("dns") }, icon = Icons.dns) { Chevron() },
+                    ))
+                    group("This app", listOf(
+                        Item("Statistics", if (prefs.stats) "Recording · ${"%.1f".format(statsSize / 1e6)} MB" else if (statsSize > 0) "Off · ${"%.1f".format(statsSize / 1e6)} MB saved" else "Off", { go("stats") }, icon = Icons.stats) { Chevron() },
+                        Item("About & support", "Version ${BuildConfig.VERSION_NAME} · open source", { go("about") }, icon = Icons.info, anchor = TourStop.About) { Chevron() },
+                        Item("Legal", "Licences, terms and credits", { go("legal") }, icon = Icons.file) { Chevron() },
+                    ))
+                    item { Gap(24.dp) }
+                }
             }
 
             p == "providers" -> Page("Providers & servers", back) {

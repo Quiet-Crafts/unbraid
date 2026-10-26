@@ -59,6 +59,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -238,6 +239,7 @@ fun StatsScreen(ui: Ui) {
     BackHandler(section != null) {
         section = when { section == "history" -> "speed"; section?.startsWith("tunnel:") == true -> "tunnels"; section == "speed" -> "live"; else -> null }
     }
+    OnReselect(Tab.Stats) { section = null }
     val motion = MaterialTheme.motionScheme
     AnimatedContent(section, transitionSpec = { fadeIn(motion.fastEffectsSpec()) togetherWith fadeOut(motion.fastEffectsSpec()) }, label = "stats") { s ->
         CompositionLocalProvider(LocalScreen provides this) {
@@ -346,7 +348,10 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
     val live by Stats.live.collectAsStateWithLifecycle()
     val vpn by ui.vpn.collectAsStateWithLifecycle()
     val play = firstShow("stats")
+    val list = rememberLazyListState()
+    OnReselect(Tab.Stats) { list.animateScrollToItem(0) }
     Screen(
+        state = list,
         overline = if (recording) rangeLabel(p, LocalDate.now()) else "Recording off · saved statistics", title = "Stats", sub = "",
     ) {
         periodPicker()

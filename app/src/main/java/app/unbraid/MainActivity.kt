@@ -71,6 +71,7 @@ import app.unbraid.ui.TourOverlay
 import app.unbraid.ui.VpnDisclosure
 import app.unbraid.ui.Welcome
 import app.unbraid.ui.settingsHub
+import app.unbraid.ui.reselected
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
 
@@ -215,7 +216,7 @@ class MainActivity : ComponentActivity() {
                     val unsaved by Unbraid.store.unsaved.collectAsStateWithLifecycle()
                     if (unsaved) Caption("Some of your changes couldn't be saved and would be lost when unbraid restarts. Tap to try saving again.",
                         Modifier.fillMaxWidth().tap({ kotlin.concurrent.thread { Unbraid.store.saveAgain() } }).padding(horizontal = 24.dp, vertical = 12.dp), color = Ink.bad)
-                    if (signedIn && picker == null && !adding) NavBar(tab) { tab = it }
+                    if (signedIn && picker == null && !adding) NavBar(tab) { if (it == tab) reselected.tryEmit(it) else tab = it }
                 }
                 if (tour >= 0) TourOverlay(
                     tour, disclosed, back = { tour-- }, close = endTour,

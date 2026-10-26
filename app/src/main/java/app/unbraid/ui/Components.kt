@@ -52,6 +52,9 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
+import kotlinx.coroutines.flow.MutableSharedFlow
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -148,6 +151,16 @@ fun SearchField(value: String, onChange: (String) -> Unit, placeholder: String) 
 // ---------------------------------------------------------------------------------------------
 
 enum class Tab(val label: String, val icon: ImageVector) { Routes("Routes", Icons.routes), Apps("Apps", Icons.apps), Stats("Stats", Icons.stats), Settings("Settings", Icons.sliders) }
+
+/** A tap on the tab already shown: its screen goes back to its main page, or a main page scrolls to the top. */
+val reselected = MutableSharedFlow<Tab>(extraBufferCapacity = 1)
+
+/** Runs [action] each time [tab] is tapped again while it is shown. */
+@Composable
+fun OnReselect(tab: Tab, action: suspend () -> Unit) {
+    val act by rememberUpdatedState(action)
+    LaunchedEffect(tab) { reselected.collect { if (it == tab) act() } }
+}
 
 @Composable
 fun NavBar(tab: Tab, onTab: (Tab) -> Unit) = ShortNavigationBar(containerColor = Ink.bar, contentColor = Ink.dim) {

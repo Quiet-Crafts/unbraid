@@ -84,6 +84,8 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     // A closed row that changed exit lands in its new group; follow it there if that is off-screen.
     val list = rememberLazyListState()
     var land by remember { mutableStateOf<String?>(null) }
+    // Tapping Apps again closes the open app and the exit filter; the search stays. With neither, it scrolls to the top.
+    OnReselect(Tab.Apps) { if (open != null || filter != null) { open = null; openedAs = null; filter = null } else list.animateScrollToItem(0) }
 
     val query = q.trim()
     val motion = MaterialTheme.motionScheme
