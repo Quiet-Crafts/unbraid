@@ -56,6 +56,8 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     override fun onAvailable(n: Network) { handler.removeCallbacks(lose); network = n; push() }
     override fun onLinkPropertiesChanged(n: Network, lp: LinkProperties) { if (n == network) push() }
     override fun onLost(n: Network) { if (n == network) handler.postDelayed(lose, 3_000) }
+    // The VPN itself is never metered (Android would warn about every app); a combined speed test asks first on a metered one.
+    override fun onCapabilitiesChanged(n: Network, caps: NetworkCapabilities) { if (n == network) UnbraidVpn.metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) }
 
     private fun push(force: Boolean = false) {
         val l = listener ?: return

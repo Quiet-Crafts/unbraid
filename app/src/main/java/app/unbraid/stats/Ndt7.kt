@@ -20,21 +20,40 @@ import kotlin.random.Random
  * one exit: locate a server, measure [ping], then ten seconds of download and ten of upload over a WebSocket.
  */
 object Ndt7 {
-    data class Server(val machine: String, val city: String, val country: String, val download: String, val upload: String)
+    /** [others]: Locate's other candidates, tried in turn when this one turns the test away. */
+    data class Server(val machine: String, val city: String, val country: String, val download: String, val upload: String, val others: List<Server> = emptyList())
+
+    /** Locate answered 204: M-Lab limits tests per address, and this exit's (often a VPN server's, shared) is used up. */
+    class Limited : Exception()
+
+    /** The test server turned the WebSocket away; another of Locate's candidates may not. */
+    class Refused : java.io.IOException("The test server refused the test")
 
     private const val SECONDS = 10
     private const val LOCATE = "locate.measurementlab.net"
 
-    /** The M-Lab server nearest the exit's own address, inside [country] when given; null if M-Lab has none there. */
+    /**
+     * The M-Lab server nearest the exit's own address, inside [country] when given; null if M-Lab has none there.
+     * Throws [Limited] when M-Lab is rate-limiting the exit's address.
+     */
     fun locate(tag: String, country: String?): Server? {
-        val q = "client_name=unbraid&client_version=${BuildConfig.VERSION_NAME}" + (country?.let { "&country=$it&strict=true" } ?: "")
+        val q = "$CLIENT" + (country?.let { "&country=$it&strict=true" } ?: "")
         val body = try { Probe.get(tag, LOCATE, "/v2/nearest/ndt/ndt7?$q") }
-        catch (e: IllegalStateException) { if (country != null && e.message?.startsWith("HTTP") == true) return null else throw e }
-        val r = NordApi.json.parseToJsonElement(body).jsonObject["results"]?.jsonArray?.firstOrNull()?.jsonObject ?: return null
-        val loc = r["location"]?.jsonObject
-        val urls = r.getValue("urls").jsonObject
-        return Server(r.str("machine"), loc?.str("city").orEmpty(), loc?.str("country").orEmpty(), urls.str("wss:///ndt/v7/download"), urls.str("wss:///ndt/v7/upload"))
+        catch (e: IllegalStateException) {
+            val m = e.message.orEmpty()
+            if (m.startsWith("HTTP 204")) throw Limited()
+            if (country != null && m.startsWith("HTTP")) return null else throw e
+        }
+        val all = NordApi.json.parseToJsonElement(body).jsonObject["results"]?.jsonArray?.map { it.jsonObject }.orEmpty().map { r ->
+            val loc = r["location"]?.jsonObject
+            val urls = r.getValue("urls").jsonObject
+            Server(r.str("machine"), loc?.str("city").orEmpty(), loc?.str("country").orEmpty(), urls.str("wss:///ndt/v7/download"), urls.str("wss:///ndt/v7/upload"))
+        }
+        return all.firstOrNull()?.copy(others = all.drop(1))
     }
+
+    /** Who is testing, kept by the server with the result; a combined run adds how many exits shared the line. */
+    private val CLIENT = "client_name=unbraid&client_version=${BuildConfig.VERSION_NAME}"
 
     /** Ping in ms: the median of five, and the lowest and highest. */
     data class Ping(val median: Int, val low: Int, val high: Int)
@@ -53,35 +72,43 @@ object Ndt7 {
 
     private fun JsonObject.str(k: String) = get(k)?.jsonPrimitive?.content.orEmpty()
 
-    /** Receives until the server ends the test; [rate] gets bits/s every quarter second. */
-    fun download(tag: String, url: String, stop: () -> Boolean, rate: (Long) -> Unit): Long {
-        val c = socket(tag, url)
+    /**
+     * Receives until the server ends the test; [rate] gets bits/s every quarter second. [bytes] gets the running count
+     * at most every 20 ms and once at the end ([extra] URL parameters tag a combined run).
+     */
+    fun download(tag: String, url: String, stop: () -> Boolean, extra: String = "", bytes: (Long) -> Unit = {}, rate: (Long) -> Unit): Long {
+        val c = socket(tag, url, extra)
         val input = DataInputStream(c.input)
         val scratch = ByteArray(1 shl 16)
         val start = SystemClock.elapsedRealtime()
-        var bytes = 0L; var told = start
+        var got = 0L; var told = start; var noted = start
+        val count = { n: Long -> got += n; val now = SystemClock.elapsedRealtime(); if (now - noted >= 20) { noted = now; bytes(got) } }
+        bytes(0)
         try {
             while (!stop() && SystemClock.elapsedRealtime() - start < (SECONDS + 3) * 1000) {
                 val (op, len) = header(input) ?: break
                 when (op) {
                     8 -> break
-                    1 -> { bytes += len; input.skipBytes(len.toInt()) } // the server's own reports; the phone counts what it receives
+                    1 -> { count(len); input.skipBytes(len.toInt()) } // the server's own reports; the phone counts what it receives
                     9 -> { val p = ByteArray(len.toInt()).also(input::readFully); frame(c.output, 10, p, p.size) }
-                    else -> { var left = len; while (left > 0 && !stop()) { val n = input.read(scratch, 0, minOf(left, scratch.size.toLong()).toInt()); if (n < 0) break; left -= n; bytes += n } }
+                    else -> { var left = len; while (left > 0 && !stop()) { val n = input.read(scratch, 0, minOf(left, scratch.size.toLong()).toInt()); if (n < 0) break; left -= n; count(n.toLong()) } }
                 }
                 val now = SystemClock.elapsedRealtime()
-                if (now - told >= 250) { told = now; rate(bytes * 8000 / (now - start).coerceAtLeast(1)) }
+                if (now - told >= 250) { told = now; rate(got * 8000 / (now - start).coerceAtLeast(1)) }
             }
-            return bytes * 8000 / (SystemClock.elapsedRealtime() - start).coerceAtLeast(1)
+            bytes(got)
+            return got * 8000 / (SystemClock.elapsedRealtime() - start).coerceAtLeast(1)
         } finally { c.close(); live -= c }
     }
 
     /**
      * Sends for ten seconds; the rate is what the server says it received (its TCPInfo), not what left the phone's
-     * buffers. The live figure falls back to bytes sent until the server's first report.
+     * buffers. The live figure falls back to bytes sent until the server's first report. [bytes] gets the server's
+     * received count as each report arrives.
      */
-    fun upload(tag: String, url: String, stop: () -> Boolean, rate: (Long) -> Unit): Long {
-        val c = socket(tag, url)
+    fun upload(tag: String, url: String, stop: () -> Boolean, extra: String = "", bytes: (Long) -> Unit = {}, rate: (Long) -> Unit): Long {
+        val c = socket(tag, url, extra)
+        bytes(0)
         val input = DataInputStream(c.input)
         val server = java.util.concurrent.atomic.AtomicLong(-1)
         // Only the sending loop writes: the reader leaves the server's pings here for it, so neither ever waits on the other.
@@ -98,7 +125,7 @@ object Ndt7 {
                         9 -> pong.set(p)
                         1 -> p.decodeToString().substringAfter("\"TCPInfo\"", "").let { t ->
                             val got = BYTES_RECEIVED.find(t)?.groupValues?.get(1)?.toLong(); val us = ELAPSED.find(t)?.groupValues?.get(1)?.toLong()
-                            if (got != null && us != null && us > 0) server.set(got * 8_000_000 / us)
+                            if (got != null && us != null && us > 0) { server.set(got * 8_000_000 / us); bytes(got) }
                         }
                     }
                 }
@@ -134,17 +161,17 @@ object Ndt7 {
     fun abort() = live.forEach { it.close() }
 
     /** Opens the test's WebSocket (RFC 6455) through the exit and checks the server accepted it. */
-    private fun socket(tag: String, url: String): Probe.Conn {
+    private fun socket(tag: String, url: String, extra: String): Probe.Conn {
         val u = URI(url)
         val c = Probe.open(tag, u.host, if (u.port > 0) u.port else 443, 15_000).also { live += it }
         try {
             val key = Base64.getEncoder().encodeToString(Random.nextBytes(16))
-            c.output.write(("GET ${u.rawPath}?${u.rawQuery} HTTP/1.1\r\nHost: ${u.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+            c.output.write(("GET ${u.rawPath}?${listOfNotNull(u.rawQuery, CLIENT, extra.ifEmpty { null }).joinToString("&")} HTTP/1.1\r\nHost: ${u.host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
                 "Sec-WebSocket-Key: $key\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: net.measurementlab.ndt.v7\r\nUser-Agent: unbraid/${BuildConfig.VERSION_NAME}\r\n\r\n").toByteArray())
             val head = Probe.head(c.input)
             val accept = Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-1").digest((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").toByteArray()))
             if (head.firstOrNull()?.split(' ')?.getOrNull(1) != "101" || head.none { it.startsWith("Sec-WebSocket-Accept:", true) && it.substringAfter(':').trim() == accept })
-                error("The test server refused the test")
+                throw Refused()
             return c
         } catch (e: Exception) { c.close(); live -= c; throw e }
     }

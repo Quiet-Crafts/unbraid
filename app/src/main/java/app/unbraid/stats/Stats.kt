@@ -44,6 +44,8 @@ object Stats {
     const val HOME = "home"
     private const val HOUR = 3_600_000L
     private const val TESTS_KEPT = 100
+    /** A test's combined run: its start (0 = tested alone) and how many exits shared the line. */
+    private const val RUN_COLUMNS = "grp INTEGER NOT NULL DEFAULT 0, n INTEGER NOT NULL DEFAULT 1"
 
     @SuppressLint("StaticFieldLeak")
     internal lateinit var ctx: Context
@@ -64,7 +66,7 @@ object Stats {
     fun hourOf(ms: Long) = (ms + TimeZone.getDefault().getOffset(ms)) / HOUR
     fun dayOf(ms: Long) = Math.floorDiv(hourOf(ms), 24L)
 
-    private class Helper(c: Context) : SQLiteOpenHelper(c, FILE, null, 2) {
+    private class Helper(c: Context) : SQLiteOpenHelper(c, FILE, null, 3) {
         override fun onCreate(d: SQLiteDatabase) = listOf(
             "CREATE TABLE hourly(h INTEGER, exit TEXT, up INTEGER, down INTEGER, PRIMARY KEY(h, exit)) WITHOUT ROWID",
             "CREATE TABLE daily(d INTEGER, app TEXT, exit TEXT, up INTEGER, down INTEGER, PRIMARY KEY(d, app, exit)) WITHOUT ROWID",
@@ -72,12 +74,13 @@ object Stats {
             "CREATE TABLE peak(d INTEGER, exit TEXT, bps INTEGER, at INTEGER, up INTEGER NOT NULL DEFAULT 0, up_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(d, exit)) WITHOUT ROWID",
             "CREATE TABLE span(start INTEGER PRIMARY KEY, end INTEGER, paused INTEGER)",
             "CREATE TABLE exit(id TEXT PRIMARY KEY, code TEXT, name TEXT, hue INTEGER, via TEXT)",
-            "CREATE TABLE test(at INTEGER PRIMARY KEY, exit TEXT, via TEXT, server TEXT, ip TEXT, down INTEGER, up INTEGER, idle INTEGER, busy_down INTEGER, busy_up INTEGER)",
+            "CREATE TABLE test(at INTEGER PRIMARY KEY, exit TEXT, via TEXT, server TEXT, ip TEXT, down INTEGER, up INTEGER, idle INTEGER, busy_down INTEGER, busy_up INTEGER, $RUN_COLUMNS)",
         ).forEach(d::execSQL)
 
-        // 2: peaks keep upload apart from download (bps/at stay the download's).
+        // 2: peaks keep upload apart from download (bps/at stay the download's). 3: tests remember a combined run.
         override fun onUpgrade(d: SQLiteDatabase, old: Int, new: Int) {
             if (old < 2) listOf("ALTER TABLE peak ADD COLUMN up INTEGER NOT NULL DEFAULT 0", "ALTER TABLE peak ADD COLUMN up_at INTEGER NOT NULL DEFAULT 0").forEach(d::execSQL)
+            if (old < 3) RUN_COLUMNS.split(", ").forEach { d.execSQL("ALTER TABLE test ADD COLUMN $it") }
         }
     }
 
@@ -179,7 +182,9 @@ object Stats {
         listOf("daily", "server").forEach { d.execSQL("DELETE FROM $it WHERE d < ?", arrayOf<Any>(today - 400)) }
         d.execSQL("DELETE FROM peak") // speeds seen in use, no longer kept (the table stays for older databases)
         d.execSQL("DELETE FROM span WHERE start < ?", arrayOf<Any>(now - 400 * 24 * HOUR))
-        d.execSQL("DELETE FROM test WHERE at < ? OR at NOT IN (SELECT at FROM test ORDER BY at DESC LIMIT $TESTS_KEPT)", arrayOf<Any>(now - 400 * 24 * HOUR))
+        // The last 100 tests, a combined run counting once and kept or dropped whole.
+        d.execSQL("DELETE FROM test WHERE at < ? OR (CASE grp WHEN 0 THEN at ELSE grp END) NOT IN " +
+            "(SELECT DISTINCT CASE grp WHEN 0 THEN at ELSE grp END k FROM test ORDER BY k DESC LIMIT $TESTS_KEPT)", arrayOf<Any>(now - 400 * 24 * HOUR))
         // An exit's name and colour go with the last row that needs them.
         d.execSQL("DELETE FROM exit WHERE id NOT IN (SELECT exit FROM hourly UNION SELECT exit FROM daily UNION SELECT exit FROM server UNION SELECT exit FROM test)")
     }
@@ -223,10 +228,17 @@ object Stats {
         if (wasOn && recording) Collector.startNow()
     }
 
-    fun saveTest(t: Test, startedIn: Int) = post {
+    /** Saves a test, or a combined run's tests, together; a key already taken moves to the next free millisecond. */
+    fun saveTests(ts: List<Test>, startedIn: Int) = post {
         if (!recording || startedIn != epoch) return@post
-        db.execSQL("INSERT OR REPLACE INTO test VALUES(?,?,?,?,?,?,?,?,?,?)", arrayOf<Any>(t.at, t.exit, t.via, t.server, t.ip, t.down, t.up, t.idle, t.busyDown, t.busyUp))
-        labelExits(db, listOf(t.exit))
+        val d = db
+        d.transaction {
+            ts.forEach { t ->
+                d.execSQL("INSERT INTO test(at, exit, via, server, ip, down, up, idle, busy_down, busy_up, grp, n) VALUES((SELECT MAX(?, IFNULL(MAX(at), 0) + 1) FROM test),?,?,?,?,?,?,?,?,?,?,?)",
+                    arrayOf<Any>(t.at, t.exit, t.via, t.server, t.ip, t.down, t.up, t.idle, t.busyDown, t.busyUp, t.grp, t.n))
+            }
+            labelExits(d, ts.map { it.exit })
+        }
         pruneNow()
     }
 
@@ -242,7 +254,8 @@ object Stats {
 
     data class Exit(val id: String, val code: String, val name: String, val hue: Int, val via: String)
     data class Bytes(val up: Long, val down: Long) { val total get() = up + down }
-    data class Test(val at: Long, val exit: String, val via: String, val server: String, val ip: String, val down: Long, val up: Long, val idle: Int, val busyDown: Int, val busyUp: Int)
+    /** [idle] is the ping in ms; [grp] the combined run it was part of (0 = alone), with [n] exits sharing the line. */
+    data class Test(val at: Long, val exit: String, val via: String, val server: String, val ip: String, val down: Long, val up: Long, val idle: Int, val busyDown: Int, val busyUp: Int, val grp: Long = 0, val n: Int = 1)
 
     private inline fun <T> rows(sql: String, args: Array<String> = emptyArray(), read: (android.database.Cursor) -> T): List<T> =
         if (!ctx.getDatabasePath(FILE).exists()) emptyList()
@@ -272,8 +285,8 @@ object Stats {
         return (stored.filter { it.first != live?.first } + listOfNotNull(live)).map { (s, e, p) -> Triple(maxOf(s, from), minOf(e, to), p) }.filter { it.second > it.first }
     }
 
-    fun tests() = rows("SELECT at, exit, via, server, ip, down, up, idle, busy_down, busy_up FROM test ORDER BY at DESC") {
-        Test(it.getLong(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getLong(5), it.getLong(6), it.getInt(7), it.getInt(8), it.getInt(9))
+    fun tests() = rows("SELECT at, exit, via, server, ip, down, up, idle, busy_down, busy_up, grp, n FROM test ORDER BY at DESC") {
+        Test(it.getLong(0), it.getString(1), it.getString(2), it.getString(3), it.getString(4), it.getLong(5), it.getLong(6), it.getInt(7), it.getInt(8), it.getInt(9), it.getLong(10), it.getInt(11))
     }
 
     // ---- live view -----------------------------------------------------------------------------------------------

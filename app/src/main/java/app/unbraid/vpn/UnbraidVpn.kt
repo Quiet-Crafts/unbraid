@@ -115,6 +115,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         @Volatile var running: Setup? = null
         /** Loopback port and password of the app's own way into each exit ([Compiler.PROBE]); see [Probe]. */
         @Volatile var probe: Pair<Int, String>? = null
+        /** The phone's own network (under the VPN) is metered: mobile data, or Wi-Fi marked so. */
+        @Volatile var metered = false
         /** Servers ("provider|ip") that failed the last health check: the next connect, even a manual one, avoids them. */
         @Volatile var failing: Set<String> = emptySet()
         /**

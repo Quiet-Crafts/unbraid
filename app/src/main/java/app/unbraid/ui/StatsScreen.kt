@@ -57,6 +57,8 @@ import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.toShape
 import androidx.compose.runtime.Composable
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -201,7 +203,8 @@ private fun load(p: Period, ui: Ui): View {
         labels = (from..to).map { d -> LocalDate.ofEpochDay(d).let { if (p == Period.Week) it.dayOfWeek.getDisplayName(DayStyle.NARROW, Locale.getDefault()) else if (it.dayOfMonth % 7 == 1) "${it.dayOfMonth}" else "" } }
     }
     val zoneMs = { d: Long -> LocalDate.ofEpochDay(d).atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli() }
-    val tests = Stats.tests().filter { it.at in zoneMs(from) until zoneMs(to + 1) }.groupBy { it.exit }.mapValues { (_, t) -> t.maxBy { it.down } }
+    // Solo tests only: an exit sharing the line with others in a combined run reads lower than it is.
+    val tests = Stats.tests().filter { it.grp == 0L && it.at in zoneMs(from) until zoneMs(to + 1) }.groupBy { it.exit }.mapValues { (_, t) -> t.maxBy { it.down } }
     // Hours connected per day, the last 13 weeks ending this Sunday; this week's days for the hub.
     val heatStart = today.with(DayOfWeek.MONDAY).minusWeeks(12)
     val zone = java.time.ZoneId.systemDefault()
@@ -827,23 +830,41 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
         UnbraidVpn.tags.keys.filter { it != DIRECT }.map { (v.exits[Stats.idOf(it, running)] ?: Ex(it, "?", it, "", Ink.faint)).copy(id = it) }.sortedBy { it.name } +
             SpeedTest.nodes().map { Ex(SpeedTest.NODE + it.ip, "TS", it.name, "Tailscale", Ink.text) }
     }
-    var chosen by rememberSaveable { mutableStateOf(options.firstOrNull()?.id) }
+    // Every routed exit at once ("ALL") once there are two; a Tailscale node without a route can't join.
+    val routed = options.filter { !it.id.startsWith(SpeedTest.NODE) }
+    val together by SpeedTest.all.collectAsStateWithLifecycle()
+    var chosen by rememberSaveable { mutableStateOf(if (together != null) SpeedTest.ALL else options.firstOrNull()?.id) }
+    val allMode = routed.size >= 2 && chosen == SpeedTest.ALL
     val ex = options.firstOrNull { it.id == (run?.exit ?: chosen) } ?: options.firstOrNull()
     val exit = ex?.id
     val color = ex?.color ?: Ink.accent
     val node = exit?.startsWith(SpeedTest.NODE) == true
-    val busy = run?.phase.let { it == SpeedTest.Phase.Preparing || it == SpeedTest.Phase.Download || it == SpeedTest.Phase.Upload }
+    val busy = SpeedTest.testing || together?.phase == SpeedTest.Phase.Deciding
     val motion = MaterialTheme.motionScheme
     // Leaving the page, or the app going to the background, stops a running test: it runs only while you watch it.
     LifecycleStartEffect(Unit) { onStopOrDispose { SpeedTest.cancel() } }
     DisposableEffect(Unit) { onDispose { SpeedTest.clear() } }
     val server = if (node) null else vpn.servers[exit]?.name
-    Section("speed", listOfNotNull(ex?.name, server ?: ex?.via?.takeIf { node }).joinToString(" · "), "Speed test", back = { go("live") }) {
+    val over = if (allMode) "All exits · together" else listOfNotNull(ex?.name, server ?: ex?.via?.takeIf { node }).joinToString(" · ")
+    Section("speed", over, "Speed test", back = { go("live") }) {
         if (vpn.phase != Phase.On || options.isEmpty()) { item { Empty("Connect to test an exit's speed.") }; return@Section }
         item(key = "exits") {
             LazyRow(Modifier.fillMaxWidth().selectableGroup(), contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (routed.size >= 2) item(key = SpeedTest.ALL) {
+                    // White, not an exit's colour: all of them; a stripe of their colours names them.
+                    val bg by animateColorAsState(if (allMode) Ink.text else Ink.surfaceHigh, MaterialTheme.motionScheme.fastEffectsSpec(), label = "exit")
+                    Row(
+                        Modifier.height(40.dp).clip(RoundedCornerShape(20.dp)).background(bg)
+                            .selectable(allMode, enabled = !busy, role = Role.RadioButton) { chosen = SpeedTest.ALL; SpeedTest.clear() }.padding(start = 12.dp, end = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Row(Modifier.size(22.dp, 8.dp).clip(RoundedCornerShape(4.dp)), horizontalArrangement = Arrangement.spacedBy(1.dp)) { routed.forEach { Box(Modifier.weight(1f).fillMaxHeight().background(it.color)) } }
+                        Text("ALL", style = Type.code.copy(fontSize = 12.sp), color = if (allMode) Ink.ground else Ink.text)
+                        Text("${routed.size} exits", style = Type.sub.copy(fontWeight = FontWeight.Medium), color = if (allMode) Ink.ground else if (busy) Ink.dim else Ink.text, maxLines = 1)
+                    }
+                }
                 items(options, key = { it.id }) { e ->
-                    val on = e.id == exit
+                    val on = e.id == exit && !allMode
                     val bg by animateColorAsState(if (on) e.color else Ink.surfaceHigh, MaterialTheme.motionScheme.fastEffectsSpec(), label = "exit")
                     Row(
                         Modifier.height(40.dp).clip(RoundedCornerShape(20.dp)).background(bg)
@@ -856,6 +877,7 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
                 }
             }
         }
+        if (allMode) { item(key = "all") { SpeedAll(v, routed, options - routed.toSet(), setup) { go("history") } }; return@Section }
         item(key = "cards") {
             // Ping, then the two speeds, as Ookla orders them; the card being measured is outlined in the exit's colour.
             Row(Modifier.padding(horizontal = Gutter, vertical = 12.dp).height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -865,17 +887,7 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
                     Triple(Icons.up, "Upload", run?.up?.let { mbps(it) } to "Mbps"),
                 ).forEach { (icon, t, value) ->
                     val active = (t == "Download" && run?.phase == SpeedTest.Phase.Download) || (t == "Upload" && run?.phase == SpeedTest.Phase.Upload)
-                    val edge by animateColorAsState(if (active) color else Ink.line, MaterialTheme.motionScheme.fastEffectsSpec(), label = "card")
-                    Column(Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(20.dp)).border(if (active) 2.dp else 1.dp, edge, RoundedCornerShape(20.dp)).padding(horizontal = 14.dp, vertical = 12.dp).semantics(mergeDescendants = true) {}) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) { Icon(icon, null, Modifier.size(16.dp), tint = Ink.dim); Text(t, style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim) }
-                        // A new value rises into place (spatial spring), the old one fades (effects spring).
-                        AnimatedContent(value.first, transitionSpec = {
-                            (slideInVertically(motion.defaultSpatialSpec()) { it / 2 } + fadeIn(motion.defaultEffectsSpec())) togetherWith fadeOut(motion.fastEffectsSpec())
-                        }, label = "value") { text ->
-                            Text(text ?: "—", style = Type.code.copy(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Medium), color = if (text != null) Ink.text else Ink.dim, modifier = Modifier.padding(top = 4.dp), maxLines = 1)
-                        }
-                        Text(value.second, style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
-                    }
+                    SpeedCard(icon, t, value.first, value.second, active, color)
                 }
             }
         }
@@ -954,6 +966,256 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
                 }
             }
           }
+        }
+    }
+}
+
+/** One of the speed test's number cards; the one being measured is outlined in [color]. */
+@Composable
+private fun androidx.compose.foundation.layout.RowScope.SpeedCard(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, value: String?, unit: String, active: Boolean, color: Color) {
+    val motion = MaterialTheme.motionScheme
+    val edge by animateColorAsState(if (active) color else Ink.line, motion.fastEffectsSpec(), label = "card")
+    Column(Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(20.dp)).border(if (active) 2.dp else 1.dp, edge, RoundedCornerShape(20.dp)).padding(horizontal = 14.dp, vertical = 12.dp).semantics(mergeDescendants = true) {}) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) { Icon(icon, null, Modifier.size(16.dp), tint = Ink.dim); Text(title, style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim) }
+        // A new value rises into place (spatial spring), the old one fades (effects spring).
+        AnimatedContent(value, transitionSpec = {
+            (slideInVertically(motion.defaultSpatialSpec()) { it / 2 } + fadeIn(motion.defaultEffectsSpec())) togetherWith fadeOut(motion.fastEffectsSpec())
+        }, label = "value") { text ->
+            Text(text ?: "—", style = Type.code.copy(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Medium), color = if (text != null) Ink.text else Ink.dim, modifier = Modifier.padding(top = 4.dp), maxLines = 1)
+        }
+        Text(unit, style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
+    }
+}
+
+/** Several exits added up: Gbps from 1000 Mbps on. */
+private fun total(bps: Long) = if (bps >= 1_000_000_000) String.format(Locale.US, "%.2f", bps / 1e9) to "Gbps" else mbps(bps) to "Mbps"
+
+/**
+ * Every routed exit at once: tick the exits, GO finds a test server for each (no test data yet), a sheet asks about
+ * an exit without one at home or a metered network, then all download together and all upload together.
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbraid.data.Setup, history: () -> Unit) {
+    val a by SpeedTest.all.collectAsStateWithLifecycle()
+    var off by rememberSaveable { mutableStateOf(setOf<String>()) } // exits unticked
+    val picked = exits.filter { it.id !in off }
+    val phase = a?.phase
+    val measuring = phase == SpeedTest.Phase.Download || phase == SpeedTest.Phase.Upload
+    val working = phase == SpeedTest.Phase.Preparing || phase == SpeedTest.Phase.Deciding
+    val done = phase == SpeedTest.Phase.Done
+    val ex = { id: String -> exits.firstOrNull { it.id == id } }
+    // Data a run may use: each exit's best test this period both ways for ten seconds, else 500 Mbps each way.
+    val running = UnbraidVpn.running ?: setup
+    val gb = { ids: List<String> -> ids.sumOf { id -> v.tests[Stats.idOf(id, running)]?.let { it.down + it.up } ?: 1_000_000_000L } * 10 / 8 / 1e9 }
+    val left = SpeedTest.PER_DAY - Unbraid.store.testsToday
+    var asking by rememberSaveable { mutableStateOf(false) }
+    val begin = { SpeedTest.startAll(picked.map { it.id }, UnbraidVpn.metered); Unit }
+    if (asking) MlabConsent({ asking = false }) { asking = false; Unbraid.store.mlabConsent = true; begin() }
+    a?.takeIf { phase == SpeedTest.Phase.Deciding }?.let { BeforeTogether(it, ex, setup, gb, left) }
+
+    Column {
+        val legs = a?.legs.orEmpty()
+        val ok = legs.count { it.error == null }
+        Row(Modifier.padding(horizontal = Gutter, vertical = 12.dp).height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val d = a?.down?.let(::total); val u = a?.up?.let(::total)
+            SpeedCard(Icons.down, "Download", d?.first, "${d?.second ?: "Gbps"} total", phase == SpeedTest.Phase.Download, Ink.text)
+            SpeedCard(Icons.up, "Upload", u?.first, "${u?.second ?: "Gbps"} total", phase == SpeedTest.Phase.Upload, Ink.text)
+            SpeedCard(Icons.routes, "Exits", "${if (a == null) picked.size else ok}", if (a == null || phase == SpeedTest.Phase.Preparing && legs.all { it.server == null }) "of ${exits.size}" else "of ${exits.size} ran", false, Ink.text)
+        }
+        when {
+            measuring -> {
+                val r = a!!
+                val speed = animateFloatAsState((r.now / 1e6).toFloat(), spring(dampingRatio = 1f, stiffness = 40f), label = "speed")
+                val progress = animateFloatAsState((r.elapsedMs / (SpeedTest.MAX_SECONDS * 1000f)).coerceIn(0f, 1f), tween(300, easing = LinearEasing), label = "progress")
+                val upload = phase == SpeedTest.Phase.Upload
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
+                    Dial({ speed.value }, Ink.text, "${total(r.now).let { "${it.first} ${it.second}" }} together, ${if (upload) "upload" else "download"}", Modifier.align(Alignment.Center), COMBINED_TICKS)
+                    Column(Modifier.padding(bottom = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        val m = speed.value
+                        Text(if (m >= 1000) String.format(Locale.US, "%.2f", m / 1000) else m.toInt().toString(), style = Type.code.copy(fontSize = 30.sp, lineHeight = 34.sp, fontWeight = FontWeight.Medium), color = Ink.text)
+                        Row(verticalAlignment = Alignment.CenterVertically) { Icon(if (upload) Icons.up else Icons.down, null, Modifier.size(16.dp), tint = Ink.text); Text(" ${if (m >= 1000) "Gbps" else "Mbps"} · ${legs.size} exits together", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim) }
+                    }
+                }
+                LinearWavyProgressIndicator(progress = { progress.value }, modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 8.dp).fillMaxWidth(), color = Ink.text, trackColor = Ink.surfaceTop)
+                Row(Modifier.padding(horizontal = 24.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("${if (upload) "2/2 · Upload" else "1/2 · Download"} · $ok of ${legs.size} running", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.weight(1f))
+                    Secondary("Cancel", { SpeedTest.cancel() }, color = Ink.text)
+                }
+                // Each exit on a plain linear scale (1 Gbps, or the fastest): what each adds to the total.
+                val scale = maxOf(1_000_000_000L, legs.maxOf { it.now }).toFloat()
+                Column(Modifier.padding(horizontal = Gutter, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    legs.forEachIndexed { i, l ->
+                        val now = animateFloatAsState(l.now.toFloat(), spring(dampingRatio = 1f, stiffness = 40f), label = "leg")
+                        Row(Modifier.fillMaxWidth().clip(groupShape(i, legs.size)).background(Ink.surface).padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Chip(ex(l.exit))
+                            if (l.error != null) Text("Stopped", style = Type.caption, color = Ink.bad, modifier = Modifier.weight(1f))
+                            else Meter(now.value / scale, ex(l.exit)?.color ?: Ink.faint, Modifier.weight(1f))
+                            Text(mbps(l.now), style = Type.code.copy(fontSize = 14.sp, fontWeight = FontWeight.Medium), color = Ink.text, modifier = Modifier.width(44.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+                        }
+                    }
+                }
+            }
+            done || phase == SpeedTest.Phase.Failed -> {
+                val r = a!!
+                r.error?.let { Text(it, style = Type.sub, color = Ink.bad, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)) }
+                if (done) {
+                    val ran = legs.filter { it.error == null }
+                    Column(Modifier.padding(horizontal = 24.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row { Text("Each exit's share of the download", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.weight(1f)); Text("${ran.size} exits, same ${r.windowMs / 1000} s", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim) }
+                        Row(Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                            ran.forEach { l -> Box(Modifier.weight((l.down ?: 0L).coerceAtLeast(1L).toFloat()).fillMaxHeight().background(ex(l.exit)?.color ?: Ink.faint)) }
+                        }
+                    }
+                }
+                LegRows(legs, ex, setup)
+                Go(if (done) 150 else 200, Ink.text, "AGAIN", "Test all exits together again", bloom = done) { if (Unbraid.store.mlabConsent) begin() else asking = true }
+                Text(if (done) "Combined throughput on this phone. " + (if (setup.prefs.stats) "Saved: each exit as a test marked \"with ${ran(legs) - 1} others\", and one History row." else "Not saved: statistics are off.") else "",
+                    style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { LinkButton(Icons.history, "History", history) }
+            }
+            else -> {
+                // Pick the exits (a test server for each is found after GO), or watch them being found.
+                Text(if (working) "Test servers · ${legs.count { it.server != null }} of ${legs.size}".uppercase() else "Selected ${picked.size} of ${exits.size}".uppercase(),
+                    style = Type.overline, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 8.dp, bottom = 8.dp))
+                Column(Modifier.padding(horizontal = Gutter), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    val n = exits.size + nodes.size
+                    exits.forEachIndexed { i, e ->
+                        val l = legs.firstOrNull { it.exit == e.id }
+                        val on = e.id !in off
+                        Row(
+                            Modifier.fillMaxWidth().clip(groupShape(i, n)).background(Ink.surface)
+                                .then(if (working) Modifier else Modifier.toggleable(on, role = Role.Checkbox) { off = if (it) off - e.id else off + e.id })
+                                .padding(start = 16.dp, end = 12.dp).heightIn(min = 52.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Chip(e)
+                            Column(Modifier.weight(1f)) {
+                                Text(e.name, style = Type.body, color = Ink.text, maxLines = 1)
+                                Text(listOfNotNull(e.via.ifEmpty { null }, UnbraidVpn.state.value.servers[e.id]?.name).joinToString(" · "), style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
+                            }
+                            when {
+                                !working -> androidx.compose.material3.Checkbox(on, null, colors = androidx.compose.material3.CheckboxDefaults.colors(checkedColor = Ink.text, checkmarkColor = Ink.ground, uncheckedColor = Ink.dim))
+                                l == null -> Text("Not ticked", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
+                                l.limited -> Text("Limited by M-Lab", style = Type.caption.copy(fontSize = 12.sp), color = Ink.accent)
+                                l.error != null -> Text("No answer", style = Type.caption.copy(fontSize = 12.sp), color = Ink.accent)
+                                l.missing -> Text(l.server?.let { "Nearest: ${it.city}" } ?: "None in its country", style = Type.caption.copy(fontSize = 12.sp), color = Ink.accent)
+                                l.server != null -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(l.server.city, style = Type.caption.copy(fontSize = 12.sp), color = Ink.text); Icon(Icons.checkCircle, null, Modifier.size(20.dp), tint = Ink.good)
+                                }
+                                else -> Text("Finding…", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
+                            }
+                        }
+                    }
+                    nodes.forEachIndexed { i, e ->
+                        Row(Modifier.fillMaxWidth().clip(groupShape(exits.size + i, n)).border(1.dp, Ink.line, groupShape(exits.size + i, n)).padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Code(e.code, Ink.faint, filled = false)
+                            Column { Text(e.name, style = Type.body, color = Ink.dim, maxLines = 1); Text("Can't join: Tailscale has one exit node at a time", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim) }
+                        }
+                    }
+                }
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Go(150, Ink.text, "GO", "Test ${picked.size} exits together", preparing = working) {
+                        if (picked.size >= 2) { if (Unbraid.store.mlabConsent) begin() else asking = true }
+                    }
+                }
+                Text(
+                    when {
+                        working -> "No test data is sent yet. Nothing runs until every exit has a server or you decide."
+                        picked.size < 2 -> "Tick at least two exits."
+                        else -> "GO first finds a test server for every exit. Then all download together, then all upload together: ten seconds each."
+                    },
+                    style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+                if (working) Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { Secondary("Cancel", { SpeedTest.cancel() }, color = Ink.text) }
+            }
+        }
+    }
+}
+
+private fun ran(legs: List<SpeedTest.Leg>) = legs.count { it.error == null }
+
+/** A finished run's exits: download, upload and ping with the M-Lab server each used; one that stopped, in red. */
+@Composable
+private fun LegRows(legs: List<SpeedTest.Leg>, ex: (String) -> Ex?, setup: app.unbraid.data.Setup) {
+    Row(Modifier.padding(start = 24.dp, end = Gutter + 16.dp, top = 12.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("EACH EXIT", style = Type.overline, color = Ink.dim, modifier = Modifier.weight(1f))
+        HistoryCols({ Icon(Icons.down, null, Modifier.size(14.dp), tint = Ink.dim) }, { Icon(Icons.up, null, Modifier.size(14.dp), tint = Ink.dim) }, { Text("ms", style = Type.small, color = Ink.dim) })
+    }
+    Column(Modifier.padding(horizontal = Gutter), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        legs.forEachIndexed { i, l ->
+            val shape = groupShape(i, legs.size)
+            Row(Modifier.fillMaxWidth().clip(shape).then(if (l.error != null) Modifier.border(1.dp, Ink.bad.copy(alpha = 0.4f), shape) else Modifier.background(Ink.surface)).padding(horizontal = 16.dp, vertical = 10.dp).semantics(mergeDescendants = true) {},
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Chip(ex(l.exit))
+                Column(Modifier.weight(1f)) {
+                    Text(ex(l.exit)?.name ?: l.exit, style = Type.body, color = Ink.text, maxLines = 1)
+                    Text(l.error ?: "M-Lab ${l.server?.city.orEmpty()}${if (l.missing) " (nearest)" else ""}", style = Type.caption.copy(fontSize = 12.sp), color = if (l.error != null) Ink.bad else Ink.dim)
+                }
+                if (l.error == null) HistoryCols(
+                    { Text(l.down?.let(::mbps) ?: "—", style = Type.code.copy(fontSize = 15.sp, fontWeight = FontWeight.Medium), color = Ink.text) },
+                    { Text(l.up?.let(::mbps) ?: "—", style = Type.code.copy(fontSize = 13.sp), color = Ink.text) },
+                    { Text(l.ping?.median?.toString() ?: "—", style = Type.code.copy(fontSize = 13.sp), color = Ink.dim) })
+            }
+        }
+    }
+}
+
+/**
+ * Before a combined run, only when something needs a decision: an exit without an M-Lab server in its country (via
+ * the nearest one, together with the others, or left out), one M-Lab is limiting or can't reach (left out), and the
+ * data it may use on a metered network. Nothing has been sent yet.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BeforeTogether(a: SpeedTest.All, ex: (String) -> Ex?, setup: app.unbraid.data.Setup, gb: (List<String>) -> Double, left: Int) {
+    var leaveOut by rememberSaveable { mutableStateOf(setOf<String>()) }
+    val nearest = a.legs.filter { it.missing && it.usable && it.exit !in leaveOut }.map { it.exit }.toSet()
+    val going = a.legs.filter { it.usable && (!it.missing || it.exit in nearest) }.map { it.exit }
+    val country = { id: String -> setup.route(id)?.loc?.country ?: ex(id)?.name ?: "its country" }
+    ModalBottomSheet({ SpeedTest.cancel() }, containerColor = Ink.surface, contentColor = Ink.text) {
+        Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 24.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            a.legs.filter { it.missing || !it.usable }.forEach { l ->
+                val name = ex(l.exit)?.name ?: l.exit
+                Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Chip(ex(l.exit))
+                    Text(when { l.limited -> "M-Lab is limiting this exit"; l.error != null -> "M-Lab can't be reached"; else -> "No test server in ${country(l.exit)}" },
+                        style = Type.title.copy(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Medium))
+                }
+                Text(
+                    when {
+                        l.limited -> "M-Lab allows a set number of tests from each internet address. $name leaves through a server whose address other people share, and they have used up its tests for now. It's left out: try again later, or pick another server for this route in Routes."
+                        l.error != null -> "$name didn't get an answer from M-Lab, so it's left out of this run."
+                        l.server == null -> "M-Lab has no server in ${country(l.exit)}, and none nearby answered. $name is left out."
+                        else -> "M-Lab has no server in ${country(l.exit)}. The nearest is in ${listOf(l.server.city, java.util.Locale("", l.server.country).displayCountry).filter(String::isNotEmpty).joinToString(", ")}, so $name's numbers would include the trip there."
+                    },
+                    style = Type.sub, color = Ink.text, modifier = Modifier.padding(horizontal = 8.dp),
+                )
+                if (l.missing && l.usable) Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    listOf(true to "Test $name via ${l.server?.city}" to "Runs with the others, at the same time", false to "Leave $name out" to "The others run together").forEachIndexed { i, (pair, sub) ->
+                        val (via, title) = pair
+                        val on = (l.exit !in leaveOut) == via
+                        Row(Modifier.fillMaxWidth().clip(groupShape(i, 2)).background(Ink.surfaceHigh).selectable(on, role = Role.RadioButton) { leaveOut = if (via) leaveOut - l.exit else leaveOut + l.exit }.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            androidx.compose.material3.RadioButton(on, null, colors = androidx.compose.material3.RadioButtonDefaults.colors(selectedColor = Ink.text, unselectedColor = Ink.dim))
+                            Column { Text(title, style = Type.body, color = Ink.text); Text(sub, style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim) }
+                        }
+                    }
+                }
+            }
+            Text(
+                (if (a.metered) "On a metered connection: about ${String.format(Locale.US, "%.1f", gb(going))} GB in 20 seconds, from each exit's best test. " else "") +
+                    "Uses ${going.size} of about $left tests left today, as counted on this phone. Leaving the page stops the test.",
+                style = Type.caption.copy(fontSize = 13.sp, lineHeight = 18.sp), color = Ink.dim, modifier = Modifier.padding(horizontal = 8.dp),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp)).border(1.dp, Ink.line, RoundedCornerShape(26.dp)).clickable(role = Role.Button) { SpeedTest.cancel() }, Alignment.Center) { Text("Cancel", style = Type.body) }
+                val can = going.size >= 2 && going.size <= left
+                Box(Modifier.weight(1f).height(52.dp).clip(RoundedCornerShape(26.dp)).background(if (can) Ink.accent else Ink.surfaceTop).clickable(enabled = can, role = Role.Button) { SpeedTest.go(nearest) }, Alignment.Center) {
+                    Text(if (going.size < 2) "Needs two exits" else if (going.size > left) "Not enough tests left" else "Start ${going.size} together", style = Type.body, color = if (can) Ink.onAccent else Ink.dim)
+                }
+            }
         }
     }
 }
@@ -1044,8 +1306,10 @@ private fun Go(size: Int, color: Color, text: String, label: String, preparing: 
 private fun History(v: View, go: (String?) -> Unit) {
     val tests by produceState(emptyList<Stats.Test>()) { value = withContext(Dispatchers.IO) { Stats.read { Stats.tests() }.orEmpty() } }
     val f = DateTimeFormatter.ofPattern("d MMM · HH:mm", locale())
-    Section("history", "${tests.size} tests", "History", back = { go("speed") }) {
-        val best = tests.maxByOrNull { it.down }
+    Section("history", "${tests.count { it.exit != SpeedTest.ALL }} tests", "History", back = { go("speed") }) {
+        val best = tests.filter { it.grp == 0L }.maxByOrNull { it.down }
+        // A combined run is one row with its exits listed under it; their own rows aren't repeated.
+        val shown = tests.filter { it.grp == 0L || it.exit == SpeedTest.ALL }
         item(key = "hero") {
             if (best == null) Empty("No speed tests yet.")
             else Hero("Best download", mbps(best.down), "Mbps", "${v.exits[best.exit]?.name ?: best.exit} · ${java.time.Instant.ofEpochMilli(best.at).atZone(java.time.ZoneId.systemDefault()).format(f)} · download")
@@ -1059,23 +1323,34 @@ private fun History(v: View, go: (String?) -> Unit) {
                     { Text("ping", style = Type.small, color = Ink.dim) })
             }
         }
-        items(tests.size) { i ->
-            val t = tests[i]
+        items(shown.size) { i ->
+            val t = shown[i]
             val ex = v.exits[t.exit]
+            val together = if (t.exit == SpeedTest.ALL) tests.filter { it.grp == t.grp && it.exit != SpeedTest.ALL } else emptyList()
             // Two lines: when and the numbers, then the whole VPN server name across the row, never cut short.
             Column(
-                Modifier.padding(horizontal = Gutter, vertical = 1.dp).fillMaxWidth().clip(groupShape(i, tests.size)).background(Ink.surface)
+                Modifier.padding(horizontal = Gutter, vertical = 1.dp).fillMaxWidth().clip(groupShape(i, shown.size)).background(Ink.surface)
                     .padding(horizontal = 16.dp, vertical = 12.dp).semantics(mergeDescendants = true) {},
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Chip(ex)
+                    if (t.exit == SpeedTest.ALL) Code("ALL", Ink.text) else Chip(ex)
                     Text(java.time.Instant.ofEpochMilli(t.at).atZone(java.time.ZoneId.systemDefault()).format(f), style = Type.body, color = Ink.text, modifier = Modifier.weight(1f), maxLines = 1)
                     HistoryCols({ Text(mbps(t.down), style = Type.code.copy(fontSize = 16.sp, fontWeight = FontWeight.Medium), color = Ink.text) },
                         { Text(mbps(t.up), style = Type.code.copy(fontSize = 14.sp), color = Ink.text) },
                         { Text(if (t.idle > 0) "${t.idle}" else "—", style = Type.code.copy(fontSize = 14.sp), color = Ink.dim) })
                 }
-                Text(listOf(t.via, t.server.ifEmpty { ex?.name ?: t.exit }).filter(String::isNotEmpty).joinToString(" · "), style = Type.caption.copy(fontSize = 13.sp, lineHeight = 18.sp), color = Ink.dim)
+                if (t.exit == SpeedTest.ALL) {
+                    Text("${t.n} exits together", style = Type.caption.copy(fontSize = 13.sp, lineHeight = 18.sp), color = Ink.dim)
+                    together.forEach { m ->
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Chip(v.exits[m.exit])
+                            Text(v.exits[m.exit]?.name ?: m.exit, style = Type.caption.copy(fontSize = 13.sp), color = Ink.dim, modifier = Modifier.weight(1f), maxLines = 1)
+                            HistoryCols({ Text(mbps(m.down), style = Type.code.copy(fontSize = 13.sp), color = Ink.text) }, { Text(mbps(m.up), style = Type.code.copy(fontSize = 13.sp), color = Ink.text) },
+                                { Text("${m.idle}", style = Type.code.copy(fontSize = 13.sp), color = Ink.dim) })
+                        }
+                    }
+                } else Text(listOf(t.via, t.server.ifEmpty { ex?.name ?: t.exit }).filter(String::isNotEmpty).joinToString(" · "), style = Type.caption.copy(fontSize = 13.sp, lineHeight = 18.sp), color = Ink.dim)
             }
         }
     }

@@ -218,10 +218,12 @@ fun Timeline(spans: List<Triple<Float, Float, Boolean>>, summary: String) {
 }
 
 private val TICKS = floatArrayOf(0f, 5f, 10f, 50f, 100f, 250f, 500f, 750f, 1000f)
+/** The dial for several exits added up: the same spacing, reaching 5 Gbps. */
+val COMBINED_TICKS = floatArrayOf(0f, 10f, 50f, 100f, 250f, 500f, 1000f, 2500f, 5000f)
 
 /** Ookla-style non-linear position (0…1) of [mbps]: ticks evenly spaced, values interpolated between them. */
-fun dialFraction(mbps: Float): Float {
-    for (i in 0 until TICKS.size - 1) if (mbps <= TICKS[i + 1]) return (i + (mbps - TICKS[i]) / (TICKS[i + 1] - TICKS[i])) / (TICKS.size - 1)
+fun dialFraction(mbps: Float, ticks: FloatArray = TICKS): Float {
+    for (i in 0 until ticks.size - 1) if (mbps <= ticks[i + 1]) return (i + (mbps - ticks[i]) / (ticks[i + 1] - ticks[i])) / (ticks.size - 1)
     return 1f
 }
 
@@ -230,12 +232,12 @@ fun dialFraction(mbps: Float): Float {
  * only while drawing, so a value animating every frame redraws the dial without recomposing anything.
  */
 @Composable
-fun Dial(mbps: () -> Float, color: Color, label: String, modifier: Modifier = Modifier) {
+fun Dial(mbps: () -> Float, color: Color, label: String, modifier: Modifier = Modifier, ticks: FloatArray = TICKS) {
     val tm = rememberTextMeasurer()
-    val labels = remember(tm) { TICKS.map { tm.measure(if (it >= 1000f) "1k" else it.toInt().toString(), TextStyle(fontFamily = Mono, fontSize = 13.sp)) } }
+    val labels = remember(tm, ticks) { ticks.map { tm.measure(if (it >= 1000f) "${(it / 1000).toString().removeSuffix(".0")}k" else it.toInt().toString(), TextStyle(fontFamily = Mono, fontSize = 13.sp)) } }
     val reveal = drawIn() // the track sweeps in once, like every chart
     Canvas(modifier.size(300.dp).semantics { contentDescription = label }) {
-        val m = mbps(); val f = dialFraction(m) * reveal.coerceAtMost(1f)
+        val m = mbps(); val f = dialFraction(m, ticks) * reveal.coerceAtMost(1f)
         val sw = 22.dp.toPx()
         val r = size.minDimension / 2 - sw / 2
         val c = center
@@ -243,8 +245,8 @@ fun Dial(mbps: () -> Float, color: Color, label: String, modifier: Modifier = Mo
         drawArc(Ink.surfaceTop, 135f, 270f * reveal.coerceAtMost(1f), false, tl, box, style = Stroke(sw, cap = StrokeCap.Round))
         if (f > 0.002f) drawArc(color, 135f, 270f * f, false, tl, box, style = Stroke(sw, cap = StrokeCap.Round))
         val angle = { frac: Float -> Math.toRadians((135.0 + 270.0 * frac)) }
-        TICKS.forEachIndexed { i, t ->
-            val a = angle(dialFraction(t)); val rr = r - 40.dp.toPx(); val l = labels[i]
+        ticks.forEachIndexed { i, t ->
+            val a = angle(dialFraction(t, ticks)); val rr = r - 40.dp.toPx(); val l = labels[i]
             drawText(l, if (t <= m) Ink.text else Ink.dim, alpha = reveal.coerceIn(0f, 1f), topLeft = Offset(c.x + rr * cos(a).toFloat() - l.size.width / 2f, c.y + rr * sin(a).toFloat() - l.size.height / 2f))
         }
         val a = angle(f.coerceIn(0f, 1f))
