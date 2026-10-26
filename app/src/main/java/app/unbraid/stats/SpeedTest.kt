@@ -192,6 +192,8 @@ object SpeedTest {
         val tag = { exit: String -> UnbraidVpn.tags[exit] ?: error("The route isn't connected") }
         val failed = { why: String -> set { it.copy(phase = Phase.Failed, now = 0, error = why) } }
         val armed = { f: (Set<String>) -> Unit -> synchronized(lock) { if (!stop()) proceed = mine to f } }
+        /** Starts the measuring on its own thread, never on the caller's (a tap on the sheet). Set below. */
+        var start: (Set<String>) -> Unit = {}
 
         /** One phase through every exit: their own results, and each one's (time, bytes) samples. */
         fun phase(p: Phase, exits: List<String>, t0: Long, f: (String, (Long, Long) -> Unit, (Long) -> Unit) -> Long): Map<String, List<Pair<Long, Long>>> {
@@ -211,7 +213,7 @@ object SpeedTest {
 
         fun measure(nearest: Set<String>) {
             // The network turned metered after GO: the person hasn't agreed to that yet.
-            if (UnbraidVpn.metered && _all.value?.metered == false) { set { it.copy(metered = true, phase = Phase.Deciding) }; armed { measure(it) }; return }
+            if (UnbraidVpn.metered && _all.value?.metered == false) { set { it.copy(metered = true, phase = Phase.Deciding) }; armed(start); return }
             val going = _all.value?.legs.orEmpty().filter { it.usable && (!it.missing || it.exit in nearest) }
             if (going.size < 2) return failed("At least two exits need a test server to run together.")
             if (!reserve(going.size, mine)) return failed("M-Lab allows $PER_DAY tests a day; this run needs ${going.size} of them. Try fewer exits, or tomorrow.")
@@ -260,14 +262,16 @@ object SpeedTest {
                 legs.filter { e -> setup.activeRoutes.none { it.id == e } }.forEach { e ->
                     val r = setup.route(e)!!
                     val over = app.unbraid.data.Limits.over(setup.copy(testing = up), setup.copy(testing = up + e), limit)
+                    val ts = setup.copy(testing = up).tsExit
                     when {
-                        r.tsExit != null && setup.tsExit != null && setup.tsExit != r.tsExit -> leg(e) { it.copy(error = "Tailscale has one exit node at a time, and another route uses it.") }
+                        r.tsExit != null && ts != null && ts != r.tsExit -> leg(e) { it.copy(error = "Tailscale has one exit node at a time, and another route uses it.") }
                         over != null -> leg(e) { it.copy(error = "${app.unbraid.data.Providers.get(over.provider)?.name ?: over.provider} allows ${app.unbraid.data.Limits.units(over.limit, over.unit)}, all in use.") }
                         else -> up = up + e
                     }
                 }
                 if (up.isNotEmpty()) {
-                    Unbraid.store.update { it.copy(testing = up) }
+                    // With the attempt check, so a cancel either comes first (nothing goes up) or takes them down again.
+                    if (!synchronized(lock) { !stop() && Unbraid.store.update { it.copy(testing = up) }.let { true } }) return@Thread
                     val until = SystemClock.elapsedRealtime() + 30_000
                     while (!stop() && up.any { UnbraidVpn.tags[it] == null } && SystemClock.elapsedRealtime() < until) Thread.sleep(250)
                     up.filter { UnbraidVpn.tags[it] == null }.forEach { e -> leg(e) { it.copy(error = "It didn't connect for the test.") } }
@@ -286,16 +290,16 @@ object SpeedTest {
                 }
                 val a = _all.value
                 if (stop() || a == null) return@Thread
-                val run = { nearest: Set<String> -> Thread({ try { measure(nearest) } catch (x: Exception) { failed("The test couldn't finish. Check the connection and try again.") } finally { if (_all.value?.phase != Phase.Deciding) done(mine) } }, "speedtest").start() }
-                if (metered || UnbraidVpn.metered || a.legs.any { it.missing || !it.usable }) { set { it.copy(metered = metered || UnbraidVpn.metered, phase = Phase.Deciding) }; armed(run) }
-                else run(emptySet())
+                start = { nearest -> Thread({ try { measure(nearest) } catch (x: Exception) { failed("The test couldn't finish. Check the connection and try again.") } finally { if (_all.value?.phase != Phase.Deciding) done(mine) } }, "speedtest").start() }
+                if (metered || UnbraidVpn.metered || a.legs.any { it.missing || !it.usable }) { set { it.copy(metered = metered || UnbraidVpn.metered, phase = Phase.Deciding) }; armed(start) }
+                else start(emptySet())
             } catch (x: Exception) { failed("The test couldn't start. Check the connection and try again."); done(mine) }
         }, "speedtest").start()
         return true
     }
 
     /** A combined run [mine] ended: routes up only for it go down, unless a newer run took over. */
-    private fun done(mine: Int) { if (attempt == mine) release() }
+    private fun done(mine: Int) = synchronized(lock) { if (attempt == mine) release() }
 
     private fun apart(n: Int) = if (n < 2) "Only one exit kept going, so there's nothing to add up. Try again." else "The exits didn't run together long enough to add them up. Try again."
 
