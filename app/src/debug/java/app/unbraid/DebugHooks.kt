@@ -13,7 +13,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * adb shell am broadcast -a app.unbraid.DEBUG -n app.unbraid/.DebugHooks --es cmd <signin|setup|start|stop|state> [--es arg ...]
+ * adb shell am broadcast -a app.unbraid.DEBUG -n app.unbraid/.DebugHooks --es cmd <signin|setup|start|stop|state|dump|all|allstate|go> [--es arg ...]
  */
 class DebugHooks : BroadcastReceiver() {
     override fun onReceive(ctx: Context, i: Intent) {
@@ -43,6 +43,11 @@ class DebugHooks : BroadcastReceiver() {
                         c.close(); "dl $t ${n * 8_000 / ((System.nanoTime() - t0) / 1_000_000).coerceAtLeast(1) / 1_000_000}Mbps" }
                     "test" -> { app.unbraid.stats.SpeedTest.start(i.getStringExtra("arg")!!); "test started" }
                     "run" -> app.unbraid.stats.SpeedTest.run.value.toString()
+                    "dump" -> NordApi.json.encodeToString(Setup.serializer(), s.setup.value) + " accounts=" + s.accounts.value.keys + " tags=" + UnbraidVpn.tags
+                    "all" -> { app.unbraid.stats.SpeedTest.startAll(i.getStringExtra("arg")!!.split(','), UnbraidVpn.metered); "all started" }
+                    "allstate" -> app.unbraid.stats.SpeedTest.all.value?.let { a -> "${a.phase} down=${a.down} up=${a.up} window=${a.windowMs} metered=${a.metered} now=${a.now} error=${a.error} | " +
+                        a.legs.joinToString(" | ") { "${it.exit} ${it.server?.city}${if (it.missing) "(nearest)" else ""} limited=${it.limited} ping=${it.ping?.median} down=${it.down} up=${it.up} now=${it.now} err=${it.error}" } }.toString()
+                    "go" -> { app.unbraid.stats.SpeedTest.go(i.getStringExtra("arg").orEmpty().split(',').filter(String::isNotEmpty).toSet()); "go" }
                     "live" -> app.unbraid.stats.Stats.live.value.down.entries.joinToString(" | ") { (k, v) -> "$k " + v.joinToString(",") { (it / 1e6).toInt().toString() } }
                     "keys" -> app.unbraid.data.WgKeys.generate().let { "keys ok sdk=${android.os.Build.VERSION.SDK_INT} priv=${it.private.length} pub=${it.public.length}" }
                     else -> UnbraidVpn.state.value.toString()

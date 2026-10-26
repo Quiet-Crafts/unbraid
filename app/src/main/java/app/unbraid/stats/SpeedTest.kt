@@ -99,7 +99,7 @@ object SpeedTest {
                 val elapsed = { SystemClock.elapsedRealtime() - t0 }
                 val (server, down) = anyOf(located) { s -> Ndt7.download(tag, s.download, stop) { bps -> set { it.copy(now = bps, elapsedMs = elapsed()) } } }
                 if (stop()) return@Runnable
-                set { it.copy(phase = Phase.Upload, down = down, now = 0, server = server) }
+                set { it.copy(phase = Phase.Upload, down = down, now = 0, server = server, ping = it.ping.takeIf { server == located }) }
                 val up = Ndt7.upload(tag, server.upload, stop) { bps -> set { it.copy(now = bps, elapsedMs = elapsed()) } }
                 if (stop()) return@Runnable
                 // Moved to another provider or server meanwhile: the numbers belong to neither.
@@ -150,7 +150,7 @@ object SpeedTest {
 
     /**
      * Several exits measured at the same time. [down] and [up] count only the stretch every remaining exit was running
-     * ([windowMs], the shorter of the two); [now] is the exits' live rates added up.
+     * ([windowMs], the shorter of the two); [now] is the exits' live rates added up. [metered]: the sheet said so.
      */
     data class All(
         val id: Long, val legs: List<Leg>, val metered: Boolean, val phase: Phase = Phase.Preparing, val now: Long = 0,
@@ -159,23 +159,29 @@ object SpeedTest {
 
     private val _all = MutableStateFlow<All?>(null)
     val all = _all.asStateFlow()
+    /** What [go] starts, bound to the run it belongs to: a cancelled run's never starts a newer one's measuring. */
+    private var proceed: Pair<Int, (Set<String>) -> Unit>? = null
+
     /** Starts the measuring once the person decided: which exits without a server at home go via the nearest one. */
-    @Volatile private var proceed: ((Set<String>) -> Unit)? = null
-    fun go(nearest: Set<String>) = proceed?.invoke(nearest)
+    fun go(nearest: Set<String>) = synchronized(lock) { proceed?.takeIf { it.first == attempt }.also { proceed = null } }?.second?.invoke(nearest)
 
     /** Runs [f] for every exit at once and waits for all of them. */
     private fun parallel(exits: List<String>, f: (String) -> Unit) =
         exits.map { e -> Thread({ runCatching { f(e) } }, "speedtest").apply { start() } }.forEach { it.join() }
 
+    /** Routes connected only for a combined run go down again (the engine reloads without them). */
+    private fun release() { if (Unbraid.store.setup.value.testing.isNotEmpty()) Unbraid.store.update { it.copy(testing = emptySet()) } }
+
     /**
-     * Tests routed [exits] at the same time (a Tailscale node without a route can't join: Tailscale has one exit node).
-     * First every exit finds its M-Lab server; then, after [go], all download together and then all upload together.
+     * Tests [exits] (route ids) at the same time. Routes without apps are connected for the run, as far as their
+     * provider's connection limit allows; a Tailscale route can join only if Tailscale's one exit node is free or its.
+     * Every exit first finds its M-Lab server; then, after [go], all download together and then all upload together.
      */
     fun startAll(exits: List<String>, metered: Boolean): Boolean {
-        val legs = exits.distinct().filter { UnbraidVpn.tags[it] != null }.take(MAX_TOGETHER)
-        if (legs.size < 2) return false
+        val setup = Unbraid.store.setup.value
+        val legs = exits.distinct().filter { setup.route(it) != null }.take(MAX_TOGETHER)
+        if (legs.size < 2 || UnbraidVpn.probe == null) return false
         cancel()
-        val setup = UnbraidVpn.running ?: Unbraid.store.setup.value
         val id = System.currentTimeMillis()
         val epoch = Stats.epoch
         val recordAs = legs.associateWith { Stats.note(it, setup) }
@@ -183,81 +189,115 @@ object SpeedTest {
         val stop = { attempt != mine }
         val set = { f: (All) -> All -> synchronized(lock) { if (!stop()) _all.value?.let { _all.value = f(it) } } }
         val leg = { exit: String, f: (Leg) -> Leg -> set { a -> a.legs.map { if (it.exit == exit) f(it) else it }.let { l -> a.copy(legs = l, now = l.sumOf { it.now }) } } }
-        val tag = { exit: String -> UnbraidVpn.tags[exit] ?: error("The route is gone") }
-        // No combined figure: fewer than two exits still running, or too short a stretch together.
-        val apart = { set { a -> a.copy(phase = Phase.Failed, now = 0, error = if (a.legs.count { it.error == null } < 2) "Only one exit kept going, so there's nothing to add up. Try again."
-            else "The exits didn't run together long enough to add them up. Try again.") } }
+        val tag = { exit: String -> UnbraidVpn.tags[exit] ?: error("The route isn't connected") }
+        val failed = { why: String -> set { it.copy(phase = Phase.Failed, now = 0, error = why) } }
+        val armed = { f: (Set<String>) -> Unit -> synchronized(lock) { if (!stop()) proceed = mine to f } }
 
-        /** One phase through every exit: their own results, and the combined rate over the stretch all of them ran. */
-        fun phase(p: Phase, exits: List<String>, t0: Long, f: (String, (Long) -> Unit, (Long) -> Unit) -> Long): Pair<Long, Long>? {
+        /** One phase through every exit: their own results, and each one's (time, bytes) samples. */
+        fun phase(p: Phase, exits: List<String>, t0: Long, f: (String, (Long, Long) -> Unit, (Long) -> Unit) -> Long): Map<String, List<Pair<Long, Long>>> {
             set { it.copy(phase = p) }
             val samples = exits.associateWith { java.util.Collections.synchronizedList(mutableListOf<Pair<Long, Long>>()) }
             parallel(exits) { e ->
                 try {
-                    val r = f(e, { bps -> leg(e) { it.copy(now = bps) }; set { it.copy(elapsedMs = SystemClock.elapsedRealtime() - t0) } }, { b -> samples.getValue(e) += SystemClock.elapsedRealtime() to b })
+                    val r = f(e, { t, b -> samples.getValue(e) += t to b }, { bps -> leg(e) { it.copy(now = bps) }; set { it.copy(elapsedMs = SystemClock.elapsedRealtime() - t0) } })
                     leg(e) { if (p == Phase.Download) it.copy(down = r, now = 0) else it.copy(up = r, now = 0) }
                 } catch (x: Exception) {
+                    android.util.Log.w("Unbraid", "speed test: ${p.name.lowercase()} through one exit stopped: ${x.javaClass.simpleName}")
                     leg(e) { it.copy(now = 0, error = "Stopped during the ${p.name.lowercase()}: the exit stopped answering. Not in the totals.") }
                 }
             }
-            val ok = _all.value?.legs.orEmpty().filter { it.error == null && it.exit in exits }
-            return if (ok.size < 2) null else combined(ok.map { samples.getValue(it.exit).toList() })
+            return samples.mapValues { it.value.toList() }
         }
 
         fun measure(nearest: Set<String>) {
+            // The network turned metered after GO: the person hasn't agreed to that yet.
+            if (UnbraidVpn.metered && _all.value?.metered == false) { set { it.copy(metered = true, phase = Phase.Deciding) }; armed { measure(it) }; return }
             val going = _all.value?.legs.orEmpty().filter { it.usable && (!it.missing || it.exit in nearest) }
-            if (going.size < 2) return set { it.copy(phase = Phase.Failed, error = "At least two exits need a test server to run together.") }
-            if (!reserve(going.size, mine)) return set { it.copy(phase = Phase.Failed, error = "M-Lab allows $PER_DAY tests a day; this run needs ${going.size} of them. Try fewer exits or tomorrow.") }
+            if (going.size < 2) return failed("At least two exits need a test server to run together.")
+            if (!reserve(going.size, mine)) return failed("M-Lab allows $PER_DAY tests a day; this run needs ${going.size} of them. Try fewer exits, or tomorrow.")
             set { it.copy(legs = going, phase = Phase.Preparing) }
             parallel(going.map { it.exit }) { e -> val p = Ndt7.ping(tag(e), going.first { it.exit == e }.server!!); leg(e) { it.copy(ping = p) } }
             if (stop()) return
-            // The server keeps these with each result, so M-Lab's data shows the line was shared.
-            val extra = "concurrent=${going.size}&run=$id"
+            // The server keeps this with each result, so M-Lab's data shows the line was shared. Nothing that ties
+            // the exits' addresses to each other (no run id): they are published, and some are the person's own.
+            val extra = "concurrent=${going.size}"
             val used = java.util.concurrent.ConcurrentHashMap<String, Ndt7.Server>()
             val t0 = SystemClock.elapsedRealtime()
-            val down = phase(Phase.Download, going.map { it.exit }, t0) { e, rate, bytes ->
-                anyOf(going.first { it.exit == e }.server!!) { s -> Ndt7.download(tag(e), s.download, stop, extra, bytes, rate) }.let { (s, r) -> used[e] = s; r }
+            val ok = { _all.value?.legs.orEmpty().filter { it.error == null }.map { it.exit } }
+            val down = phase(Phase.Download, going.map { it.exit }, t0) { e, sample, rate ->
+                val (s, r) = anyOf(going.first { it.exit == e }.server!!) { s -> Ndt7.download(tag(e), s.download, stop, extra, sample, rate) }
+                // Another of Locate's servers took the test: its ping wasn't measured, and the card names it.
+                if (s != going.first { it.exit == e }.server) leg(e) { it.copy(server = s, ping = null) }
+                used[e] = s; r
             }
             if (stop()) return
-            if (down == null) return apart()
-            set { it.copy(down = down.first, windowMs = down.second, now = 0) }
-            val up = phase(Phase.Upload, _all.value?.legs.orEmpty().filter { it.error == null }.map { it.exit }, t0) { e, rate, bytes ->
-                Ndt7.upload(tag(e), used.getValue(e).upload, stop, extra, bytes, rate)
-            }
+            combined(ok().takeIf { it.size >= 2 }.orEmpty().map { down.getValue(it) })?.let { (bps, ms) -> set { it.copy(down = bps, windowMs = ms) } } ?: return failed(apart(ok().size))
+            val up = phase(Phase.Upload, ok(), t0) { e, sample, rate -> Ndt7.upload(tag(e), used.getValue(e).upload, stop, extra, sample, rate) }
             if (stop()) return
-            if (up == null) return apart()
             // An exit moved to another provider or server meanwhile: its numbers belong to neither.
             val running = UnbraidVpn.running ?: setup
-            set { a -> a.copy(legs = a.legs.map { if (it.error == null && Stats.idOf(it.exit, running) != recordAs[it.exit]) it.copy(error = "The route changed during the test. Not saved.") else it }) }
-            set { it.copy(phase = Phase.Done, up = up.first, windowMs = minOf(it.windowMs, up.second), now = 0, elapsedMs = MAX_SECONDS * 1000L) }
+            set { a -> a.copy(legs = a.legs.map { if (it.error == null && Stats.idOf(it.exit, running) != recordAs[it.exit]) it.copy(error = "The route changed during the test. Not counted.") else it }) }
+            // Both totals over the exits that made it through both phases, so the run adds up to the rows it lists.
+            val last = ok()
+            val d = combined(last.map { down.getValue(it) }); val u = combined(last.map { up.getValue(it) })
+            if (last.size < 2 || d == null || u == null) return failed(apart(last.size))
+            set { it.copy(phase = Phase.Done, down = d.first, up = u.first, windowMs = minOf(d.second, u.second), now = 0, elapsedMs = MAX_SECONDS * 1000L) }
             val done = _all.value?.takeIf { it.phase == Phase.Done } ?: return
-            val ok = done.legs.filter { it.error == null }
             val servers = UnbraidVpn.state.value.servers
-            Stats.saveTests(listOf(Stats.Test(id, ALL, "", "", "", done.down ?: 0, done.up ?: 0, 0, 0, 0, id, ok.size)) + ok.mapIndexed { i, l ->
+            Stats.saveTests(listOf(Stats.Test(id, ALL, "", "", "", d.first, u.first, 0, 0, 0, id, last.size)) + done.legs.filter { it.error == null }.mapIndexed { i, l ->
                 val r = setup.route(l.exit)
                 Stats.Test(id + 1 + i, recordAs.getValue(l.exit), r?.source.orEmpty(), servers[l.exit]?.name ?: r?.name.orEmpty(), servers[l.exit]?.ip.orEmpty(),
-                    l.down ?: 0, l.up ?: 0, l.ping?.median ?: 0, 0, 0, id, ok.size)
+                    l.down ?: 0, l.up ?: 0, l.ping?.median ?: 0, 0, 0, id, last.size)
             }, epoch)
         }
 
         Thread({
-            // A cut-off test of another node may have left Tailscale on it: the routed node first, as for a single test.
-            if (Unbraid.store.tsTestFrom != null && legs.any { UnbraidVpn.tags[it] == Compiler.TS_TAG }) runCatching { tsq.submit(::switchBack).get() }
-            parallel(legs) { e ->
-                val country = setup.route(e)?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()
-                try {
-                    val s = Ndt7.locate(tag(e), country)
-                    leg(e) { if (s != null) it.copy(server = s) else it.copy(missing = true, server = runCatching { Ndt7.locate(tag(e), null) }.getOrNull()) }
-                } catch (x: Ndt7.Limited) { leg(e) { it.copy(limited = true) } }
-                catch (x: Exception) { leg(e) { it.copy(error = "M-Lab couldn't be reached through this exit.") } }
-            }
-            val a = _all.value
-            if (stop() || a == null) return@Thread
-            proceed = { nearest -> proceed = null; Thread({ runCatching { measure(nearest) }.onFailure { set { a -> a.copy(phase = Phase.Failed, now = 0, error = "The test couldn't finish. Check the connection and try again.") } } }, "speedtest").start() }
-            if (metered || a.legs.any { it.missing || !it.usable }) set { it.copy(phase = Phase.Deciding) } else go(emptySet())
+            try {
+                // Routes without apps come up for the run, one at a time while each provider's limit allows.
+                val acc = Unbraid.store.accounts.value
+                val limit = { p: String -> acc[p]?.let { a -> app.unbraid.data.Providers.get(p)?.limit(a) } }
+                var up = emptySet<String>()
+                legs.filter { e -> setup.activeRoutes.none { it.id == e } }.forEach { e ->
+                    val r = setup.route(e)!!
+                    val over = app.unbraid.data.Limits.over(setup.copy(testing = up), setup.copy(testing = up + e), limit)
+                    when {
+                        r.tsExit != null && setup.tsExit != null && setup.tsExit != r.tsExit -> leg(e) { it.copy(error = "Tailscale has one exit node at a time, and another route uses it.") }
+                        over != null -> leg(e) { it.copy(error = "${app.unbraid.data.Providers.get(over.provider)?.name ?: over.provider} allows ${app.unbraid.data.Limits.units(over.limit, over.unit)}, all in use.") }
+                        else -> up = up + e
+                    }
+                }
+                if (up.isNotEmpty()) {
+                    Unbraid.store.update { it.copy(testing = up) }
+                    val until = SystemClock.elapsedRealtime() + 30_000
+                    while (!stop() && up.any { UnbraidVpn.tags[it] == null } && SystemClock.elapsedRealtime() < until) Thread.sleep(250)
+                    up.filter { UnbraidVpn.tags[it] == null }.forEach { e -> leg(e) { it.copy(error = "It didn't connect for the test.") } }
+                }
+                // A cut-off test of another node may have left Tailscale on it: the routed node first, as for a single test.
+                if (Unbraid.store.tsTestFrom != null && legs.any { UnbraidVpn.tags[it] == Compiler.TS_TAG }) runCatching { tsq.submit(::switchBack).get() }
+                parallel(_all.value?.legs.orEmpty().filter { it.error == null }.map { it.exit }) { e ->
+                    val country = setup.route(e)?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()
+                    try {
+                        val s = Ndt7.locate(tag(e), country)
+                        // Outside the lock: a slow answer mustn't hold up a cancel on the main thread.
+                        val near = if (s == null) runCatching { Ndt7.locate(tag(e), null) }.getOrNull() else null
+                        leg(e) { if (s != null) it.copy(server = s) else it.copy(missing = true, server = near) }
+                    } catch (x: Ndt7.Limited) { leg(e) { it.copy(limited = true) } }
+                    catch (x: Exception) { leg(e) { it.copy(error = "M-Lab couldn't be reached through it.") } }
+                }
+                val a = _all.value
+                if (stop() || a == null) return@Thread
+                val run = { nearest: Set<String> -> Thread({ try { measure(nearest) } catch (x: Exception) { failed("The test couldn't finish. Check the connection and try again.") } finally { if (_all.value?.phase != Phase.Deciding) done(mine) } }, "speedtest").start() }
+                if (metered || UnbraidVpn.metered || a.legs.any { it.missing || !it.usable }) { set { it.copy(metered = metered || UnbraidVpn.metered, phase = Phase.Deciding) }; armed(run) }
+                else run(emptySet())
+            } catch (x: Exception) { failed("The test couldn't start. Check the connection and try again."); done(mine) }
         }, "speedtest").start()
         return true
     }
+
+    /** A combined run [mine] ended: routes up only for it go down, unless a newer run took over. */
+    private fun done(mine: Int) { if (attempt == mine) release() }
+
+    private fun apart(n: Int) = if (n < 2) "Only one exit kept going, so there's nothing to add up. Try again." else "The exits didn't run together long enough to add them up. Try again."
 
     /**
      * bits/s through several exits counted only while all of them ran, and that stretch in ms: from the latest first
@@ -334,6 +374,7 @@ object SpeedTest {
             _all.value = null
             if (wasNode) restoreNode()
         }
+        release()
     }
 
     /** Leaving the result screen forgets the last run (it's in History if stats are on). */

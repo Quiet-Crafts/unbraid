@@ -830,8 +830,10 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
         UnbraidVpn.tags.keys.filter { it != DIRECT }.map { (v.exits[Stats.idOf(it, running)] ?: Ex(it, "?", it, "", Ink.faint)).copy(id = it) }.sortedBy { it.name } +
             SpeedTest.nodes().map { Ex(SpeedTest.NODE + it.ip, "TS", it.name, "Tailscale", Ink.text) }
     }
-    // Every routed exit at once ("ALL") once there are two; a Tailscale node without a route can't join.
-    val routed = options.filter { !it.id.startsWith(SpeedTest.NODE) }
+    // Every route at once ("ALL") once there are two, with apps or without (those connect for the run); a Tailscale
+    // node without a route can't join.
+    // Two routes by the same name ("Fastest") are told apart by their provider.
+    val routed = setup.routes.map { r -> Ex(r.id, r.code, if (setup.routes.count { it.name == r.name } > 1) "${r.name} · ${r.source}" else r.name, r.source, Ink.route(r.hue)) }.sortedBy { it.name }
     val together by SpeedTest.all.collectAsStateWithLifecycle()
     var chosen by rememberSaveable { mutableStateOf(if (together != null) SpeedTest.ALL else options.firstOrNull()?.id) }
     val allMode = routed.size >= 2 && chosen == SpeedTest.ALL
@@ -877,7 +879,7 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
                 }
             }
         }
-        if (allMode) { item(key = "all") { SpeedAll(v, routed, options - routed.toSet(), setup) { go("history") } }; return@Section }
+        if (allMode) { item(key = "all") { SpeedAll(v, routed, options.filter { it.id.startsWith(SpeedTest.NODE) }, setup) { go("history") } }; return@Section }
         item(key = "cards") {
             // Ping, then the two speeds, as Ookla orders them; the card being measured is outlined in the exit's colour.
             Row(Modifier.padding(horizontal = Gutter, vertical = 12.dp).height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1021,7 +1023,7 @@ private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbra
             val d = a?.down?.let(::total); val u = a?.up?.let(::total)
             SpeedCard(Icons.down, "Download", d?.first, "${d?.second ?: "Gbps"} total", phase == SpeedTest.Phase.Download, Ink.text)
             SpeedCard(Icons.up, "Upload", u?.first, "${u?.second ?: "Gbps"} total", phase == SpeedTest.Phase.Upload, Ink.text)
-            SpeedCard(Icons.routes, "Exits", "${if (a == null) picked.size else ok}", if (a == null || phase == SpeedTest.Phase.Preparing && legs.all { it.server == null }) "of ${exits.size}" else "of ${exits.size} ran", false, Ink.text)
+            SpeedCard(Icons.routes, "Exits", "${if (a == null) picked.size else ok}", if (done || phase == SpeedTest.Phase.Failed) "of ${exits.size} ran" else "of ${exits.size}", false, Ink.text)
         }
         when {
             measuring -> {
@@ -1042,8 +1044,8 @@ private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbra
                     Text("${if (upload) "2/2 · Upload" else "1/2 · Download"} · $ok of ${legs.size} running", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.weight(1f))
                     Secondary("Cancel", { SpeedTest.cancel() }, color = Ink.text)
                 }
-                // Each exit on a plain linear scale (1 Gbps, or the fastest): what each adds to the total.
-                val scale = maxOf(1_000_000_000L, legs.maxOf { it.now }).toFloat()
+                // Each exit's plain linear share of the total now: what it adds, on a fast line or a slow one.
+                val scale = maxOf(r.now, 1L).toFloat()
                 Column(Modifier.padding(horizontal = Gutter, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     legs.forEachIndexed { i, l ->
                         val now = animateFloatAsState(l.now.toFloat(), spring(dampingRatio = 1f, stiffness = 40f), label = "leg")
@@ -1069,7 +1071,9 @@ private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbra
                     }
                 }
                 LegRows(legs, ex, setup)
-                Go(if (done) 150 else 200, Ink.text, "AGAIN", "Test all exits together again", bloom = done) { if (Unbraid.store.mlabConsent) begin() else asking = true }
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Go(150, Ink.text, "AGAIN", "Test all exits together again", bloom = done) { if (Unbraid.store.mlabConsent) begin() else asking = true }
+                }
                 Text(if (done) "Combined throughput on this phone. " + (if (setup.prefs.stats) "Saved: each exit as a test marked \"with ${ran(legs) - 1} others\", and one History row." else "Not saved: statistics are off.") else "",
                     style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { LinkButton(Icons.history, "History", history) }
@@ -1092,18 +1096,19 @@ private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbra
                             Chip(e)
                             Column(Modifier.weight(1f)) {
                                 Text(e.name, style = Type.body, color = Ink.text, maxLines = 1)
-                                Text(listOfNotNull(e.via.ifEmpty { null }, UnbraidVpn.state.value.servers[e.id]?.name).joinToString(" · "), style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
+                                Text(listOfNotNull(e.via.ifEmpty { null }, UnbraidVpn.state.value.servers[e.id]?.name ?: "connects for the test".takeIf { setup.activeRoutes.none { it.id == e.id } }).joinToString(" · "),
+                                    style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
                             }
                             when {
                                 !working -> androidx.compose.material3.Checkbox(on, null, colors = androidx.compose.material3.CheckboxDefaults.colors(checkedColor = Ink.text, checkmarkColor = Ink.ground, uncheckedColor = Ink.dim))
                                 l == null -> Text("Not ticked", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
                                 l.limited -> Text("Limited by M-Lab", style = Type.caption.copy(fontSize = 12.sp), color = Ink.accent)
-                                l.error != null -> Text("No answer", style = Type.caption.copy(fontSize = 12.sp), color = Ink.accent)
+                                l.error != null -> Text("Can't join", style = Type.caption.copy(fontSize = 12.sp), color = Ink.accent)
                                 l.missing -> Text(l.server?.let { "Nearest: ${it.city}" } ?: "None in its country", style = Type.caption.copy(fontSize = 12.sp), color = Ink.accent)
                                 l.server != null -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                     Text(l.server.city, style = Type.caption.copy(fontSize = 12.sp), color = Ink.text); Icon(Icons.checkCircle, null, Modifier.size(20.dp), tint = Ink.good)
                                 }
-                                else -> Text("Finding…", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
+                                else -> Text(if (UnbraidVpn.tags[e.id] == null) "Connecting…" else "Finding…", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
                             }
                         }
                     }
@@ -1124,7 +1129,8 @@ private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbra
                     when {
                         working -> "No test data is sent yet. Nothing runs until every exit has a server or you decide."
                         picked.size < 2 -> "Tick at least two exits."
-                        else -> "GO first finds a test server for every exit. Then all download together, then all upload together: ten seconds each."
+                        else -> "GO first finds a test server for every exit. Then all download together, then all upload together: ten seconds each." +
+                            (if (picked.any { p -> setup.activeRoutes.none { it.id == p.id } }) " Routes without apps connect just for the test, so the VPN restarts for a moment before and after." else "")
                     },
                     style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 )
@@ -1180,13 +1186,13 @@ private fun BeforeTogether(a: SpeedTest.All, ex: (String) -> Ex?, setup: app.unb
                 val name = ex(l.exit)?.name ?: l.exit
                 Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Chip(ex(l.exit))
-                    Text(when { l.limited -> "M-Lab is limiting this exit"; l.error != null -> "M-Lab can't be reached"; else -> "No test server in ${country(l.exit)}" },
+                    Text(when { l.limited -> "M-Lab is limiting this exit"; l.error != null -> "$name can't join"; else -> "No test server in ${country(l.exit)}" },
                         style = Type.title.copy(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Medium))
                 }
                 Text(
                     when {
                         l.limited -> "M-Lab allows a set number of tests from each internet address. $name leaves through a server whose address other people share, and they have used up its tests for now. It's left out: try again later, or pick another server for this route in Routes."
-                        l.error != null -> "$name didn't get an answer from M-Lab, so it's left out of this run."
+                        l.error != null -> "${l.error} It's left out of this run."
                         l.server == null -> "M-Lab has no server in ${country(l.exit)}, and none nearby answered. $name is left out."
                         else -> "M-Lab has no server in ${country(l.exit)}. The nearest is in ${listOf(l.server.city, java.util.Locale("", l.server.country).displayCountry).filter(String::isNotEmpty).joinToString(", ")}, so $name's numbers would include the trip there."
                     },

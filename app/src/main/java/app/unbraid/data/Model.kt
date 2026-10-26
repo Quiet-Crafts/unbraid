@@ -153,6 +153,8 @@ data class Setup(
     val profiles: List<Profile> = emptyList(),
     /** The profile in use; its saved copy follows every edit, as [defaultRoute] and [apps] hold it ([saved]). Null = none. */
     val profile: String? = null,
+    /** Routes without apps connected only for a combined speed test; never saved. */
+    @kotlinx.serialization.Transient val testing: Set<String> = emptySet(),
 ) {
     fun route(id: String?) = routes.firstOrNull { it.id == id }
 
@@ -202,8 +204,8 @@ data class Setup(
         })
     }
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute
-    /** Routes that carry traffic right now: the default plus any with apps. */
-    val activeRoutes get() = routes.filter { r -> r.id == defaultRoute || apps.containsValue(r.id) }
+    /** Routes that carry traffic right now: the default plus any with apps (and those up for a speed test). */
+    val activeRoutes get() = routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) }
     /** The Tailscale exit node in use, if any active route goes out through one (Tailscale allows one at a time). */
     val tsExit get() = activeRoutes.firstNotNullOfOrNull { it.tsExit }
     /** Tailscale runs for home access or for an exit-node route. */

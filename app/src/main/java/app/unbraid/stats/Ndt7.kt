@@ -73,17 +73,17 @@ object Ndt7 {
     private fun JsonObject.str(k: String) = get(k)?.jsonPrimitive?.content.orEmpty()
 
     /**
-     * Receives until the server ends the test; [rate] gets bits/s every quarter second. [bytes] gets the running count
-     * at most every 20 ms and once at the end ([extra] URL parameters tag a combined run).
+     * Receives until the server ends the test; [rate] gets bits/s every quarter second. [sample] gets the time
+     * (elapsedRealtime ms) and running count at most every 20 ms and at the end ([extra] URL parameters tag a combined run).
      */
-    fun download(tag: String, url: String, stop: () -> Boolean, extra: String = "", bytes: (Long) -> Unit = {}, rate: (Long) -> Unit): Long {
+    fun download(tag: String, url: String, stop: () -> Boolean, extra: String = "", sample: (Long, Long) -> Unit = { _, _ -> }, rate: (Long) -> Unit): Long {
         val c = socket(tag, url, extra)
         val input = DataInputStream(c.input)
         val scratch = ByteArray(1 shl 16)
         val start = SystemClock.elapsedRealtime()
         var got = 0L; var told = start; var noted = start
-        val count = { n: Long -> got += n; val now = SystemClock.elapsedRealtime(); if (now - noted >= 20) { noted = now; bytes(got) } }
-        bytes(0)
+        val count = { n: Long -> got += n; val now = SystemClock.elapsedRealtime(); if (now - noted >= 20) { noted = now; sample(now, got) } }
+        sample(start, 0)
         try {
             while (!stop() && SystemClock.elapsedRealtime() - start < (SECONDS + 3) * 1000) {
                 val (op, len) = header(input) ?: break
@@ -96,19 +96,20 @@ object Ndt7 {
                 val now = SystemClock.elapsedRealtime()
                 if (now - told >= 250) { told = now; rate(got * 8000 / (now - start).coerceAtLeast(1)) }
             }
-            bytes(got)
+            sample(SystemClock.elapsedRealtime(), got)
             return got * 8000 / (SystemClock.elapsedRealtime() - start).coerceAtLeast(1)
         } finally { c.close(); live -= c }
     }
 
     /**
      * Sends for ten seconds; the rate is what the server says it received (its TCPInfo), not what left the phone's
-     * buffers. The live figure falls back to bytes sent until the server's first report. [bytes] gets the server's
-     * received count as each report arrives.
+     * buffers. The live figure falls back to bytes sent until the server's first report. [sample] gets the server's
+     * received count as each report arrives, timed by the server's own clock from the connection's start.
      */
-    fun upload(tag: String, url: String, stop: () -> Boolean, extra: String = "", bytes: (Long) -> Unit = {}, rate: (Long) -> Unit): Long {
+    fun upload(tag: String, url: String, stop: () -> Boolean, extra: String = "", sample: (Long, Long) -> Unit = { _, _ -> }, rate: (Long) -> Unit): Long {
         val c = socket(tag, url, extra)
-        bytes(0)
+        val opened = SystemClock.elapsedRealtime()
+        sample(opened, 0)
         val input = DataInputStream(c.input)
         val server = java.util.concurrent.atomic.AtomicLong(-1)
         // Only the sending loop writes: the reader leaves the server's pings here for it, so neither ever waits on the other.
@@ -125,7 +126,7 @@ object Ndt7 {
                         9 -> pong.set(p)
                         1 -> p.decodeToString().substringAfter("\"TCPInfo\"", "").let { t ->
                             val got = BYTES_RECEIVED.find(t)?.groupValues?.get(1)?.toLong(); val us = ELAPSED.find(t)?.groupValues?.get(1)?.toLong()
-                            if (got != null && us != null && us > 0) { server.set(got * 8_000_000 / us); bytes(got) }
+                            if (got != null && us != null && us > 0) { server.set(got * 8_000_000 / us); sample(opened + us / 1000, got) }
                         }
                     }
                 }
