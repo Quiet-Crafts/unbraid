@@ -114,6 +114,16 @@ class MainActivity : ComponentActivity() {
     // The open sheet and a connect waiting on it outlive a rotation (never a secret here); nothing connects by itself.
     override fun onSaveInstanceState(out: Bundle) { super.onSaveInstanceState(out); out.putString("sheet", sheet); out.putBoolean("connectAfter", connectAfter) }
 
+    // A profile shortcut (or a tile that needed the app): switch, and connect if nothing is running.
+    private fun useProfile(intent: Intent) {
+        if (intent.action != app.unbraid.vpn.Profiles.ACTION || intent.getStringExtra("key") != app.unbraid.vpn.Profiles.key(this)) return
+        val name = intent.getStringExtra("name") ?: return
+        // Connects once switched: at once, or after the user's yes to a provider's limit (maybe in a later activity).
+        ui.useProfile(name) { ui.connectWanted.value = true }
+    }
+
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); useProfile(intent) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         savedInstanceState?.let { sheet = it.getString("sheet"); connectAfter = it.getBoolean("connectAfter") }
         window.setHideOverlayWindows(true) // no tapjacking over sign-in or connect
@@ -123,6 +133,7 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         Onboarding.init(this)
+        if (savedInstanceState == null) useProfile(intent)
         setContent {
             UnbraidTheme {
               if (!Onboarding.termsOk) {
@@ -138,6 +149,12 @@ class MainActivity : ComponentActivity() {
                 var adding by rememberSaveable { mutableStateOf(false) }
                 val vpn by ui.vpn.collectAsStateWithLifecycle()
                 val disclosed by ui.disclosed.collectAsStateWithLifecycle()
+                val connectWanted by ui.connectWanted.collectAsStateWithLifecycle()
+                LaunchedEffect(connectWanted) {
+                    if (!connectWanted) return@LaunchedEffect
+                    ui.connectWanted.value = false
+                    if (UnbraidVpn.state.value.phase.let { it == VpnState.Phase.Off || it == VpnState.Phase.Paused }) connect()
+                }
 
                 // The tour: a stop index, -1 = off. A new install gets it once it is set up; Settings replays it.
                 var tour by rememberSaveable { mutableStateOf(-1) }

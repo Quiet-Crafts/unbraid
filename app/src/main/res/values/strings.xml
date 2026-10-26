@@ -3,6 +3,9 @@
     <!-- The app's name, as in Kotlin's APP (Unbraid.kt): plain "unbraid". The un/braid wordmark is only a logo inside the app. -->
     <string name="app_name" translatable="false">unbraid</string>
     <string name="widget_name">unbraid</string>
+    <string name="profile_tile_1">Profile 1</string>
+    <string name="profile_tile_2">Profile 2</string>
+    <string name="profile_tile_3">Profile 3</string>
     <string name="widget_description">Shows whether you\'re protected, paused or off, with one button to connect, pause or resume.</string>
     <!-- Placeholder until the widget gets its live state. -->
     <string name="widget_connect">Connect</string>

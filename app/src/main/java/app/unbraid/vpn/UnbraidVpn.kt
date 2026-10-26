@@ -96,6 +96,10 @@ data class VpnState(
     val dropping: Set<String> = emptySet(),
     /** Counts engine starts, each of which restarts every tunnel: what was observed of an earlier one no longer holds. */
     val engine: Int = 0,
+    /** [Setup.hashCode] of the setup the engine runs in full (no route still waiting for a server): a profile switch is done. */
+    val applied: Int = 0,
+    /** [Setup.hashCode] of the last setup the engine refused (the one before it still runs): a profile switch is undone. */
+    val refused: Int = 0,
 ) {
     enum class Phase { Off, Connecting, On, Paused }
 }
@@ -340,7 +344,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             forgetLookups(this)
             val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
             apply(srv, setup, picked, accounts)
-            state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, stuck = stuck(setup, picked.blocked), engine = starts)
+            state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, stuck = stuck(setup, picked.blocked), engine = starts,
+                applied = if (picked.blocked.values.none { it is LinkPicker.Waiting }) setup.hashCode() else 0)
             stopWanted = false
             notify(setup)
             if (setup.tailscale) watchTailscale()
@@ -349,7 +354,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             health = scope.launch { watchHealth() }
             watch = combine(store.setup, store.accounts) { s, a -> s to a }.debounce(400).onEach { (s, a) ->
                 // Not awaited: a slow provider must never hold up the next edit (which may have to block an app at once).
-                if (lock.withLock { (s != applied || a != appliedAccounts) && (s to a) != rejected }) scope.launch { reload() }
+                if (lock.withLock {
+                    // Moved on from a refused setup (a switch put back): trying that one again later is a fresh attempt.
+                    if (rejected != null && rejected?.first != s) { rejected = null; state.update { it.copy(refused = 0) } }
+                    (s != applied || a != appliedAccounts) && (s to a) != rejected
+                }) scope.launch { reload() }
             }.launchIn(scope)
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${Redact.log(e)}")
@@ -400,6 +409,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (fresh || was != setup) app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() }
         applied = setup
         appliedAccounts = accounts
+        // A refusal is over once a setup runs again: a retry of the same one is judged afresh.
+        state.update { it.copy(applied = if (picked.blocked.values.none { it is LinkPicker.Waiting }) setup.hashCode() else it.applied, refused = 0) }
         rejected = null
         this.links = links
         retryBlocked(picked.blocked)
@@ -514,7 +525,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val restored = !restarting || restoreLastGood(srv)
         restarting = false
         if (restored) app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() } // a new engine, numbered afresh
-        if (restored) state.update { it.copy(error = Redact.message(e, "Change not applied")) } else teardown(Redact.message(e, "Connection lost"))
+        if (restored) state.update { it.copy(error = Redact.message(e, "Change not applied"), refused = setup.hashCode()) } else teardown(Redact.message(e, "Connection lost"))
         false
     }
 

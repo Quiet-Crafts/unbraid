@@ -6,6 +6,7 @@ import app.unbraid.stats.Stats
 import app.unbraid.vpn.VpnState.Phase
 import kotlinx.coroutines.flow.combine
 import app.unbraid.vpn.UnbraidVpn
+import app.unbraid.vpn.Profiles
 import app.unbraid.vpn.StatusWidget
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -39,6 +40,9 @@ class Unbraid : Application() {
         app.unbraid.data.Snapshot.dir = filesDir
         // The home-screen widget mirrors every connection change, and whether running protects anything.
         combine(UnbraidVpn.state.map { it.phase }, store.setup.map { it.directOnly }) { p, d -> p to d }.distinctUntilChanged().onEach { StatusWidget.update(this) }.launchIn(MainScope())
+        // The launcher shortcuts and quick-settings tiles follow the first three profiles and the one in use.
+        store.setup.map { s -> s.profiles.take(Profiles.SLOTS).map { it.name } to s.profile }.distinctUntilChanged().onEach { Profiles.refresh(this) }.launchIn(MainScope())
+        Profiles.watch(MainScope())
         // Statistics follow the connection while they're on: sessions from the phase, traffic from the running engine.
         Stats.init(this)
         combine(UnbraidVpn.state.map { it.phase }, store.setup.map { it.prefs.stats }) { p, on -> p to on }.distinctUntilChanged().onEach { (p, on) ->

@@ -113,6 +113,22 @@ data class OwnServer(val id: String, val wg: WgPeer? = null, val ovpn: OvpnProfi
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OVPN"; else -> "SS" }
 }
 
+/** A saved setup, switched to in one tap: a default exit and app exceptions. Routes are shared by every profile. */
+@Serializable
+data class Profile(val name: String, val defaultRoute: String, val apps: Map<String, String> = emptyMap())
+
+const val MAX_PROFILES = 20
+/** A profile name's length in characters people see: an emoji or an accented letter counts once. */
+const val PROFILE_NAME = 12
+
+private fun chars(s: String) = java.text.BreakIterator.getCharacterInstance().apply { setText(s) }
+
+/** Characters people see in [s] ([PROFILE_NAME] counts these, not UTF-16 units). */
+fun graphemes(s: String): Int = chars(s).let { b -> var n = 0; while (b.next() != java.text.BreakIterator.DONE) n++; n }
+
+/** The first [n] characters people see of [s], never splitting one. */
+fun String.takeGraphemes(n: Int): String = chars(this).let { b -> var end = 0; repeat(n) { b.next().takeIf { it != java.text.BreakIterator.DONE }?.let { end = it } }; take(end) }
+
 /** The current [Setup.version]. */
 const val VERSION = 1
 
@@ -134,8 +150,57 @@ data class Setup(
     val version: Int = 0,
     /** Each provider's page settings: provider id → [Opt.key] → value. Unset keys take [Provider.defaults]. */
     val opts: Map<String, Map<String, String>> = emptyMap(),
+    val profiles: List<Profile> = emptyList(),
+    /** The profile in use; its saved copy follows every edit, as [defaultRoute] and [apps] hold it ([saved]). Null = none. */
+    val profile: String? = null,
 ) {
     fun route(id: String?) = routes.firstOrNull { it.id == id }
+
+    /** [profiles] as they stand: the one in use with the current default and exceptions. */
+    val saved get() = profiles.map { if (it.name == profile) it.copy(defaultRoute = defaultRoute, apps = apps) else it }
+
+    /** Switches to profile [name]; the one in use keeps what it has now. */
+    fun use(name: String) = profiles.firstOrNull { it.name == name }?.let { p -> copy(profiles = saved, profile = p.name, defaultRoute = p.defaultRoute, apps = p.apps) } ?: this
+
+    /** Saves the current setup as profile [name], now in use. */
+    fun saveAs(name: String) = copy(profiles = saved + Profile(name, defaultRoute, apps), profile = name)
+
+    fun rename(old: String, new: String) = copy(profiles = profiles.map { if (it.name == old) it.copy(name = new) else it }, profile = if (profile == old) new else profile)
+
+    /** Deletes profile [name]. The current routes stay as they are, even when it was the one in use. */
+    fun forget(name: String) = copy(profiles = profiles.filter { it.name != name }, profile = profile.takeIf { it != name })
+
+    /**
+     * Back to what [ran] (the setup the engine still runs after refusing a switch) uses: its profile when still saved, its
+     * default and exceptions as far as their routes still exist. The refused profile keeps what it had.
+     */
+    fun back(ran: Setup): Setup {
+        val ok = { id: String -> id == DIRECT || route(id) != null }
+        return copy(profiles = saved, profile = ran.profile?.takeIf { n -> profiles.any { it.name == n } },
+            defaultRoute = ran.defaultRoute.takeIf(ok) ?: defaultRoute, apps = ran.apps.filterValues(ok))
+    }
+
+    /** Moves profile [name] [by] places (negative = earlier). */
+    fun move(name: String, by: Int): Setup {
+        val i = profiles.indexOfFirst { it.name == name }.takeIf { it >= 0 } ?: return this
+        return copy(profiles = profiles.toMutableList().apply { add((i + by).coerceIn(0, lastIndex), removeAt(i)) })
+    }
+
+    /** [raw] trimmed, if it can name a profile: not blank, at most [PROFILE_NAME] characters, not taken (but by [except]). */
+    fun profileName(raw: String, except: String? = null) = raw.trim().takeIf { n ->
+        n.isNotEmpty() && graphemes(n) <= PROFILE_NAME && profiles.none { it.name != except && it.name.equals(n, ignoreCase = true) }
+    }
+
+    /** Profiles left pointing at a removed route: its apps follow the profile's default, a removed default becomes the first route. */
+    fun tidy(): Setup {
+        val ok = { id: String -> id == DIRECT || routes.any { it.id == id } }
+        if (profiles.all { p -> ok(p.defaultRoute) && p.apps.values.all(ok) }) return this
+        val first = routes.firstOrNull()?.id ?: DIRECT
+        return copy(profiles = profiles.map { p ->
+            val d = p.defaultRoute.takeIf(ok) ?: first
+            p.copy(defaultRoute = d, apps = p.apps.filterValues { ok(it) && it != d })
+        })
+    }
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute
     /** Routes that carry traffic right now: the default plus any with apps. */
     val activeRoutes get() = routes.filter { r -> r.id == defaultRoute || apps.containsValue(r.id) }

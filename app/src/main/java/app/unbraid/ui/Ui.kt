@@ -29,6 +29,8 @@ import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.data.Limits
 import app.unbraid.data.Setup
+import app.unbraid.data.MAX_PROFILES
+import app.unbraid.vpn.Profiles
 import app.unbraid.data.WgConf
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
@@ -37,6 +39,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -410,19 +413,23 @@ class Ui(app: Application) : AndroidViewModel(app) {
     /**
      * Saves [f], unless it takes a provider over its limit ([Limits.over]): then nothing changes until the user answers
      * [limitAsk]. With one route of that provider already on a server, it offers to put both routes on that server.
+     * [after] runs once [f] is saved, whether at once or on the user's yes.
      */
-    private fun guarded(f: (Setup) -> Setup) {
+    private fun guarded(after: () -> Unit = {}, f: (Setup) -> Setup) {
         val old = setup.value
         val acc = accounts.value
-        val o = Limits.over(old, f(old)) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } ?: run { store.update(f); return }
+        val o = Limits.over(old, f(old)) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } ?: run { store.update(f); after(); return }
         val name = Providers.get(o.provider)?.name ?: o.provider
         // Only a route the engine runs as saved has a server worth sharing; checked again when the user answers.
         val anchor = old.activeRoutes.singleOrNull { !it.imported && it.loc.provider == o.provider }?.takeIf { a -> UnbraidVpn.running?.route(a.id)?.loc == a.loc }
         val server = anchor?.let { vpn.value.servers[it.id] }
-        limitAsk.value = LimitAsk(Limits.warning(name, o.limit, o.unit, o.n), { store.update(f) }, server?.let { sv ->
+        limitAsk.value = LimitAsk(Limits.warning(name, o.limit, o.unit, o.n), { store.update(f); after() }, server?.let { sv ->
             sv.name to {
-                if (setup.value.route(anchor.id)?.loc == anchor.loc && vpn.value.servers[anchor.id] == sv) store.update { s ->
-                    f(s).let { n -> n.copy(routes = n.routes.map { r -> if (!r.imported && r.loc.provider == o.provider && n.activeRoutes.any { it.id == r.id }) r.copy(loc = anchor.loc.copy(pinned = sv)) else r }) }
+                if (setup.value.route(anchor.id)?.loc == anchor.loc && vpn.value.servers[anchor.id] == sv) {
+                    store.update { s ->
+                        f(s).let { n -> n.copy(routes = n.routes.map { r -> if (!r.imported && r.loc.provider == o.provider && n.activeRoutes.any { it.id == r.id }) r.copy(loc = anchor.loc.copy(pinned = sv)) else r }) }
+                    }
+                    after()
                 }
             }
         })
@@ -562,6 +569,26 @@ class Ui(app: Application) : AndroidViewModel(app) {
     }
 
     fun setDefault(id: String) = guarded { s -> s.copy(defaultRoute = id, apps = s.apps.filterValues { it != id }) }
+
+    // ---- profiles ----
+
+    /** Set by a profile shortcut that should connect once switched; the activity on screen then connects. */
+    val connectWanted = MutableStateFlow(false)
+    val switching = Profiles.switching
+    val switchFailed = Profiles.refused
+
+    /** Switches to profile [name]; [then] runs once it is saved (at once, or after the user's yes to a provider's limit). */
+    fun useProfile(name: String, then: () -> Unit = {}) {
+        switchFailed.value = null
+        if (setup.value.profiles.none { it.name == name }) return
+        if (setup.value.profile == name) return then()
+        guarded({ Profiles.started(name); then() }) { it.use(name) }
+    }
+
+    fun saveProfile(name: String) = store.update { s -> s.profileName(name)?.takeIf { s.profiles.size < MAX_PROFILES }?.let { s.saveAs(it) } ?: s }
+    fun renameProfile(old: String, name: String) = store.update { s -> s.profileName(name, except = old)?.let { s.rename(old, it) } ?: s }
+    fun forgetProfile(name: String) = store.update { it.forget(name) }
+    fun moveProfile(name: String, by: Int) = store.update { it.move(name, by) }
 
     /** [routeId] null or equal to the default → app follows the default. */
     fun assign(pkg: String, routeId: String?) = guarded { s ->

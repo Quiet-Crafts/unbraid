@@ -46,7 +46,8 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
     /** Applies [f]; false when it couldn't be written (see [unsaved]), so callers keep a pasted secret on the clipboard. */
     @Synchronized
     fun update(f: (Setup) -> Setup): Boolean {
-        _setup.update(f)
+        // Wherever a route is removed, profiles that used it are mended here.
+        _setup.update { f(it).tidy() }
         return saveSetup()
     }
 

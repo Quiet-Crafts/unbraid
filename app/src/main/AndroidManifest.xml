@@ -85,5 +85,35 @@
             </intent-filter>
             <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="true" />
         </service>
+        <service
+            android:name=".vpn.ProfileTile1"
+            android:exported="true"
+            android:icon="@drawable/ic_profile"
+            android:label="@string/profile_tile_1"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+        <service
+            android:name=".vpn.ProfileTile2"
+            android:exported="true"
+            android:icon="@drawable/ic_profile"
+            android:label="@string/profile_tile_2"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+        <service
+            android:name=".vpn.ProfileTile3"
+            android:exported="true"
+            android:icon="@drawable/ic_profile"
+            android:label="@string/profile_tile_3"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

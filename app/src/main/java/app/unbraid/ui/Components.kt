@@ -188,12 +188,13 @@ fun Code(code: String, color: Color, modifier: Modifier = Modifier, filled: Bool
 /** [Code] for VPN routes; for Direct a same-sized chip carrying the bypass glyph. */
 @Composable
 fun RouteMark(code: String?, color: Color, modifier: Modifier = Modifier, filled: Boolean = true, direct: Boolean = false) {
-    if (!direct) return Code(code.orEmpty(), color, modifier, filled)
+    // "··" is a route with no country (fastest anywhere): it shows the bolt instead.
+    if (!direct && code != "··") return Code(code.orEmpty(), color, modifier, filled)
     val shape = RoundedCornerShape(8.dp)
     Box(
         modifier.size(30.dp, 26.dp).clip(shape).then(if (filled) Modifier.background(color) else Modifier.border(1.dp, Ink.line, shape)),
         contentAlignment = Alignment.Center,
-    ) { Icon(Icons.direct, null, Modifier.size(14.dp), tint = if (filled) Ink.ground else Ink.faint) }
+    ) { Icon(if (direct) Icons.direct else Icons.bolt, null, Modifier.size(if (direct) 14.dp else 16.dp), tint = if (filled) Ink.ground else Ink.faint) }
 }
 
 /** M3 Expressive segmented list: big outer corners, small inner ones, 2dp gaps. */
@@ -218,8 +219,9 @@ fun groupShape(i: Int, n: Int): Shape = when {
 }
 
 @Composable
-fun SectionLabel(text: String, trailing: (@Composable RowScope.() -> Unit)? = null) = Row(
-    Modifier.fillMaxWidth().padding(start = 24.dp, end = Gutter, top = 20.dp, bottom = 8.dp).heightIn(min = 24.dp),
+fun SectionLabel(text: String, tall: Boolean = false, trailing: (@Composable RowScope.() -> Unit)? = null) = Row(
+    // [tall]: every label on a page in one 48 dp row (room for its button), 4 dp from what it labels, so sections keep one rhythm.
+    Modifier.fillMaxWidth().padding(start = 24.dp, end = if (tall) Gutter - 4.dp else Gutter, top = if (tall) 16.dp else 20.dp, bottom = if (tall) 4.dp else 8.dp).heightIn(min = if (tall) 48.dp else 24.dp),
     verticalAlignment = Alignment.CenterVertically,
 ) {
     Text(text.uppercase(), style = Type.overline, color = Ink.dim, modifier = Modifier.weight(1f))
@@ -371,5 +373,9 @@ object Icons {
     val router = symbol("router", "M200-120q-33 0-56.5-23.5T120-200v-160q0-33 23.5-56.5T200-440h400v-120q0-17 11.5-28.5T640-600q17 0 28.5 11.5T680-560v120h80q33 0 56.5 23.5T840-360v160q0 33-23.5 56.5T760-120H200Zm0-80h560v-160H200v160Zm108.5-51.5Q320-263 320-280t-11.5-28.5Q297-320 280-320t-28.5 11.5Q240-297 240-280t11.5 28.5Q263-240 280-240t28.5-11.5Zm140 0Q460-263 460-280t-11.5-28.5Q437-320 420-320t-28.5 11.5Q380-297 380-280t11.5 28.5Q403-240 420-240t28.5-11.5Zm140 0Q600-263 600-280t-11.5-28.5Q577-320 560-320t-28.5 11.5Q520-297 520-280t11.5 28.5Q543-240 560-240t28.5-11.5ZM640-660q-11 0-20 2t-18 6q-16 7-32.5 6T541-659q-12-12-11.5-29t14.5-25q21-13 45.5-20t50.5-7q27 0 51 7t45 20q14 8 14.5 25T739-659q-12 12-29 13t-33-6q-8-4-17.5-6t-19.5-2Zm-74.5-128.5Q530-777 500-755q-14 10-30.5 9T442-758q-12-12-12-28t13-26q41-32 91-50t106-18q56 0 106 18t91 50q13 10 13 26t-12 28q-11 11-27.5 12t-30.5-9q-30-22-65.5-33.5T640-800q-39 0-74.5 11.5ZM200-200v-160 160Z")
     val file = symbol("description", "M360-240h240q17 0 28.5-11.5T640-280q0-17-11.5-28.5T600-320H360q-17 0-28.5 11.5T320-280q0 17 11.5 28.5T360-240Zm0-160h240q17 0 28.5-11.5T640-440q0-17-11.5-28.5T600-480H360q-17 0-28.5 11.5T320-440q0 17 11.5 28.5T360-400ZM240-80q-33 0-56.5-23.5T160-160v-640q0-33 23.5-56.5T240-880h287q16 0 30.5 6t25.5 17l194 194q11 11 17 25.5t6 30.5v447q0 33-23.5 56.5T720-80H240Zm280-560v-160H240v640h480v-440H560q-17 0-28.5-11.5T520-640ZM240-800v200-200 640-640Z")
     val link = symbol("link", "M280-280q-83 0-141.5-58.5T80-480q0-83 58.5-141.5T280-680h120q17 0 28.5 11.5T440-640q0 17-11.5 28.5T400-600H280q-50 0-85 35t-35 85q0 50 35 85t85 35h120q17 0 28.5 11.5T440-320q0 17-11.5 28.5T400-280H280Zm80-160q-17 0-28.5-11.5T320-480q0-17 11.5-28.5T360-520h240q17 0 28.5 11.5T640-480q0 17-11.5 28.5T600-440H360Zm200 160q-17 0-28.5-11.5T520-320q0-17 11.5-28.5T560-360h120q50 0 85-35t35-85q0-50-35-85t-85-35H560q-17 0-28.5-11.5T520-640q0-17 11.5-28.5T560-680h120q83 0 141.5 58.5T880-480q0 83-58.5 141.5T680-280H560Z")
+    val layers = symbol("layers", "M161-366q-16-12-15.5-31.5T162-429q11-8 24-8t24 8l270 209 270-209q11-8 24-8t24 8q16 12 16.5 31.5T799-366L529-156q-22 17-49 17t-49-17L161-366Zm270 8L201-537q-31-24-31-63t31-63l230-179q22-17 49-17t49 17l230 179q31 24 31 63t-31 63L529-358q-22 17-49 17t-49-17Zm49-64 230-178-230-178-230 178 230 178Zm0-178Z")
+    val drag = symbol("drag", "M360-160q-33 0-56.5-23.5T280-240q0-33 23.5-56.5T360-320q33 0 56.5 23.5T440-240q0 33-23.5 56.5T360-160Zm240 0q-33 0-56.5-23.5T520-240q0-33 23.5-56.5T600-320q33 0 56.5 23.5T680-240q0 33-23.5 56.5T600-160ZM360-400q-33 0-56.5-23.5T280-480q0-33 23.5-56.5T360-560q33 0 56.5 23.5T440-480q0 33-23.5 56.5T360-400Zm240 0q-33 0-56.5-23.5T520-480q0-33 23.5-56.5T600-560q33 0 56.5 23.5T680-480q0 33-23.5 56.5T600-400ZM360-640q-33 0-56.5-23.5T280-720q0-33 23.5-56.5T360-800q33 0 56.5 23.5T440-720q0 33-23.5 56.5T360-640Zm240 0q-33 0-56.5-23.5T520-720q0-33 23.5-56.5T600-800q33 0 56.5 23.5T680-720q0 33-23.5 56.5T600-640Z")
+    val edit = symbol("edit", "M200-200h57l391-391-57-57-391 391v57Zm-40 80q-17 0-28.5-11.5T120-160v-97q0-16 6-30.5t17-25.5l505-504q12-11 26.5-17t30.5-6q16 0 31 6t26 18l55 56q12 11 17.5 26t5.5 30q0 16-5.5 30.5T817-647L313-143q-11 11-25.5 17t-30.5 6h-97Zm600-584-56-56 56 56Zm-141 85-28-29 57 57-29-28Z")
+    val error = symbol("error", "M480-280q17 0 28.5-11.5T520-320q0-17-11.5-28.5T480-360q-17 0-28.5 11.5T440-320q0 17 11.5 28.5T480-280Zm0-160q17 0 28.5-11.5T520-480v-160q0-17-11.5-28.5T480-680q-17 0-28.5 11.5T440-640v160q0 17 11.5 28.5T480-440Zm0 360q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Zm0-80q134 0 227-93t93-227q0-134-93-227t-227-93q-134 0-227 93t-93 227q0 134 93 227t227 93Zm0-320Z")
     val chevronLeft = symbol("chevronLeft", "m432-480 156 156q11 11 11 28t-11 28q-11 11-28 11t-28-11L348-452q-6-6-8.5-13t-2.5-15q0-8 2.5-15t8.5-13l184-184q11-11 28-11t28 11q11 11 11 28t-11 28L432-480Z")
 }

@@ -84,7 +84,11 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.activity.compose.BackHandler
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import app.unbraid.data.DIRECT
+import app.unbraid.data.MAX_PROFILES
 import app.unbraid.data.Home
 import app.unbraid.data.Nord
 import app.unbraid.data.Providers
@@ -146,6 +150,13 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     val apps by ui.apps.collectAsStateWithLifecycle()
     var sheet by rememberSaveable { mutableStateOf<String?>(null) }
     var renaming by rememberSaveable { mutableStateOf<String?>(null) }
+    // Profiles: the Manage page, the sheet ("" = new, else the name being edited), the note shown at the limit.
+    var managing by rememberSaveable { mutableStateOf(false) }
+    var profileSheet by rememberSaveable { mutableStateOf<String?>(null) }
+    var full by rememberSaveable { mutableStateOf(false) }
+    val switching by ui.switching.collectAsStateWithLifecycle()
+    val failed by ui.switchFailed.collectAsStateWithLifecycle()
+    val addProfile = { if (setup.profiles.size < MAX_PROFILES) { full = false; profileSheet = "" } else full = true }
     var newName by rememberSaveable { mutableStateOf("") }
     val on = vpn.phase == Phase.On
     val byRoute = remember(setup) { setup.apps.entries.groupBy({ it.value }, { it.key }) }
@@ -172,10 +183,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     }
     // A route with a tunnel and no answer yet says it is being checked, so its card keeps its size meanwhile; it says it
     // couldn't be checked only once every attempt has failed.
-    val exitLine = { id: String ->
-        (report(id) ?: ExitReport(null, 0, vpn.engine, null).takeIf { on && (id in vpn.servers || setup.route(id)?.tsExit != null) })
-            ?.let { r -> @Composable { ExitLine(r, pending = r.ip == null && (asking || r.at == 0L)) } }
-    }
+    val exitOf = { id: String -> report(id) ?: ExitReport(null, 0, vpn.engine, null).takeIf { on && (id in vpn.servers || setup.route(id)?.tsExit != null) } }
+    val pendingOf = { r: ExitReport? -> r != null && r.ip == null && (asking || r.at == 0L) }
     // Right after a sign-in, a provider's new key may not reach all its servers for a minute: say so instead of nothing.
     val accounts by ui.accounts.collectAsStateWithLifecycle()
     val settingUp by produceState(emptySet<String>(), on, setup, accounts) {
@@ -196,17 +205,20 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
 
     val power = { if (vpn.phase == Phase.On || vpn.phase == Phase.Connecting) sheet = "power" else connect() }
     val scroll = rememberLazyListState()
-    OnReselect(Tab.Routes) { scroll.animateScrollToItem(0) }
-    Screen(
+    OnReselect(Tab.Routes) { if (managing) managing = false else scroll.animateScrollToItem(0) }
+    BackHandler(managing) { managing = false }
+    if (managing) {
+        ProfilesPage(ui, setup, onBack = { managing = false }, onAdd = addProfile, onEdit = { profileSheet = it })
+    } else Screen(
         state = scroll,
         overline = "",
-        overlineContent = { Status(vpn) },
-        title = when (vpn.phase) {
+        overlineContent = { Status(vpn, switching != null) },
+        title = if (switching != null) "Switching" else when (vpn.phase) {
             Phase.On -> if (setup.directOnly) "Connected" else "Protected"
             Phase.Paused -> "Paused"; Phase.Connecting -> "Connecting"; Phase.Off -> "Unprotected"
         },
         subColor = if (vpn.error != null) Ink.bad else Ink.dim,
-        sub = vpn.error ?: settingUp.takeIf { it.isNotEmpty() }?.let { ps -> "${ps.joinToString(" and ") { Providers.get(it)?.name ?: it }} is setting up your key. Its routes can take a minute to work" } ?: when (vpn.phase) {
+        sub = switching?.let { "To $it · apps reconnect for a moment" } ?: vpn.error ?: settingUp.takeIf { it.isNotEmpty() }?.let { ps -> "${ps.joinToString(" and ") { Providers.get(it)?.name ?: it }} is setting up your key. Its routes can take a minute to work" } ?: when (vpn.phase) {
             Phase.On -> "Tap to pause or disconnect"
             Phase.Paused -> if (vpn.lockdown) "Apps are offline (Block connections without VPN) · tap to resume" else "Apps skip the VPN · tap to resume"
             Phase.Connecting -> "Setting up your routes"
@@ -214,7 +226,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
         },
         // Connected: offer pause or disconnect. Paused or off: one tap connects. The status text says "tap to …",
         // so tapping it does the same as the button.
-        action = { PowerButton(vpn) { power() } },
+        action = { PowerButton(vpn, busy = switching != null) { power() } },
         onHeader = { power() },
         headerLabel = when (vpn.phase) { Phase.On, Phase.Connecting -> "Pause or disconnect"; Phase.Paused -> "Resume"; Phase.Off -> "Connect" },
     ) {
@@ -227,18 +239,30 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                 )
             }
         }
+        // A switch the engine couldn't run: the last profile is back, said once, with Try again.
+        failed?.let { f ->
+            item(key = "switchFailed") {
+                Notice(Icons.error, Ink.bad, "Couldn't switch to ${f.to}.${f.kept?.let { " $it is still in use." }.orEmpty()}", "Try again", dismiss = { ui.switchFailed.value = null }, live = true) { ui.useProfile(f.to) }
+            }
+        }
+        item(key = "profileLabel") {
+            SectionLabel("Profile", tall = true) {
+                if (setup.profiles.size >= MAX_PROFILES) Text("$MAX_PROFILES of $MAX_PROFILES", style = Type.caption, color = Ink.dim, modifier = Modifier.padding(end = 4.dp))
+                if (setup.profiles.isNotEmpty()) Manage { managing = true }
+            }
+        }
+        item(key = "profiles") {
+            if (setup.profiles.isEmpty()) Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = Gutter - 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Save this setup to switch back to it in one tap.", style = Type.sub, color = Ink.dim, modifier = Modifier.weight(1f))
+                AddButton(Icons.layers, "Add profile", onClick = addProfile)
+            } else ProfileStrip(setup, switching, { ui.useProfile(it) }, addProfile)
+        }
+        if (full && setup.profiles.size >= MAX_PROFILES) item(key = "full") {
+            Notice(Icons.layers, Ink.dim, "$MAX_PROFILES profiles is the most. Delete one to add another.", "Manage", dismiss = { full = false }, live = true) { full = false; managing = true }
+        }
         item(key = "label") {
-            SectionLabel("Default route") {
-                Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
-                    Row(
-                        Modifier.then(sharedRoute("", RoundedCornerShape(20.dp))).then(tourAnchor(TourStop.AddRoute)).height(40.dp).clip(RoundedCornerShape(20.dp)).background(Ink.accent)
-                            .tap({ openPicker("") }, role = Role.Button).padding(start = 12.dp, end = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Icon(Icons.plus, null, Modifier.size(20.dp), tint = Ink.ground)
-                        Text("Add route", style = Type.title.copy(fontSize = 14.sp), color = Ink.ground)
-                    }
-                }
+            SectionLabel("Default route", tall = true) {
+                AddButton(Icons.routes, "Add route", Modifier.then(sharedRoute("", RoundedCornerShape(20.dp))).then(tourAnchor(TourStop.AddRoute))) { openPicker("") }
             }
         }
         item(key = "default") {
@@ -249,7 +273,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                 title = route?.name ?: "Direct", meta = route?.let { place(it, live) } ?: "No VPN for these apps",
                 extra = if (on && route != null && server != null) serverId(route, server) else null,
                 border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (on) 0.45f else 0.25f),
-                below = exitLine(setup.defaultRoute),
+                exit = exitOf(setup.defaultRoute).let { r -> r?.let { it to pendingOf(it) } },
             ) { sheet = setup.defaultRoute } }
         }
         // Android refused the VPN: most often another VPN app holds Always-on.
@@ -262,7 +286,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
         if (leakDue && on && !(vpn.alwaysOn && vpn.lockdown)) item(key = "leak") {
             Notice(Icons.shield, Ink.accent, "Apps go online without $APP when it's off", "Set up", dismiss = { Onboarding.snoozeLeak() }, dismissLabel = "Not now", onAction = leakSetup)
         }
-        if (exceptions.isNotEmpty()) item(key = "exLabel") { SectionLabel("Exceptions") }
+        if (exceptions.isNotEmpty()) item(key = "exLabel") { SectionLabel("Exceptions", tall = true) }
         itemsIndexed(exceptions, key = { _, st -> st.id }) { i, st ->
             val direct = st.id == DIRECT
             Rise("routes", i + 1, reveal) { RouteRow(
@@ -272,8 +296,12 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                 shape = groupShape(i, exceptions.size), fill = if (direct) Color.Transparent else Ink.surface,
                 border = null, dashed = direct, minHeight = 72.dp,
                 modifier = Modifier.padding(vertical = 1.dp), key = st.id.takeUnless { direct },
-                below = if (direct) null else exitLine(st.id),
+                exit = if (direct) null else exitOf(st.id)?.let { it to pendingOf(it) },
             ) { sheet = st.id } }
+        }
+        // Nothing set apart yet: say what that means instead of leaving the page empty.
+        if (setup.apps.isEmpty()) item(key = "allDefault") {
+            Text("All apps use the default route. Add a route to send some apps through another country.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp))
         }
         if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {
             HomeRow(setup.home, lit = on, loginUrl = vpn.tsLoginUrl.takeIf { setup.home.tailscale }) { tsLogin(it) }
@@ -314,11 +342,21 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                     setup.route(id)?.takeIf { it.imported }?.let { r -> SheetAction("Rename") { act { newName = r.name; renaming = id } } }
                     if (id != setup.defaultRoute) {
                         SheetAction("Make default") { act { ui.setDefault(id) } }
-                        SheetAction("Remove", Ink.bad) { act { ui.removeRoute(id) } }
+                        SheetAction("Remove route", Ink.bad) { act { ui.removeRoute(id) } }
+                        val others = setup.saved.filter { p -> p.name != setup.profile && (p.defaultRoute == id || id in p.apps.values) }.map { it.name }
+                        Text(
+                            "Its apps will use the default route." + if (others.isEmpty()) "" else " ${others.joinToString()} ${if (others.size == 1) "uses" else "use"} it too and will change the same way.",
+                            style = Type.caption, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp),
+                        )
                     }
                 }
             }
         }
+    }
+    profileSheet?.let { editing ->
+        ProfileSheet(setup, editing.ifEmpty { null },
+            onSave = { n -> if (editing.isEmpty()) ui.saveProfile(n) else ui.renameProfile(editing, n); profileSheet = null },
+            onDelete = { ui.forgetProfile(editing); profileSheet = null }, onDismiss = { profileSheet = null })
     }
     renaming?.let { id ->
         Prompt("Rename", "Save", { ui.renameRoute(id, newName); renaming = null }, { renaming = null }, enabled = newName.isNotBlank()) {
@@ -331,15 +369,21 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
 @Composable
 private fun Notice(
     icon: androidx.compose.ui.graphics.vector.ImageVector, tint: Color, text: String, action: String,
-    dismiss: (() -> Unit)? = null, dismissLabel: String = "Dismiss", onAction: () -> Unit,
+    dismiss: (() -> Unit)? = null, dismissLabel: String = "Dismiss", live: Boolean = false, onAction: () -> Unit,
 ) = Row(
-    Modifier.padding(horizontal = Gutter, vertical = 8.dp).fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Ink.surface)
+    // [live]: TalkBack reads it out when it appears (a failure the user didn't tap for).
+    Modifier.then(if (live) Modifier.semantics { liveRegion = LiveRegionMode.Polite } else Modifier).padding(horizontal = Gutter, vertical = 8.dp).fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Ink.surface)
         .border(1.dp, Ink.line, RoundedCornerShape(20.dp)).padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
 ) {
+    // At large text the action moves under the text, which keeps the card's width.
+    val large = LocalDensity.current.fontScale >= 1.5f
     Icon(icon, null, Modifier.size(22.dp), tint = tint)
-    Text(text, style = Type.sub, color = Ink.text, modifier = Modifier.weight(1f).padding(vertical = 8.dp))
-    Secondary(action, onAction)
+    Column(Modifier.weight(1f).padding(vertical = 8.dp), horizontalAlignment = Alignment.End) {
+        Text(text, style = Type.sub, color = Ink.text, modifier = Modifier.fillMaxWidth())
+        if (large) Secondary(action, onAction)
+    }
+    if (!large) Secondary(action, onAction)
     dismiss?.let { IconTap(Icons.close, dismissLabel, it, size = 40.dp, tint = Ink.dim) }
 }
 
@@ -351,17 +395,17 @@ private fun SheetAction(text: String, color: Color = Ink.text, onClick: () -> Un
 
 /** Header overline. Owns the once-a-second clock so that tick recomposes only this line, not the whole screen. */
 @Composable
-private fun Status(vpn: VpnState) {
+private fun Status(vpn: VpnState, switching: Boolean = false) {
     val on = vpn.phase == Phase.On
     val now by produceState(System.currentTimeMillis(), on) { while (on) { value = System.currentTimeMillis(); delay(1000) } }
     val elapsed = ((now - vpn.since) / 1000).coerceAtLeast(0).let { "%02d:%02d:%02d".format(it / 3600, it / 60 % 60, it % 60) }
-    val label = when (vpn.phase) {
+    val label = if (switching) "Switching profile" else when (vpn.phase) {
         Phase.On -> "Connected · $elapsed"
         Phase.Connecting -> "Connecting"
         Phase.Off -> "Not connected"
         Phase.Paused -> if (vpn.pausedUntil > 0) "Paused · resumes ${if (vpn.pausedAbout) "about " else ""}${java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(vpn.pausedUntil))}" else "Paused"
     }
-    Text(label.uppercase(), style = Type.overline, color = stateColor(vpn.phase), maxLines = 1)
+    Text(label.uppercase(), style = Type.overline, color = if (switching) Ink.dim else stateColor(vpn.phase), maxLines = 1)
 }
 
 /** Green protected, orange paused, red unprotected: the button and the status line say the same thing. */
@@ -374,8 +418,9 @@ private fun stateColor(phase: Phase) = when (phase) { Phase.On -> Ink.good; Phas
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun PowerButton(vpn: VpnState, onClick: () -> Unit) {
-    val phase = vpn.phase
+private fun PowerButton(vpn: VpnState, busy: Boolean = false, onClick: () -> Unit) {
+    // A profile switch reconnects every app: the button shows it as it shows a connect.
+    val phase = if (busy && vpn.phase == Phase.On) Phase.Connecting else vpn.phase
     val haptic = LocalHapticFeedback.current
     val motion = MaterialTheme.motionScheme
     val source = remember { MutableInteractionSource() }
@@ -440,7 +485,7 @@ private fun appsLabel(pkgs: List<String>, labels: Map<String, String>) = when {
 @Composable
 private fun DefaultTile(
     key: String, apps: Int, code: String?, chip: Color, direct: Boolean, title: String, meta: String, extra: String?, border: Color,
-    below: (@Composable () -> Unit)? = null, onClick: () -> Unit,
+    exit: Pair<ExitReport, Boolean>? = null, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
@@ -450,7 +495,7 @@ private fun DefaultTile(
     val shape = RoundedCornerShape(corner)
     Column(
         Modifier.padding(horizontal = Gutter).then(tourAnchor(TourStop.DefaultRoute)).graphicsLayer { scaleX = press.value; scaleY = press.value }.then(sharedRoute(key, shape))
-            .fillMaxWidth().clip(shape).background(Ink.surfaceHigh).border(1.dp, border, shape)
+            .fillMaxWidth().clip(shape).background(Ink.surfaceTop).border(1.dp, border, shape)
             .clickable(source, ripple(), onClick = onClick).padding(horizontal = 20.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -459,11 +504,15 @@ private fun DefaultTile(
             RouteMark(code, chip, direct = direct)
             Text(title, style = Type.title.copy(fontSize = 24.sp, lineHeight = 30.sp), color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // At large text the place and the server each take a line, instead of the place being cut short.
+        if (LocalDensity.current.fontScale >= 1.5f) {
+            Text(meta, style = Type.caption, color = Ink.dim)
+            extra?.let { Text(it, style = Type.code, color = Ink.dim) }
+        } else Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(meta, style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-            extra?.let { Text(it, style = Type.code.copy(fontSize = 11.sp), color = Ink.dim, maxLines = 1) }
+            extra?.let { Text(it, style = Type.code, color = Ink.dim, maxLines = 1) }
         }
-        below?.invoke()
+        exit?.let { (r, pending) -> ExitLine(r, pending) }
     }
 }
 
@@ -473,11 +522,23 @@ private fun RouteRow(
     ui: Ui, pkgs: List<String>, labels: Map<String, String>, appsLabel: String,
     code: String?, chip: Color, direct: Boolean, title: String, meta: String,
     shape: Shape, fill: Color, border: Color?, minHeight: Dp, modifier: Modifier = Modifier,
-    dashed: Boolean = false, key: String? = null, below: (@Composable () -> Unit)? = null, onClick: () -> Unit,
+    dashed: Boolean = false, key: String? = null, exit: Pair<ExitReport, Boolean>? = null, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val press = squish(source)
-    // Anything [below] spans the whole row, under its apps and its exit.
+    // Everything about the exit reads together on the right, its address under its server. A long (IPv6) address takes
+    // a line of its own under the row; at large text the row stacks, apps above the exit, so nothing is cut away.
+    val wide = exit?.first?.ip?.contains(':') == true
+    val stacked = LocalDensity.current.fontScale >= 1.5f
+    val apps = @Composable {
+        AppStack(ui, pkgs, labels, edge = if (fill == Color.Transparent) Ink.ground else fill)
+        Text(appsLabel, style = Type.caption, color = if (pkgs.isEmpty()) Ink.dim else Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis)
+    }
+    val where = @Composable { end: Boolean ->
+        Text(title, style = Type.title, color = Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
+        Text(meta, style = Type.caption, color = Ink.dim, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
+        if (!wide) exit?.let { (r, pending) -> ExitLine(r, pending) }
+    }
     Column(
     modifier.padding(horizontal = Gutter).graphicsLayer { scaleX = press.value; scaleY = press.value }
         .then(if (key != null) sharedRoute(key, shape) else Modifier)
@@ -485,31 +546,37 @@ private fun RouteRow(
         .then(if (border != null) Modifier.border(1.dp, border, shape) else Modifier)
         .then(if (dashed) Modifier.dashed(shape) else Modifier)
         .clickable(source, ripple(), onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
-    verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterVertically),
+    verticalArrangement = Arrangement.spacedBy(if (stacked) 10.dp else 6.dp, Alignment.CenterVertically),
 ) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Column(Modifier.width(140.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            AppStack(ui, pkgs, labels, edge = if (fill == Color.Transparent) Ink.ground else fill)
-            Text(appsLabel, style = Type.caption, color = if (pkgs.isEmpty()) Ink.dim else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    if (stacked) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { apps() }
+        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) { where(false) }
+            RouteMark(code, chip, direct = direct)
         }
+    } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f, fill = false).widthIn(max = 136.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { apps() }
         // The exit reads right-aligned beside its chip, which closes the row on the right.
-        Column(Modifier.weight(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = Type.title, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(meta, style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
+        Column(Modifier.weight(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) { where(true) }
         RouteMark(code, chip, direct = direct)
     }
-    below?.invoke()
+    exit?.takeIf { wide }?.let { (r, pending) -> Box(Modifier.fillMaxWidth().padding(end = 42.dp), contentAlignment = Alignment.CenterEnd) { ExitLine(r, pending) } }
 }
 }
 
-/** The address a route's exit reported ([app.unbraid.vpn.ExitCheck]), in the size of the server line above it. */
+/**
+ * The address a route's exit reported ([app.unbraid.vpn.ExitCheck]), in the size of the server line above it. A check
+ * that failed is said quietly, never in red: the route may well be working.
+ */
 @Composable
-private fun ExitLine(r: ExitReport, pending: Boolean) = Text(
-    r.ip ?: if (pending) "Checking the exit…" else "Couldn't check this exit",
-    style = if (r.ip != null) Type.code.copy(fontSize = 11.sp) else Type.caption.copy(fontSize = 12.sp, lineHeight = 16.sp),
-    color = Ink.dim,
-)
+private fun ExitLine(r: ExitReport, pending: Boolean) = Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+    if (r.ip == null && !pending) Icon(Icons.info, null, Modifier.size(14.dp), tint = Ink.dim)
+    Text(
+        r.ip ?: if (pending) "Checking the exit…" else "Couldn't check this exit's address",
+        style = if (r.ip != null) Type.code else Type.caption.copy(fontSize = 12.sp, lineHeight = 16.sp),
+        color = Ink.dim,
+    )
+}
 
 /** Up to five overlapping icons, then a "+N" pill; an empty slot when no app is assigned. */
 @Composable
