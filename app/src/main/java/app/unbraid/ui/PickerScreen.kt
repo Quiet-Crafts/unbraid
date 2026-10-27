@@ -77,6 +77,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.unbraid.data.City
 import app.unbraid.data.Country
 import app.unbraid.data.Location
+import app.unbraid.data.DIRECT
 import app.unbraid.data.favKey
 import app.unbraid.data.ident
 import app.unbraid.data.Nord
@@ -225,6 +226,15 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
 
     fun LazyListScope.locations() {
         if (provider == null) return
+        // An empty profile's default can also be Direct: Routes lists Direct only once an app uses it.
+        if (target == "default") item(key = "direct") {
+            PickRow({ ui.setDefault(DIRECT); close() }, false, tint, Modifier.padding(horizontal = 8.dp)) {
+                Box(Modifier.size(36.dp).clip(RoundedCornerShape(12.dp)).background(Ink.surfaceTop), Alignment.Center) {
+                    Icon(Icons.direct, null, tint = Ink.dim, modifier = Modifier.size(20.dp))
+                }
+                Title("Direct", "No VPN: apps use your normal connection")
+            }
+        }
         if (countries.isEmpty()) {
             item(key = "empty") {
                 Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp)) {

@@ -170,7 +170,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     val list = remember(shown, live, byRoute) { stops(shown, live, byRoute) }
     // A profile lists its own routes, and routes nothing uses yet (one just added), never another profile's.
     val hidden = remember(setup, draft) { setup.hiddenRoutes(draft) }
-    val exceptions = list.filter { it.id != shown.defaultRoute && it.id !in hidden }
+    // Direct is built in, not a route: listed once an app in this profile uses it (its default shows as the card above).
+    val exceptions = list.filter { it.id != shown.defaultRoute && it.id !in hidden && (it.id != DIRECT || it.pkgs.isNotEmpty()) }
     val labels = remember(apps) { apps.associate { it.pkg to it.label } }
     // The default carries every app not sent elsewhere; its preview shows user apps, not system ones.
     val defaultPkgs = remember(apps, shown) { apps.filter { shown.routeOf(it.pkg) == shown.defaultRoute }.sortedBy { it.system }.map { it.pkg } }
@@ -356,6 +357,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                 } else {
                     // In a profile not in use, a route the live setup uses too is copied first: nothing live changes.
                     SheetAction("Change location") { act { openPicker(ui.ownRoute(id)) } }
+                    if (id == shown.defaultRoute) SheetAction("Make Direct the default") { act { ui.setDefault(DIRECT) } }
                     // Editing a profile not in use never reaches what is shared: no rename, no removal of the route itself.
                     if (draft != null) {
                         if (id != shown.defaultRoute) {
