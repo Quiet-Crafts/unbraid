@@ -29,7 +29,7 @@ class ProfilesTest {
         val back = travel.use("Home")
         assertEquals("nl", back.defaultRoute)
         assertEquals(mapOf("netflix" to "us", "bank" to DIRECT), back.apps)
-        assertEquals(Profile("Travel", "us"), back.profiles[1])
+        assertEquals(Profile("Travel", "us", added = listOf("it")), back.profiles[1])
         assertEquals(back, back.use("Nowhere")) // an unknown name changes nothing
     }
 
@@ -96,7 +96,7 @@ class ProfilesTest {
         assertEquals("Home", back.profile)
         assertEquals("nl", back.defaultRoute)
         assertEquals(mapOf("netflix" to "us"), back.apps)
-        assertEquals(Profile("Trip", "it", mapOf("rai" to DIRECT)), back.profiles[1]) // the refused one keeps what it had
+        assertEquals(Profile("Trip", "it", mapOf("rai" to DIRECT), listOf("it")), back.profiles[1]) // the refused one keeps what it had
         val renamed = trip.rename("Home", "House").copy(routes = listOf(nl, it))
         val b2 = renamed.back(ran)
         assertNull(b2.profile) // its profile is gone by that name: none selected, the routes still as they ran
@@ -113,7 +113,7 @@ class ProfilesTest {
         assertEquals("Trip", trip.profile)
         assertEquals("nl", trip.defaultRoute)
         assertEquals(base.apps, trip.apps)
-        assertEquals(Profile("Home", "it", mapOf("rai" to DIRECT)), trip.profiles[0])
+        assertEquals(Profile("Home", "it", mapOf("rai" to DIRECT), listOf("it")), trip.profiles[0])
     }
 
     @Test fun addCopiesLiveStateOrCreatesEmptyWithoutSwitching() {
@@ -122,13 +122,13 @@ class ProfilesTest {
         assertEquals("Home", copied.profile)
         assertEquals("it", copied.defaultRoute)
         assertEquals(live.apps, copied.apps)
-        assertEquals(Profile("Home", "it", live.apps), copied.profiles[0])
-        assertEquals(Profile("Copy", "it", live.apps), copied.profiles[1])
+        assertEquals(Profile("Home", "it", live.apps, listOf("it")), copied.profiles[0])
+        assertEquals(Profile("Copy", "it", live.apps, listOf("it")), copied.profiles[1])
         val empty = live.add("Empty", true)
         assertEquals("Home", empty.profile)
         assertEquals("it", empty.defaultRoute)
         assertEquals(live.apps, empty.apps)
-        assertEquals(Profile("Home", "it", live.apps), empty.profiles[0])
+        assertEquals(Profile("Home", "it", live.apps, listOf("it")), empty.profiles[0])
         assertEquals(Profile("Empty", ""), empty.profiles[1])
     }
 
@@ -136,7 +136,7 @@ class ProfilesTest {
         val s = base.saveAs("Home").add("Trip", true)
             .editing("Trip") { it.copy(defaultRoute = "it", apps = mapOf("rai" to DIRECT)) }
             .copy(defaultRoute = "us", apps = mapOf("bank" to DIRECT))
-        assertEquals(s.copy(defaultRoute = "it", apps = mapOf("rai" to DIRECT)), s.viewAs("Trip"))
+        assertEquals(s.copy(defaultRoute = "it", apps = mapOf("rai" to DIRECT), added = emptyList()), s.viewAs("Trip"))
         assertEquals(s, s.viewAs(null))
         assertEquals(s, s.viewAs("Home"))
         assertEquals(s, s.viewAs("Missing"))
@@ -155,7 +155,7 @@ class ProfilesTest {
         assertEquals("Trip", switched.profile)
         assertEquals("it", switched.defaultRoute)
         assertEquals(mapOf("rai" to "nl"), switched.apps)
-        assertEquals(Profile("Home", "us", s.apps), switched.profiles[0])
+        assertEquals(Profile("Home", "us", s.apps, listOf("it")), switched.profiles[0])
     }
 
     @Test fun editLiveForNullCurrentAndUnknownNames() {
@@ -166,7 +166,7 @@ class ProfilesTest {
             assertEquals("it", edited.defaultRoute)
             assertEquals(mapOf("rai" to DIRECT), edited.apps)
             assertEquals(s.profiles, edited.profiles)
-            assertEquals(Profile("Home", "it", edited.apps), edited.saved[0])
+            assertEquals(Profile("Home", "it", edited.apps, listOf("it")), edited.saved[0])
         }
     }
 
@@ -192,7 +192,7 @@ class ProfilesTest {
         assertEquals("nl", back.defaultRoute)
         assertEquals(base.apps, back.apps)
         assertEquals(Profile("Empty", ""), back.profiles[1])
-        assertEquals(Profile("Trip", "it", mapOf("rai" to DIRECT)), back.profiles[2])
+        assertEquals(Profile("Trip", "it", mapOf("rai" to DIRECT), listOf("it")), back.profiles[2])
     }
 
     /** A refused switch keeps edits made meanwhile to the profile it goes back to: the routes run as before, unprofiled. */
@@ -214,13 +214,79 @@ class ProfilesTest {
         assertEquals("👨‍👩‍👧 Casa", s.profileName("👨‍👩‍👧 Casa")) // a joined emoji (zero-width joiners) stays allowed
     }
 
-    /** Routes shows a profile's own routes and unused ones, never another profile's, whether it's in use or not. */
+    /** Each profile shows only its own routes; without profiles all routes show. */
     @Test fun hiddenRoutes() {
-        val spare = Route("spare", Location("nord", 81, "DE", "Germany")) // used by nobody, e.g. just added
-        val s = base.copy(routes = listOf(nl, us, it, spare)).saveAs("Home") // Home: nl, netflix on us
-            .add("Trip", empty = true).editing("Trip") { p -> p.copy(defaultRoute = "it") }
-        assertEquals(setOf("it"), s.hiddenRoutes(null)) // Home in use: Trip's Italy is left out
-        assertEquals(setOf("nl", "us"), s.hiddenRoutes("Trip")) // Trip shown: Home's (live) routes are left out
-        assertEquals(setOf<String>(), base.hiddenRoutes(null)) // no profiles: every route shows, as before
+        val spare = Route("spare", Location("nord", 81, "DE", "Germany"))
+        val s = base.copy(routes = listOf(nl, us, it, spare)).saveAs("Home")
+            .copy(added = listOf("spare"))
+            .add("Trip", empty = true).editing("Trip") { p -> p.copy(defaultRoute = "it", added = listOf("us")) }
+        assertEquals(setOf("it"), s.hiddenRoutes(null))
+        assertEquals(setOf("it"), s.hiddenRoutes("Home"))
+        assertEquals(setOf("nl", "spare"), s.hiddenRoutes("Trip"))
+        assertEquals(emptySet<String>(), base.hiddenRoutes(null))
+        assertEquals(setOf("it"), s.forget("Home").hiddenRoutes(null)) // live setup remains without a profile
+    }
+
+    @Test fun addedOnSaveCopyAndEmpty() {
+        val first = base.saveAs("Home")
+        assertEquals(listOf("it"), first.added)
+        assertEquals(listOf("it"), first.profiles.single().added)
+        assertEquals(emptySet<String>(), first.hiddenRoutes(null))
+        val live = first.copy(added = listOf("us"))
+        val later = live.saveAs("Later")
+        assertEquals(listOf("us"), later.added)
+        assertEquals(listOf("us"), later.profiles.last().added)
+        assertEquals(listOf("us"), live.add("Copy", false).profiles.last().added)
+        assertEquals(emptyList<String>(), live.add("Empty", true).profiles.last().added)
+    }
+
+    @Test fun firstSaveKeepsPreviouslyAddedOrphan() {
+        val first = base.copy(added = listOf("it")).saveAs("Home")
+        assertEquals(emptySet<String>(), first.hiddenRoutes(null))
+    }
+
+    @Test fun addedFollowsSwitchesAndDraftEdits() {
+        val home = base.saveAs("Home").copy(added = listOf("it"))
+        val s = home.add("Trip", true).editing("Trip") { it.copy(defaultRoute = "us", added = listOf("nl")) }
+        assertEquals(listOf("nl"), s.viewAs("Trip").added)
+        assertEquals(listOf("it"), s.added)
+        val trip = s.use("Trip")
+        assertEquals(listOf("nl"), trip.added)
+        assertEquals(listOf("it"), trip.profiles.first().added)
+        val edited = trip.editing(null) { it.copy(added = listOf("us")) }
+        val back = edited.use("Home")
+        assertEquals(listOf("it"), back.added)
+        assertEquals(listOf("us"), back.profiles.last().added)
+    }
+
+    @Test fun useCurrentProfileKeepsLiveAdded() {
+        val s = base.saveAs("Home").copy(added = listOf("us"))
+        assertEquals(listOf("us"), s.use("Home").added)
+    }
+
+    @Test fun tidyRemovesAddedFromLiveAndSavedProfiles() {
+        val s = base.saveAs("Home").copy(added = listOf("us", "it"))
+            .add("Trip", true).editing("Trip") { it.copy(added = listOf("us", "nl")) }
+        val t = s.copy(routes = listOf(nl, it)).tidy()
+        assertEquals(listOf("it"), t.added)
+        assertEquals(listOf("it"), t.profiles.first().added)
+        assertEquals(listOf("nl"), t.profiles.last().added)
+    }
+
+    @Test fun backRestoresAddedAndSavesRefusedAdded() {
+        val ran = base.saveAs("Home").copy(added = listOf("it"))
+        val refused = ran.add("Trip", false).use("Trip").copy(added = listOf("us"))
+        val back = refused.back(ran)
+        assertEquals("Home", back.profile)
+        assertEquals(listOf("it"), back.added)
+        assertEquals(listOf("us"), back.profiles.last().added)
+    }
+
+    @Test fun backKeepsAddedEditsMadeMeanwhile() {
+        val ran = base.saveAs("Home").saveAs("Trip")
+        val edited = ran.use("Home").editing("Trip") { it.copy(added = listOf("us")) }
+        val back = edited.back(ran)
+        assertNull(back.profile)
+        assertEquals(listOf("us"), back.saved.last().added)
     }
 }

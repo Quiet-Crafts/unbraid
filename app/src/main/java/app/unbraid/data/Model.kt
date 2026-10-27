@@ -118,8 +118,14 @@ data class OwnServer(val id: String, val wg: WgPeer? = null, val ovpn: OvpnProfi
  * [defaultRoute] yet ("") and can't be used until it gets one.
  */
 @Serializable
-data class Profile(val name: String, val defaultRoute: String, val apps: Map<String, String> = emptyMap()) {
+data class Profile(
+    val name: String, val defaultRoute: String, val apps: Map<String, String> = emptyMap(),
+    /** Routes added to this profile, which it lists even while no app uses them. */
+    val added: List<String> = emptyList(),
+) {
     val ready get() = defaultRoute.isNotEmpty()
+    /** The routes this profile lists: its default, those its apps use, and those added to it. */
+    val own get() = setOf(defaultRoute) + apps.values + added
 }
 
 const val MAX_PROFILES = 20
@@ -159,6 +165,8 @@ data class Setup(
     /** Each provider's page settings: provider id → [Opt.key] → value. Unset keys take [Provider.defaults]. */
     val opts: Map<String, Map<String, String>> = emptyMap(),
     val profiles: List<Profile> = emptyList(),
+    /** The profile in use's [Profile.added], kept live like [defaultRoute] and [apps]. */
+    val added: List<String> = emptyList(),
     /** The profile in use; its saved copy follows every edit, as [defaultRoute] and [apps] hold it ([saved]). Null = none. */
     val profile: String? = null,
     /** Routes without apps connected only for a combined speed test; never saved. */
@@ -167,35 +175,36 @@ data class Setup(
     fun route(id: String?) = routes.firstOrNull { it.id == id }
 
     /** [profiles] as they stand: the one in use with the current default and exceptions. */
-    val saved get() = profiles.map { if (it.name == profile) it.copy(defaultRoute = defaultRoute, apps = apps) else it }
+    val saved get() = profiles.map { if (it.name == profile) it.copy(defaultRoute = defaultRoute, apps = apps, added = added) else it }
+
+    /** The live setup as a profile: what is in use. */
+    private val live get() = Profile(profile.orEmpty(), defaultRoute, apps, added)
 
     /** Switches to profile [name] (not an empty one); the one in use keeps what it has now. */
-    fun use(name: String) = profiles.firstOrNull { it.name == name && it.ready }?.let { p -> copy(profiles = saved, profile = p.name, defaultRoute = p.defaultRoute, apps = p.apps) } ?: this
+    fun use(name: String) = if (name == profile) this else profiles.firstOrNull { it.name == name && it.ready }?.let { p -> copy(profiles = saved, profile = p.name, defaultRoute = p.defaultRoute, apps = p.apps, added = p.added) } ?: this
 
     /** Saves the current setup as profile [name], now in use (nothing changes on the connection). */
-    fun saveAs(name: String) = copy(profiles = saved + Profile(name, defaultRoute, apps), profile = name)
+    fun saveAs(name: String): Setup {
+        // The first profile keeps every route shown until now; a later one, what the setup in use lists.
+        val keep = if (profiles.isEmpty()) (added + (routes.map { it.id } - live.own)).distinct() else added
+        return copy(profiles = saved + Profile(name, defaultRoute, apps, keep), profile = name, added = keep)
+    }
 
     /** Adds profile [name], not in use: a copy of the current setup, or [empty]. */
-    fun add(name: String, empty: Boolean) = copy(profiles = saved + if (empty) Profile(name, "") else Profile(name, defaultRoute, apps))
+    fun add(name: String, empty: Boolean) = copy(profiles = saved + if (empty) Profile(name, "") else live.copy(name = name))
 
     /** The setup as profile [name] routes it (its default and exceptions), for showing it; itself for the one in use or null. */
-    fun viewAs(name: String?) = profiles.firstOrNull { name != null && it.name == name && name != profile }?.let { copy(defaultRoute = it.defaultRoute, apps = it.apps) } ?: this
+    fun viewAs(name: String?) = profiles.firstOrNull { name != null && it.name == name && name != profile }?.let { copy(defaultRoute = it.defaultRoute, apps = it.apps, added = it.added) } ?: this
 
     /**
-     * Routes a profile's page leaves out when showing profile [name] (null = the one in use): those other profiles use
-     * and it doesn't (and, for a profile not in use, the live setup's). A route nobody uses stays, so one just added shows.
+     * Routes a page leaves out when showing profile [name] (null = the setup in use): every route that profile doesn't
+     * use or keep ([Profile.own]). With no profiles yet, none: every route shows.
      */
-    fun hiddenRoutes(name: String?): Set<String> {
-        val draft = name != null && name != profile && profiles.any { it.name == name }
-        val shown = viewAs(name)
-        val others = saved.filter { it.name != (if (draft) name else profile) }.flatMap { it.apps.values + it.defaultRoute } +
-            if (draft) activeRoutes.map { it.id } else emptyList()
-        return others.toSet() - shown.apps.values.toSet() - shown.defaultRoute - DIRECT
-    }
+    fun hiddenRoutes(name: String?): Set<String> = if (profiles.isEmpty()) emptySet() else routes.map { it.id }.toSet() - viewAs(name).live.own
 
     /** Changes the default and exceptions of profile [name] with [f]: only its saved copy, unless it is the one in use (or null). */
     fun editing(name: String?, f: (Profile) -> Profile): Setup {
-        if (name == null || name == profile || profiles.none { it.name == name }) return f(Profile(profile.orEmpty(), defaultRoute, apps)).let { copy(defaultRoute = it.defaultRoute, apps = it.apps) }
+        if (name == null || name == profile || profiles.none { it.name == name }) return f(live).let { copy(defaultRoute = it.defaultRoute, apps = it.apps, added = it.added) }
         return copy(profiles = profiles.map { if (it.name == name) f(it) else it })
     }
 
@@ -211,9 +220,9 @@ data class Setup(
     fun back(ran: Setup): Setup {
         val ok = { id: String -> id == DIRECT || route(id) != null }
         // Its profile again only if still as it ran: one edited meanwhile keeps those edits, the routes run unprofiled.
-        val same = profiles.firstOrNull { it.name == ran.profile }?.takeIf { it.defaultRoute == ran.defaultRoute && it.apps == ran.apps }
+        val same = profiles.firstOrNull { it.name == ran.profile }?.takeIf { it.defaultRoute == ran.defaultRoute && it.apps == ran.apps && it.added == ran.added }
         return copy(profiles = saved, profile = same?.name,
-            defaultRoute = ran.defaultRoute.takeIf(ok) ?: defaultRoute, apps = ran.apps.filterValues(ok))
+            defaultRoute = ran.defaultRoute.takeIf(ok) ?: defaultRoute, apps = ran.apps.filterValues(ok), added = ran.added.filter(ok))
     }
 
     /** Moves profile [name] [by] places (negative = earlier). */
@@ -232,11 +241,11 @@ data class Setup(
     /** Profiles left pointing at a removed route: its apps follow the profile's default, a removed default becomes the first route. */
     fun tidy(): Setup {
         val ok = { id: String -> id == DIRECT || id.isEmpty() || routes.any { it.id == id } }
-        if (profiles.all { p -> ok(p.defaultRoute) && p.apps.values.all(ok) }) return this
+        if (added.all(ok) && profiles.all { p -> ok(p.defaultRoute) && p.apps.values.all(ok) && p.added.all(ok) }) return this
         val first = routes.firstOrNull()?.id ?: DIRECT
-        return copy(profiles = profiles.map { p ->
+        return copy(added = added.filter(ok), profiles = profiles.map { p ->
             val d = p.defaultRoute.takeIf(ok) ?: first
-            p.copy(defaultRoute = d, apps = p.apps.filterValues { ok(it) && it != d })
+            p.copy(defaultRoute = d, apps = p.apps.filterValues { ok(it) && it != d }, added = p.added.filter(ok))
         })
     }
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute

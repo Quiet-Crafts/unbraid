@@ -371,9 +371,9 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                     if (draft == null && id != setup.defaultRoute) {
                         SheetAction("Make default") { act { ui.setDefault(id) } }
                         SheetAction("Remove route", Ink.bad) { act { ui.removeRoute(id) } }
-                        val others = setup.saved.filter { p -> p.name != setup.profile && (p.defaultRoute == id || id in p.apps.values) }.map { it.name }
+                        val others = setup.saved.filter { p -> p.name != setup.profile && id in p.own }.map { it.name }
                         Text(
-                            "Its apps will use the default route." + if (others.isEmpty()) "" else " ${others.joinToString()} ${if (others.size == 1) "uses" else "use"} it too and will change the same way.",
+                            "Its apps will use the default route." + if (others.isEmpty()) "" else " It also goes from ${others.joinToString()}.",
                             style = Type.caption, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp),
                         )
                     }

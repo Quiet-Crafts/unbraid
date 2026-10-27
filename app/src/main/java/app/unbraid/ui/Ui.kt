@@ -383,13 +383,19 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     // ---- routes ----
 
-    /** Adds a route for [loc] (or reuses one already exiting there) and returns its id. */
-    fun addRoute(loc: Location): String {
+    /** Adds a route for [loc] (or reuses one already exiting there) to the profile shown, and returns its id. */
+    fun addRoute(loc: Location) = routeAt(loc).also(::keep)
+
+    /** The route exiting at [loc]: an existing one, or a new one. */
+    private fun routeAt(loc: Location): String {
         setup.value.routes.firstOrNull { !it.imported && it.loc.ident() == loc.ident() }?.let { return it.id }
         val id = newId()
         store.update { it.copy(routes = it.routes + Route(id, loc, hue = nextHue(it))) }
         return id
     }
+
+    /** Keeps route [id] on the profile shown, which then lists it even while no app uses it. */
+    private fun keep(id: String) = store.update { it.editing(draft) { p -> if (id in p.added) p else p.copy(added = p.added + id) } }
 
     /** Unique even for two routes added in the same millisecond (ids key the route lists). */
     private fun newId() = generateSequence { "r" + java.util.UUID.randomUUID().toString().take(8) }.first { id -> setup.value.routes.none { it.id == id } }
@@ -412,7 +418,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     }
 
     /** Sets the default route of the profile being viewed to [loc] (a route already exiting there, or a new one). */
-    fun chooseDefault(loc: Location) { if (draft != null) setDefault(addRoute(loc)) }
+    fun chooseDefault(loc: Location) { if (draft != null) setDefault(routeAt(loc)) }
 
     /** A route change that would take a provider over its connection limit, waiting for the user's answer. */
     class LimitAsk(val text: String, val apply: () -> Unit, val share: Pair<String, () -> Unit>?)
@@ -523,6 +529,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             next
         }
         if (target.startsWith("app:")) assign(target.removePrefix("app:"), id)
+        if (target.isEmpty()) keep(id) // a new route, added to the profile shown
         _signedIn.value = true
         return id
     }
@@ -538,7 +545,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val t = setup.value.route(target)
         when {
             t != null && t.tsExit == null -> addImported(target) { it.copy(tsExit = ip, tsName = name) }
-            old != null -> if (target.startsWith("app:")) assign(target.removePrefix("app:"), old.id)
+            old != null -> if (target.startsWith("app:")) assign(target.removePrefix("app:"), old.id) else if (target.isEmpty()) keep(old.id)
             else -> addImported(target) { it.copy(tsExit = ip, tsName = name) }
         }
         return old != null
@@ -605,18 +612,18 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val d = draft ?: return id
         val s = setup.value
         // Shared with the live setup or another profile: those keep theirs.
-        val r = s.route(id)?.takeIf { s.activeRoutes.any { it.id == id } || s.saved.any { p -> p.name != d && (p.defaultRoute == id || id in p.apps.values) } } ?: return id
+        val r = s.route(id)?.takeIf { s.activeRoutes.any { it.id == id } || id in s.added || s.saved.any { p -> p.name != d && id in p.own } } ?: return id
         val copy = newId()
         store.update { c ->
             c.copy(routes = c.routes + r.copy(id = copy, hue = nextHue(c))).editing(d) { p ->
-                p.copy(defaultRoute = if (p.defaultRoute == id) copy else p.defaultRoute, apps = p.apps.mapValues { (_, v) -> if (v == id) copy else v })
+                p.copy(defaultRoute = if (p.defaultRoute == id) copy else p.defaultRoute, apps = p.apps.mapValues { (_, v) -> if (v == id) copy else v }, added = p.added.map { if (it == id) copy else it })
             }
         }
         return copy
     }
 
     /** Takes route [id] out of the profile being viewed: its apps there follow that profile's default. The route stays for others. */
-    fun dropRoute(id: String) { draft?.let { d -> store.update { it.editing(d) { p -> p.copy(apps = p.apps.filterValues { v -> v != id }) } } } }
+    fun dropRoute(id: String) { draft?.let { d -> store.update { it.editing(d) { p -> p.copy(apps = p.apps.filterValues { v -> v != id }, added = p.added - id) } } } }
 
     /**
      * While a profile not in use is edited: the live route through another Tailscale exit node, which keeps [ip] from
