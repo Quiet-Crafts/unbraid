@@ -51,6 +51,12 @@ import kotlinx.coroutines.withContext
 
 data class AppInfo(val pkg: String, val label: String, val system: Boolean)
 
+/** Removed routes' apps follow the default; a removed default becomes [fallback], the first route left, or Direct. */
+private fun Setup.without(gone: Set<String>, fallback: String? = null): Setup {
+    val left = routes.filter { it.id !in gone }
+    return copy(routes = left, defaultRoute = if (defaultRoute in gone) fallback ?: left.firstOrNull()?.id ?: DIRECT else defaultRoute, apps = apps.filterValues { it !in gone })
+}
+
 /** The single screen-facing model. Thin: state lives in [app.unbraid.data.Store] and [UnbraidVpn.state]. */
 class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : AndroidViewModel(app) {
     private val store = Unbraid.store
@@ -143,7 +149,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      * app keeps it, so the user can fetch a key from the browser and come back.
      */
     fun discardForm(id: String) {
-        reads[id] = (reads[id] ?: 0) + 1
+        reads.merge(id, 1, Int::plus)
         // A sign-in in flight still finishes (a device slot it registers must be saved), but its form is gone for good.
         if (id in signing.value) dismissed += id
         form.keys.filter { it.startsWith("$id:") }.forEach { form.remove(it) }
@@ -169,8 +175,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val asked = challenge[id]
         _signing.update { it + id }
         viewModelScope.launch(Dispatchers.IO) {
-            var failure: Throwable? = null
-            val error = runCatching {
+            val failure = runCatching {
                 val clean = (provider.fields + listOfNotNull(asked?.field)).associate { f -> f.key to input[f.key].orEmpty().let { if (f.secret) it else it.trim() } } + asked?.keep.orEmpty()
                 val saved = store.account(id, provider.signIn(clean))
                 Providers.signedInAt[id] = System.currentTimeMillis()
@@ -186,12 +191,12 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                 _signedIn.value = true
                 if (saved) input.values.forEach(::clearClipboardIf)
                 refreshCountries(id)
-                null
-            }.getOrElse { e -> failure = e; (e as? app.unbraid.data.Challenge)?.message ?: Http.explain(e, provider.name) }
+            }.exceptionOrNull()
+            val error = failure?.let { (it as? app.unbraid.data.Challenge)?.message ?: Http.explain(it, provider.name) }
             // On the main thread, like Back: a form closed now never gets this attempt's error.
             withContext(Dispatchers.Main) {
                 if (error == null) { // a file still being read must not refill the form just used
-                    reads[id] = (reads[id] ?: 0) + 1
+                    reads.merge(id, 1, Int::plus)
                     form.keys.filter { it.startsWith("$id:") }.forEach { form.remove(it) }
                 }
                 if (!dismissed.remove(id)) {
@@ -275,12 +280,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             if (!whileStopped("turn Tailscale off") {
                 store.update { s ->
                     val gone = s.routes.filter { it.tsExit != null }.map { it.id }.toSet()
-                    val routes = s.routes.filter { it.id !in gone }
-                    s.copy(
-                        routes = routes, home = s.home.copy(tailscale = false, tsAuthKey = null),
-                        defaultRoute = if (s.defaultRoute in gone) routes.firstOrNull()?.id ?: DIRECT else s.defaultRoute,
-                        apps = s.apps.filterValues { it !in gone },
-                    )
+                    s.without(gone).copy(home = s.home.copy(tailscale = false, tsAuthKey = null))
                 }
                 File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
                 store.tsSuffix = null
@@ -355,8 +355,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     /** A config file picked in a sign-in form, read here so a rotation during a slow read doesn't lose it. */
     fun loadFormFile(uri: android.net.Uri, formKey: String, provider: String) = viewModelScope.launch {
-        val mine = (reads[provider] ?: 0) + 1
-        reads[provider] = mine
+        val mine = reads.merge(provider, 1, Int::plus)!!
         val text = withContext(Dispatchers.IO) { readCapped(getApplication<Application>().contentResolver, uri) }
         if (reads[provider] != mine) return@launch // the form was closed, or another file chosen, meanwhile
         if (text == null) formError[provider] = "Couldn't read that file. Config files must be under 64 KB."
@@ -365,8 +364,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     /** A QR code read for a sign-in field, here so a rotation during a slow decode doesn't lose it. */
     fun readQr(uri: android.net.Uri?, formKey: String, provider: String) = viewModelScope.launch {
-        val mine = (reads[provider] ?: 0) + 1
-        reads[provider] = mine
+        val mine = reads.merge(provider, 1, Int::plus)!!
         val text = uri?.let { withContext(Dispatchers.IO) { decodeQr(getApplication(), it) } }
         if (reads[provider] != mine || uri == null) return@launch // closed, cancelled, or another read started meanwhile
         if (text.isNullOrBlank()) formError[provider] = "No QR code found in that picture. Try again closer, or type it in."
@@ -502,12 +500,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     private fun dropServer(id: String) = store.update { s ->
         val gone = s.routes.filter { it.own == id }.map { it.id }.toSet()
-        val routes = s.routes.filter { it.id !in gone }
-        s.copy(
-            servers = s.servers.filter { it.id != id }, routes = routes,
-            defaultRoute = if (s.defaultRoute in gone) routes.firstOrNull()?.id ?: DIRECT else s.defaultRoute,
-            apps = s.apps.filterValues { it !in gone },
-        )
+        s.without(gone).copy(servers = s.servers.filter { it.id != id })
     }
 
     /**
@@ -524,11 +517,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             // With no provider account left, provider routes go; not while editing a profile not in use (nothing live changes).
             if (store.accounts.value.isEmpty() && draft == null) {
                 val dead = next.routes.filter { !it.imported }.map { it.id }.toSet()
-                next = next.copy(
-                    routes = next.routes.filter { it.id !in dead },
-                    defaultRoute = if (next.defaultRoute in dead) id else next.defaultRoute,
-                    apps = next.apps.filterValues { it !in dead },
-                )
+                next = next.without(dead, fallback = id)
             }
             next
         }
@@ -582,12 +571,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     fun removeRoute(id: String) = store.update { s ->
         if (s.routes.size <= 1 && s.defaultRoute == id) return@update s
-        val routes = s.routes.filter { it.id != id }
-        s.copy(
-            routes = routes,
-            defaultRoute = if (s.defaultRoute == id) routes.firstOrNull()?.id ?: DIRECT else s.defaultRoute,
-            apps = s.apps.filterValues { it != id },
-        )
+        s.without(setOf(id))
     }
 
     /** Makes route [id] the default of the profile being viewed (saved only, nothing connects) or of the live setup. */

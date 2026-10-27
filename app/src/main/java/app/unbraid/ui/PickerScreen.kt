@@ -453,21 +453,13 @@ private fun LazyListScope.countrySheet(ui: Ui, c: Country, favs: List<Location>,
     val all = Location(p.provider, c.id, c.code, c.name, group = group, protocol = protocol)
     item { SheetTitle(c.name) }
     item {
-        PickRow({ p.choose(all) }, p.on(all), p.tint, Modifier.padding(horizontal = 8.dp)) {
-            Title(if (p.hasLoad) "Fastest in ${c.name}" else "Automatic in ${c.name}")
-            Trailing(p.on(all), p.tint)
-            Star(favs.any { f -> f.favKey() == all.favKey() }) { ui.toggleFavorite(all) }
-        }
+        FavoriteLocationRow(ui, all, p, favs, if (p.hasLoad) "Fastest in ${c.name}" else "Automatic in ${c.name}")
     }
     if (c.cities.size > 1) {
         item { SectionLabel("Cities") }
         items(c.cities, key = { "city:${it.id}" }) { city: City ->
             val l = all.copy(cityId = city.id, city = city.name, region = city.key)
-            PickRow({ p.choose(l) }, p.on(l), p.tint, Modifier.padding(horizontal = 8.dp)) {
-                Title(city.name)
-                Trailing(p.on(l), p.tint)
-                Star(favs.any { f -> f.favKey() == l.favKey() }) { ui.toggleFavorite(l) }
-            }
+            FavoriteLocationRow(ui, l, p, favs, city.name)
         }
     }
     item { ServerList(ui, all, p, favs) }
@@ -487,13 +479,18 @@ private fun ServerList(ui: Ui, all: Location, p: Pick, favs: List<Location>) {
             servers.isNullOrEmpty() -> Caption("No servers found")
             else -> servers.orEmpty().forEach { s ->
                 val l = all.copy(pinned = s)
-                PickRow({ p.choose(l) }, p.on(l), p.tint, Modifier.padding(horizontal = 8.dp), radius = 16.dp) {
-                    Title(s.name, listOfNotNull(s.city.ifBlank { null }, "${s.load}% load".takeIf { p.hasLoad && s.load >= 0 }).joinToString(" · ").ifEmpty { null })
-                    Trailing(p.on(l), p.tint)
-                    Star(favs.any { f -> f.favKey() == l.favKey() }) { ui.toggleFavorite(l) }
-                }
+                FavoriteLocationRow(ui, l, p, favs, s.name, listOfNotNull(s.city.ifBlank { null }, "${s.load}% load".takeIf { p.hasLoad && s.load >= 0 }).joinToString(" · ").ifEmpty { null }, 16.dp)
             }
         }
+    }
+}
+
+@Composable
+private fun FavoriteLocationRow(ui: Ui, l: Location, p: Pick, favs: List<Location>, title: String, sub: String? = null, radius: Dp = 20.dp) {
+    PickRow({ p.choose(l) }, p.on(l), p.tint, Modifier.padding(horizontal = 8.dp), radius = radius) {
+        Title(title, sub)
+        Trailing(p.on(l), p.tint)
+        Star(favs.any { f -> f.favKey() == l.favKey() }) { ui.toggleFavorite(l) }
     }
 }
 

@@ -610,10 +610,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 if (!ok) Text("Use a full https:// address", style = Type.caption, color = Ink.bad)
             }
         }
-        "subnets" -> ListDialog(
-            "Home subnets", "192.168.178.0/24", home.subnets, { cidr.matches(it) && app.unbraid.vpn.Compiler.isPrivate(it) }, "Private ranges only, in CIDR notation, e.g. 192.168.178.0/24",
-            note = "Separate several with commas.", onSave = { l -> ui.setHome { it.copy(subnets = l.mapNotNull(app.unbraid.vpn.Compiler::canonical).distinct()) } }, onDismiss = { dialog = null },
-        )
+        "subnets" -> HomeSubnetsDialog(home.subnets, ui, { dialog = null })
         "statsConsent" -> StatsConsent({ dialog = null }) { dialog = null; ui.setStats(true) }
         "statsDelete" -> Prompt("Delete statistics?", "Delete statistics", { dialog = null; ui.deleteStats() }, { dialog = null }, danger = true) {
             Text("All recorded data, sessions and speed tests are erased from this phone. This can't be undone." + if (prefs.stats) " Recording stays on." else "", style = Type.sub)
@@ -713,24 +710,21 @@ private fun Tonal(text: String, icon: ImageVector, onClick: () -> Unit) = Row(
 private fun Radio(on: Boolean) = Box(Modifier.size(24.dp).clip(RoundedCornerShape(12.dp)).border(if (on) 7.dp else 2.dp, if (on) Ink.accent else Ink.dim, RoundedCornerShape(12.dp)))
 
 @Composable
-private fun ListDialog(
-    title: String, placeholder: String, current: List<String>, valid: (String) -> Boolean, invalid: String, note: String,
-    onSave: (List<String>) -> Unit, onDismiss: () -> Unit,
-) {
+private fun HomeSubnetsDialog(current: List<String>, ui: Ui, onDismiss: () -> Unit) {
     var text by remember { mutableStateOf(current.joinToString(", ")) }
-    val bad = split(text).any { !valid(it) }
+    val bad = split(text).any { !cidr.matches(it) || !app.unbraid.vpn.Compiler.isPrivate(it) }
     AlertDialog(
         onDismissRequest = onDismiss, containerColor = Ink.surface, titleContentColor = Ink.text, textContentColor = Ink.dim,
-        title = { Text(title, style = Type.title) },
+        title = { Text("Home subnets", style = Type.title) },
         text = {
             OutlinedTextField(
                 text, { text = it }, isError = bad, textStyle = Type.body.copy(fontFamily = Mono, fontSize = 14.sp),
-                placeholder = { Text(placeholder, style = Type.body.copy(fontFamily = Mono, fontSize = 14.sp)) },
-                supportingText = { Text(if (bad) invalid else note, style = Type.caption) },
+                placeholder = { Text("192.168.178.0/24", style = Type.body.copy(fontFamily = Mono, fontSize = 14.sp)) },
+                supportingText = { Text(if (bad) "Private ranges only, in CIDR notation, e.g. 192.168.178.0/24" else "Separate several with commas.", style = Type.caption) },
                 colors = inkFieldColors(),
             )
         },
-        confirmButton = { Secondary("Save", { if (!bad) { onSave(split(text)); onDismiss() } }, color = if (bad) Ink.faint else Ink.accent) },
+        confirmButton = { Secondary("Save", { if (!bad) { val l = split(text); ui.setHome { it.copy(subnets = l.mapNotNull(app.unbraid.vpn.Compiler::canonical).distinct()) }; onDismiss() } }, color = if (bad) Ink.faint else Ink.accent) },
         dismissButton = { Secondary("Cancel", onDismiss, color = Ink.dim) },
     )
 }

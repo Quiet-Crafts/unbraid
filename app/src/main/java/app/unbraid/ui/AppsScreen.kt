@@ -1,11 +1,6 @@
 package app.unbraid.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.material3.ripple
-import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.animation.shrinkVertically

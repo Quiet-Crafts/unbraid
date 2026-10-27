@@ -119,7 +119,7 @@ object Ndt7 {
             runCatching {
                 while (true) {
                     val (op, len) = header(input) ?: break
-                    if (op == 0 || op == 2) { skip(input, len); continue } // data isn't expected while uploading: never buffered
+                    if (op == 0 || op == 2) { input.skipBytes(len.toInt()); continue } // data isn't expected while uploading: never buffered
                     val p = ByteArray(len.toInt()).also(input::readFully)
                     when (op) {
                         8 -> break
@@ -189,12 +189,6 @@ object Ndt7 {
         val op = b0 and 0x0f
         if (len < 0 || len > (if (op == 2 || op == 0) MAX_DATA else MAX_MESSAGE)) throw java.io.IOException("Bad frame from the test server")
         return op to len
-    }
-
-    /** Reads past [len] bytes in small pieces (InputStream.skipNBytes needs Android 14). */
-    private fun skip(input: java.io.InputStream, len: Long) {
-        val scratch = ByteArray(16_384); var left = len
-        while (left > 0) { val n = input.read(scratch, 0, minOf(left, scratch.size.toLong()).toInt()); if (n < 0) break; left -= n }
     }
 
     private const val MAX_MESSAGE = 1L shl 20 // measurement messages are a few hundred bytes

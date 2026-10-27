@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -385,65 +386,49 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
             Column(Modifier.padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 // Tiles in a row share the taller one's height.
                 Row(Modifier.padding(horizontal = Gutter).height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Box(Modifier.weight(1f).fillMaxHeight()) {
-                        Rise("stats", 1, play) {
-                            Tile("live", "Live", Icons.speed, onOpen = go) {
-                                if (vpn.phase == Phase.On) {
-                                    Num(listOf(rate(live.downNow)), 28)
-                                    Text("download now", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
-                                    val total = remember(live) { FloatArray(60) { i -> live.down.values.sumOf { it[i].toDouble() }.toFloat() } }
-                                    Spark(total, Ink.text, Modifier.fillMaxWidth())
-                                } else Text("Not connected", style = Type.sub, color = Ink.dim)
-                            }
-                        }
+                    HubTile("live", "Live", Icons.speed, 1, play, go) {
+                        if (vpn.phase == Phase.On) {
+                            Num(listOf(rate(live.downNow)), 28)
+                            Text("download now", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
+                            val total = remember(live) { FloatArray(60) { i -> live.down.values.sumOf { it[i].toDouble() }.toFloat() } }
+                            Spark(total, Ink.text, Modifier.fillMaxWidth())
+                        } else Text("Not connected", style = Type.sub, color = Ink.dim)
                     }
-                    Box(Modifier.weight(1f).fillMaxHeight()) {
-                        Rise("stats", 2, play) {
-                            Tile("flows", "App flows", Icons.flows, onOpen = go) {
-                                // Where the data went: the share by exit as a ring, in the exits' colours, and how many apps.
-                                val exits = v?.byExit?.filter { it.first != DIRECT }.orEmpty()
-                                if (v == null || exits.isEmpty()) Text("No data yet", style = Type.sub, color = Ink.dim) else {
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                        Ring(exits.map { (id, b) -> b.total.toFloat() to (v.exits[id]?.color ?: Ink.faint) }, "Share by exit: " + exits.joinToString { (id, b) -> "${v.exits[id]?.name} ${bytesText(b.total)}" }, size = 56.dp, stroke = 8.dp)
-                                        Column {
-                                            Num(v.apps.filter { it.second != DIRECT }.map { it.first }.distinct().size.toString(), "apps", 26)
-                                            Text("into ${exits.size} ${if (exits.size == 1) "exit" else "exits"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
-                                        }
-                                    }
-                                    exits.take(2).forEach { (id, b) -> Legend(v.exits[id], (100 * b.total / exits.sumOf { it.second.total }.coerceAtLeast(1)).toInt()) }
+                    HubTile("flows", "App flows", Icons.flows, 2, play, go) {
+                        // Where the data went: the share by exit as a ring, in the exits' colours, and how many apps.
+                        val exits = v?.byExit?.filter { it.first != DIRECT }.orEmpty()
+                        if (v == null || exits.isEmpty()) Text("No data yet", style = Type.sub, color = Ink.dim) else {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Ring(exits.map { (id, b) -> b.total.toFloat() to (v.exits[id]?.color ?: Ink.faint) }, "Share by exit: " + exits.joinToString { (id, b) -> "${v.exits[id]?.name} ${bytesText(b.total)}" }, size = 56.dp, stroke = 8.dp)
+                                Column {
+                                    Num(v.apps.filter { it.second != DIRECT }.map { it.first }.distinct().size.toString(), "apps", 26)
+                                    Text("into ${exits.size} ${if (exits.size == 1) "exit" else "exits"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
                                 }
                             }
+                            exits.take(2).forEach { (id, b) -> Legend(v.exits[id], (100 * b.total / exits.sumOf { it.second.total }.coerceAtLeast(1)).toInt()) }
                         }
                     }
                 }
                 // Tiles in a row share the taller one's height.
                 Row(Modifier.padding(horizontal = Gutter).height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Box(Modifier.weight(1f).fillMaxHeight()) {
-                        Rise("stats", 3, play) {
-                            Tile("journal", "Journal", Icons.calendar, onOpen = go) {
-                                Num(hmParts(v?.weekMs ?: 0), 28)
-                                Text("connected this week", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
-                                if (v != null) WeekMarks(v.week.map { it.coerceAtLeast(0f) }, DayOfWeek.entries.map { it.getDisplayName(DayStyle.NARROW, locale()) }, LocalDate.now().dayOfWeek.ordinal)
-                            }
-                        }
+                    HubTile("journal", "Journal", Icons.calendar, 3, play, go) {
+                        Num(hmParts(v?.weekMs ?: 0), 28)
+                        Text("connected this week", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
+                        if (v != null) WeekMarks(v.week.map { it.coerceAtLeast(0f) }, DayOfWeek.entries.map { it.getDisplayName(DayStyle.NARROW, locale()) }, LocalDate.now().dayOfWeek.ordinal)
                     }
-                    Box(Modifier.weight(1f).fillMaxHeight()) {
-                        Rise("stats", 3, play) {
-                            Tile("tunnels", "Tunnels", Icons.tunnel, onOpen = go) {
-                                // Each exit's fastest download test.
-                                val fastest = v?.let { it.tests.keys.associateWith(it::fastestDown).filterValues { b -> b > 0 } }.orEmpty()
-                                val best = fastest.maxByOrNull { it.value }
-                                if (v == null || best == null) Text("No speed tests yet", style = Type.sub, color = Ink.dim) else {
-                                    Num(mbps(best.value), "Mbps", 28)
-                                    Text("best test · ${v.exits[best.key]?.name}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
-                                    // The two fastest, like App flows' legend: the hub fits one Pixel screen without scrolling.
-                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        fastest.entries.sortedByDescending { it.value }.take(2).forEach { (id, b) ->
-                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                                Text(v.exits[id]?.code ?: "?", style = Type.code.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.width(28.dp))
-                                                Meter(b.toFloat() / best.value, v.exits[id]?.color ?: Ink.faint, Modifier.weight(1f))
-                                            }
-                                        }
+                    HubTile("tunnels", "Tunnels", Icons.tunnel, 3, play, go) {
+                        // Each exit's fastest download test.
+                        val fastest = v?.let { it.tests.keys.associateWith(it::fastestDown).filterValues { b -> b > 0 } }.orEmpty()
+                        val best = fastest.maxByOrNull { it.value }
+                        if (v == null || best == null) Text("No speed tests yet", style = Type.sub, color = Ink.dim) else {
+                            Num(mbps(best.value), "Mbps", 28)
+                            Text("best test · ${v.exits[best.key]?.name}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
+                            // The two fastest, like App flows' legend: the hub fits one Pixel screen without scrolling.
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                fastest.entries.sortedByDescending { it.value }.take(2).forEach { (id, b) ->
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Text(v.exits[id]?.code ?: "?", style = Type.code.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.width(28.dp))
+                                        Meter(b.toFloat() / best.value, v.exits[id]?.color ?: Ink.faint, Modifier.weight(1f))
                                     }
                                 }
                             }
@@ -468,6 +453,11 @@ private fun Legend(ex: Ex?, pct: Int) = Row(verticalAlignment = Alignment.Center
     Box(Modifier.size(10.dp).clip(RoundedCornerShape(5.dp)).background(ex?.color ?: Ink.faint))
     Text("${ex?.code ?: "?"} $pct%", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
 }
+
+/** A hub tile in a row: the row's share of width and height, revealed at its own [index]. */
+@Composable
+private fun RowScope.HubTile(key: String, title: String, icon: ImageVector, index: Int, play: Boolean, go: (String?) -> Unit, content: @Composable ColumnScope.() -> Unit) =
+    Box(Modifier.weight(1f).fillMaxHeight()) { Rise("stats", index, play) { Tile(key, title, icon, onOpen = go, content = content) } }
 
 /** A hub tile: one card, one target, opening its section (container transform from the card). */
 @Composable

@@ -470,9 +470,8 @@ internal object Collector {
             // unbraid's own traffic (speed tests, health checks) is drawn but counted apart: the live chart is your apps'.
             val own = c.app == Stats.ctx.packageName
             if (fast && !reset && c.exit != DIRECT) when {
-                own -> { closing.merge(c.exit, down, Long::plus); closingUp += up }
+                own || e.type == Libbox.ConnectionEventClosed -> { closing.merge(c.exit, down, Long::plus); closingUp += up }
                 e.type == Libbox.ConnectionEventUpdate -> { window.merge(c.exit, down, Long::plus); windowUp += up }
-                e.type == Libbox.ConnectionEventClosed -> { closing.merge(c.exit, down, Long::plus); closingUp += up }
             }
         }
         // After a reload the old engine's connections never close: a full replay says which ones still exist.
