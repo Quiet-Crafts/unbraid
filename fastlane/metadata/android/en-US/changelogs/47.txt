@@ -1,0 +1,5 @@
+• Profiles: save up to 20 setups and switch on Routes. Tap a profile to look at it; Use switches. Start from a copy or empty.
+• Quick Settings tiles and app shortcuts for your first three profiles.
+• Speed test: ALL tests up to 10 routes together.
+• Routes: tidier page, aligned rows, better with large text.
+• Fixes: server favourites connect to their server, Mullvad and ExpressVPN fixes, steadier stats.
