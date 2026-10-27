@@ -213,4 +213,14 @@ class ProfilesTest {
         assertNull(s.profileName("Ho\u0000me"))
         assertEquals("👨‍👩‍👧 Casa", s.profileName("👨‍👩‍👧 Casa")) // a joined emoji (zero-width joiners) stays allowed
     }
+
+    /** Routes shows a profile's own routes and unused ones, never another profile's, whether it's in use or not. */
+    @Test fun hiddenRoutes() {
+        val spare = Route("spare", Location("nord", 81, "DE", "Germany")) // used by nobody, e.g. just added
+        val s = base.copy(routes = listOf(nl, us, it, spare)).saveAs("Home") // Home: nl, netflix on us
+            .add("Trip", empty = true).editing("Trip") { p -> p.copy(defaultRoute = "it") }
+        assertEquals(setOf("it"), s.hiddenRoutes(null)) // Home in use: Trip's Italy is left out
+        assertEquals(setOf("nl", "us"), s.hiddenRoutes("Trip")) // Trip shown: Home's (live) routes are left out
+        assertEquals(setOf<String>(), base.hiddenRoutes(null)) // no profiles: every route shows, as before
+    }
 }

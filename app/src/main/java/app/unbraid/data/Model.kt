@@ -181,6 +181,18 @@ data class Setup(
     /** The setup as profile [name] routes it (its default and exceptions), for showing it; itself for the one in use or null. */
     fun viewAs(name: String?) = profiles.firstOrNull { name != null && it.name == name && name != profile }?.let { copy(defaultRoute = it.defaultRoute, apps = it.apps) } ?: this
 
+    /**
+     * Routes a profile's page leaves out when showing profile [name] (null = the one in use): those other profiles use
+     * and it doesn't (and, for a profile not in use, the live setup's). A route nobody uses stays, so one just added shows.
+     */
+    fun hiddenRoutes(name: String?): Set<String> {
+        val draft = name != null && name != profile && profiles.any { it.name == name }
+        val shown = viewAs(name)
+        val others = saved.filter { it.name != (if (draft) name else profile) }.flatMap { it.apps.values + it.defaultRoute } +
+            if (draft) activeRoutes.map { it.id } else emptyList()
+        return others.toSet() - shown.apps.values.toSet() - shown.defaultRoute - DIRECT
+    }
+
     /** Changes the default and exceptions of profile [name] with [f]: only its saved copy, unless it is the one in use (or null). */
     fun editing(name: String?, f: (Profile) -> Profile): Setup {
         if (name == null || name == profile || profiles.none { it.name == name }) return f(Profile(profile.orEmpty(), defaultRoute, apps)).let { copy(defaultRoute = it.defaultRoute, apps = it.apps) }

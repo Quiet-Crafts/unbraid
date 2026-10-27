@@ -168,9 +168,9 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     val byRoute = remember(shown) { shown.apps.entries.groupBy({ it.value }, { it.key }) }
     val live = if (lit) vpn.servers else emptyMap()
     val list = remember(shown, live, byRoute) { stops(shown, live, byRoute) }
-    // A draft lists its own routes, and routes nothing uses yet (one just added), not every other profile's.
-    val others = remember(setup, draft) { draft?.let { d -> (setup.saved.filter { it.name != d }.flatMap { it.apps.values + it.defaultRoute } + setup.activeRoutes.map { it.id }).toSet() } }
-    val exceptions = list.filter { it.id != shown.defaultRoute && (others == null || it.id == DIRECT || it.pkgs.isNotEmpty() || it.id !in others) }
+    // A profile lists its own routes, and routes nothing uses yet (one just added), never another profile's.
+    val hidden = remember(setup, draft) { setup.hiddenRoutes(draft) }
+    val exceptions = list.filter { it.id != shown.defaultRoute && it.id !in hidden }
     val labels = remember(apps) { apps.associate { it.pkg to it.label } }
     // The default carries every app not sent elsewhere; its preview shows user apps, not system ones.
     val defaultPkgs = remember(apps, shown) { apps.filter { shown.routeOf(it.pkg) == shown.defaultRoute }.sortedBy { it.system }.map { it.pkg } }
