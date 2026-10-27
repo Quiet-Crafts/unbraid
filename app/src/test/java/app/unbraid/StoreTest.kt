@@ -15,6 +15,25 @@ class StoreTest {
     @get:Rule val tmp = TemporaryFolder()
     private val key: SecretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
 
+    @Test fun unreadableLinkCacheIsEmpty() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        File(dir, "links.bin").mkdir()
+        assertTrue(s.lastLinks.isEmpty())
+    }
+
+    @Test fun catalogDateRetriesAfterFailedWrite() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        val target = File(dir, "catalog-dates.json").apply { mkdir(); resolve("block").writeText("x") }
+        s.catalogDate("provider", 123)
+        assertTrue(s.catalogDates.value.isEmpty())
+        target.deleteRecursively()
+        s.catalogDate("provider", 123)
+        assertEquals(123L, s.catalogDates.value["provider"])
+        assertEquals(123L, Store(dir) { key }.catalogDates.value["provider"])
+    }
+
     @Test fun sealedFilesRoundTripAndNoTempFileStays() {
         val dir = tmp.newFolder()
         Store(dir) { key }.apply { assertTrue(account("nord", "blob-1")); assertTrue(update { it.copy(defaultRoute = "x") }) }

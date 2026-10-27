@@ -39,7 +39,7 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
         )
     }
 
-    fun stop() = runCatching { cm.unregisterNetworkCallback(this) }.let {}
+    fun stop() { handler.removeCallbacks(lose); runCatching { cm.unregisterNetworkCallback(this) } }
 
     fun quit() { stop(); thread.quitSafely() }
 
@@ -50,12 +50,13 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
 
     // Every update the engine sees as a new interface closes all connections, so only real changes go through:
     // a loss waits briefly for the network to come back, and link changes on the same interface are ignored.
-    private val lose = Runnable { network = null; push() }
+    @Volatile private var lost: Network? = null
+    private val lose = Runnable { if (network == lost) { network = null; push() } }
     @Volatile private var pushed: Pair<String, Int>? = null
 
     override fun onAvailable(n: Network) { handler.removeCallbacks(lose); network = n; push() }
     override fun onLinkPropertiesChanged(n: Network, lp: LinkProperties) { if (n == network) push() }
-    override fun onLost(n: Network) { if (n == network) handler.postDelayed(lose, 3_000) }
+    override fun onLost(n: Network) { if (n == network) { lost = n; handler.postDelayed(lose, 3_000) } }
     // The VPN itself is never metered (Android would warn about every app); a combined speed test asks first on a metered one.
     override fun onCapabilitiesChanged(n: Network, caps: NetworkCapabilities) { if (n == network) UnbraidVpn.metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) }
 

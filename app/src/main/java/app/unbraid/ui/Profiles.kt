@@ -80,6 +80,16 @@ import app.unbraid.data.Setup
 import app.unbraid.data.graphemes
 import app.unbraid.data.takeGraphemes
 
+/** The label style of the profile controls: the title face at body size. */
+private val Label = Type.title.copy(fontSize = Type.sub.fontSize)
+
+/** A connected button group's segment [i] of [n]: outer corners 22 dp, inner ones 8 dp. */
+private fun segmentShape(i: Int, n: Int): RoundedCornerShape {
+    val start = if (i == 0) 22.dp else 8.dp
+    val end = if (i == n - 1) 22.dp else 8.dp
+    return RoundedCornerShape(start, end, end, start)
+}
+
 /** [glyph] with a small + badge: the mark of Add route and Add profile. */
 @Composable
 fun AddMark(glyph: ImageVector, ink: Color, badge: Color, plus: Color, ring: Color) = Box(Modifier.size(24.dp)) {
@@ -122,7 +132,7 @@ fun Manage(onClick: () -> Unit) = Row(
     Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(24.dp)).clickable(role = Role.Button, onClick = onClick).padding(start = 8.dp, end = 2.dp),
     verticalAlignment = Alignment.CenterVertically,
 ) {
-    Text("Manage", style = Type.title.copy(fontSize = Type.sub.fontSize), color = Ink.text)
+    Text("Manage", style = Label, color = Ink.text)
     Icon(Icons.chevron, null, Modifier.size(20.dp), tint = Ink.dim)
 }
 
@@ -169,14 +179,13 @@ fun ProfileStrip(setup: Setup, switching: String?, viewing: String?, onView: (St
  */
 @Composable
 private fun Segment(name: String, i: Int, n: Int, shown: Boolean, inUse: Boolean, busy: Boolean, onClick: () -> Unit) {
-    val selected = shown
     val source = remember { MutableInteractionSource() }
     val press = squish(source)
-    val fill by animateColorAsState(if (selected) Ink.accentContainer else Ink.surfaceHigh, MaterialTheme.motionScheme.fastEffectsSpec(), label = "segment")
+    val fill by animateColorAsState(if (shown) Ink.accentContainer else Ink.surfaceHigh, MaterialTheme.motionScheme.fastEffectsSpec(), label = "segment")
     val scale = LocalDensity.current.fontScale.coerceIn(1f, 2f) // larger text widens the segment rather than cutting the name
-    val shape = RoundedCornerShape(if (i == 0) 22.dp else 8.dp, if (i == n - 1) 22.dp else 8.dp, if (i == n - 1) 22.dp else 8.dp, if (i == 0) 22.dp else 8.dp)
+    val shape = segmentShape(i, n)
     Box(
-        Modifier.height(48.dp).selectable(selected, source, null, role = Role.Tab, onClick = onClick).semantics { if (inUse) stateDescription = "In use" },
+        Modifier.height(48.dp).selectable(shown, source, null, role = Role.Tab, onClick = onClick).semantics { if (inUse) stateDescription = "In use" },
         contentAlignment = Alignment.Center,
     ) {
         Row(
@@ -186,8 +195,8 @@ private fun Segment(name: String, i: Int, n: Int, shown: Boolean, inUse: Boolean
         ) {
             if (busy) CircularProgressIndicator(Modifier.size(16.dp), color = Ink.accent, strokeWidth = 2.dp, trackColor = Ink.accent.copy(alpha = 0.25f))
             else if (inUse) Icon(Icons.check, null, Modifier.size(18.dp), tint = Ink.accent)
-            Text(name, style = Type.title.copy(fontSize = Type.sub.fontSize, fontWeight = if (selected) Type.title.fontWeight else Type.body.fontWeight),
-                color = if (selected) Ink.accent else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(name, style = Label.copy(fontWeight = if (shown) Type.title.fontWeight else Type.body.fontWeight),
+                color = if (shown) Ink.accent else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -204,7 +213,7 @@ fun UseBar(name: String, inUse: String?, ready: Boolean, onBack: () -> Unit, onU
     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
 ) {
     Column(Modifier.weight(1f).padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text("$name · not in use", style = Type.title.copy(fontSize = Type.sub.fontSize), color = Ink.text)
+        Text("$name · not in use", style = Label, color = Ink.text)
         Text(if (!ready) "Choose a default route to use it" else inUse?.let { "$it is in use" } ?: "No profile is in use", style = Type.caption, color = Ink.dim)
     }
     Secondary(inUse?.let { "Back" } ?: "Close", onBack, color = Ink.dim)
@@ -212,7 +221,7 @@ fun UseBar(name: String, inUse: String?, ready: Boolean, onBack: () -> Unit, onU
         Modifier.heightIn(min = 40.dp).clip(RoundedCornerShape(20.dp)).background(if (ready) Ink.accent else Ink.surfaceHigh)
             .clickable(enabled = ready, role = Role.Button, onClickLabel = "Use $name", onClick = onUse).padding(horizontal = 16.dp),
         contentAlignment = Alignment.Center,
-    ) { Text("Use", style = Type.title.copy(fontSize = Type.sub.fontSize), color = if (ready) Ink.onAccent else Ink.faint) }
+    ) { Text("Use", style = Label, color = if (ready) Ink.onAccent else Ink.faint) }
 }
 
 /** The default route of an empty profile: not chosen yet, so it can't be used. Choose opens the picker. */
@@ -227,7 +236,7 @@ fun NotSet(onChoose: () -> Unit) = Row(
         Text("Not set", style = Type.title.copy(fontSize = Type.headline.fontSize * 0.55f), color = Ink.text)
         Text("Choose where apps go by default", style = Type.caption, color = Ink.dim)
     }
-    Text("Choose", style = Type.title.copy(fontSize = Type.sub.fontSize), color = Ink.accent)
+    Text("Choose", style = Label, color = Ink.accent)
 }
 
 /** What a profile keeps, in words: "Netherlands · 3 exceptions". */
@@ -274,12 +283,12 @@ fun ProfileSheet(setup: Setup, editing: String?, startEmpty: Boolean, onSave: (S
                 listOf(false to (setup.profile?.let { "Copy of $it" } ?: "Current setup"), true to "Empty").forEachIndexed { i, (e, label) ->
                     val on = empty == e
                     Row(
-                        Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(if (i == 0) 22.dp else 8.dp, if (i == 1) 22.dp else 8.dp, if (i == 1) 22.dp else 8.dp, if (i == 0) 22.dp else 8.dp))
+                        Modifier.weight(1f).height(48.dp).clip(segmentShape(i, 2))
                             .background(if (on) Ink.accentContainer else Ink.surfaceHigh).selectable(on, role = Role.Tab) { empty = e }.padding(horizontal = 12.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
                     ) {
                         if (on) Icon(Icons.check, null, Modifier.size(18.dp), tint = Ink.accent)
-                        Text(label, style = Type.title.copy(fontSize = Type.sub.fontSize), color = if (on) Ink.accent else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(label, style = Label, color = if (on) Ink.accent else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }

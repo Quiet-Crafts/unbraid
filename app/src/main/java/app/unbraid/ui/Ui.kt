@@ -309,9 +309,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val p = Providers.get(provider) ?: return@launch
         val acc = store.accounts.value[provider] ?: return@launch
         runCatching { p.countries(acc) }.onSuccess { c ->
-            store.countries(provider, c)
             _countries.update { it + (provider to c) }
-            refreshed.update { it + 1 }
+            // A fetched list is shown even when its cache can't be written; only a saved one counts as refreshed.
+            if (runCatching { store.countries(provider, c) }.isSuccess) refreshed.update { it + 1 }
         }
     }
 
@@ -346,7 +346,11 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         if (n != appsAsked) return@launch // a newer read is under way (checked and applied here, on the main thread)
         _apps.value = list
         // An uninstalled app must not keep its route (and a tunnel) alive.
-        if (store.setup.value.apps.keys.any { it !in installed }) store.update { s -> s.copy(apps = s.apps.filterKeys { it in installed }) }
+        // Saved profiles too: one used later must not bring an uninstalled app's exception back.
+        val gone = { s: Setup -> s.apps.keys.any { it !in installed } || s.profiles.any { p -> p.apps.keys.any { it !in installed } } }
+        if (gone(store.setup.value)) store.update { s ->
+            s.copy(apps = s.apps.filterKeys { it in installed }, profiles = s.profiles.map { p -> p.copy(apps = p.apps.filterKeys { it in installed }) })
+        }
     } }
 
     /** A config file picked in a sign-in form, read here so a rotation during a slow read doesn't lose it. */
@@ -540,6 +544,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun addTsExit(target: String, ip: String, name: String? = null): Boolean {
         if (tsLock(ip) != null) return false
+        draft?.let { d -> draftTsExit(d, target, ip, name); return true }
         val old = setup.value.routes.firstOrNull { it.tsExit != null }
         store.update { s -> s.copy(routes = s.routes.map { if (it.tsExit != null) it.copy(tsExit = ip, tsName = name) else it }) }
         val t = setup.value.route(target)
@@ -626,6 +631,31 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun dropRoute(id: String) { draft?.let { d -> store.update { it.editing(d) { p -> p.copy(apps = p.apps.filterValues { v -> v != id }, added = p.added - id) } } } }
 
     /**
+     * Exit node [ip] for profile [d], not in use: only its own routes change, never another profile's. It reuses a route
+     * already through that node, else retargets one of its Tailscale routes (copied first if shared), else adds one.
+     * Tailscale uses one exit node at a time, so the profile's other Tailscale routes follow to the same node.
+     */
+    private fun draftTsExit(d: String, target: String, ip: String, name: String?) {
+        val s = setup.value
+        val own = s.profiles.firstOrNull { it.name == d }?.own.orEmpty()
+        // Replaces the route's whole source (a saved server's config goes), in place.
+        val via = { id: String -> addImported(id) { it.copy(tsExit = ip, tsName = name) } }
+        val id = s.route(target)?.id?.also { via(it) }
+            ?: s.routes.firstOrNull { it.tsExit == ip }?.id
+            ?: s.routes.firstOrNull { it.tsExit != null && it.id in own }?.id?.let(::ownRoute)?.also { via(it) }
+            ?: addImported(target) { it.copy(tsExit = ip, tsName = name) }
+        // Read again: a route copied above is the profile's now, the original no longer.
+        val now = setup.value
+        val mine = now.profiles.firstOrNull { it.name == d }?.own.orEmpty()
+        now.routes.filter { it.tsExit != null && it.tsExit != ip && it.id in mine && it.id != id }.forEach { via(ownRoute(it.id)) }
+        when {
+            target.startsWith("app:") -> assign(target.removePrefix("app:"), id)
+            target == "default" -> setDefault(id)
+            target.isEmpty() -> keep(id)
+        }
+    }
+
+    /**
      * While a profile not in use is edited: the live route through another Tailscale exit node, which keeps [ip] from
      * being chosen (Tailscale uses one exit node at a time, and the live one must not change before Use).
      */
@@ -694,7 +724,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val l = loc.favKey()
         // Matched by identity, so favourites saved with older ids are found (and dropped) too.
         val had = s.favorites.filter { it.favKey() == l }
-        s.copy(favorites = if (had.isNotEmpty()) s.favorites - had.toSet() else s.favorites + l)
+        // Saved whole (a pinned server keeps its address and key, to connect to it later), matched by identity only.
+        s.copy(favorites = if (had.isNotEmpty()) s.favorites - had.toSet() else s.favorites + loc.copy(group = null, protocol = null))
     }
 
     fun setPrefs(f: (Prefs) -> Prefs) { store.update { it.copy(prefs = f(it.prefs)) } }

@@ -166,6 +166,15 @@ class KeyProviders2Test {
 
     // ---- ExpressVPN
 
+    @Test fun expressSkipsEntriesWithoutStrictIpv4() {
+        val valid = express.first { it.ips.any { ip -> ip.matches(Regex("[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+")) } }
+        val invalid = valid.copy(hostname = "bad.example", ips = listOf("1.2.3.999"), load = 0)
+        val loc = Location("expressvpn")
+        val account = ExpressVpn.Account("u", "p")
+        assertEquals(valid.hostname, ExpressVpn.link(listOf(invalid, valid), loc, account).server.host)
+        try { ExpressVpn.link(listOf(invalid), loc, account); fail() } catch (e: IOException) { assertTrue(e.message!!.startsWith("No ExpressVPN server")) }
+    }
+
     @Test fun expressCountriesCarryIsoCodes() {
         val cs = ExpressVpn.countries(express)
         assertEquals(cs.map { it.name }.sorted(), cs.map { it.name })

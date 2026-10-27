@@ -37,7 +37,7 @@ object Ndt7 {
      * Throws [Limited] when M-Lab is rate-limiting the exit's address.
      */
     fun locate(tag: String, country: String?): Server? {
-        val q = "$CLIENT" + (country?.let { "&country=$it&strict=true" } ?: "")
+        val q = CLIENT + (country?.let { "&country=$it&strict=true" } ?: "")
         val body = try { Probe.get(tag, LOCATE, "/v2/nearest/ndt/ndt7?$q") }
         catch (e: IllegalStateException) {
             val m = e.message.orEmpty()
@@ -181,7 +181,7 @@ object Ndt7 {
      * A frame's opcode and length (servers never mask theirs); null at the end of the stream. The length comes from the
      * server, so it is bounded: data frames are streamed past, but text and control frames are read into memory.
      */
-    private fun header(i: DataInputStream): Pair<Int, Long>? {
+    internal fun header(i: DataInputStream): Pair<Int, Long>? {
         val b0 = i.read(); if (b0 < 0) return null
         val b1 = i.readUnsignedByte()
         val len = when (val l = b1 and 0x7f) { 126 -> i.readUnsignedShort().toLong(); 127 -> i.readLong(); else -> l.toLong() }
@@ -201,7 +201,7 @@ object Ndt7 {
     private const val MAX_DATA = 1L shl 25    // ndt7 data frames are at most 16 MiB
 
     /** One final client frame, masked as the spec requires; the key is random, the payload sent as it is (see upload). */
-    private fun frame(o: OutputStream, op: Int, payload: ByteArray, len: Int) {
+    internal fun frame(o: OutputStream, op: Int, payload: ByteArray, len: Int) {
         val h = java.io.ByteArrayOutputStream(14)
         h.write(0x80 or op)
         when {

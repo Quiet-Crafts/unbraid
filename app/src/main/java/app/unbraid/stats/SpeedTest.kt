@@ -27,6 +27,7 @@ object SpeedTest {
 
     /** M-Lab's limit for interactive users (measurementlab.net/aup). */
     const val PER_DAY = 40
+    private const val DAY_LIMIT = "M-Lab allows $PER_DAY tests a day. Try again tomorrow."
 
     /**
      * Speeds in bits/s, [ping] in ms (median, low, high); null = not measured yet. [server] is the M-Lab server once located; [missing]
@@ -59,7 +60,7 @@ object SpeedTest {
 
     /** Counts [n] tests against M-Lab's daily allowance, unless a newer test took over or they don't fit. */
     private fun reserve(n: Int, mine: Int) = synchronized(lock) {
-        attempt == mine && Unbraid.store.testsToday + n <= PER_DAY && run { Unbraid.store.testsToday += n; true }
+        (attempt == mine && Unbraid.store.testsToday + n <= PER_DAY).also { if (it) Unbraid.store.testsToday += n }
     }
 
     /** Runs [f] on the located server, then on Locate's other candidates while they turn the test away. */
@@ -71,7 +72,7 @@ object SpeedTest {
         val node = if (exit.startsWith(NODE)) nodes().firstOrNull { NODE + it.ip == exit } ?: return false else null
         val tag = if (node != null) Compiler.TS_TAG else UnbraidVpn.tags[exit] ?: return false
         cancel()
-        if (Unbraid.store.testsToday >= PER_DAY) { _run.value = Run(exit, Phase.Failed, error = "M-Lab allows $PER_DAY tests a day. Try again tomorrow."); return false }
+        if (Unbraid.store.testsToday >= PER_DAY) { _run.value = Run(exit, Phase.Failed, error = DAY_LIMIT); return false }
         val setup = UnbraidVpn.running ?: Unbraid.store.setup.value // what the engine runs, for the label and the record
         val route = setup.route(exit)
         val vpnServer = UnbraidVpn.state.value.servers[exit]
@@ -89,8 +90,13 @@ object SpeedTest {
             try {
                 val located = Ndt7.locate(tag, country)
                 if (stop()) return@Runnable
-                if (located == null) { set { it.copy(phase = Phase.Failed, missing = route?.loc?.country ?: country) }; return@Runnable }
-                if (!reserve(1, mine)) { set { it.copy(phase = Phase.Failed, error = "M-Lab allows $PER_DAY tests a day. Try again tomorrow.") }; return@Runnable }
+                if (located == null) {
+                    // With no country to name there is nothing for "missing" to say: say that no server answered.
+                    val named = (route?.loc?.country ?: country)?.ifBlank { null }
+                    set { it.copy(phase = Phase.Failed, missing = named, error = "No test server answered. Try again later.".takeIf { named == null }) }
+                    return@Runnable
+                }
+                if (!reserve(1, mine)) { set { it.copy(phase = Phase.Failed, error = DAY_LIMIT) }; return@Runnable }
                 set { it.copy(server = located) }
                 val ping = Ndt7.ping(tag, located)
                 if (stop()) return@Runnable

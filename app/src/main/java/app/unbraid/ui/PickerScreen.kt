@@ -97,7 +97,8 @@ private val NordProtocols = listOf<Triple<String?, String, String>>(
 )
 
 /** A city saved before regions were stored: Mullvad, IVPN and PIA can't tell which city it was, so it must be picked again. */
-private fun stale(l: Location) = l.provider != "nord" && l.city != null && l.region == null
+// Also a pinned favourite saved without its server's address and key (before favourites kept them): star it again.
+private fun stale(l: Location) = l.provider != "nord" && l.city != null && l.region == null || l.pinned?.host?.isEmpty() == true
 
 private class Pick(
     val provider: String, val current: Location?, val group: String?, val protocol: String?, val tint: Color, val hasLoad: Boolean, val choose: (Location) -> Unit,
@@ -183,8 +184,6 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             return
         }
         ui.addTsExit(target, ip, name)
-        // addTsExit doesn't return the route; there is one Tailscale exit route at most, and it is the one just set.
-        if (target == "default") ui.setup.value.routes.firstOrNull { it.tsExit != null }?.let { ui.setDefault(it.id) }
         close()
     }
     // Protocol applies to this route at once, keeping its location; a server type narrows the list for the next pick.
@@ -224,9 +223,9 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         }
     }
 
-    fun LazyListScope.locations() {
-        if (provider == null) return
-        // An empty profile's default can also be Direct: Routes lists Direct only once an app uses it.
+    // An empty profile's default can also be Direct (Routes lists Direct only once an app uses it): on either tab, and
+    // with no provider signed in too.
+    fun LazyListScope.direct() {
         if (target == "default") item(key = "direct") {
             PickRow({ ui.setDefault(DIRECT); close() }, false, tint, Modifier.padding(horizontal = 8.dp)) {
                 Box(Modifier.size(36.dp).clip(RoundedCornerShape(12.dp)).background(Ink.surfaceTop), Alignment.Center) {
@@ -235,6 +234,10 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
                 Title("Direct", "No VPN: apps use your normal connection")
             }
         }
+    }
+
+    fun LazyListScope.locations() {
+        if (provider == null) return
         if (countries.isEmpty()) {
             item(key = "empty") {
                 Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp)) {
@@ -314,7 +317,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     }
 
     fun LazyListScope.myServers() {
-        tsNote?.let { item(key = "tsNote") { Caption(it, color = Ink.text) } }
+        tsNote?.let { item(key = "tsLockNote") { Caption(it, color = Ink.text) } }
         tailscale(nodes)
         saved(setup.servers)
         settingsNote(empty = !setup.tailscale && setup.servers.isEmpty())
@@ -399,6 +402,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             }
         },
     ) {
+        if (query.isEmpty()) direct()
         when {
             query.isNotEmpty() -> results()
             mine -> myServers()

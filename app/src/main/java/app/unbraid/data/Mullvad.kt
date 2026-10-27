@@ -158,7 +158,8 @@ object Mullvad : Provider {
 
     override fun signOut(account: String): Boolean = try {
         val a = account(account)
-        Http.delete("$API/accounts/v1/devices/${Http.enc(a.deviceId)}", bearer(accessToken(a.account)))
+        val token = accessToken(a.account)
+        try { Http.delete("$API/accounts/v1/devices/${Http.enc(a.deviceId)}", bearer(token)) } catch (e: Http.Status) { if (e.code != 404) throw e }
         true
     } catch (e: IOException) {
         false
@@ -281,7 +282,7 @@ object Mullvad : Provider {
     /** [p] as the fresh list has it, found by host name, else by IP. */
     private fun current(l: RelayList, p: Server): Server {
         val r = l.usable.firstOrNull { it.hostname == p.host } ?: l.usable.firstOrNull { it.ip == p.ip }
-            ?: throw IOException("Mullvad no longer lists ${p.name}")
+            ?: throw NoLongerOffered(p)
         return server(r, l)
     }
 

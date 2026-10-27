@@ -38,16 +38,17 @@ class Unbraid : Application() {
         // Files other Tailscale devices sent before receiving them was turned off: the engine no longer accepts any.
         if (!java.io.File(filesDir, "box/Taildrop").deleteRecursively()) android.util.Log.w("Unbraid", "old received files not deleted")
         app.unbraid.data.Snapshot.dir = filesDir
+        val scope = MainScope()
         // The home-screen widget mirrors every connection change, and whether running protects anything.
-        combine(UnbraidVpn.state.map { it.phase }, store.setup.map { it.directOnly }) { p, d -> p to d }.distinctUntilChanged().onEach { StatusWidget.update(this) }.launchIn(MainScope())
+        combine(UnbraidVpn.state.map { it.phase }, store.setup.map { it.directOnly }) { p, d -> p to d }.distinctUntilChanged().onEach { StatusWidget.update(this) }.launchIn(scope)
         // The launcher shortcuts and quick-settings tiles follow the first three profiles and the one in use.
-        store.setup.map { s -> s.profiles.take(Profiles.SLOTS).map { it.name } to s.profile }.distinctUntilChanged().onEach { Profiles.refresh(this) }.launchIn(MainScope())
-        Profiles.watch(MainScope())
+        store.setup.map { s -> s.profiles.take(Profiles.SLOTS).map { it.name } to s.profile }.distinctUntilChanged().onEach { Profiles.refresh(this) }.launchIn(scope)
+        Profiles.watch(scope)
         // Statistics follow the connection while they're on: sessions from the phase, traffic from the running engine.
         Stats.init(this)
         combine(UnbraidVpn.state.map { it.phase }, store.setup.map { it.prefs.stats }) { p, on -> p to on }.distinctUntilChanged().onEach { (p, on) ->
             Stats.phase(if (on) p else Phase.Off)
             if (on && p == Phase.On) Stats.start() else Stats.stop()
-        }.launchIn(MainScope())
+        }.launchIn(scope)
     }
 }

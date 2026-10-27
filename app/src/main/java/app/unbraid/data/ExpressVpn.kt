@@ -60,7 +60,7 @@ object ExpressVpn : Provider {
     override fun connect(loc: Location, account: String): Link = link(if (loc.pinned == null) fetch() else runCatching { fetch() }.getOrNull(), loc, account(account))
 
     override fun servers(loc: Location, account: String, limit: Int): List<Server> =
-        Catalog.pick(fetch(), loc).take(limit).map { server(it, it.ips.filter(::isIpv4).random()) }
+        Catalog.pick(fetch().filter { it.ips.any(::isIpv4) }, loc).take(limit).map { server(it, it.ips.filter(::isIpv4).random()) }
 
     override val listSource = "expressvpn"
     private fun fetch() = Catalog.fetch(listSource, "openvpn").filter { it.udp }
@@ -73,7 +73,7 @@ object ExpressVpn : Provider {
             // Its current addresses; the one it had while it still has it.
             e.ips.filter(::isIpv4).let { ips -> server(e, if (pinned.ip in ips) pinned.ip else ips.randomOrNull(rnd) ?: throw NoLongerOffered(pinned)) }
         } ?: throw NoLongerOffered(pinned) else {
-            val e = Catalog.pick(entries, loc).firstOrNull() ?: throw IOException("No ExpressVPN server for ${loc.label}")
+            val e = Catalog.pick(entries.filter { it.ips.any(::isIpv4) }, loc).firstOrNull() ?: throw IOException("No ExpressVPN server for ${loc.label}")
             server(e, e.ips.filter(::isIpv4).random(rnd))
         }
         return OvpnLink(sv, Manual.parseOvpn(profile(sv.ip), sv.name, a.username, a.password))

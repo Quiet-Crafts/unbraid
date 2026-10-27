@@ -110,9 +110,10 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
 
     LaunchedEffect(shown, land) {
         val key = land ?: return@LaunchedEffect
-        land = null
         val at = shown.indexOfFirst { it.pkg == key }
         if (at >= 0 && list.layoutInfo.visibleItemsInfo.none { it.key == key }) list.animateScrollToItem(at)
+        // Cleared only now: clearing first would recompose with a new key and cancel the scroll on its way.
+        if (land == key) land = null
     }
 
     Screen(

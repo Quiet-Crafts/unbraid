@@ -760,6 +760,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         forgetLookups(this)
         net.stop()
         applied = null; rejected = null; lastGood = null; lastInput = null; probe = null; links = emptyMap(); appliedAccounts = emptyMap()
+        running = null; tags = emptyMap(); tunnelDns = emptyMap()
     }
 
     /** Caller holds [lock]. */
@@ -834,6 +835,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 openTable(false)
                 forgetLookups(this@UnbraidVpn)
                 failing = emptySet()
+                probe = null; links = emptyMap(); running = null; tags = emptyMap(); tunnelDns = emptyMap()
                 cancelResume() // again: a pause that was still running when the service went may have set an alarm
                 if (state.value.phase != VpnState.Phase.Off) state.value = VpnState()
             }

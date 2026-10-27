@@ -81,12 +81,12 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
     @Synchronized
     fun catalogDate(name: String, epochSeconds: Long) {
         val d = catalogDates.value
-        if (d[name] != epochSeconds) (d + (name to epochSeconds)).let { catalogDates.value = it; write("catalog-dates.json", json.encodeToString(datesSer, it)) }
+        if (d[name] != epochSeconds) (d + (name to epochSeconds)).let { if (write("catalog-dates.json", json.encodeToString(datesSer, it))) catalogDates.value = it }
     }
 
     /** Last tunnel that worked per "provider|location", used when a provider's API is unreachable. Holds keys, so sealed. */
     val lastLinks: Map<String, Link>
-        get() = open("links.bin")?.let { runCatching { json.decodeFromString(linksSer, it) }.getOrNull() }.orEmpty()
+        get() = runCatching { open("links.bin")?.let { json.decodeFromString(linksSer, it) } }.getOrNull().orEmpty()
 
     /** Merges [add], keeping only providers still signed in (a sign-out may have raced a connect). Only a cache: never throws. */
     @Synchronized

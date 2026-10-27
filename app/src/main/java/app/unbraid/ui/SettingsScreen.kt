@@ -165,7 +165,11 @@ private fun LazyListScope.advanced(open: Boolean, toggle: () -> Unit, summary: S
 
 private val octet = "(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)"
 private val cidr = Regex("$octet(\\.$octet){3}/([12]?\\d|3[0-2])")
-private fun split(s: String) = s.split(Regex("[,\\s]+")).filter { it.isNotEmpty() }
+private val separators = Regex("[,\\s]+")
+private fun split(s: String) = s.split(separators).filter { it.isNotEmpty() }
+private val httpsUrl = Regex("https://[A-Za-z0-9.-]+(:\\d{1,5})?(/.*)?")
+/** Licence files are hard-wrapped near 80 columns: a single line break inside a paragraph, but not before a list item. */
+private val rewrap = Regex("""[ \t]*(?<!\n)\n(?!\n|[ \t]*([*•-]|\d+[.)]|\([a-z0-9]+\))\s)[ \t]*""")
 
 /**
  * Settings pages: the hub (empty stack), then one page per subject; a provider's page is "provider:<id>". The path
@@ -528,16 +532,20 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             }
 
             p == "notices" -> {
-                // The texts are long (about 200 KB): read off the main thread, one item per notice.
-                val notices by androidx.compose.runtime.produceState(emptyList<String>()) {
-                    value = withContext(Dispatchers.IO) { context.assets.open("notices.txt").bufferedReader().use { it.readText() } }.split("\n=== ").map { it.removePrefix("=== ") }
+                // The texts are long (about 200 KB): read and reflowed off the main thread, one item per notice (title, text).
+                val notices by androidx.compose.runtime.produceState(emptyList<Pair<String, String>>()) {
+                    value = withContext(Dispatchers.IO) {
+                        context.assets.open("notices.txt").bufferedReader().use { it.readText() }.split("\n=== ").map { n ->
+                            // Reflow each paragraph to the screen, keeping list items apart.
+                            n.removePrefix("=== ").let { it.substringBefore('\n') to it.substringAfter('\n').trim().replace(rewrap, " ") }
+                        }
+                    }
                 }
                 Page("Licences", back, over = "Legal") {
-                    notices.forEach { n ->
+                    notices.forEach { (title, text) ->
                         item {
-                            SectionLabel(n.substringBefore('\n'))
-                            // Licence files are hard-wrapped near 80 columns: reflow each paragraph to the screen, keeping list items apart.
-                            Text(n.substringAfter('\n').trim().replace(Regex("""[ \t]*(?<!\n)\n(?!\n|[ \t]*([*•-]|\d+[.)]|\([a-z0-9]+\))\s)[ \t]*"""), " "), style = Type.caption, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp))
+                            SectionLabel(title)
+                            Text(text, style = Type.caption, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp))
                         }
                     }
                 }
@@ -594,7 +602,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
         "tsserver" -> {
             var url by remember { mutableStateOf(home.tsControlUrl.orEmpty()) }
             var key by remember { mutableStateOf("") }
-            val ok = url.isBlank() || Regex("https://[A-Za-z0-9.-]+(:\\d{1,5})?(/.*)?").matches(url.trim())
+            val ok = url.isBlank() || httpsUrl.matches(url.trim())
             Prompt("Control server", "Save", { dialog = null; ui.setTailscaleServer(url.trim().ifEmpty { null }, key.trim().ifEmpty { null }) }, { dialog = null }, enabled = ok, secure = true) {
                 Text("For a self-hosted Headscale. Changing it signs this phone out of the current tailnet.", style = Type.sub)
                 DialogField(url, { url = it }, "Server URL", "https://headscale.example.com")
@@ -707,10 +715,10 @@ private fun Radio(on: Boolean) = Box(Modifier.size(24.dp).clip(RoundedCornerShap
 @Composable
 private fun ListDialog(
     title: String, placeholder: String, current: List<String>, valid: (String) -> Boolean, invalid: String, note: String,
-    onSave: (List<String>) -> Unit, onDismiss: () -> Unit, max: Int = Int.MAX_VALUE,
+    onSave: (List<String>) -> Unit, onDismiss: () -> Unit,
 ) {
     var text by remember { mutableStateOf(current.joinToString(", ")) }
-    val bad = split(text).let { it.size > max || it.any { v -> !valid(v) } }
+    val bad = split(text).any { !valid(it) }
     AlertDialog(
         onDismissRequest = onDismiss, containerColor = Ink.surface, titleContentColor = Ink.text, textContentColor = Ink.dim,
         title = { Text(title, style = Type.title) },

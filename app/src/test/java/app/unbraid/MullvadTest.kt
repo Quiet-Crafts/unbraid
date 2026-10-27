@@ -119,6 +119,12 @@ class MullvadTest {
         assertEquals("${sv.ip}:51820", l.peer.endpoint)
     }
 
+    @Test fun missingPinnedRelayIsNoLongerOffered() {
+        val sv = Mullvad.link(list, Location("mullvad", countryCode = "NL"), acct).server
+        try { Mullvad.link(list, Location("mullvad", pinned = sv.copy(host = "gone", ip = "203.0.113.99")), acct); fail() }
+        catch (e: app.unbraid.data.NoLongerOffered) { }
+    }
+
     @Test fun ownedOnlyLeavesOutRentedServers() {
         val us = { owned: Boolean -> Mullvad.countries(list, owned).first { it.code == "US" }.cities.map { it.key } }
         assertEquals(listOf("us-lax", "us-nyc"), us(false))

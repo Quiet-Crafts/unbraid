@@ -193,7 +193,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     // A route with a tunnel and no answer yet says it is being checked, so its card keeps its size meanwhile; it says it
     // couldn't be checked only once every attempt has failed.
     val exitOf = { id: String -> if (!lit) null else report(id) ?: ExitReport(null, 0, vpn.engine, null).takeIf { id in vpn.servers || setup.route(id)?.tsExit != null } }
-    val pendingOf = { r: ExitReport? -> r != null && r.ip == null && (asking || r.at == 0L) }
+    val pendingOf = { r: ExitReport? -> r != null && r.ip == null && asking }
     // Right after a sign-in, a provider's new key may not reach all its servers for a minute: say so instead of nothing.
     val accounts by ui.accounts.collectAsStateWithLifecycle()
     val settingUp by produceState(emptySet<String>(), on, setup, accounts) {

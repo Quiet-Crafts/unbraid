@@ -1,7 +1,6 @@
 package app.unbraid.stats
 
 import android.annotation.SuppressLint
-import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
@@ -36,7 +35,7 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * One ordered worker thread owns all state and every write: engine callbacks, lifecycle (start, stop, delete) and
  * sessions are queued to it, so nothing needs a lock, and a callback from a stopped or deleted recording (an older
- * [gen]) is dropped. Reads run on the caller's IO thread.
+ * [gen]) is dropped. Reads run on the worker too, through [read]; the raw readers below are for it only.
  */
 @SuppressLint("StaticFieldLeak") // only the application context is held, which lives as long as the process
 object Stats {
@@ -127,9 +126,7 @@ object Stats {
     /** Exits keep the label they had when used, so history survives renames and removed routes. */
     private fun labelExits(d: SQLiteDatabase, ids: List<String>) = ids.distinct().forEach { id ->
         val e = labels[id] ?: return@forEach
-        val v = ContentValues()
-        v.put("id", id); v.put("code", e.code); v.put("name", e.name); v.put("hue", e.hue); v.put("via", e.via)
-        d.insertWithOnConflict("exit", null, v, SQLiteDatabase.CONFLICT_REPLACE)
+        d.execSQL("INSERT OR REPLACE INTO exit VALUES(?,?,?,?,?)", arrayOf<Any>(id, e.code, e.name, e.hue, e.via))
     }
 
     /** Each exit's label as last noted, taken when its connections open or its test starts, not when the bytes are written. */
@@ -250,7 +247,7 @@ object Stats {
      */
     fun <T> read(f: () -> T): T? { val t = FutureTask { runCatching { flushNow(); maybePrune(); f() }.getOrNull() }; worker.execute(t); return runCatching { t.get() }.getOrNull() }
 
-    // ---- reading (IO thread) ---------------------------------------------------------------------------------------
+    // ---- reading (worker: call through read) ---------------------------------------------------------------------------------------
 
     data class Exit(val id: String, val code: String, val name: String, val hue: Int, val via: String)
     data class Bytes(val up: Long, val down: Long) { val total get() = up + down }
@@ -264,14 +261,14 @@ object Stats {
     fun exits(): Map<String, Exit> = rows("SELECT id, code, name, hue, via FROM exit") { Exit(it.getString(0), it.getString(1), it.getString(2), it.getInt(3), it.getString(4)) }.associateBy { it.id }
 
     /** Bytes per exit per day, for days [from, to]. */
-    fun perDay(from: Long, to: Long): Map<Long, Map<String, Bytes>> =
-        rows("SELECT d, exit, SUM(up), SUM(down) FROM daily WHERE d BETWEEN ? AND ? GROUP BY d, exit", arrayOf("$from", "$to")) { Triple(it.getLong(0), it.getString(1), Bytes(it.getLong(2), it.getLong(3))) }
-            .groupBy({ it.first }, { it.second to it.third }).mapValues { it.value.toMap() }
+    fun perDay(from: Long, to: Long) =
+        rows("SELECT d, exit, SUM(up), SUM(down) FROM daily WHERE d BETWEEN ? AND ? GROUP BY d, exit", arrayOf("$from", "$to")) { Triple(it.getLong(0), it.getString(1), Bytes(it.getLong(2), it.getLong(3))) }.byKey()
 
     /** Bytes per exit per hour of one day (the Day view). */
-    fun perHour(day: Long): Map<Long, Map<String, Bytes>> =
-        rows("SELECT h, exit, up, down FROM hourly WHERE h BETWEEN ? AND ?", arrayOf("${day * 24}", "${day * 24 + 23}")) { Triple(it.getLong(0) - day * 24, it.getString(1), Bytes(it.getLong(2), it.getLong(3))) }
-            .groupBy({ it.first }, { it.second to it.third }).mapValues { it.value.toMap() }
+    fun perHour(day: Long) =
+        rows("SELECT h, exit, up, down FROM hourly WHERE h BETWEEN ? AND ?", arrayOf("${day * 24}", "${day * 24 + 23}")) { Triple(it.getLong(0) - day * 24, it.getString(1), Bytes(it.getLong(2), it.getLong(3))) }.byKey()
+
+    private fun List<Triple<Long, String, Bytes>>.byKey(): Map<Long, Map<String, Bytes>> = groupBy({ it.first }, { it.second to it.third }).mapValues { it.value.toMap() }
 
     /** Bytes per app and exit over days [from, to], largest first. */
     fun apps(from: Long, to: Long) = rows("SELECT app, exit, SUM(up)+SUM(down) b FROM daily WHERE d BETWEEN ? AND ? GROUP BY app, exit ORDER BY b DESC", arrayOf("$from", "$to")) { Triple(it.getString(0), it.getString(1), it.getLong(2)) }
@@ -421,10 +418,11 @@ internal object Collector {
     private fun apply(events: List<Ev>, reset: Boolean) {
         val now = System.currentTimeMillis()
         val (setup, tags, servers) = engine
+        val ids = HashMap<String, String>() // the recorded id of each exit, worked out once per batch (a replay lists hundreds)
         val open = { e: Ev ->
             val app = if (e.own) Stats.ctx.packageName else appOf(e)
             val exit = (if (e.own) SpeedTest.exitOn(e.tag) else null) ?: exitOf(e.tag, app, setup, tags)
-            Conn(app, Stats.note(exit, setup), servers[exit]?.name, 0, 0)
+            Conn(app, ids.getOrPut(exit) { Stats.note(exit, setup) }, servers[exit]?.name, 0, 0)
         }
         val replayed = HashSet<String>()
         var batch = false

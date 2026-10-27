@@ -72,6 +72,7 @@ import app.unbraid.ui.VpnDisclosure
 import app.unbraid.ui.Welcome
 import app.unbraid.ui.settingsHub
 import app.unbraid.ui.reselected
+import app.unbraid.stats.Stats
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
 
@@ -102,14 +103,14 @@ class MainActivity : ComponentActivity() {
         val ask = listOfNotNull(
             Manifest.permission.POST_NOTIFICATIONS.takeIf { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED },
             // Under "Block connections without VPN", LAN traffic runs through Unbraid's own sockets too.
-            LOCAL_NETWORK.takeIf { needsLocalNetwork(ui.setup.value, app.unbraid.vpn.UnbraidVpn.state.value.lockdown && ui.setup.value.prefs.lan) },
+            LOCAL_NETWORK.takeIf { needsLocalNetwork(ui.setup.value, UnbraidVpn.state.value.lockdown && ui.setup.value.prefs.lan) },
         )
         if (ask.isNotEmpty()) permissions.launch(ask.toTypedArray())
         VpnService.prepare(this)?.let { vpnConsent.launch(it) } ?: ui.connect()
     }
 
     // Android's Always-on and Block connections, and the installed apps, can change while unbraid is in the background.
-    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); ui.refreshApps(); app.unbraid.stats.Stats.maintain() }
+    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); ui.refreshApps(); Stats.maintain() }
 
     // The open sheet and a connect waiting on it outlive a rotation (never a secret here); nothing connects by itself.
     override fun onSaveInstanceState(out: Bundle) { super.onSaveInstanceState(out); out.putString("sheet", sheet); out.putBoolean("connectAfter", connectAfter) }
