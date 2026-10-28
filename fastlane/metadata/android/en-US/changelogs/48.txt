@@ -1,0 +1,3 @@
+• Routes: one + button, bottom right, adds a route or a profile. The two orange add buttons are gone.
+• Routes: route chips show a slash before the exit's code (/NL) and all share one size, so exit names line up.
+• Routes: the default route card shows a chevron, so it reads as tappable. Exit addresses stay on every route.
