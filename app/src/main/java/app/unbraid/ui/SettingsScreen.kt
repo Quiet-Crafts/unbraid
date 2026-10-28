@@ -53,6 +53,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -335,7 +336,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     val n = setup.routes.count { it.own == sv.id }
                     Item(sv.name, "${sv.kind} · ${if (n == 0) "not used" else "used by $n ${if (n == 1) "route" else "routes"}"}", { dialog = "server:${sv.id}" }) { Chevron() }
                 })
-                item { Box(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Tonal("Add connection", Icons.plus) { importer.error = null; dialog = "add" } } }
+                item { Box(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Tonal("Add connection", Icons.add) { importer.error = null; dialog = "add" } } }
                 importer.error?.let { e -> item { Text(e, style = Type.caption, color = Ink.bad, modifier = Modifier.padding(start = 24.dp, end = Gutter)) } }
                 caption("A provider sign-in, a WireGuard or OpenVPN file, or a Shadowsocks link. Tailscale exit nodes are under Tailscale.")
             }
@@ -383,7 +384,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         val apps = setup.apps.count { it.value == r.id }
                         // A route that turned the provider's blocking on or off for itself says so.
                         val own = r.filter?.takeIf { protect != null }?.let { "${protect!!.label} ${if (it) "on" else "off"} here" }
-                        Item(r.name, listOfNotNull(if (r.id == setup.defaultRoute) "Default route" else "$apps ${if (apps == 1) "app" else "apps"}", vpn.servers[r.id]?.name, own).joinToString(" · ")) { Code(r.code, Ink.route(r.hue)) }
+                        Item(r.name, listOfNotNull(if (r.id == setup.defaultRoute) "Default route" else "$apps ${if (apps == 1) "app" else "apps"}", vpn.servers[r.id]?.name, own).joinToString(" · ")) { RouteMark(r.code, Ink.route(r.hue), Modifier.clearAndSetSemantics {}) }
                     })
                     val adv = shownOpts.filter { it.advanced }
                     // How the key was made, read from its config, and where configs are managed: shown, never changed here.

@@ -148,7 +148,7 @@ private fun Braid() {
                 Modifier.align(Alignment.TopEnd).offset(y = ((y - 34) * s).dp).graphicsLayer { alpha = ((reveal.value - 0.6f) / 0.4f).coerceIn(0f, 1f) },
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(label, style = Type.caption, color = Ink.text)
+                Text(label, style = Type.caption, color = Ink.text, modifier = Modifier.weight(1f, fill = false))
                 RouteMark(code, colors[i], direct = code == null)
             }
         }

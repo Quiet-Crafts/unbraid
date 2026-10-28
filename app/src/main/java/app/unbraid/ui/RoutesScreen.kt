@@ -37,6 +37,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -49,6 +51,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FloatingActionButtonMenu
+import androidx.compose.material3.FloatingActionButtonMenuItem
+import androidx.compose.material3.ToggleFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
@@ -75,6 +80,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.semantics
@@ -201,112 +208,119 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     BackHandler(managing) { managing = false }
     if (managing) {
         ProfilesPage(ui, setup, onBack = { managing = false }, onAdd = { addProfile(it) }, onEdit = { profileSheet = it })
-    } else Screen(
-        state = scroll,
-        overline = "",
-        overlineContent = { Status(vpn, switching != null) },
-        title = if (switching != null) "Switching" else when (vpn.phase) {
-            Phase.On -> if (setup.directOnly) "Connected" else "Protected"
-            Phase.Paused -> "Paused"; Phase.Connecting -> "Connecting"; Phase.Off -> "Unprotected"
-        },
-        subColor = if (vpn.error != null) Ink.bad else Ink.dim,
-        sub = switching?.let { "To $it · apps reconnect for a moment" } ?: vpn.error ?: settingUp.takeIf { it.isNotEmpty() }?.let { ps -> "${ps.joinToString(" and ") { Providers.get(it)?.name ?: it }} is setting up your key. Its routes can take a minute to work" } ?: when (vpn.phase) {
-            Phase.On -> "Tap to pause or disconnect"
-            Phase.Paused -> if (vpn.lockdown) "Apps are offline (Block connections without VPN) · tap to resume" else "Apps skip the VPN · tap to resume"
-            Phase.Connecting -> "Setting up your routes"
-            Phase.Off -> "Tap to connect"
-        },
-        // Connected: offer pause or disconnect. Paused or off: one tap connects. The status text says "tap to …",
-        // so tapping it does the same as the button.
-        action = { PowerButton(vpn, busy = switching != null) { power() } },
-        onHeader = { power() },
-        headerLabel = when (vpn.phase) { Phase.On, Phase.Connecting -> "Pause or disconnect"; Phase.Paused -> "Resume"; Phase.Off -> "Connect" },
-    ) {
-        privateDns?.let { host ->
-            item(key = "privateDns") {
-                Text(
-                    "Android Private DNS ($host) does DNS itself, so apps' lookups skip their routes. Set Private DNS to Automatic.",
-                    style = Type.caption, color = Ink.accent,
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp).tap({ openSettings(Settings.ACTION_WIRELESS_SETTINGS) }),
-                )
+    } else Box(Modifier.fillMaxSize()) {
+        var adding by rememberSaveable { mutableStateOf(false) }
+        BackHandler(adding) { adding = false }
+        Box(if (adding) Modifier.clearAndSetSemantics {} else Modifier) {
+            Screen(
+                state = scroll,
+                overline = "",
+                overlineContent = { Status(vpn, switching != null) },
+                title = if (switching != null) "Switching" else when (vpn.phase) {
+                    Phase.On -> if (setup.directOnly) "Connected" else "Protected"
+                    Phase.Paused -> "Paused"; Phase.Connecting -> "Connecting"; Phase.Off -> "Unprotected"
+                },
+                subColor = if (vpn.error != null) Ink.bad else Ink.dim,
+                sub = switching?.let { "To $it · apps reconnect for a moment" } ?: vpn.error ?: settingUp.takeIf { it.isNotEmpty() }?.let { ps -> "${ps.joinToString(" and ") { Providers.get(it)?.name ?: it }} is setting up your key. Its routes can take a minute to work" } ?: when (vpn.phase) {
+                    Phase.On -> "Tap to pause or disconnect"
+                    Phase.Paused -> if (vpn.lockdown) "Apps are offline (Block connections without VPN) · tap to resume" else "Apps skip the VPN · tap to resume"
+                    Phase.Connecting -> "Setting up your routes"
+                    Phase.Off -> "Tap to connect"
+                },
+                // Connected: offer pause or disconnect. Paused or off: one tap connects. The status text says "tap to …",
+                // so tapping it does the same as the button.
+                action = { PowerButton(vpn, busy = switching != null) { power() } },
+                onHeader = { power() },
+                headerLabel = when (vpn.phase) { Phase.On, Phase.Connecting -> "Pause or disconnect"; Phase.Paused -> "Resume"; Phase.Off -> "Connect" },
+            ) {
+                privateDns?.let { host ->
+                    item(key = "privateDns") {
+                        Text(
+                            "Android Private DNS ($host) does DNS itself, so apps' lookups skip their routes. Set Private DNS to Automatic.",
+                            style = Type.caption, color = Ink.accent,
+                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp).tap({ openSettings(Settings.ACTION_WIRELESS_SETTINGS) }),
+                        )
+                    }
+                }
+                // A switch the engine couldn't run: the last profile is back, said once, with Try again.
+                failed?.let { f ->
+                    item(key = "switchFailed") {
+                        Notice(Icons.error, Ink.bad, "Couldn't switch to ${f.to}.${f.kept?.let { " $it is still in use." }.orEmpty()}", "Try again", dismiss = { ui.switchFailed.value = null }, live = true) { ui.useProfile(f.to) }
+                    }
+                }
+                item(key = "profileLabel") {
+                    SectionLabel("Profile", tall = true) {
+                        if (setup.profiles.size >= MAX_PROFILES) Text("$MAX_PROFILES of $MAX_PROFILES", style = Type.caption, color = Ink.dim, modifier = Modifier.padding(end = 4.dp))
+                        if (setup.profiles.isNotEmpty()) Manage { managing = true }
+                    }
+                }
+                item(key = "profiles") {
+                    if (setup.profiles.isEmpty()) Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = Gutter - 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Save this setup to switch back to it in one tap.", style = Type.sub, color = Ink.dim, modifier = Modifier.weight(1f))
+                        Secondary("Save", { addProfile(false) }, color = Ink.text)
+                    } else ProfileStrip(setup, switching, draft) { ui.view(it) }
+                }
+                // Shown, not in use: nothing reconnects until Use.
+                draft?.let { d ->
+                    item(key = "useBar") {
+                        UseBar(d, setup.profile, setup.profiles.first { it.name == d }.ready, onBack = { ui.view(null) }) { ui.useProfile(d) }
+                    }
+                }
+                if (full && setup.profiles.size >= MAX_PROFILES) item(key = "full") {
+                    Notice(Icons.layers, Ink.dim, "$MAX_PROFILES profiles is the most. Delete one to add another.", "Manage", dismiss = { full = false }, live = true) { full = false; managing = true }
+                }
+                item(key = "label") {
+                    SectionLabel("Default route", tall = true)
+                }
+                item(key = "default") {
+                    val route = setup.route(shown.defaultRoute)
+                    // An empty profile has no default route yet: one to choose, never Direct by accident.
+                    if (shown.defaultRoute.isEmpty()) NotSet { openPicker("default") }
+                    else Rise("routes", 0, reveal) { DefaultTile(
+                        key = shown.defaultRoute,
+                        apps = defaultPkgs.size, code = route?.code, chip = if (lit && route != null) Ink.route(route.hue) else Ink.faint, direct = route == null,
+                        title = route?.name ?: "Direct", meta = route?.let { place(it, live) } ?: "No VPN for these apps",
+                        extra = if (route != null && server != null) serverId(route, server) else null,
+                        border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
+                        exit = exitOf(shown.defaultRoute)?.let { it to pendingOf(it) },
+                    ) { sheet = shown.defaultRoute } }
+                }
+                // Android refused the VPN: most often another VPN app holds Always-on.
+                if (Onboarding.consentFailed && vpn.phase == Phase.Off) item(key = "consent") {
+                    Notice(Icons.block, Ink.bad, "Android didn't start $APP's VPN. If another VPN app is set to Always-on, turn that off in Android's VPN settings.", "Open Android VPN settings") {
+                        openSettings(Settings.ACTION_VPN_SETTINGS)
+                    }
+                }
+                // The leak-proof setup was snoozed: one quiet reminder once the snooze is over; closing it snoozes it again.
+                if (leakDue && on && !(vpn.alwaysOn && vpn.lockdown)) item(key = "leak") {
+                    Notice(Icons.shield, Ink.accent, "Apps go online without $APP when it's off", "Set up", dismiss = { Onboarding.snoozeLeak() }, dismissLabel = "Not now", onAction = leakSetup)
+                }
+                if (exceptions.isNotEmpty()) item(key = "exLabel") { SectionLabel("Exceptions", tall = true) }
+                itemsIndexed(exceptions, key = { _, id -> id }) { i, id ->
+                    val route = shown.route(id)
+                    Rise("routes", i + 1, reveal) { RouteRow(
+                        ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size),
+                        exit = if (route == null) null else exitOf(id)?.let { it to pendingOf(it) },
+                    ) { sheet = id } }
+                }
+                // Nothing set apart yet: say what that means instead of leaving the page empty.
+                if (shown.apps.isEmpty() && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
+                    Text("All apps use the default route. Tap + to send some apps through another exit.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp))
+                }
+                if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {
+                    HomeRow(setup.home, lit = on, loginUrl = vpn.tsLoginUrl.takeIf { setup.home.tailscale }) { tsLogin(it) }
+                }
+                if (setup.activeRoutes.count { !it.imported && it.loc.provider == "nord" } > 6) item(key = "note") {
+                    Text(
+                        "Nord allows 10 connections per account; each active location uses one.",
+                        style = Type.caption, color = Ink.faint, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp),
+                    )
+                }
+                item(key = "fabSpace") { Spacer(Modifier.height(88.dp)) }
             }
         }
-        // A switch the engine couldn't run: the last profile is back, said once, with Try again.
-        failed?.let { f ->
-            item(key = "switchFailed") {
-                Notice(Icons.error, Ink.bad, "Couldn't switch to ${f.to}.${f.kept?.let { " $it is still in use." }.orEmpty()}", "Try again", dismiss = { ui.switchFailed.value = null }, live = true) { ui.useProfile(f.to) }
-            }
-        }
-        item(key = "profileLabel") {
-            SectionLabel("Profile", tall = true) {
-                if (setup.profiles.size >= MAX_PROFILES) Text("$MAX_PROFILES of $MAX_PROFILES", style = Type.caption, color = Ink.dim, modifier = Modifier.padding(end = 4.dp))
-                if (setup.profiles.isNotEmpty()) Manage { managing = true }
-            }
-        }
-        item(key = "profiles") {
-            if (setup.profiles.isEmpty()) Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = Gutter - 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Save this setup to switch back to it in one tap.", style = Type.sub, color = Ink.dim, modifier = Modifier.weight(1f))
-                AddButton(Icons.layers, "Add profile", onLongClick = { addProfile(true) }) { addProfile(false) }
-            } else ProfileStrip(setup, switching, draft, { ui.view(it) }, { addProfile(it) })
-        }
-        // Shown, not in use: nothing reconnects until Use.
-        draft?.let { d ->
-            item(key = "useBar") {
-                UseBar(d, setup.profile, setup.profiles.first { it.name == d }.ready, onBack = { ui.view(null) }) { ui.useProfile(d) }
-            }
-        }
-        if (full && setup.profiles.size >= MAX_PROFILES) item(key = "full") {
-            Notice(Icons.layers, Ink.dim, "$MAX_PROFILES profiles is the most. Delete one to add another.", "Manage", dismiss = { full = false }, live = true) { full = false; managing = true }
-        }
-        item(key = "label") {
-            SectionLabel("Default route", tall = true) {
-                AddButton(Icons.routes, "Add route", Modifier.then(sharedRoute("", RoundedCornerShape(20.dp))).then(tourAnchor(TourStop.AddRoute))) { openPicker("") }
-            }
-        }
-        item(key = "default") {
-            val route = setup.route(shown.defaultRoute)
-            // An empty profile has no default route yet: one to choose, never Direct by accident.
-            if (shown.defaultRoute.isEmpty()) NotSet { openPicker("default") }
-            else Rise("routes", 0, reveal) { DefaultTile(
-                key = shown.defaultRoute,
-                apps = defaultPkgs.size, code = route?.code, chip = if (lit && route != null) Ink.route(route.hue) else Ink.faint, direct = route == null,
-                title = route?.name ?: "Direct", meta = route?.let { place(it, live) } ?: "No VPN for these apps",
-                extra = if (route != null && server != null) serverId(route, server) else null,
-                border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
-                exit = exitOf(shown.defaultRoute)?.let { it to pendingOf(it) },
-            ) { sheet = shown.defaultRoute } }
-        }
-        // Android refused the VPN: most often another VPN app holds Always-on.
-        if (Onboarding.consentFailed && vpn.phase == Phase.Off) item(key = "consent") {
-            Notice(Icons.block, Ink.bad, "Android didn't start $APP's VPN. If another VPN app is set to Always-on, turn that off in Android's VPN settings.", "Open Android VPN settings") {
-                openSettings(Settings.ACTION_VPN_SETTINGS)
-            }
-        }
-        // The leak-proof setup was snoozed: one quiet reminder once the snooze is over; closing it snoozes it again.
-        if (leakDue && on && !(vpn.alwaysOn && vpn.lockdown)) item(key = "leak") {
-            Notice(Icons.shield, Ink.accent, "Apps go online without $APP when it's off", "Set up", dismiss = { Onboarding.snoozeLeak() }, dismissLabel = "Not now", onAction = leakSetup)
-        }
-        if (exceptions.isNotEmpty()) item(key = "exLabel") { SectionLabel("Exceptions", tall = true) }
-        itemsIndexed(exceptions, key = { _, id -> id }) { i, id ->
-            val route = shown.route(id)
-            Rise("routes", i + 1, reveal) { RouteRow(
-                ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size),
-                exit = if (route == null) null else exitOf(id)?.let { it to pendingOf(it) },
-            ) { sheet = id } }
-        }
-        // Nothing set apart yet: say what that means instead of leaving the page empty.
-        if (shown.apps.isEmpty() && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
-            Text("All apps use the default route. Add a route to send some apps through another country.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp))
-        }
-        if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {
-            HomeRow(setup.home, lit = on, loginUrl = vpn.tsLoginUrl.takeIf { setup.home.tailscale }) { tsLogin(it) }
-        }
-        if (setup.activeRoutes.count { !it.imported && it.loc.provider == "nord" } > 6) item(key = "note") {
-            Text(
-                "Nord allows 10 connections per account; each active location uses one.",
-                style = Type.caption, color = Ink.faint, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp),
-            )
-        }
+        if (adding) Box(Modifier.matchParentSize().background(Ink.ground.copy(alpha = 0.72f)).semantics { contentDescription = "Close add menu" }.clickable { adding = false })
+        AddMenu(adding, { adding = it }, { adding = false; openPicker("") }, { adding = false; addProfile(false) }, Modifier.align(Alignment.BottomEnd))
     }
 
     sheet?.let { id ->
@@ -479,6 +493,32 @@ private fun PowerButton(vpn: VpnState, busy: Boolean = false, onClick: () -> Uni
     }
 }
 
+/** The page's add actions, with Route nearest the toggle. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun AddMenu(expanded: Boolean, onExpanded: (Boolean) -> Unit, onRoute: () -> Unit, onProfile: () -> Unit, modifier: Modifier = Modifier) {
+    FloatingActionButtonMenu(
+        expanded = expanded, modifier = modifier,
+        button = {
+            ToggleFloatingActionButton(
+                checked = expanded, onCheckedChange = onExpanded,
+                modifier = Modifier.then(sharedRoute("", RoundedCornerShape(16.dp))).then(tourAnchor(TourStop.AddRoute))
+                    .semantics { contentDescription = "Add route or profile" },
+                containerColor = { Ink.accent }, containerSize = { 56.dp }, containerCornerRadius = { 16.dp },
+            ) { Icon(if (checkedProgress > 0.5f) Icons.close else Icons.add, null, Modifier.size(24.dp), tint = Ink.onAccent) }
+        },
+    ) {
+        FloatingActionButtonMenuItem(
+            onClick = onProfile, text = { Text("Profile", style = Type.title) }, icon = { Icon(Icons.layers, null) },
+            containerColor = Ink.accentContainer, contentColor = Ink.accent,
+        )
+        FloatingActionButtonMenuItem(
+            onClick = onRoute, text = { Text("Route", style = Type.title) }, icon = { Icon(Icons.routes, null) },
+            containerColor = Ink.accentContainer, contentColor = Ink.accent,
+        )
+    }
+}
+
 /** App labels for a small group ("Signal", "Bank A, Bank B"), the app count for a larger one ("7 apps"). */
 private fun appsLabel(pkgs: List<String>, labels: Map<String, String>) = when {
     pkgs.isEmpty() -> "No apps assigned"
@@ -505,9 +545,12 @@ private fun DefaultTile(
             .clickable(source, ripple(), onClick = onClick).padding(horizontal = 20.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("All other apps · $apps".uppercase(), style = Type.overline, color = Ink.dim, maxLines = 1)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("All other apps · $apps".uppercase(), style = Type.overline, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Icon(Icons.chevron, null, Modifier.size(20.dp), tint = Ink.dim)
+        }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            RouteMark(code, chip, direct = direct)
+            RouteMark(code, chip, Modifier.clearAndSetSemantics {}, direct = direct)
             Text(title, style = Type.title.copy(fontSize = 24.sp, lineHeight = 30.sp), color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         // At large text the place and the server each take a line, instead of the place being cut short.
@@ -558,14 +601,14 @@ private fun RouteRow(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { apps() }
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) { where(false) }
-                Slot { RouteMark(route?.code ?: "··", chip, direct = direct) }
+                Slot { RouteMark(route?.code ?: "··", chip, Modifier.clearAndSetSemantics {}, direct = direct) }
             }
         } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             // Fixed width, so the exit column always takes the rest and every row's chip ends on the same edge.
             Column(Modifier.width(AppsColumn), verticalArrangement = Arrangement.spacedBy(8.dp)) { apps() }
             // The exit reads right-aligned beside its chip, which closes the row on the right.
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) { where(true) }
-            Slot { RouteMark(route?.code ?: "··", chip, direct = direct) }
+            Slot { RouteMark(route?.code ?: "··", chip, Modifier.clearAndSetSemantics {}, direct = direct) }
         }
         exit?.takeIf { wide }?.let { (r, pending) -> Box(Modifier.fillMaxWidth().padding(end = 48.dp), contentAlignment = Alignment.CenterEnd) { ExitLine(r, pending) } }
     }
@@ -619,7 +662,7 @@ private fun HomeRow(home: Home, lit: Boolean, loginUrl: String?, signIn: (String
                 Text("Home network", style = Type.title, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(listOfNotNull(via, home.subnets.joinToString(", ").ifBlank { null }).joinToString(" · "), style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Slot { Code("HM", if (lit) Ink.route(3) else Ink.faint) }
+            Slot { RouteMark("HM", if (lit) Ink.route(3) else Ink.faint, Modifier.clearAndSetSemantics {}, hops = 0) }
         }
         loginUrl?.let { Secondary("Sign in to Tailscale", { signIn(it) }, Modifier.offset(x = (-16).dp)) }
     }

@@ -50,6 +50,10 @@ import androidx.compose.material3.ShortNavigationBarItemDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
@@ -185,16 +189,28 @@ fun Code(code: String, color: Color, modifier: Modifier = Modifier, filled: Bool
         .padding(horizontal = 7.dp, vertical = 5.dp),
 )
 
-/** [Code] for VPN routes; for Direct a same-sized chip carrying the bypass glyph. */
+/** A route chip: one slash per VPN hop, then the exit's code ("/NL"), in one size for every place; Direct keeps its small bypass glyph. */
 @Composable
-fun RouteMark(code: String?, color: Color, modifier: Modifier = Modifier, filled: Boolean = true, direct: Boolean = false) {
-    // "··" is a route with no country (fastest anywhere): it shows the bolt instead.
-    if (!direct && code != "··") return Code(code.orEmpty(), color, modifier, filled)
+fun RouteMark(code: String?, color: Color, modifier: Modifier = Modifier, filled: Boolean = true, direct: Boolean = false, hops: Int = 1) {
     val shape = RoundedCornerShape(8.dp)
-    Box(
-        modifier.size(30.dp, 26.dp).clip(shape).then(if (filled) Modifier.background(color) else Modifier.border(1.dp, Ink.line, shape)),
-        contentAlignment = Alignment.Center,
-    ) { Icon(if (direct) Icons.direct else Icons.bolt, null, Modifier.size(if (direct) 14.dp else 16.dp), tint = if (filled) Ink.ground else Ink.faint) }
+    val ink = if (filled) Ink.ground else Ink.faint
+    Row(
+        modifier.size(if (direct) 30.dp else 36.dp, 26.dp).clip(shape)
+            .then(if (filled) Modifier.background(color) else Modifier.border(1.dp, Ink.line, shape)),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
+    ) {
+        // Decorative marks keep their size while the exit's name follows the text scale.
+        CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, 1f)) {
+            if (direct) Icon(Icons.direct, null, Modifier.size(14.dp), tint = ink)
+            else {
+                // Slash in the logo's face at the code's size, as in the wordmark; both faces share their metrics, so baselines meet.
+                if (hops > 0) Text("/".repeat(hops), style = Type.headline.copy(fontSize = Type.code.fontSize, lineHeight = Type.code.lineHeight), color = ink, maxLines = 1,
+                    modifier = Modifier.clearAndSetSemantics {})
+                if (code == "··") Icon(Icons.bolt, null, Modifier.size(16.dp), tint = ink)
+                else Text(code.orEmpty(), style = Type.code, color = ink, maxLines = 1)
+            }
+        }
+    }
 }
 
 /** M3 Expressive segmented list: big outer corners, small inner ones, 2dp gaps. */
@@ -339,7 +355,7 @@ object Icons {
     val chevron = symbol("chevron", "M504-480 348-636q-11-11-11-28t11-28q11-11 28-11t28 11l184 184q6 6 8.5 13t2.5 15q0 8-2.5 15t-8.5 13L404-268q-11 11-28 11t-28-11q-11-11-11-28t11-28l156-156Z")
     val expand = symbol("expand", "M480-362q-8 0-15-2.5t-13-8.5L268-557q-11-11-11-28t11-28q11-11 28-11t28 11l156 156 156-156q11-11 28-11t28 11q11 11 11 28t-11 28L508-373q-6 6-13 8.5t-15 2.5Z")
     val dropDown = symbol("dropDown", "M459-381 314-526q-3-3-4.5-6.5T308-540q0-8 5.5-14t14.5-6h304q9 0 14.5 6t5.5 14q0 2-6 14L501-381q-5 5-10 7t-11 2q-6 0-11-2t-10-7Z")
-    val plus = symbol("plus", "M440-440H240q-17 0-28.5-11.5T200-480q0-17 11.5-28.5T240-520h200v-200q0-17 11.5-28.5T480-760q17 0 28.5 11.5T520-720v200h200q17 0 28.5 11.5T760-480q0 17-11.5 28.5T720-440H520v200q0 17-11.5 28.5T480-200q-17 0-28.5-11.5T440-240v-200Z")
+    val add = symbol("plus", "M440-440H240q-17 0-28.5-11.5T200-480q0-17 11.5-28.5T240-520h200v-200q0-17 11.5-28.5T480-760q17 0 28.5 11.5T520-720v200h200q17 0 28.5 11.5T760-480q0 17-11.5 28.5T720-440H520v200q0 17-11.5 28.5T480-200q-17 0-28.5-11.5T440-240v-200Z")
     val bolt = symbol("bolt", "M360-360H236q-24 0-35.5-21.5T203-423l299-430q10-14 26-19.5t33 .5q17 6 25 21t6 32l-32 259h155q26 0 36.5 23t-6.5 43L416-100q-11 13-27 17t-31-3q-15-7-23.5-21.5T328-139l32-221Z")
     val star = symbol("star", "m354-287 126-76 126 77-33-144 111-96-146-13-58-136-58 135-146 13 111 97-33 143Zm126 18L314-169q-11 7-23 6t-21-8q-9-7-14-17.5t-2-23.5l44-189-147-127q-10-9-12.5-20.5T140-571q4-11 12-18t22-9l194-17 75-178q5-12 15.5-18t21.5-6q11 0 21.5 6t15.5 18l75 178 194 17q14 2 22 9t12 18q4 11 1.5 22.5T809-528L662-401l44 189q3 13-2 23.5T690-171q-9 7-21 8t-23-6L480-269Zm0-201Z")
     val starFilled = symbol("starFilled", "M480-269 314-169q-11 7-23 6t-21-8q-9-7-14-17.5t-2-23.5l44-189-147-127q-10-9-12.5-20.5T140-571q4-11 12-18t22-9l194-17 75-178q5-12 15.5-18t21.5-6q11 0 21.5 6t15.5 18l75 178 194 17q14 2 22 9t12 18q4 11 1.5 22.5T809-528L662-401l44 189q3 13-2 23.5T690-171q-9 7-21 8t-23-6L480-269Z")

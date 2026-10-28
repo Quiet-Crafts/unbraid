@@ -5,8 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.stateDescription
@@ -57,6 +55,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -67,7 +66,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -90,39 +88,12 @@ private fun segmentShape(i: Int, n: Int): RoundedCornerShape {
     return RoundedCornerShape(start, end, end, start)
 }
 
-/** [glyph] with a small + badge: the mark of Add route and Add profile. */
+/** [glyph] with a small + badge for adding a profile. */
 @Composable
 fun AddMark(glyph: ImageVector, ink: Color, badge: Color, plus: Color, ring: Color) = Box(Modifier.size(24.dp)) {
     Icon(glyph, null, Modifier.size(24.dp), tint = ink)
     Box(Modifier.align(Alignment.BottomEnd).offset(5.dp, 4.dp).size(15.dp).clip(CircleShape).background(ring).padding(2.dp).clip(CircleShape).background(badge), contentAlignment = Alignment.Center) {
-        Icon(Icons.plus, null, Modifier.size(10.dp), tint = plus)
-    }
-}
-
-/**
- * Add route and Add profile are the same control: a 52 × 40 dp accent pill in a 48 dp target, its glyph badged with +.
- * Not [lit], it greys but stays tappable, so it can say why nothing more can be added.
- */
-@Composable
-fun AddButton(
-    glyph: ImageVector, label: String, modifier: Modifier = Modifier, lit: Boolean = true,
-    /** A long press, also offered to TalkBack as an action named [longLabel]. */
-    onLongClick: (() -> Unit)? = null, longLabel: String = "New empty profile", onClick: () -> Unit,
-) {
-    val source = remember { MutableInteractionSource() }
-    val press = squish(source)
-    val haptic = LocalHapticFeedback.current
-    val fill = if (lit) Ink.accent else Ink.surfaceHigh
-    Box(
-        modifier.size(56.dp, 48.dp)
-            .combinedClickable(source, null, role = Role.Button, onLongClick = onLongClick?.let { f -> { haptic.performHapticFeedback(HapticFeedbackType.LongPress); f() } }, onClick = onClick)
-            .semantics { contentDescription = label; onLongClick?.let { f -> customActions = listOf(CustomAccessibilityAction(longLabel) { f(); true }) } },
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(
-            Modifier.graphicsLayer { scaleX = press.value; scaleY = press.value }.size(52.dp, 40.dp).clip(RoundedCornerShape(20.dp)).background(fill).indication(source, ripple()),
-            contentAlignment = Alignment.Center,
-        ) { if (lit) AddMark(glyph, Ink.onAccent, Ink.onAccent, Ink.accent, fill) else AddMark(glyph, Ink.faint, fill, Ink.faint, fill) }
+        Icon(Icons.add, null, Modifier.size(10.dp), tint = plus)
     }
 }
 
@@ -136,12 +107,9 @@ fun Manage(onClick: () -> Unit) = Row(
     Icon(Icons.chevron, null, Modifier.size(20.dp), tint = Ink.dim)
 }
 
-/**
- * The profiles as a connected button group that scrolls sideways, Add profile pinned on the right. The one in use (or
- * being switched to, with a small loader in place of its check) is always scrolled fully into view.
- */
+/** Scrolling profile segments, keeping the selected profile in view. */
 @Composable
-fun ProfileStrip(setup: Setup, switching: String?, viewing: String?, onView: (String) -> Unit, onAdd: (empty: Boolean) -> Unit) {
+fun ProfileStrip(setup: Setup, switching: String?, viewing: String?, onView: (String) -> Unit) {
     val names = setup.profiles.map { it.name }
     val inUse = switching ?: setup.profile
     val selected = viewing ?: inUse
@@ -159,17 +127,14 @@ fun ProfileStrip(setup: Setup, switching: String?, viewing: String?, onView: (St
         }
         if (by != 0f) list.animateScrollBy(by)
     }
-    Row(Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter - 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        Box(Modifier.weight(1f).height(48.dp)) {
-            LazyRow(Modifier.fillMaxSize().selectableGroup(), state = list, horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-                itemsIndexed(names, key = { _, n -> n }) { i, n -> Segment(n, i, names.size, shown = n == selected, inUse = n == inUse, busy = n == switching) { onView(n) } }
-            }
-            // A fade where more profiles are hidden.
-            val fade = { start: Boolean -> Brush.horizontalGradient(if (start) listOf(Ink.ground, Color.Transparent) else listOf(Color.Transparent, Ink.ground)) }
-            if (list.canScrollBackward) Box(Modifier.align(Alignment.CenterStart).width(20.dp).fillMaxHeight().background(fade(true)))
-            if (list.canScrollForward) Box(Modifier.align(Alignment.CenterEnd).width(20.dp).fillMaxHeight().background(fade(false)))
+    Box(Modifier.fillMaxWidth().padding(horizontal = Gutter).height(48.dp)) {
+        LazyRow(Modifier.fillMaxSize().selectableGroup(), state = list, horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+            itemsIndexed(names, key = { _, n -> n }) { i, n -> Segment(n, i, names.size, shown = n == selected, inUse = n == inUse, busy = n == switching) { onView(n) } }
         }
-        AddButton(Icons.layers, if (names.size < MAX_PROFILES) "Add profile" else "Profile limit reached", lit = names.size < MAX_PROFILES, onLongClick = { onAdd(true) }) { onAdd(false) }
+        // A fade where more profiles are hidden.
+        val fade = { start: Boolean -> Brush.horizontalGradient(if (start) listOf(Ink.ground, Color.Transparent) else listOf(Color.Transparent, Ink.ground)) }
+        if (list.canScrollBackward) Box(Modifier.align(Alignment.CenterStart).width(20.dp).fillMaxHeight().background(fade(true)))
+        if (list.canScrollForward) Box(Modifier.align(Alignment.CenterEnd).width(20.dp).fillMaxHeight().background(fade(false)))
     }
 }
 
@@ -383,7 +348,7 @@ fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: (empty: Boolea
                     },
                     contentAlignment = Alignment.Center,
                 ) { Icon(Icons.drag, null, Modifier.size(20.dp), tint = Ink.dim) }
-                RouteMark(route?.code, if (route != null) Ink.route(route.hue) else Ink.direct, direct = route == null)
+                RouteMark(route?.code, if (route != null) Ink.route(route.hue) else Ink.direct, Modifier.clearAndSetSemantics {}, direct = route == null)
                 Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(p.name, style = Type.title, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
