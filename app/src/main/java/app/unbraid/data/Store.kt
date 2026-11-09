@@ -46,10 +46,29 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
     /** Applies [f]; false when it couldn't be written (see [unsaved]), so callers keep a pasted secret on the clipboard. */
     @Synchronized
     fun update(f: (Setup) -> Setup): Boolean {
-        // Wherever a route is removed, profiles that used it are mended here.
-        _setup.update { f(it).tidy() }
+        change(f)
         return saveSetup()
     }
+
+    /**
+     * Applies [f] at once and writes it on [writer], so a tap never waits for the Keystore and the disk. Each write
+     * takes the newest setup, so the last one on disk is always the latest; a failed one shows [unsaved], as [update].
+     */
+    fun edit(f: (Setup) -> Setup) {
+        change(f)
+        if (queued.compareAndSet(false, true)) writer.execute { queued.set(false); synchronized(this) { saveSetup() } }
+    }
+
+    /** Waits for the writes [edit] queued so far. */
+    fun flush() = writer.submit {}.get()
+
+    // Its own lock, not the one saves hold: a tap's edit never waits for a write under way. Changes still apply one at a time.
+    private val changing = Any()
+    private val queued = java.util.concurrent.atomic.AtomicBoolean()
+    private val writer = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "store").apply { isDaemon = true } }
+
+    // Wherever a route is removed, profiles that used it are mended here.
+    private fun change(f: (Setup) -> Setup) = synchronized(changing) { _setup.update { f(it).tidy() } }
 
     // A Keystore hiccup must not crash a tap: the change stays in memory, the banner says so, and a retry writes it.
     private fun saveSetup() = safely { seal("setup.bin", json.encodeToString(Setup.serializer(), _setup.value)) }

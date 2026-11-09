@@ -69,9 +69,19 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     // A running VPN keeps its controls, also after its last provider signed out (its routes' apps wait blocked).
     private val _signedIn = MutableStateFlow(store.accounts.value.isNotEmpty() || store.setup.value.routes.any { it.imported } || store.setup.value.servers.isNotEmpty() || store.setup.value.home.tailscale || vpn.value.phase != VpnState.Phase.Off)
     val signedIn = _signedIn.asStateFlow()
-    private val _countries = MutableStateFlow(Providers.all.associate { it.id to store.countries(it.id) })
+    private val _countries = MutableStateFlow<Map<String, List<app.unbraid.data.Country>>>(emptyMap())
     /** Server catalog per provider id. */
     val countries = _countries.asStateFlow()
+    /** True once the saved catalogs are read: until then an empty one means not read yet, not missing. */
+    val catalogsRead = MutableStateFlow(false)
+    // Saved catalogs run to megabytes: read off the main thread. A list fetched meanwhile is newer and stays.
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            val saved = Providers.all.associate { it.id to store.countries(it.id) }
+            _countries.update { saved + it }
+            catalogsRead.value = true
+        }
+    }
     /** Counts catalog refreshes, also ones that brought the same list (its saved copy is fresh again). */
     val refreshed = MutableStateFlow(0)
     private val _apps = MutableStateFlow<List<AppInfo>>(emptyList())
@@ -348,7 +358,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         // An uninstalled app must not keep its route (and a tunnel) alive.
         // Saved profiles too: one used later must not bring an uninstalled app's exception back.
         val gone = { s: Setup -> s.apps.keys.any { it !in installed } || s.profiles.any { p -> p.apps.keys.any { it !in installed } } }
-        if (gone(store.setup.value)) store.update { s ->
+        if (gone(store.setup.value)) store.edit { s ->
             s.copy(apps = s.apps.filterKeys { it in installed }, profiles = s.profiles.map { p -> p.copy(apps = p.apps.filterKeys { it in installed }) })
         }
     } }
@@ -392,12 +402,12 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     private fun routeAt(loc: Location): String {
         setup.value.routes.firstOrNull { !it.imported && it.loc.ident() == loc.ident() }?.let { return it.id }
         val id = newId()
-        store.update { it.copy(routes = it.routes + Route(id, loc, hue = nextHue(it))) }
+        store.edit { it.copy(routes = it.routes + Route(id, loc, hue = nextHue(it))) }
         return id
     }
 
     /** Keeps route [id] on the profile shown, which then lists it even while no app uses it. */
-    private fun keep(id: String) = store.update { it.editing(draft) { p -> if (id in p.added) p else p.copy(added = p.added + id) } }
+    private fun keep(id: String) = store.edit { it.editing(draft) { p -> if (id in p.added) p else p.copy(added = p.added + id) } }
 
     /** Unique even for two routes added in the same millisecond (ids key the route lists). */
     private fun newId() = generateSequence { "r" + java.util.UUID.randomUUID().toString().take(8) }.first { id -> setup.value.routes.none { it.id == id } }
@@ -416,7 +426,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             // As [assign]: an app given the default route follows the default.
             s.copy(routes = if (r in s.routes) s.routes else s.routes + r).editing(draft) { p -> p.copy(apps = if (r.id == p.defaultRoute) p.apps - pkg else p.apps + (pkg to r.id)) }
         }
-        if (draft != null) store.update(f) else guarded(f = f)
+        if (draft != null) store.edit(f) else guarded(f = f)
     }
 
     /** Sets the default route of the profile being viewed to [loc] (a route already exiting there, or a new one). */
@@ -434,15 +444,15 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     private fun guarded(after: () -> Unit = {}, f: (Setup) -> Setup) {
         val old = setup.value
         val acc = accounts.value
-        val o = Limits.over(old, f(old)) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } ?: run { store.update(f); after(); return }
+        val o = Limits.over(old, f(old)) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } ?: run { store.edit(f); after(); return }
         val name = Providers.get(o.provider)?.name ?: o.provider
         // Only a route the engine runs as saved has a server worth sharing; checked again when the user answers.
         val anchor = old.activeRoutes.singleOrNull { !it.imported && it.loc.provider == o.provider }?.takeIf { a -> UnbraidVpn.running?.route(a.id)?.loc == a.loc }
         val server = anchor?.let { vpn.value.servers[it.id] }
-        limitAsk.value = LimitAsk(Limits.warning(name, o.limit, o.unit, o.n), { store.update(f); after() }, server?.let { sv ->
+        limitAsk.value = LimitAsk(Limits.warning(name, o.limit, o.unit, o.n), { store.edit(f); after() }, server?.let { sv ->
             sv.name to {
                 if (setup.value.route(anchor.id)?.loc == anchor.loc && vpn.value.servers[anchor.id] == sv) {
-                    store.update { s ->
+                    store.edit { s ->
                         f(s).let { n -> n.copy(routes = n.routes.map { r -> if (!r.imported && r.loc.provider == o.provider && n.activeRoutes.any { it.id == r.id }) r.copy(loc = anchor.loc.copy(pinned = sv)) else r }) }
                     }
                     after()
@@ -456,7 +466,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** Before saved servers existed, an imported config lived only in its route: save each one once and link it. */
     private fun saveImportedServers() {
         if (setup.value.routes.none { (it.wg != null || it.ovpn != null || it.ss != null) && it.own == null }) return
-        store.update { s ->
+        store.edit { s ->
             var servers = s.servers
             s.copy(routes = s.routes.map { r ->
                 if ((r.wg == null && r.ovpn == null && r.ss == null) || r.own != null) return@map r
@@ -484,7 +494,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** Renames a saved server and every route using it. */
     fun renameServer(id: String, name: String) = name.trim().take(40).takeIf { it.isNotEmpty() }?.let { n ->
         fun OwnServer.named() = copy(wg = wg?.copy(name = n), ovpn = ovpn?.copy(name = n), ss = ss?.copy(name = n))
-        store.update { s ->
+        store.edit { s ->
             s.copy(
                 servers = s.servers.map { if (it.id == id) it.named() else it },
                 routes = s.routes.map { r -> if (r.own != id) r else r.copy(wg = r.wg?.copy(name = n), ovpn = r.ovpn?.copy(name = n), ss = r.ss?.copy(name = n)) },
@@ -498,7 +508,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         resetIfEmpty()
     }
 
-    private fun dropServer(id: String) = store.update { s ->
+    private fun dropServer(id: String) = store.edit { s ->
         val gone = s.routes.filter { it.own == id }.map { it.id }.toSet()
         s.without(gone).copy(servers = s.servers.filter { it.id != id })
     }
@@ -510,7 +520,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun addImported(target: String, source: (Route) -> Route): String {
         val id = target.takeIf { setup.value.route(it) != null } ?: newId()
-        store.update { s ->
+        store.edit { s ->
             val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null) ?: Route(id, hue = nextHue(s))
             val r = source(blank)
             var next = s.copy(routes = if (s.route(id) != null) s.routes.map { if (it.id == id) r else it } else s.routes + r)
@@ -535,7 +545,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         if (tsLock(ip) != null) return false
         draft?.let { d -> draftTsExit(d, target, ip, name); return true }
         val old = setup.value.routes.firstOrNull { it.tsExit != null }
-        store.update { s -> s.copy(routes = s.routes.map { if (it.tsExit != null) it.copy(tsExit = ip, tsName = name) else it }) }
+        store.edit { s -> s.copy(routes = s.routes.map { if (it.tsExit != null) it.copy(tsExit = ip, tsName = name) else it }) }
         val t = setup.value.route(target)
         when {
             t != null && t.tsExit == null -> addImported(target) { it.copy(tsExit = ip, tsName = name) }
@@ -547,7 +557,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     /** Skips providers: Tailscale becomes the only network feature, and the unusable provider route goes. */
     fun useTailscaleOnly() {
-        store.update { s ->
+        store.edit { s ->
             val routes = if (store.accounts.value.isEmpty()) s.routes.filter { it.imported } else s.routes
             s.copy(
                 routes = routes, home = s.home.copy(tailscale = true),
@@ -562,15 +572,15 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun renameRoute(id: String, name: String) {
         setup.value.route(id)?.own?.let { renameServer(it, name); return }
         val n = name.trim().take(40).ifEmpty { return }
-        store.update { s ->
+        store.edit { s ->
             s.copy(routes = s.routes.map { r ->
                 if (r.id != id) r else r.copy(wg = r.wg?.copy(name = n), ovpn = r.ovpn?.copy(name = n), ss = r.ss?.copy(name = n), tsName = r.tsExit?.let { n })
             })
         }
     }
 
-    fun removeRoute(id: String) = store.update { s ->
-        if (s.routes.size <= 1 && s.defaultRoute == id) return@update s
+    fun removeRoute(id: String) = store.edit { s ->
+        if (s.routes.size <= 1 && s.defaultRoute == id) return@edit s
         s.without(setOf(id))
     }
 
@@ -580,7 +590,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** [f] on the profile being viewed when it isn't the one in use (nothing connects, no limit to check), else live and guarded. */
     private fun editRoutes(f: (app.unbraid.data.Profile) -> app.unbraid.data.Profile) {
         val d = draft
-        if (d != null) store.update { it.editing(d, f) } else guarded { it.editing(null, f) }
+        if (d != null) store.edit { it.editing(d, f) } else guarded { it.editing(null, f) }
     }
 
     // ---- viewing a profile ----
@@ -603,7 +613,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         // Shared with the live setup or another profile: those keep theirs.
         val r = s.route(id)?.takeIf { s.activeRoutes.any { it.id == id } || id in s.added || s.saved.any { p -> p.name != d && id in p.own } } ?: return id
         val copy = newId()
-        store.update { c ->
+        store.edit { c ->
             c.copy(routes = c.routes + r.copy(id = copy, hue = nextHue(c))).editing(d) { p ->
                 p.copy(defaultRoute = if (p.defaultRoute == id) copy else p.defaultRoute, apps = p.apps.mapValues { (_, v) -> if (v == id) copy else v }, added = p.added.map { if (it == id) copy else it })
             }
@@ -612,7 +622,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     }
 
     /** Takes route [id] out of the profile being viewed: its apps there follow that profile's default. The route stays for others. */
-    fun dropRoute(id: String) { draft?.let { d -> store.update { it.editing(d) { p -> p.copy(apps = p.apps.filterValues { v -> v != id }, added = p.added - id) } } } }
+    fun dropRoute(id: String) { draft?.let { d -> store.edit { it.editing(d) { p -> p.copy(apps = p.apps.filterValues { v -> v != id }, added = p.added - id) } } } }
 
     /**
      * Exit node [ip] for profile [d], not in use: only its own routes change, never another profile's. It reuses a route
@@ -671,21 +681,21 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun newProfile(raw: String, empty: Boolean) {
         var added: String? = null
-        store.update { s ->
-            val n = s.profileName(raw)?.takeIf { s.profiles.size < MAX_PROFILES } ?: return@update s
+        store.edit { s ->
+            val n = s.profileName(raw)?.takeIf { s.profiles.size < MAX_PROFILES } ?: return@edit s
             if (s.profile == null && !empty) s.saveAs(n) else { added = n; s.add(n, empty) }
         }
         viewing.value = added
     }
 
     fun renameProfile(old: String, name: String) {
-        store.update { s -> s.profileName(name, except = old)?.let { s.rename(old, it) } ?: s }
+        store.edit { s -> s.profileName(name, except = old)?.let { s.rename(old, it) } ?: s }
         // Renamed while shown: keep showing it under its new name.
         if (viewing.value == old && setup.value.profiles.none { it.name == old }) viewing.value = name.trim()
     }
 
-    fun forgetProfile(name: String) { store.update { it.forget(name) }; if (viewing.value == name) viewing.value = null }
-    fun moveProfile(name: String, by: Int) = store.update { it.move(name, by) }
+    fun forgetProfile(name: String) { store.edit { it.forget(name) }; if (viewing.value == name) viewing.value = null }
+    fun moveProfile(name: String, by: Int) = store.edit { it.move(name, by) }
 
     /** [routeId] null or equal to the default → app follows the default. */
     fun assign(pkg: String, routeId: String?) = editRoutes { p ->
@@ -704,7 +714,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         refreshCountries(provider)
     }
 
-    fun toggleFavorite(loc: Location) = store.update { s ->
+    fun toggleFavorite(loc: Location) = store.edit { s ->
         val l = loc.favKey()
         // Matched by identity, so favourites saved with older ids are found (and dropped) too.
         val had = s.favorites.filter { it.favKey() == l }
@@ -712,6 +722,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         s.copy(favorites = if (had.isNotEmpty()) s.favorites - had.toSet() else s.favorites + loc.copy(group = null, protocol = null))
     }
 
+    // Privacy and protection settings wait for the disk, as setHome does: a restart must never bring back an older one.
     fun setPrefs(f: (Prefs) -> Prefs) { store.update { it.copy(prefs = f(it.prefs)) } }
 
     /** Statistics on or off; while off nothing is recorded (the app's observer starts and stops the collector). */

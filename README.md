@@ -53,11 +53,11 @@ only lets one of them run.
 
 ## Build
 
-You need JDK 17 or newer, Android SDK 37, NDK 28 and Go 1.25 (Go fetches the exact toolchain itself through
+You need JDK 17 or newer, Android SDK 37, NDK 28 and Go 1.26 (Go fetches the exact toolchain itself through
 `GOTOOLCHAIN`).
 
 ```bash
-tools/build-libbox.sh                 # builds app/libs/libbox.aar from sing-box v1.14.3 with the patches in tools/
+tools/build-libbox.sh                 # builds app/libs/libbox.aar from sing-box v1.14.4 with the patches in tools/
 ./gradlew :app:assembleFossRelease    # the APK published here and meant for F-Droid, without Google Play Billing
 ./gradlew :app:bundlePlayRelease      # the Google Play bundle, which adds an optional tip jar through Play Billing
 ./gradlew :app:testFossDebugUnitTest

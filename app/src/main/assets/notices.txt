@@ -3196,7 +3196,7 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
-=== github.com/sagernet/gliderssh v0.3.4-0.20260531100337-2194faca5648
+=== github.com/sagernet/gliderssh v0.3.4-0.20261023092853-e0cad6d28647
 Copyright (c) 2016 Glider Labs. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -3486,7 +3486,7 @@ Licensed under the Apache License, Version 2.0 (full text at the end).
 === github.com/sagernet/nftables v0.3.0-mod.4
 Licensed under the Apache License, Version 2.0 (full text at the end).
 
-=== github.com/sagernet/sing v0.9.7-0.20260929150544-0ad23b637bd4
+=== github.com/sagernet/sing v0.9.7-0.20261023115459-5dc452e537bf
 Copyright (C) 2022 by nekohasekai <contact-sagernet@sekai.icu>
 
 This program is free software: you can redistribute it and/or modify
@@ -3573,7 +3573,7 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
-=== github.com/sagernet/sing-openvpn v0.1.1-0.20260929151220-7c3045dbddce
+=== github.com/sagernet/sing-openvpn v0.1.1-0.20261020061838-432d37b47c92
 Copyright (C) 2022 by nekohasekai <contact-sagernet@sekai.icu>
 
 This program is free software: you can redistribute it and/or modify
@@ -3648,7 +3648,7 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
-=== github.com/sagernet/sing-tun v0.9.7-0.20261009020158-bca4bf029237
+=== github.com/sagernet/sing-tun v0.9.7-0.20261023115432-040db71fcd33
 Copyright (C) 2022 by nekohasekai <contact-sagernet@sekai.icu>
 
 This program is free software: you can redistribute it and/or modify
@@ -3663,7 +3663,7 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
-=== github.com/sagernet/sing-vmess v0.2.9-0.20260929152519-9b95ab8c9478
+=== github.com/sagernet/sing-vmess v0.2.9-0.20261019223527-a0c58542bd9d
 Copyright (C) 2022 by nekohasekai <contact-sagernet@sekai.icu>
 
 This program is free software: you can redistribute it and/or modify
@@ -3701,7 +3701,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-=== github.com/sagernet/tailscale v1.102.1-sing-box-1.14-mod.5
+=== github.com/sagernet/tailscale v1.102.1-sing-box-1.14-mod.5.0.20261019070639-79c1732442a9
 BSD 3-Clause License
 
 Copyright (c) 2020 Tailscale Inc & contributors.
@@ -3760,7 +3760,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-=== github.com/sagernet/wireguard-go v0.0.8-0.20260929150556-6731c7387c81
+=== github.com/sagernet/wireguard-go v0.0.8-0.20261022215841-e4d85ef2ed38
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in
 the Software without restriction, including without limitation the rights to

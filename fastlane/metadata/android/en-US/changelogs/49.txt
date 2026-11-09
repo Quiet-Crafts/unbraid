@@ -1,0 +1,5 @@
+• Faster: moving an app to another route, picking a location, starring a favourite or editing a profile responds at once.
+• Connect no longer freezes the power button for a moment.
+• unbraid opens faster when it holds large server lists.
+• A country's server list opens and scrolls more smoothly.
+• Stats charts draw in more smoothly.

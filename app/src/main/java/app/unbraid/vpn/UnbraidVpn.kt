@@ -234,11 +234,13 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     override fun onCreate() {
         super.onCreate()
-        engineSetup(this)
         cm = getSystemService(ConnectivityManager::class.java)
         net = NetMonitor(cm)
         current = this
         scope.launch {
+            // Off the main thread: loading the engine takes long enough to freeze the connect animation. Every command
+            // that needs it runs below, after it.
+            engineSetup(this@UnbraidVpn)
             cleanup?.join()
             for ((intent, locked) in inbox) {
                 lock.withLock { waiting.decrementAndGet(); handle(intent, locked) }
@@ -907,7 +909,6 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     override fun autoDetectInterfaceControl(fd: Int) { protect(fd) }
     override fun usePlatformAutoDetectInterfaceControl() = true
-    override fun useProcFS() = false
 
     override fun findConnectionOwner(proto: Int, src: String, sport: Int, dst: String, dport: Int): ConnectionOwner {
         val uid = cm.getConnectionOwnerUid(proto, InetSocketAddress(src, sport), InetSocketAddress(dst, dport))

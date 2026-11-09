@@ -8,7 +8,7 @@ app in `app/src/main/assets/notices.txt`. `tools/notices.sh` regenerates that fi
 
 | Component | Used for | Licence |
 |---|---|---|
-| [sing-box](https://github.com/SagerNet/sing-box) 1.14.3, with the patches in `tools/` | The VPN engine (libbox) | GPL-3.0-or-later |
+| [sing-box](https://github.com/SagerNet/sing-box) 1.14.4, with the patches in `tools/` | The VPN engine (libbox) | GPL-3.0-or-later |
 | [wireguard-go](https://github.com/sagernet/wireguard-go) (SagerNet fork) | WireGuard inside libbox | MIT, Copyright WireGuard LLC |
 | Go standard library and runtime | Part of libbox | BSD-3-Clause |
 | [sagernet/gomobile](https://github.com/sagernet/gomobile) | Java bindings for libbox | BSD-3-Clause |

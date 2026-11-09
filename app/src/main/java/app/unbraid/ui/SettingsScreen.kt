@@ -75,7 +75,7 @@ private const val SOURCE = "https://github.com/quiet-crafts/unbraid"
 
 /** What the APK re-uses, by name, licence and holder; the full texts are tools/notices.sh's assets/notices.txt. */
 private val credits = listOfNotNull(
-    "sing-box 1.14.3" to "GPL-3.0-or-later · nekohasekai (SagerNet). The VPN engine, with a small patch",
+    "sing-box 1.14.4" to "GPL-3.0-or-later · nekohasekai (SagerNet). The VPN engine, with a small patch",
     "Tailscale" to "BSD-3-Clause · Tailscale Inc. and contributors",
     "wireguard-go" to "MIT · WireGuard LLC",
     "gVisor" to "Apache-2.0 · The gVisor Authors",

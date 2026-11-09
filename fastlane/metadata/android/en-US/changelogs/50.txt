@@ -1,0 +1,6 @@
+• Faster: moving an app to another route, picking a location, starring a favourite or editing a profile responds at once.
+• Connect no longer freezes the power button, and unbraid opens faster with large server lists.
+• Smoother server lists and Stats charts.
+• Updated connection engine with new security fixes.
+• WireGuard renews keys on time after sleep; OpenVPN reports bad keys when you connect.
+• Tailscale name lookups follow the most specific DNS rule.

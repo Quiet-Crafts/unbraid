@@ -17,8 +17,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -46,20 +49,23 @@ import kotlin.math.sin
 // Small Canvas charts for Stats. Route colours encode exits and nothing else;
 // every chart carries a spoken summary, and draws in once with a spatial spring (snapped when animations are off).
 
-/** 0 → 1 once, on first composition: the draw-in for a chart. */
+/**
+ * 0 → 1 once, on first composition: the draw-in for a chart. Taken with `by` and read only while drawing, so each frame
+ * of it redraws the chart without composing it again.
+ */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun drawIn(): Float {
+private fun drawIn(): State<Float> {
     val a = remember { Animatable(0f) }
     val spec = MaterialTheme.motionScheme.defaultSpatialSpec<Float>()
     LaunchedEffect(Unit) { a.animateTo(1f, spec) }
-    return a.value.coerceIn(0f, 1.05f)
+    return remember { derivedStateOf { a.value.coerceIn(0f, 1.05f) } }
 }
 
 /** Share by exit as a segmented ring with round ends and gaps. */
 @Composable
 fun Ring(parts: List<Pair<Float, Color>>, summary: String, size: Dp = 120.dp, stroke: Dp = 14.dp) {
-    val p = drawIn()
+    val p by drawIn()
     Canvas(Modifier.size(size).semantics { contentDescription = summary }) {
         val total = parts.sumOf { it.first.toDouble() }.toFloat().takeIf { it > 0 } ?: return@Canvas
         val w = stroke.toPx()
@@ -76,7 +82,7 @@ fun Ring(parts: List<Pair<Float, Color>>, summary: String, size: Dp = 120.dp, st
 /** A thin horizontal bar: [frac] of the track filled in [color]. */
 @Composable
 fun Meter(frac: Float, color: Color, modifier: Modifier = Modifier, height: Dp = 6.dp) {
-    val p = drawIn()
+    val p by drawIn()
     Canvas(modifier.height(height)) {
         val r = CornerRadius(size.height / 2)
         drawRoundRect(Ink.surfaceTop, cornerRadius = r)
@@ -87,7 +93,7 @@ fun Meter(frac: Float, color: Color, modifier: Modifier = Modifier, height: Dp =
 /** Columns of stacked parts (bottom first) with a 0…[max] scale in a 48 dp gutter; [selected] is drawn at full strength. */
 @Composable
 fun StackedBars(columns: List<List<Pair<Float, Color>>>, labels: List<String>, max: Float, scale: String, summary: String, selected: Int = -1, height: Dp = 120.dp) {
-    val p = drawIn()
+    val p by drawIn()
     val tm = rememberTextMeasurer()
     Column(Modifier.semantics { contentDescription = summary }) {
         Canvas(Modifier.fillMaxWidth().height(height)) {
@@ -133,8 +139,8 @@ private fun DrawScope.label(tm: TextMeasurer, text: String, at: Offset, end: Boo
 @Composable
 fun LiveArea(series: List<Pair<FloatArray, Color>>, cap: Float, unit: String, summary: String, height: Dp = 120.dp) {
     val tm = rememberTextMeasurer()
-    val reveal = drawIn() // sweeps in from the left once, like every chart; new samples then update in place
-    Canvas(Modifier.fillMaxWidth().height(height).semantics { contentDescription = summary }.drawWithContent { if (reveal >= 1f) drawContent() else clipRect(right = size.width * reveal) { this@drawWithContent.drawContent() } }) {
+    val reveal by drawIn() // sweeps in from the left once, like every chart; new samples then update in place
+    Canvas(Modifier.fillMaxWidth().height(height).semantics { contentDescription = summary }.drawWithContent { if (reveal >= 1f) drawContent() else clipRect(right = size.width * reveal) { this@drawWithContent.drawContent() } }.graphicsLayer {}) {
         val gutter = 48.dp.toPx()
         val w = size.width - gutter
         val n = series.firstOrNull()?.first?.size ?: return@Canvas
@@ -167,8 +173,8 @@ fun scaleText(v: Float): String = if (v == v.toInt().toFloat()) v.toInt().toStri
 /** A small line of recent values ending in a dot at "now". */
 @Composable
 fun Spark(values: FloatArray, color: Color, modifier: Modifier = Modifier) {
-    val reveal = drawIn()
-    Canvas(modifier.height(36.dp).drawWithContent { if (reveal >= 1f) drawContent() else clipRect(right = size.width * reveal) { this@drawWithContent.drawContent() } }) {
+    val reveal by drawIn()
+    Canvas(modifier.height(36.dp).drawWithContent { if (reveal >= 1f) drawContent() else clipRect(right = size.width * reveal) { this@drawWithContent.drawContent() } }.graphicsLayer {}) {
         if (values.isEmpty()) return@Canvas
         val max = (values.maxOrNull() ?: 0f).coerceAtLeast(1f) * 1.15f
         val x = { i: Int -> size.width * i / (values.size - 1).coerceAtLeast(1) }
@@ -207,7 +213,7 @@ fun Heatmap(hours: List<Float>, selected: Int, weekdays: List<String>, months: M
 /** A day as a 24 h track: protected in green, paused in the accent; fractions of the day. */
 @Composable
 fun Timeline(spans: List<Triple<Float, Float, Boolean>>, summary: String) {
-    val p = drawIn()
+    val p by drawIn()
     Canvas(Modifier.fillMaxWidth().height(20.dp).semantics { contentDescription = summary }) {
         val r = CornerRadius(6.dp.toPx())
         drawRoundRect(Ink.surfaceTop, cornerRadius = r)
@@ -235,7 +241,7 @@ fun dialFraction(mbps: Float, ticks: FloatArray = TICKS): Float {
 fun Dial(mbps: () -> Float, color: Color, label: String, modifier: Modifier = Modifier, ticks: FloatArray = TICKS) {
     val tm = rememberTextMeasurer()
     val labels = remember(tm, ticks) { ticks.map { tm.measure(if (it >= 1000f) "${(it / 1000).toString().removeSuffix(".0")}k" else it.toInt().toString(), TextStyle(fontFamily = Mono, fontSize = 13.sp)) } }
-    val reveal = drawIn() // the track sweeps in once, like every chart
+    val reveal by drawIn() // the track sweeps in once, like every chart
     Canvas(modifier.size(300.dp).semantics { contentDescription = label }) {
         val m = mbps(); val f = dialFraction(m, ticks) * reveal.coerceAtMost(1f)
         val sw = 22.dp.toPx()
@@ -259,7 +265,7 @@ fun Dial(mbps: () -> Float, color: Color, label: String, modifier: Modifier = Mo
 /** Seven small columns of hours protected (0–12 h), today strongest; for the hub's Journal tile. */
 @Composable
 fun WeekMarks(hours: List<Float>, labels: List<String>, today: Int) {
-    val reveal = drawIn()
+    val reveal by drawIn()
     Row(horizontalArrangement = Arrangement.spacedBy(1.dp)) {
         hours.forEachIndexed { i, h ->
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {

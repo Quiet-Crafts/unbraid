@@ -133,6 +133,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     val context = LocalContext.current
     val setup by ui.setup.collectAsStateWithLifecycle()
     val catalogs by ui.countries.collectAsStateWithLifecycle()
+    val catalogsRead by ui.catalogsRead.collectAsStateWithLifecycle()
     val accounts by ui.accounts.collectAsStateWithLifecycle()
     val vpn by ui.vpn.collectAsStateWithLifecycle()
     val route = setup.route(target)
@@ -158,7 +159,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     }
     val countries = remember(catalog, allowed) { allowed?.let { a -> catalog.filter { it.code in a } } ?: catalog }
     val tint = Ink.route(route?.hue ?: 0)
-    LaunchedEffect(provider, countries.isEmpty()) { if (provider != null && countries.isEmpty()) ui.refreshCountries(provider) }
+    LaunchedEffect(provider, countries.isEmpty(), catalogsRead) { if (catalogsRead && provider != null && countries.isEmpty()) ui.refreshCountries(provider) }
     val hasLoad = Providers.get(provider.orEmpty())?.hasLoad == true
     val pick = Pick(provider.orEmpty(), current, group, protocol, tint, hasLoad) { picked ->
         // A Nord server found over OpenVPN may have no NordLynx key: under NordLynx it is picked again instead.
@@ -239,6 +240,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     fun LazyListScope.locations() {
         if (provider == null) return
         if (countries.isEmpty()) {
+            if (!catalogsRead) return // the saved list is still being read: nothing to say yet
             item(key = "empty") {
                 Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp)) {
                     Text("Server list unavailable. Check the connection.", style = Type.sub, color = Ink.dim)
@@ -413,6 +415,14 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
 
     if (sheet != null) ModalBottomSheet({ sheet = null }, containerColor = Ink.surface, contentColor = Ink.text) {
         val s = sheet.orEmpty()
+        // A country's servers load on request. Held here, so each one is a row of the sheet's lazy list: a long list
+        // composes only the rows on screen.
+        val country = countries.firstOrNull { "c:${it.id}" == s }
+        val all = country?.let { c -> Location(pick.provider, c.id, c.code, c.name, group = group, protocol = protocol) }
+        var serversOpen by rememberSaveable(country?.id) { mutableStateOf(false) }
+        val servers by produceState<List<Server>?>(null, serversOpen, all) {
+            if (serversOpen && all != null) value = serverList(ui, all).sortedBy { if (it.load < 0) Int.MAX_VALUE else it.load }
+        }
         LazyColumn(Modifier.padding(bottom = 16.dp)) {
             when {
                 s == "options" -> {
@@ -442,15 +452,14 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
                     }
                     item { GroupRow(0, 1, "App settings", "DNS, local network, Tailscale, kill switch", onClick = { sheet = null; settings() }, trailing = { Chevron() }) }
                 }
-                s.startsWith("c:") -> countries.firstOrNull { "c:${it.id}" == s }?.let { c -> countrySheet(ui, c, ownFavs, pick, group, protocol) }
+                country != null && all != null -> countrySheet(ui, country, all, ownFavs, pick, serversOpen, { serversOpen = !serversOpen }, servers)
             }
         }
     }
 }
 
 /** A country's cities and, on request, its servers. */
-private fun LazyListScope.countrySheet(ui: Ui, c: Country, favs: List<Location>, p: Pick, group: String?, protocol: String?) {
-    val all = Location(p.provider, c.id, c.code, c.name, group = group, protocol = protocol)
+private fun LazyListScope.countrySheet(ui: Ui, c: Country, all: Location, favs: List<Location>, p: Pick, open: Boolean, toggle: () -> Unit, servers: List<Server>?) {
     item { SheetTitle(c.name) }
     item {
         FavoriteLocationRow(ui, all, p, favs, if (p.hasLoad) "Fastest in ${c.name}" else "Automatic in ${c.name}")
@@ -462,25 +471,14 @@ private fun LazyListScope.countrySheet(ui: Ui, c: Country, favs: List<Location>,
             FavoriteLocationRow(ui, l, p, favs, city.name)
         }
     }
-    item { ServerList(ui, all, p, favs) }
-}
-
-@Composable
-private fun ServerList(ui: Ui, all: Location, p: Pick, favs: List<Location>) {
-    var open by rememberSaveable(all.countryId) { mutableStateOf(false) }
-    val servers by produceState<List<Server>?>(null, open, all) { if (open) value = serverList(ui, all).sortedBy { if (it.load < 0) Int.MAX_VALUE else it.load } }
-    Column {
-        SectionLabel("Servers") {
-            Secondary(if (open) "Hide" else "Show", { open = !open }, color = Ink.accent)
-        }
-        if (!open) return@Column
-        when {
-            servers == null -> Caption("Loading servers")
-            servers.isNullOrEmpty() -> Caption("No servers found")
-            else -> servers.orEmpty().forEach { s ->
-                val l = all.copy(pinned = s)
-                FavoriteLocationRow(ui, l, p, favs, s.name, listOfNotNull(s.city.ifBlank { null }, "${s.load}% load".takeIf { p.hasLoad && s.load >= 0 }).joinToString(" · ").ifEmpty { null }, 16.dp)
-            }
+    item { SectionLabel("Servers") { Secondary(if (open) "Hide" else "Show", toggle, color = Ink.accent) } }
+    if (!open) return
+    when {
+        servers == null -> item { Caption("Loading servers") }
+        servers.isEmpty() -> item { Caption("No servers found") }
+        else -> items(servers) { s ->
+            val l = all.copy(pinned = s)
+            FavoriteLocationRow(ui, l, p, favs, s.name, listOfNotNull(s.city.ifBlank { null }, "${s.load}% load".takeIf { p.hasLoad && s.load >= 0 }).joinToString(" · ").ifEmpty { null }, 16.dp)
         }
     }
 }

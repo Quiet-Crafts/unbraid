@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SB=${WORK:-$HOME/.cache/unbraid-libbox}/sing-box
 TAGS=$(sed -n 's/.*-tags \([^ ]*\).*/\1/p' "$ROOT/tools/build-libbox.sh")
-export GOTOOLCHAIN=go1.25.14 GOFLAGS=-mod=mod
+export GOTOOLCHAIN=go1.26.10 GOFLAGS=-mod=mod
 OUT="$ROOT/app/src/main/assets/notices.txt"
 mkdir -p "$(dirname "$OUT")"
 licence() { ls "$1" | grep -iE '^(LICEN[CS]E|COPYING)' | head -1; }

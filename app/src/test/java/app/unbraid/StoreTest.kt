@@ -44,6 +44,28 @@ class StoreTest {
         assertFalse(File(dir, "accounts.bin").readText(Charsets.ISO_8859_1).contains("blob-1")) // sealed, not plain
     }
 
+    /** A tap's edit applies at once and reaches the disk on the writer thread; the newest setup is the one saved. */
+    @Test fun editsApplyAtOnceAndTheLastOneIsSaved() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        s.edit { it.copy(defaultRoute = "a") }
+        assertEquals("a", s.setup.value.defaultRoute)
+        repeat(50) { i -> s.edit { it.copy(defaultRoute = "r$i") } }
+        s.flush()
+        assertEquals("r49", Store(dir) { key }.setup.value.defaultRoute)
+        assertFalse(s.unsaved.value)
+        // A failed background write says so, as a failed update does, and a later one that works clears it.
+        dir.setWritable(false)
+        s.edit { it.copy(defaultRoute = "b") }
+        s.flush()
+        assertTrue(s.unsaved.value)
+        dir.setWritable(true)
+        s.edit { it.copy(defaultRoute = "c") }
+        s.flush()
+        assertFalse(s.unsaved.value)
+        assertEquals("c", Store(dir) { key }.setup.value.defaultRoute)
+    }
+
     /** A failed write keeps the change in memory (a new sign-in's device slot lives only there), says so, and retries. */
     @Test fun aFailedSaveIsKeptShownAndRetried() {
         val dir = tmp.newFolder()
