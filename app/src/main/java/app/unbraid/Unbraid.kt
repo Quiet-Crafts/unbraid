@@ -42,7 +42,9 @@ class Unbraid : Application() {
         // The home-screen widget mirrors every connection change, and whether running protects anything.
         combine(UnbraidVpn.state.map { it.phase }, store.setup.map { it.directOnly }) { p, d -> p to d }.distinctUntilChanged().onEach { StatusWidget.update(this) }.launchIn(scope)
         // The launcher shortcuts and quick-settings tiles follow the first three profiles and the one in use.
-        store.setup.map { s -> s.profiles.take(Profiles.SLOTS).map { it.name } to s.profile }.distinctUntilChanged().onEach { Profiles.refresh(this) }.launchIn(scope)
+        // Not while the saved settings won't open (defaults would remove the user's shortcuts); again once they do.
+        combine(store.setup.map { s -> s.profiles.take(Profiles.SLOTS).map { it.name } to s.profile }, store.unreadable) { p, u -> p to u }
+            .distinctUntilChanged().onEach { (_, u) -> if (!u) Profiles.refresh(this) }.launchIn(scope)
         Profiles.watch(scope)
         // Statistics follow the connection while they're on: sessions from the phase, traffic from the running engine.
         Stats.init(this)

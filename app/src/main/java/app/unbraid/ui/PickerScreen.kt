@@ -117,10 +117,10 @@ private fun validNode(s: String) = nodeName.matches(s) && (!dotted.matches(s) ||
 /** Most servers a manual list shows; NordVPN's comes from its recommendations, best 20 only. */
 private const val SERVER_LIMIT = 200
 
-private suspend fun serverList(ui: Ui, loc: Location): List<Server> = withContext(Dispatchers.IO) {
+private suspend fun serverList(ui: Ui, loc: Location): Result<List<Server>> = withContext(Dispatchers.IO) {
     val p = Providers.get(loc.provider)
-    val account = p?.let { ui.accounts.value[it.id] } ?: return@withContext emptyList()
-    runCatching { p.servers(loc.copy(pinned = null), account, if (p.id == "nord") 20 else SERVER_LIMIT) }.getOrDefault(emptyList())
+    val account = p?.let { ui.accounts.value[it.id] } ?: return@withContext Result.success(emptyList())
+    runCatching { p.servers(loc.copy(pinned = null), account, if (p.id == "nord") 20 else SERVER_LIMIT) }
 }
 
 /**
@@ -161,7 +161,9 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     val tint = Ink.route(route?.hue ?: 0)
     LaunchedEffect(provider, countries.isEmpty(), catalogsRead) { if (catalogsRead && provider != null && countries.isEmpty()) ui.refreshCountries(provider) }
     val hasLoad = Providers.get(provider.orEmpty())?.hasLoad == true
-    val pick = Pick(provider.orEmpty(), current, group, protocol, tint, hasLoad) { picked ->
+    var closed by remember { mutableStateOf(false) } // a second tap while the picker closes must not run the action again
+    fun once(f: () -> Unit) { if (!closed) { closed = true; f() } }
+    val pick = Pick(provider.orEmpty(), current, group, protocol, tint, hasLoad) { picked -> once {
         // A Nord server found over OpenVPN may have no NordLynx key: under NordLynx it is picked again instead.
         val loc = picked.copy(pinned = picked.pinned?.takeIf { picked.provider != "nord" || picked.protocol != null || it.publicKey.isNotEmpty() })
         when {
@@ -171,7 +173,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             else -> ui.setLocation(target, loc)
         }
         close()
-    }
+    } }
     val query = q.trim()
     fun hit(s: String) = query.isEmpty() || s.contains(query, ignoreCase = true)
     val ownFavs = setup.favorites.filter { it.provider == provider && !stale(it) }.distinctBy { it.favKey() }
@@ -184,8 +186,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             tsNote = "${setup.profile ?: "The setup in use"} uses the Tailscale exit ${r.tsName ?: r.tsExit}. Tailscale uses one exit node at a time: pick that one here, or this one once this profile is in use."
             return
         }
-        ui.addTsExit(target, ip, name)
-        close()
+        once { ui.addTsExit(target, ip, name); close() }
     }
     // Protocol applies to this route at once, keeping its location; a server type narrows the list for the next pick.
     fun setProtocol(p: String?) {
@@ -228,7 +229,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     // with no provider signed in too.
     fun LazyListScope.direct() {
         if (target == "default") item(key = "direct") {
-            PickRow({ ui.setDefault(DIRECT); close() }, false, tint, Modifier.padding(horizontal = 8.dp)) {
+            PickRow({ once { ui.setDefault(DIRECT); close() } }, false, tint, Modifier.padding(horizontal = 8.dp)) {
                 Box(Modifier.size(36.dp).clip(RoundedCornerShape(12.dp)).background(Ink.surfaceTop), Alignment.Center) {
                     Icon(Icons.direct, null, tint = Ink.dim, modifier = Modifier.size(20.dp))
                 }
@@ -295,7 +296,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         item(key = "savedLabel") { SectionLabel("Saved servers") }
         itemsIndexed(list, key = { _, s -> "own:${s.id}" }) { i, s ->
             GroupRow(
-                i, list.size, s.name, s.kind, onClick = { ui.useServer(target, s).let { id -> if (target == "default") ui.setDefault(id) }; close() },
+                i, list.size, s.name, s.kind, onClick = { once { ui.useServer(target, s).let { id -> if (target == "default") ui.setDefault(id) }; close() } },
                 leading = { Code(s.code, Ink.dim, filled = false) },
                 trailing = { if (route?.own == s.id) Icon(Icons.checkCircle, "Selected", tint = tint, modifier = Modifier.size(22.dp)) },
             )
@@ -420,8 +421,8 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         val country = countries.firstOrNull { "c:${it.id}" == s }
         val all = country?.let { c -> Location(pick.provider, c.id, c.code, c.name, group = group, protocol = protocol) }
         var serversOpen by rememberSaveable(country?.id) { mutableStateOf(false) }
-        val servers by produceState<List<Server>?>(null, serversOpen, all) {
-            if (serversOpen && all != null) value = serverList(ui, all).sortedBy { if (it.load < 0) Int.MAX_VALUE else it.load }
+        val servers by produceState<Result<List<Server>>?>(null, serversOpen, all) {
+            if (serversOpen && all != null) value = serverList(ui, all).map { l -> l.sortedBy { if (it.load < 0) Int.MAX_VALUE else it.load } }
         }
         LazyColumn(Modifier.padding(bottom = 16.dp)) {
             when {
@@ -459,7 +460,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
 }
 
 /** A country's cities and, on request, its servers. */
-private fun LazyListScope.countrySheet(ui: Ui, c: Country, all: Location, favs: List<Location>, p: Pick, open: Boolean, toggle: () -> Unit, servers: List<Server>?) {
+private fun LazyListScope.countrySheet(ui: Ui, c: Country, all: Location, favs: List<Location>, p: Pick, open: Boolean, toggle: () -> Unit, servers: Result<List<Server>>?) {
     item { SheetTitle(c.name) }
     item {
         FavoriteLocationRow(ui, all, p, favs, if (p.hasLoad) "Fastest in ${c.name}" else "Automatic in ${c.name}")
@@ -475,8 +476,9 @@ private fun LazyListScope.countrySheet(ui: Ui, c: Country, all: Location, favs: 
     if (!open) return
     when {
         servers == null -> item { Caption("Loading servers") }
-        servers.isEmpty() -> item { Caption("No servers found") }
-        else -> items(servers) { s ->
+        servers.isFailure -> item { Caption("Couldn't load the server list. Check your connection.") }
+        servers.getOrThrow().isEmpty() -> item { Caption("No servers found") }
+        else -> items(servers.getOrThrow()) { s ->
             val l = all.copy(pinned = s)
             FavoriteLocationRow(ui, l, p, favs, s.name, listOfNotNull(s.city.ifBlank { null }, "${s.load}% load".takeIf { p.hasLoad && s.load >= 0 }).joinToString(" · ").ifEmpty { null }, 16.dp)
         }

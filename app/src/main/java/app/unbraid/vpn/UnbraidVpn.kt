@@ -358,7 +358,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         state.value = VpnState(VpnState.Phase.Connecting)
         try {
             net.start()
+            // Saved settings that won't open would start on defaults, another routing policy: the app offers to recover them.
+            if (store.unreadable.value && !store.reopen()) throw Fail("Couldn't open your saved settings. Open $APP.")
             val setup = store.setup.value
+            // A saved Tailscale node that won't open fails here with its own message, not as an engine error.
+            if (setup.tailscale && store.tsStored) store.tsState
             val accounts = store.accounts.value
             // The app's own tests get a fresh way in with each engine start (see apply); none until it runs.
             probe = null

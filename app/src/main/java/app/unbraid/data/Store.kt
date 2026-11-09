@@ -23,12 +23,22 @@ import javax.crypto.spec.GCMParameterSpec
  * Everything Unbraid persists. Plain JSON files in private storage; secrets AES-GCM sealed by the Keystore. [dir] and
  * [keyOf] can be swapped for tests.
  */
-class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keystoreKey) {
+class Store(private val dir: File, private val keyOf: (create: Boolean) -> SecretKey = ::keystoreKey) {
     constructor(ctx: Context) : this(ctx.filesDir)
     private val json = NordApi.json
 
-    // Declared before anything that loads sealed files at construction.
-    private val key: SecretKey by lazy(keyOf)
+    // Declared before anything that loads sealed files at construction. A new key only while no sealed file exists: a
+    // key missing beside them throws, and a failed lazy runs again on the next use, so those files are never orphaned.
+    private val key: SecretKey by lazy { keyOf(listOf(SETUP, ACCOUNTS, TS_STATE).none { File(dir, it).exists() }) }
+
+    /**
+     * True while the saved settings or sign-ins exist but won't open. Nothing changes them then, in memory or on disk,
+     * until [reopen] reads them or the user chooses [startFresh]: running on defaults would be another routing policy.
+     */
+    private val _unreadable = MutableStateFlow(false)
+    val unreadable: StateFlow<Boolean> = _unreadable.asStateFlow()
+    private val bad = mutableSetOf<String>()
+    @Volatile private var tsBad = false
 
     /** Set when a change applied but couldn't be written: it would be gone after a restart, so the UI says so. */
     val unsaved = MutableStateFlow(false)
@@ -40,22 +50,20 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
     }
 
     // Sealed: it can hold imported WireGuard private keys and a Tailscale auth key.
-    private val _setup = MutableStateFlow(load("setup.bin") { json.decodeFromString(Setup.serializer(), it).migrated() } ?: Setup(version = VERSION))
+    private val _setup = MutableStateFlow(readSetup() ?: Setup(version = VERSION))
     val setup: StateFlow<Setup> = _setup.asStateFlow()
+    private fun readSetup() = marked(SETUP) { json.decodeFromString(Setup.serializer(), it).migrated() }
 
     /** Applies [f]; false when it couldn't be written (see [unsaved]), so callers keep a pasted secret on the clipboard. */
     @Synchronized
-    fun update(f: (Setup) -> Setup): Boolean {
-        change(f)
-        return saveSetup()
-    }
+    fun update(f: (Setup) -> Setup): Boolean = change(f) && saveSetup()
 
     /**
      * Applies [f] at once and writes it on [writer], so a tap never waits for the Keystore and the disk. Each write
      * takes the newest setup, so the last one on disk is always the latest; a failed one shows [unsaved], as [update].
      */
     fun edit(f: (Setup) -> Setup) {
-        change(f)
+        if (!change(f)) return
         if (queued.compareAndSet(false, true)) writer.execute { queued.set(false); synchronized(this) { saveSetup() } }
     }
 
@@ -68,7 +76,8 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
     private val writer = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "store").apply { isDaemon = true } }
 
     // Wherever a route is removed, profiles that used it are mended here.
-    private fun change(f: (Setup) -> Setup) = synchronized(changing) { _setup.update { f(it).tidy() } }
+    // False while [unreadable]: nothing changes then.
+    private fun change(f: (Setup) -> Setup) = synchronized(changing) { if (_unreadable.value) false else { _setup.update { f(it).tidy() }; true } }
 
     // A Keystore hiccup must not crash a tap: the change stays in memory, the banner says so, and a retry writes it.
     private fun saveSetup() = safely { seal("setup.bin", json.encodeToString(Setup.serializer(), _setup.value)) }
@@ -80,7 +89,7 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
     /** Writes what is in memory again, after a failed save (the user's retry). True if all of it is on disk now. */
     @Synchronized
     fun saveAgain(): Boolean {
-        if (tsFailed) tsState // reading it seals the old Tailscale state again
+        if (tsFailed) runCatching { tsState } // reading it seals the old Tailscale state again
         return saveSetup() and saveAccounts() and !tsFailed
     }
 
@@ -95,7 +104,7 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
     fun countries(provider: String, v: List<Country>) = write("countries-$provider.json", json.encodeToString(countriesSer, v))
 
     /** When each gluetun catalogue last read was published (epoch seconds, [Catalog.published]); kept across restarts. */
-    val catalogDates = MutableStateFlow(read("catalog-dates.json")?.let { runCatching { json.decodeFromString(datesSer, it) }.getOrNull() }.orEmpty())
+    val catalogDates = MutableStateFlow(runCatching { read("catalog-dates.json")?.let { json.decodeFromString(datesSer, it) } }.getOrNull().orEmpty())
 
     @Synchronized
     fun catalogDate(name: String, epochSeconds: Long) {
@@ -115,10 +124,36 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
     }
 
     /** Signed-in providers: provider id → the sealed account blob its [Provider.signIn] returned. */
-    private val _accounts = MutableStateFlow(
-        load("accounts.bin") { json.decodeFromString(accountsSer, it) } ?: migrateNord(),
-    )
+    private val _accounts = MutableStateFlow(readAccounts() ?: if (ACCOUNTS in bad) emptyMap() else migrateNord())
     val accounts: StateFlow<Map<String, String>> = _accounts.asStateFlow()
+    private fun readAccounts() = marked(ACCOUNTS) { json.decodeFromString(accountsSer, it) }
+    init { _unreadable.value = bad.isNotEmpty() }
+
+    /** Reads the files that wouldn't open again; what opens goes into memory before the mark clears. True when all did. */
+    @Synchronized
+    fun reopen(): Boolean = synchronized(changing) {
+        if (SETUP in bad) _setup.value = readSetup() ?: _setup.value
+        if (ACCOUNTS in bad) _accounts.value = readAccounts() ?: _accounts.value
+        _unreadable.value = bad.isNotEmpty()
+        !_unreadable.value
+    }
+
+    /**
+     * The reset the user confirmed over files that won't open: routes, sign-ins and settings on this phone go, old
+     * versions' copies too. Statistics and the onboarding choices stay. True when every file is gone and saving works again.
+     */
+    @Synchronized
+    fun startFresh(): Boolean = synchronized(changing) {
+        if (!_unreadable.value) return true // they opened meanwhile (a VPN start reopens them): nothing to reset
+        // The old Tailscale sign-in first: if it stays, nothing else goes and the mark stays.
+        if (!File(dir, "tailscale").deleteRecursively()) return false
+        listOf(SETUP, ACCOUNTS, "links.bin", "token.bin", "nlk.bin", "servers.json", "tssuffix", "cache.db", "expiry",
+            "setup.bin.bad", "accounts.bin.bad", "links.bin.bad").forEach { File(dir, it).delete() }
+        _setup.value = Setup(version = VERSION); _accounts.value = emptyMap(); failed(false, false, false)
+        bad.removeAll { !File(dir, it).exists() }
+        _unreadable.value = bad.isNotEmpty()
+        !_unreadable.value
+    }
 
     /**
      * False when the change couldn't be written. It applies in memory anyway: a new sign-in holds a device slot the
@@ -126,16 +161,17 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
      */
     @Synchronized
     fun account(provider: String, blob: String?): Boolean {
+        if (_unreadable.value) return false
         _accounts.update { if (blob == null) it - provider else it + (provider to blob) }
         val ok = saveAccounts()
         if (blob == null) rememberLinks(emptyMap())
         return ok
     }
 
-    /** Preview builds kept the Nord token and key in their own files. */
+    /** Preview builds kept the Nord token and key in their own files. Only while there is no accounts file at all. */
     private fun migrateNord(): Map<String, String> {
-        val t = open("token.bin") ?: return emptyMap()
-        val k = open("nlk.bin") ?: return emptyMap()
+        val t = runCatching { open("token.bin") }.getOrNull() ?: return emptyMap()
+        val k = runCatching { open("nlk.bin") }.getOrNull() ?: return emptyMap()
         val m = mapOf("nord" to json.encodeToString(Nord.Account.serializer(), Nord.Account(t, k)))
         if (safely { seal("accounts.bin", json.encodeToString(accountsSer, m)) }) listOf("token.bin", "nlk.bin", "servers.json").forEach { File(dir, it).delete() }
         return m
@@ -152,9 +188,17 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
      * inside its directory, so every reset that deletes that directory drops it too.
      */
     var tsState: String
-        // What older versions left in plaintext goes once the sealed copy reads back.
-        @Synchronized get() = load(TS_STATE) { it }?.also { dropPlainTs() } ?: migrateTs()
-        @Synchronized set(v) { check(seal(TS_STATE, v)) { "Tailscale state not saved" }; File(dir, TS_PLAIN).delete() }
+        // What older versions left in plaintext goes once the sealed copy reads back. A sealed copy that won't open throws
+        // and isn't written over, so the engine can't replace the node; signing out of Tailscale removes it.
+        @Synchronized get() {
+            val v = runCatching { load(TS_STATE) { it } }.getOrElse { tsBad = true; error(TS_UNREADABLE) }
+            tsBad = false
+            return v?.also { dropPlainTs() } ?: migrateTs()
+        }
+        @Synchronized set(v) {
+            check(!tsBad || !File(dir, TS_STATE).exists()) { TS_UNREADABLE }
+            check(seal(TS_STATE, v)) { "Tailscale state not saved" }; File(dir, TS_PLAIN).delete()
+        }
 
     /** A Tailscale node is kept on this phone (sealed or from an older version), signed in or not. No decryption. */
     val tsStored get() = File(dir, TS_STATE).exists() || File(dir, TS_PLAIN).exists()
@@ -196,13 +240,14 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
         set(v) { if (v != null) write("tstest", v) else File(dir, "tstest").delete() }
 
     fun signOutAll() {
+        if (_unreadable.value) return
         _accounts.value.keys.toList().forEach { account(it, null) }
-        // Also over a file that didn't open (then nothing was in memory to remove): it must not come back later.
+        // Written once more: a removal above whose save failed must not bring that account back after a restart.
         _accounts.value = emptyMap(); saveAccounts()
         update { it.copy(home = it.home.copy(tsAuthKey = null)) }
         File(dir, "expiry").delete() // left by older versions
         tsSuffix = null
-        // Copies of files that once failed to open hold accounts and keys too.
+        // Copies older versions kept of files that failed to open hold accounts and keys too.
         listOf("links.bin", "cache.db", "setup.bin.bad", "accounts.bin.bad", "links.bin.bad").forEach { File(dir, it).delete() }
         File(dir, "tailscale").deleteRecursively()
     }
@@ -221,32 +266,41 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
     }
 
     /**
-     * Reads a sealed file. One that exists but won't open (Keystore reset, corruption) is kept as "<name>.bad" rather
-     * than silently replaced by defaults on the next write.
+     * Reads a sealed file: null when there is none. One that exists but won't open (a Keystore hiccup, corruption) is
+     * tried once more after a short pause, then throws; the file stays as it is.
      */
     private fun <T> load(name: String, decode: (String) -> T): T? {
-        val text = open(name)
-        val v = text?.let { runCatching { decode(it) }.getOrNull() }
-        if (v == null && File(dir, name).exists()) runCatching { File(dir, name).copyTo(File(dir, "$name.bad"), overwrite = true) }
-        return v
+        var last: Throwable? = null
+        repeat(2) { n ->
+            if (n > 0) Thread.sleep(200)
+            runCatching { return open(name)?.let(decode) }.onFailure { last = it }
+        }
+        throw IllegalStateException("$name won't open", last)
     }
 
+    /** [load] for the files [unreadable] guards: one that won't open is noted in [bad], and null is returned. */
+    private fun <T> marked(name: String, decode: (String) -> T): T? =
+        runCatching { load(name, decode) }.onSuccess { bad -= name }.getOrElse { Log.e("Unbraid", "store: $name won't open"); bad += name; null }
+
     private fun seal(name: String, value: String?): Boolean {
+        if (_unreadable.value && (name == SETUP || name == ACCOUNTS)) return false
         if (value == null) return File(dir, name).delete()
         val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key) }
         return durable(name, c.iv + c.doFinal(value.toByteArray()))
     }
 
+    /** Null when [name] doesn't exist; throws when it won't read or open. */
     private fun open(name: String): String? {
         val b = File(dir, name).takeIf { it.exists() }?.readBytes() ?: return null
-        return runCatching {
-            val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, b, 0, 12)) }
-            String(c.doFinal(b, 12, b.size - 12))
-        }.getOrNull()
+        val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, b, 0, 12)) }
+        return String(c.doFinal(b, 12, b.size - 12))
     }
 
     private companion object {
         const val ALIAS = "unbraid"
+        const val SETUP = "setup.bin"
+        const val ACCOUNTS = "accounts.bin"
+        const val TS_UNREADABLE = "Couldn't open the saved Tailscale sign-in. Try again. If it keeps failing, sign out of Tailscale in Settings and sign in again."
         const val TS_STATE = "tailscale/state.bin"
         const val TS_PLAIN = "tailscale/tailscaled.state"
         val countriesSer = ListSerializer(Country.serializer())
@@ -254,9 +308,12 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
         val accountsSer = MapSerializer(String.serializer(), String.serializer())
         val datesSer = MapSerializer(String.serializer(), Long.serializer())
 
-        fun keystoreKey(): SecretKey {
+        /** The app's key; a new one only when [create] (no sealed file it would orphan), else a missing one throws. */
+        fun keystoreKey(create: Boolean): SecretKey {
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-            return (ks.getKey(ALIAS, null) as? SecretKey) ?: KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
+            (ks.getKey(ALIAS, null) as? SecretKey)?.let { return it }
+            check(create) { "Keystore key missing" }
+            return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
                 init(
                     KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                         .setBlockModes(KeyProperties.BLOCK_MODE_GCM)

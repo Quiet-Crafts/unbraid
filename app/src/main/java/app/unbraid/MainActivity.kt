@@ -15,6 +15,20 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.first
+import androidx.lifecycle.lifecycleScope
+import app.unbraid.ui.Primary
+import app.unbraid.ui.Prompt
+import app.unbraid.ui.Secondary
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.activity.compose.PredictiveBackHandler
 import android.Manifest
@@ -80,7 +94,9 @@ class MainActivity : ComponentActivity() {
     private val ui: Ui by viewModels()
 
     private val vpnConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        // Still unprepared: refused, or another VPN app holds Always-on (Routes then says so).
+        // Still unprepared: refused, or another VPN app holds Always-on (Routes then says so). Restarted on settings that
+        // won't open, the connect is dropped: the view model is built only once they open.
+        if (Unbraid.store.unreadable.value) return@registerForActivityResult
         if (VpnService.prepare(this) == null) ui.connect() else Onboarding.consentFailed = true
     }
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
@@ -110,7 +126,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // Android's Always-on and Block connections, and the installed apps, can change while unbraid is in the background.
-    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); ui.refreshApps(); Stats.maintain() }
+    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); if (!Unbraid.store.unreadable.value) ui.refreshApps(); Stats.maintain() }
 
     // The open sheet and a connect waiting on it outlive a rotation (never a secret here); nothing connects by itself.
     override fun onSaveInstanceState(out: Bundle) { super.onSaveInstanceState(out); out.putString("sheet", sheet); out.putBoolean("connectAfter", connectAfter) }
@@ -118,13 +134,33 @@ class MainActivity : ComponentActivity() {
     // A profile shortcut (or a tile that needed the app) opens Routes on that profile: it switches only on Use, so an
     // intent from anywhere (a launcher fires shortcuts by itself) never changes routes on its own.
     private fun showProfile(intent: Intent) {
-        if (intent.action != app.unbraid.vpn.Profiles.ACTION) return
+        if (intent.action != app.unbraid.vpn.Profiles.ACTION || Unbraid.store.unreadable.value) return
         val name = intent.getStringExtra("name")?.takeIf { n -> ui.setup.value.profiles.any { it.name == n } } ?: return
         ui.view(name)
         ui.routesWanted.value = true
     }
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); showProfile(intent) }
+
+    /** The saved settings won't open: try again, or (confirmed) start fresh. */
+    @Composable
+    private fun Unreadable() {
+        var busy by remember { mutableStateOf(false) }
+        var confirm by remember { mutableStateOf(false) }
+        var failed by remember { mutableStateOf(false) }
+        val scope = rememberCoroutineScope()
+        val act = { f: () -> Boolean -> busy = true; failed = false; scope.launch { failed = !withContext(Dispatchers.IO) { f() }; busy = false }; Unit }
+        Column(Modifier.fillMaxSize().background(Ink.ground).windowInsetsPadding(WindowInsets.systemBars).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically)) {
+            Text("$APP couldn't open your saved settings.", style = Type.title, color = Ink.text)
+            Text("The phone's secure storage didn't open them. Trying again often helps. Until then nothing is changed or removed.", style = Type.body, color = Ink.dim)
+            Primary("Try again", { act(Unbraid.store::reopen) }, busy = busy)
+            if (failed) Text("Still couldn't open them. Restarting the phone often helps.", style = Type.caption, color = Ink.bad)
+            Secondary("Start fresh", { confirm = true }, Modifier.align(Alignment.CenterHorizontally), color = Ink.bad, enabled = !busy)
+        }
+        if (confirm) Prompt("Start fresh?", "Start fresh", { confirm = false; act(Unbraid.store::startFresh) }, { confirm = false }, danger = true) {
+            Text("Your routes, sign-ins and settings on this phone are removed. You sign in and set up $APP again.", style = Type.body)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         savedInstanceState?.let { sheet = it.getString("sheet"); connectAfter = it.getBoolean("connectAfter") }
@@ -136,9 +172,18 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Onboarding.init(this)
         if (savedInstanceState == null) showProfile(intent)
+        // Started on unreadable settings: what onResume and the shortcut skipped runs once they open.
+        if (Unbraid.store.unreadable.value) lifecycleScope.launch {
+            Unbraid.store.unreadable.first { !it }
+            ui.refreshApps()
+            if (savedInstanceState == null) showProfile(intent)
+        }
         setContent {
             UnbraidTheme {
-              if (!Onboarding.termsOk) {
+              // Saved settings that won't open come first: the view model is only built from what they hold once they do.
+              val unreadable by Unbraid.store.unreadable.collectAsStateWithLifecycle()
+              if (unreadable) Unreadable()
+              else if (!Onboarding.termsOk) {
                 // A new install gets the whole welcome; someone updating from before the terms only the terms.
                 val fresh = remember { !ui.signedIn.value && !ui.disclosed.value }
                 Welcome(fresh) { Onboarding.acceptTerms(fresh) }

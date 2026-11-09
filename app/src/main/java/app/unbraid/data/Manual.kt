@@ -309,6 +309,7 @@ object Manual {
             c.arg("auth-retry")?.let { r -> put("auth_retry", r.also { require(it in setOf("none", "nointeract", "interact")) { "Invalid auth-retry" } }) }
             putJsonObject("tls") {
                 c.d["verify-x509-name"]?.last()?.let { a ->
+                    require(!a.firstOrNull().isNullOrEmpty()) { "verify-x509-name needs a name" }
                     put("server_name", a[0])
                     val type = (a.getOrNull(1) ?: "subject").also { require(it in setOf("subject", "name", "name-prefix")) { "Invalid verify-x509-name type: $it" } }
                     put("server_name_type", type)

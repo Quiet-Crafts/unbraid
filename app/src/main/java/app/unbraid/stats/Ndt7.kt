@@ -32,17 +32,20 @@ object Ndt7 {
     private const val SECONDS = 10
     private const val LOCATE = "locate.measurementlab.net"
 
+    /** The status code in an "HTTP 500 ..." failure message, or null. */
+    internal fun status(message: String?) = message?.takeIf { it.startsWith("HTTP ") }?.split(' ')?.getOrNull(1)?.toIntOrNull()
+
     /**
-     * The M-Lab server nearest the exit's own address, inside [country] when given; null if M-Lab has none there.
+     * The M-Lab server nearest the exit's own address, inside [country] when given; null if M-Lab has none there
+     * (it answers HTTP 500 for a country without servers).
      * Throws [Limited] when M-Lab is rate-limiting the exit's address.
      */
     fun locate(tag: String, country: String?): Server? {
         val q = CLIENT + (country?.let { "&country=$it&strict=true" } ?: "")
         val body = try { Probe.get(tag, LOCATE, "/v2/nearest/ndt/ndt7?$q") }
         catch (e: IllegalStateException) {
-            val m = e.message.orEmpty()
-            if (m.startsWith("HTTP 204")) throw Limited()
-            if (country != null && m.startsWith("HTTP")) return null else throw e
+            when (status(e.message)) { 204 -> throw Limited(); 500 -> if (country != null) return null }
+            throw e
         }
         val all = NordApi.json.parseToJsonElement(body).jsonObject["results"]?.jsonArray?.map { it.jsonObject }.orEmpty().map { r ->
             val loc = r["location"]?.jsonObject

@@ -266,6 +266,8 @@ class ManualTest {
         assertEquals(listOf("AES-256-GCM", "AES-128-GCM", "CHACHA20-POLY1305", "AES-256-CBC"), c23.strings("data_ciphers"))
         rejects("compat-mode") { Manual.parseOvpn(base + "\ncompat-mode 2.4", "x", "u", "p") }
         rejects("needs a cipher") { Manual.parseOvpn(base.replace("cipher AES-256-CBC\n", "") + "\ncompat-mode 2.3.0", "x", "u", "p") }
+        rejects("verify-x509-name needs a name") { Manual.parseOvpn(base + "\nverify-x509-name", "x", "u", "p") }
+        rejects("verify-x509-name needs a name") { Manual.parseOvpn(base + "\nverify-x509-name \"\"", "x", "u", "p") }
         rejects("Invalid data-ciphers-fallback") { Manual.parseOvpn(base + "\ndata-ciphers-fallback AES-128-CBC:AES-256-CBC", "x", "u", "p") }
     }
 

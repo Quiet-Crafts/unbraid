@@ -330,7 +330,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     sheet?.let { id ->
         val state = rememberModalBottomSheetState()
         val scope = rememberCoroutineScope()
-        fun act(f: () -> Unit = {}) { f(); scope.launch { state.hide() }.invokeOnCompletion { sheet = null } }
+        var closing by remember(id) { mutableStateOf(false) } // taps while the sheet slides away are ignored
+        fun act(f: () -> Unit = {}) { if (closing) return; closing = true; f(); scope.launch { state.hide() }.invokeOnCompletion { sheet = null } }
         ModalBottomSheet({ sheet = null }, sheetState = state, containerColor = Ink.surface, contentColor = Ink.text) {
             Column(Modifier.padding(bottom = 16.dp)) {
                 Text(if (id == "power") "Pause or disconnect" else (if (id == DIRECT) "Direct" else shown.route(id)?.name).orEmpty(), style = Type.title, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))

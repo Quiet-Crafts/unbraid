@@ -275,6 +275,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** A new control server or auth key means a new node: drop the old Tailscale state and reconnect fresh. */
     /** Switches control server: the engine must be fully down before its Tailscale state is deleted. */
     fun setTailscaleServer(url: String?, authKey: String?) = viewModelScope.launch(Dispatchers.IO) {
+        if (authKey == null && url == store.setup.value.home.tsControlUrl) return@launch // nothing changed: keep the sign-in
         stopVpn(false)
         var saved = false
         // The new server is saved before the lock opens: a connect waiting for it starts with the new node, never the old one.
@@ -382,6 +383,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** A QR code read for a sign-in field, here so a rotation during a slow decode doesn't lose it. */
     fun readQr(uri: android.net.Uri?, formKey: String, provider: String) = viewModelScope.launch {
         val mine = reads.merge(provider, 1, Int::plus)!!
+        if (uri == android.net.Uri.EMPTY) { formError[provider] = "No camera app found"; return@launch }
         val text = uri?.let { withContext(Dispatchers.IO) { decodeQr(getApplication(), it) } }
         if (reads[provider] != mine || uri == null) return@launch // closed, cancelled, or another read started meanwhile
         if (text.isNullOrBlank()) formError[provider] = "No QR code found in that picture. Try again closer, or type it in."

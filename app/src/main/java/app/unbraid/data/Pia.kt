@@ -102,7 +102,7 @@ object Pia : Provider {
 
     override fun connect(loc: Location, account: String): Link {
         val a = account(account)
-        val targets = loc.pinned?.let { listOf(Wg(it.ip, it.host) to it) }
+        val targets = loc.pinned?.let { p -> refreshed(p, try { regions() } catch (e: Exception) { null }).let { listOf(Wg(it.ip, it.host) to it) } }
             ?: pick(regions(), loc).let { r -> r.servers.wg.take(TRIES).map { it to Server(r.name, it.cn, it.ip, "", 0, r.city) } }
         var failure: IOException? = null
         for ((sv, base) in targets) {
@@ -117,6 +117,12 @@ object Pia : Provider {
             }
         }
         throw failure ?: IOException("PIA has no WireGuard server for this location")
+    }
+
+    /** A pinned server under the address PIA's list gives its name now; the saved one when the list is unread or lacks the name (it shows only some servers). */
+    internal fun refreshed(pinned: Server, listed: List<Region>?): Server {
+        val ip = listed?.firstNotNullOfOrNull { r -> r.servers.wg.firstOrNull { it.cn == pinned.host } }?.ip ?: return pinned
+        return pinned.copy(ip = ip)
     }
 
     override fun servers(loc: Location, account: String, limit: Int): List<Server> {

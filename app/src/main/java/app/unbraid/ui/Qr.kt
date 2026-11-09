@@ -35,7 +35,7 @@ fun rememberQrScan(onPicked: (Uri?) -> Unit): QrScan {
             runCatching {
                 file.parentFile?.mkdirs()
                 camera.launch(FileProvider.getUriForFile(context, "${context.packageName}.scan", file))
-            }.onFailure { onPicked(null) }
+            }.onFailure { onPicked(Uri.EMPTY) } // no camera app: EMPTY tells the caller, null means cancelled
         },
         picture = { runCatching { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }.onFailure { onPicked(null) } },
     )

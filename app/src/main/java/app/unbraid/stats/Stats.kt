@@ -245,7 +245,7 @@ object Stats {
      * Runs a read on the worker after writing pending sums, so it sees the latest and never races a delete. Call off
      * the main thread (never from the worker itself).
      */
-    fun <T> read(f: () -> T): T? { val t = FutureTask { runCatching { flushNow(); maybePrune(); f() }.getOrNull() }; worker.execute(t); return runCatching { t.get() }.getOrNull() }
+    fun <T> read(f: () -> T): T? { val t = FutureTask { runCatching { runCatching { flushNow() }; runCatching { maybePrune() }; f() }.getOrNull() }; worker.execute(t); return runCatching { t.get() }.getOrNull() }
 
     // ---- reading (worker: call through read) ---------------------------------------------------------------------------------------
 
@@ -397,7 +397,9 @@ internal object Collector {
             if (lastTick == 0L) lastTick = android.os.SystemClock.elapsedRealtime()
             val quiet = android.os.SystemClock.elapsedRealtime() - lastTick
             if (fast && quiet > 1_600) sample(now, ((quiet + 500) / 1000).toInt())
-            if (now - lastFlush > 25_000) { lastFlush = now; Stats.flushNow(); Stats.checkpointNow() }
+            // Monotonic, so setting the phone's clock back can't stall saving.
+            val up = android.os.SystemClock.elapsedRealtime()
+            if (up - lastFlush > 25_000) { lastFlush = up; Stats.flushNow(); Stats.checkpointNow() }
         }
 
         override fun connected() = Unit

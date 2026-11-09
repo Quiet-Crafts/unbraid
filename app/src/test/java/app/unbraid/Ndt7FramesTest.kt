@@ -11,6 +11,16 @@ import java.io.DataInputStream
 import java.io.IOException
 
 class Ndt7FramesTest {
+    @Test fun onlyTheStatusCodeDecidesWhatAnHttpFailureMeans() {
+        assertEquals(500, Ndt7.status("HTTP 500 Internal Server Error"))
+        assertEquals(204, Ndt7.status("HTTP 204 No Content"))
+        assertEquals(429, Ndt7.status("HTTP 429 Too Many Requests"))
+        assertEquals(502, Ndt7.status("HTTP 502"))
+        assertNull(Ndt7.status("HTTP"))
+        assertNull(Ndt7.status("connect failed"))
+        assertNull(Ndt7.status(null))
+    }
+
     private fun header(vararg b: Int) = Ndt7.header(DataInputStream(b.map { it.toByte() }.toByteArray().inputStream()))
 
     /** The opcode and the 7, 16 or 64-bit length of a server frame; a masked frame's key is skipped; the end of the stream is null. */

@@ -595,7 +595,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     when (dialog) {
         "filter:nextdns", "filter:own" -> {
             val own = dialog == "filter:own"
-            var text by remember { mutableStateOf(filter.value.takeIf { filter.id == if (own) app.unbraid.data.Filters.OWN else "nextdns" }.orEmpty()) }
+            var text by rememberSaveable { mutableStateOf(filter.value.takeIf { filter.id == if (own) app.unbraid.data.Filters.OWN else "nextdns" }.orEmpty()) }
             val ok = if (own) app.unbraid.data.Filters.own(text) != null else app.unbraid.data.Filter("nextdns", text).server() != null
             Prompt(if (own) "Your own server" else "NextDNS profile", "Save", { dialog = null; setFilter { it.copy(id = if (own) app.unbraid.data.Filters.OWN else "nextdns", value = text.trim()) } }, { dialog = null }, enabled = ok) {
                 Text(if (own) "A DNS over HTTPS address (https://dns.example.com/dns-query), DNS over TLS (tls://dns.example.com), or a plain IPv4 address, which isn't encrypted." else "The ID of your profile, as on my.nextdns.io (6 characters).", style = Type.sub)
@@ -606,7 +606,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             Text("Tailscale exit routes are removed. Their apps follow the default route.", style = Type.sub)
         }
         "tsserver" -> {
-            var url by remember { mutableStateOf(home.tsControlUrl.orEmpty()) }
+            var url by rememberSaveable { mutableStateOf(home.tsControlUrl.orEmpty()) }
             var key by remember { mutableStateOf("") }
             val ok = url.isBlank() || httpsUrl.matches(url.trim())
             Prompt("Control server", "Save", { dialog = null; ui.setTailscaleServer(url.trim().ifEmpty { null }, key.trim().ifEmpty { null }) }, { dialog = null }, enabled = ok, secure = true) {
@@ -717,7 +717,7 @@ private fun Radio(on: Boolean) = Box(Modifier.size(24.dp).clip(RoundedCornerShap
 
 @Composable
 private fun HomeSubnetsDialog(current: List<String>, ui: Ui, onDismiss: () -> Unit) {
-    var text by remember { mutableStateOf(current.joinToString(", ")) }
+    var text by rememberSaveable { mutableStateOf(current.joinToString(", ")) }
     val bad = split(text).any { !cidr.matches(it) || !app.unbraid.vpn.Compiler.isPrivate(it) }
     AlertDialog(
         onDismissRequest = onDismiss, containerColor = Ink.surface, titleContentColor = Ink.text, textContentColor = Ink.dim,

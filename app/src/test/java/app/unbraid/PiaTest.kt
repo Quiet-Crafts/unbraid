@@ -27,6 +27,17 @@ class PiaTest {
     }
 
     @Test
+    fun pinnedServerTakesTheListedAddress() {
+        val rs = Pia.parseRegions(list)
+        val pin = { ip: String, host: String -> app.unbraid.data.Server("d", host, ip, "k", 0, "Denver") }
+        assertEquals("181.41.206.151", Pia.refreshed(pin("10.9.9.9", "denver425"), rs).ip)
+        assertEquals("k", Pia.refreshed(pin("10.9.9.9", "denver425"), rs).publicKey)
+        assertEquals(pin("181.41.206.151", "denver425"), Pia.refreshed(pin("181.41.206.151", "denver425"), rs))
+        assertEquals(pin("10.9.9.9", "gone1"), Pia.refreshed(pin("10.9.9.9", "gone1"), rs))
+        assertEquals(pin("10.9.9.9", "denver425"), Pia.refreshed(pin("10.9.9.9", "denver425"), null))
+    }
+
+    @Test
     fun regionsWithoutWireguardOrOfflineAreSkipped() {
         val body = """{"regions":[{"id":"a","name":"A","country":"NL","servers":{"meta":[{"ip":"1.1.1.1","cn":"x"}]}},""" +
             """{"id":"b","name":"B","country":"NL","offline":true,"servers":{"wg":[{"ip":"1.1.1.2","cn":"y"}]}},""" +
