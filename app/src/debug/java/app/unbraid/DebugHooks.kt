@@ -50,7 +50,7 @@ class DebugHooks : BroadcastReceiver() {
                     "go" -> { app.unbraid.stats.SpeedTest.go(i.getStringExtra("arg").orEmpty().split(',').filter(String::isNotEmpty).toSet()); "go" }
                     "live" -> app.unbraid.stats.Stats.live.value.down.entries.joinToString(" | ") { (k, v) -> "$k " + v.joinToString(",") { (it / 1e6).toInt().toString() } }
                     "keys" -> app.unbraid.data.WgKeys.generate().let { "keys ok sdk=${android.os.Build.VERSION.SDK_INT} priv=${it.private.length} pub=${it.public.length}" }
-                    else -> UnbraidVpn.state.value.toString()
+                    else -> UnbraidVpn.state.value.toString() + UnbraidVpn.asked.value.let { a -> if (a == null) " asked=none" else " asked=${a.n}:${a.on}" }
                 }
             }.getOrElse { "error ${it.message}" }
             Log.i("UNBRAID_DEBUG", out)

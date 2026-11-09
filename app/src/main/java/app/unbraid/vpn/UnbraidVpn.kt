@@ -150,14 +150,26 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 state.value = VpnState(error = "Open $APP to allow it as your VPN")
                 return
             }
-            ctx.startForegroundService(Intent(ctx, UnbraidVpn::class.java))
+            ask(true) { ctx.startForegroundService(Intent(ctx, UnbraidVpn::class.java).putExtra(EXTRA_ASK, it)) }
         }
-        fun stop(ctx: Context) = ctx.startService(Intent(ctx, UnbraidVpn::class.java).setAction(ACTION_STOP))
+        fun stop(ctx: Context) = ask(false) { ctx.startService(Intent(ctx, UnbraidVpn::class.java).setAction(ACTION_STOP).putExtra(EXTRA_ASK, it)) }
         /** Drops the tunnel for [minutes] (0 = until resumed); a start while paused resumes. */
         /** Reads Android's Always-on and Block-connections settings again (they can change while connected). Only while running. */
         fun refreshFlags(ctx: Context) { if (state.value.phase == VpnState.Phase.On || state.value.phase == VpnState.Phase.Paused) runCatching { ctx.startService(Intent(ctx, UnbraidVpn::class.java).setAction(ACTION_FLAGS)) } }
 
-        fun pause(ctx: Context, minutes: Int) = ctx.startService(Intent(ctx, UnbraidVpn::class.java).setAction(ACTION_PAUSE).putExtra(EXTRA_MINUTES, minutes))
+        fun pause(ctx: Context, minutes: Int) = ask(false) { ctx.startService(Intent(ctx, UnbraidVpn::class.java).setAction(ACTION_PAUSE).putExtra(EXTRA_MINUTES, minutes).putExtra(EXTRA_ASK, it)) }
+
+        /** The newest start, stop or pause the service hasn't handled yet; see [vpnOn]. */
+        val asked = MutableStateFlow<Ask?>(null)
+        private val asks = java.util.concurrent.atomic.AtomicInteger()
+        private const val EXTRA_ASK = "ask"
+        private fun ask(on: Boolean, send: (Int) -> Unit) {
+            val a = Ask(asks.incrementAndGet(), on)
+            asked.value = a
+            try { send(a.n) } catch (e: RuntimeException) { asked.compareAndSet(a, null); throw e }
+        }
+        /** The service handled request [n] (or turned it away), and with it every earlier one. */
+        private fun handled(intent: Intent?) = intent?.getIntExtra(EXTRA_ASK, 0)?.takeIf { it != 0 }?.let { n -> asked.update { a -> a?.takeIf { it.n > n } } }
 
         private val bg = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -244,6 +256,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             cleanup?.join()
             for ((intent, locked) in inbox) {
                 lock.withLock { waiting.decrementAndGet(); handle(intent, locked) }
+                handled(intent)
                 kotlinx.coroutines.withContext(Dispatchers.Main) { pending--; stopIfIdle() }
             }
         }
@@ -254,14 +267,19 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (stopSelfResult(lastStartId)) { stopWanted = false; stopForeground(STOP_FOREGROUND_REMOVE) }
     }
 
+    /** The newest request ([Ask.n]) Android handed this instance. */
+    private var delivered = 0
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        delivered = maxOf(delivered, intent?.getIntExtra(EXTRA_ASK, 0) ?: 0)
         // Disconnecting and pausing drop protection: never from a locked phone, whoever holds the PendingIntent
         // (a notification listener, the widget host). The in-app controls are only reachable unlocked anyway.
         lastStartId = startId
         val locked = getSystemService(KeyguardManager::class.java).isDeviceLocked
         // A timed resume reaching a paused service keeps the paused notice: the pause may be a newer one it doesn't end.
         val timedWhilePaused = (intent?.getIntExtra(EXTRA_PAUSE, 0) ?: 0) != 0 && state.value.phase == VpnState.Phase.Paused
-        if (intent?.action == null && !timedWhilePaused) {
+        // Android's own start (Always-on) names the VPN interface; it must go foreground like the app's.
+        if ((intent?.action == null || intent.action == VpnService.SERVICE_INTERFACE) && !timedWhilePaused) {
             // Another VPN app may have taken the slot since: Android then refuses this service type. Never crash on it.
             val allowed = prepare(this) == null && runCatching {
                 // The systemExempted type exists from Android 14; on 13 a foreground service needs no type.
@@ -272,6 +290,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (!allowed && (state.value.phase == VpnState.Phase.Off || state.value.phase == VpnState.Phase.Paused)) {
                 cancelResume()
                 state.value = VpnState(error = "Open $APP to allow it as your VPN")
+                handled(intent)
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -422,6 +441,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     private var retry: Job? = null
     private var retries = 0
+    /** The running setup's blocked routes, which [retry] tries again. */
+    private var retrying: Map<String, Exception> = emptyMap()
 
     /**
      * Routes blocked for a passing reason (no network, provider unreachable) try again after 5 s, 15 s, 30 s, 1 min,
@@ -429,6 +450,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      */
     private fun retryBlocked(blocked: Map<String, Exception>) {
         retry?.cancel(); retry = null
+        retrying = blocked
         if (blocked.values.all { it is AuthException }) { retries = 0; net.onChange = null; return }
         val wait = listOf(5, 15, 30, 60, 300)[minOf(retries++, 4)] * 1000L
         retry = scope.launch {
@@ -526,8 +548,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         rejected = setup to accounts // don't retry the same broken pair in a loop; [applied] stays what runs
         // libbox stops the old engine before starting the new one: only then bring the last good config back. It comes
         // back with a new probe pair too: the old password may have been seen while the old engine's port was free.
-        val restored = !restarting || restoreLastGood(srv)
+        val restarted = restarting
+        val restored = !restarted || restoreLastGood(srv)
         restarting = false
+        // A retry of the running setup that failed before any engine restart is tried again later; one that restarted
+        // every tunnel isn't, so a failing server never takes all apps offline every few minutes (a network change
+        // still tries again). A refused edit is never retried this way: it waits for the next edit.
+        if (restored && restarted) { retry?.cancel(); retry = null }
+        else if (restored && setup == applied && accounts == appliedAccounts) retryBlocked(retrying)
         if (restored) app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() } // a new engine, numbered afresh
         if (restored) state.update { it.copy(error = Redact.message(e, "Change not applied"), refused = setup.hashCode()) } else teardown(Redact.message(e, "Connection lost"))
         false
@@ -747,15 +775,23 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         }.onFailure { Log.w(TAG, "tailscale status: ${Redact.log(it)}") }.getOrNull()
     }
 
-    private suspend fun shutdown(error: String?) = lock.withLock { teardown(error) }
+    /** Counts connections ended ([stopEngine]): a stop from outside applies only to the one it was sent for. */
+    @Volatile private var session = 0
+    /** Android or the engine ended the connection: said, like a failed connect, unless that one had already ended. */
+    private fun stoppedOutside(why: String) {
+        val mine = session // taken now: a stop and a new connect may be handled before this gets the lock
+        scope.launch { lock.withLock { if (session == mine && state.value.phase != VpnState.Phase.Off) teardown(why) } }
+    }
 
     /** Stops the engine and the tunnel; the service itself stays. Caller holds [lock]. */
     private fun stopEngine() {
         watch?.cancel(); watch = null
         health?.cancel(); health = null
         generation++
-        retry?.cancel(); retry = null; retries = 0; net.onChange = null; refusals = emptyMap(); gone = emptyMap(); failing = emptySet()
+        session++
+        retry?.cancel(); retry = null; retries = 0; retrying = emptyMap(); net.onChange = null; refusals = emptyMap(); gone = emptyMap(); failing = emptySet()
         runCatching { ts?.close() }; ts = null
+        tsLoginPending = false
         runCatching { server?.closeService() }
         runCatching { tun?.close() }; tun = null
         openTable(false)
@@ -815,13 +851,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         state.value = VpnState(VpnState.Phase.Paused, pausedUntil = until, pausedAt = System.currentTimeMillis(), pausedAbout = !exact, lockdown = lockdown, alwaysOn = alwaysOn)
     }
 
-    override fun onRevoke() { scope.launch { shutdown(null) } }
+    override fun onRevoke() = stoppedOutside("Android turned off $APP's VPN: another VPN app took over, or it was disconnected in Android's settings.")
 
     override fun onDestroy() {
         // Killed without teardown: never leave a tunnel or an "On" state behind. Cleanup waits for whatever holds the
         // lifecycle lock (a connect finishing its provider calls), so nothing it starts afterwards survives.
         destroyed = true
         if (current === this) current = null
+        asked.update { a -> a?.takeIf { it.n > delivered } } // what it was handed it never will; newer ones go to the next
         cancelResume()
         scope.cancel()
         val before = cleanup
@@ -977,7 +1014,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     // ---- CommandServerHandler -------------------------------------------------------------------
 
-    override fun serviceStop() { scope.launch { shutdown(null) } }
+    override fun serviceStop() = stoppedOutside("$APP's VPN was stopped from outside the app.")
     override fun serviceReload() { scope.launch { reload() } }
     override fun getSystemProxyStatus() = null
     override fun setSystemProxyEnabled(enabled: Boolean) {}
@@ -998,3 +1035,12 @@ private inline fun io.nekohasekai.libbox.RoutePrefixIterator.forEach(f: (RoutePr
 private fun io.nekohasekai.libbox.RoutePrefixIterator.toList(): List<RoutePrefix> = buildList { this@toList.forEach { add(it) } }
 private inline fun StringIterator.forEachString(f: (String) -> Unit) { while (hasNext()) f(next()) }
 private fun RoutePrefix.ipPrefix() = IpPrefix(InetAddress.getByName(address()), prefix())
+
+/** A start ([on]) or a stop or pause, numbered [n] in the order asked. */
+class Ask(val n: Int, val on: Boolean)
+
+/**
+ * Whether the VPN is on or about to be, for toggles: the newest request the service hasn't handled yet wins over the
+ * phase, so a second quick tap undoes the first instead of repeating it, however long the first one takes.
+ */
+fun vpnOn(phase: VpnState.Phase, ask: Ask?): Boolean = ask?.on ?: (phase == VpnState.Phase.On || phase == VpnState.Phase.Connecting)

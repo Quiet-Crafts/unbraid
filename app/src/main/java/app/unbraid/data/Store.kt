@@ -156,6 +156,9 @@ class Store(private val dir: File, private val keyOf: () -> SecretKey = ::keysto
         @Synchronized get() = load(TS_STATE) { it }?.also { dropPlainTs() } ?: migrateTs()
         @Synchronized set(v) { check(seal(TS_STATE, v)) { "Tailscale state not saved" }; File(dir, TS_PLAIN).delete() }
 
+    /** A Tailscale node is kept on this phone (sealed or from an older version), signed in or not. No decryption. */
+    val tsStored get() = File(dir, TS_STATE).exists() || File(dir, TS_PLAIN).exists()
+
     /** Older versions left the state, and a cache of the tailnet map, in plaintext: sealed, and deleted only once sealed. */
     private fun migrateTs(): String {
         val plain = File(dir, TS_PLAIN).takeIf { it.exists() }?.readText() ?: return ""

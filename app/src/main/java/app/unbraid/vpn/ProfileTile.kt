@@ -88,7 +88,8 @@ abstract class LiveTile<T>(private val changes: () -> Flow<T>) : TileService() {
 
     protected abstract fun render(value: T)
     protected fun updateTile(render: QsTile.() -> Unit) { qsTile?.apply { render(); updateTile() } }
-    protected fun running(phase: Phase = UnbraidVpn.state.value.phase) = phase == Phase.On || phase == Phase.Connecting
+    /** On or about to be, counting a tap the service hasn't handled yet ([vpnOn]). */
+    protected fun running(phase: Phase = UnbraidVpn.state.value.phase) = vpnOn(phase, UnbraidVpn.asked.value)
 
     override fun onStartListening() {
         job = changes().onEach(::render).launchIn(CoroutineScope(Dispatchers.Main))
@@ -105,7 +106,7 @@ abstract class LiveTile<T>(private val changes: () -> Flow<T>) : TileService() {
 }
 
 /** A tile for the profile in [slot]: shows whether it is in use, switches to it (connecting if needed), or pauses when it is. */
-abstract class ProfileTile(private val slot: Int) : LiveTile<Setup>({ combine(UnbraidVpn.state, Unbraid.store.setup) { _, s -> s } }) {
+abstract class ProfileTile(private val slot: Int) : LiveTile<Setup>({ combine(UnbraidVpn.state, Unbraid.store.setup, UnbraidVpn.asked) { _, s, _ -> s } }) {
     override fun render(value: Setup) {
         val p = value.profiles.getOrNull(slot)
         val lit = p != null && value.profile == p.name && running()

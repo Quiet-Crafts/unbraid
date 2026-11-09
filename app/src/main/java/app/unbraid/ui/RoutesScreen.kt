@@ -99,8 +99,10 @@ import app.unbraid.data.Providers
 import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.vpn.ExitReport
+import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
 import app.unbraid.vpn.VpnState.Phase
+import app.unbraid.vpn.vpnOn
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -202,7 +204,9 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     LaunchedEffect(Onboarding.leakUntil) { (Onboarding.leakUntil - System.currentTimeMillis()).takeIf { it > 0 }?.let { delay(it); tick++ } }
     val leakDue = remember(resumed, tick, Onboarding.leak, Onboarding.leakUntil) { Onboarding.leakDue }
 
-    val power = { if (vpn.phase == Phase.On || vpn.phase == Phase.Connecting) sheet = "power" else connect() }
+    // A connect the service hasn't taken up yet counts as on, so a second tap offers to stop instead of connecting again.
+    val asked by UnbraidVpn.asked.collectAsStateWithLifecycle()
+    val power = { if (vpnOn(vpn.phase, asked)) sheet = "power" else connect() }
     val scroll = rememberLazyListState()
     OnReselect(Tab.Routes) { if (managing) managing = false else scroll.animateScrollToItem(0) }
     BackHandler(managing) { managing = false }

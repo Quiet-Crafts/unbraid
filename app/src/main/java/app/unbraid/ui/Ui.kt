@@ -64,6 +64,10 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     val setup = store.setup
     val vpn = UnbraidVpn.state
+    /** A Tailscale node is kept on this phone ([app.unbraid.data.Store.tsStored]); refreshed by [checkTailscale]. */
+    private val _tsStored = MutableStateFlow(false)
+    val tsStored = _tsStored.asStateFlow()
+    fun checkTailscale() = viewModelScope.launch(Dispatchers.IO) { _tsStored.value = store.tsStored }
     /** Signed in to at least one provider, or holding an imported config. */
     val accounts = store.accounts
     // A running VPN keeps its controls, also after its last provider signed out (its routes' apps wait blocked).
@@ -280,6 +284,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             saved = store.update { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl }, tsSuffixAllowed = null)) }
         }) return@launch
         if (saved) authKey?.let(::clearClipboardIf)
+        checkTailscale()
     }
 
     /** Turns Tailscale off, drops its exit routes (their apps follow the default) and logs this device out of its tailnet. */
@@ -295,7 +300,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                 File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
                 store.tsSuffix = null
             }) return@launch
-            tailscaleLeft(loggedOut)
+            // Off already (only a node left behind): the engine isn't running, so the tailnet still lists this phone.
+            tailscaleLeft(if (had) loggedOut else false)
+            checkTailscale()
             resetIfEmpty()
         }
     }

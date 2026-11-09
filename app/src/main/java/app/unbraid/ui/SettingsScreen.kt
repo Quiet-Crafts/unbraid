@@ -113,11 +113,13 @@ private class Item(
 
 private const val IDLE = "Reach your tailnet from every app"
 
-private fun tailscaleSub(enabled: Boolean, connected: Boolean, state: String?) = when {
+internal fun tailscaleSub(enabled: Boolean, connected: Boolean, state: String?) = when {
     !enabled -> IDLE
     !connected -> "Connects with $APP"
     state == "NeedsLogin" -> "Sign-in needed"
     state == "NeedsMachineAuth" -> "Waiting for approval in the Tailscale admin console"
+    state == "InUseOtherUser" -> "In use by another user on this device"
+    state.isNullOrEmpty() -> "Starting"
     state == "Starting" || state == "NoState" -> "Starting"
     state == "Running" -> "Connected"
     state == "Stopped" -> "Stopped"
@@ -196,6 +198,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     val prefs = setup.prefs
     val home = setup.home
     var stack by rememberSaveable { mutableStateOf(path) } // survives the app being killed behind a file picker
+    val tsStored by ui.tsStored.collectAsStateWithLifecycle()
+    LaunchedEffect(stack, setup.tailscale) { ui.checkTailscale() } // a node left behind can be signed out of
     val page = stack.lastOrNull()
     val go = { p: String -> stack = stack + p; path = stack }
     val back = { stack = stack.dropLast(1); path = stack }
@@ -407,7 +411,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 notice(ui, notice)
                 group(null, listOfNotNull(
                     Item("Reach your tailnet", if (home.tailscale) tsStatus else if (setup.tsExit != null) "Off · Tailscale still runs for your exit-node route" else "From apps routed through unbraid", { setTailscale(!home.tailscale) }, checked = home.tailscale, icon = Icons.hub) { Toggle(home.tailscale) },
-                    vpn.tsLoginUrl?.let { url -> Item("Sign in to Tailscale", "Opens your browser", cta = true, onClick = { tsLogin(url) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } },
+                    vpn.tsLoginUrl?.takeIf { setup.tailscale }?.let { url -> Item("Sign in to Tailscale", "Opens your browser", cta = true, onClick = { tsLogin(url) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } },
                 ))
                 if (setup.tailscale && vpn.tsExitNodes.isNotEmpty()) group("Exit nodes", vpn.tsExitNodes.sortedByDescending { it.online }.map { n ->
                     val used = setup.routes.count { it.tsExit == n.ip }
@@ -424,7 +428,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                             { ui.setHome { it.copy(tsSuffixAllowed = if (on) null else d) } }, checked = on) { Toggle(on) }
                     },
                 ))
-                if (setup.tailscale && vpn.tsState == "Running") group(null, listOf(Item("Sign out of Tailscale", "Its exit routes are removed; their apps follow the default route", { dialog = "tsout" }, danger = true)))
+                // Whatever the sign-in's state, and also with Tailscale off while its node is still kept on the phone.
+                if (setup.tailscale || tsStored) group(null, listOf(Item("Sign out of Tailscale", "Its exit routes are removed; their apps follow the default route", { dialog = "tsout" }, danger = true)))
             }
 
             p == "local" -> Page("Local & home access", back) {
