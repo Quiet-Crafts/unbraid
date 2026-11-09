@@ -1,7 +1,7 @@
-• Faster: moving an app, picking a location, starring a favourite or editing a profile responds at once.
+• More responsive: moving apps, picking locations, starring favourites and editing profiles no longer wait for saving.
 • Connect no longer freezes the power button; unbraid opens faster with large server lists.
 • Smoother server lists and Stats charts.
 • Updated connection engine with new security fixes.
-• Always-on VPN starts unbraid fully protected, and you're told when Android turns it off.
-• WireGuard renews keys on time after sleep.
-• Quick double taps and Tailscale sign-out work as expected.
+• Better handling of Always-on VPN starts, and you're told when Android turns unbraid off.
+• WireGuard counts sleep time for key renewal.
+• Fixes for quick double taps and Tailscale sign-out.
