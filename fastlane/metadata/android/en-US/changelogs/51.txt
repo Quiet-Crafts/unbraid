@@ -1,0 +1,7 @@
+• If unbraid can't open your saved settings, it keeps them and tells you, instead of starting empty.
+• Saving the Tailscale control server unchanged no longer stops the VPN or signs you out.
+• Quick double taps no longer add a route twice or lose a location change.
+• Text typed in Settings dialogs survives rotation.
+• A pinned PIA server follows PIA's list when its address changes.
+• Speed test and Stats handle errors better.
+• Clearer messages when something can't be loaded.
