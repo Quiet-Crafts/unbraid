@@ -1,15 +1,13 @@
 <p align="center">
-  <img src="fastlane/metadata/android/en-US/images/featureGraphic.png" alt="unbraid: every app, its own exit" width="720">
+  <img src=".github/banner.png" alt="unbraid: every app, its own exit. Per-app VPN routing for Android, free and open source." width="760">
 </p>
 
 <p align="center">
-  <a href="https://github.com/quiet-crafts/unbraid/releases/latest"><img src="https://img.shields.io/github/v/release/quiet-crafts/unbraid?label=download&color=ffa86b" alt="Latest release"></a>
-  <img src="https://img.shields.io/badge/Android-13%2B-8fdca4" alt="Android 13 or later">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-GPL--3.0-7cc1ff" alt="GPL-3.0 licence"></a>
-  <a href="https://unbraid.app"><img src="https://img.shields.io/badge/website-unbraid.app-c9a7ff" alt="Website"></a>
+  <a href="https://github.com/quiet-crafts/unbraid/releases/latest"><img src="https://img.shields.io/github/v/release/quiet-crafts/unbraid?label=download&color=FFA66B" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/Android-13%2B-8EE0A8" alt="Android 13 or later">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-GPL--3.0-7CC4FF" alt="GPL-3.0 licence"></a>
+  <a href="https://unbraid.app"><img src="https://img.shields.io/badge/website-unbraid.app-C9A7FF" alt="Website"></a>
 </p>
-
-# unbraid
 
 unbraid is a split tunneling VPN client for Android that lets every app take its own exit. Your banking app can skip the VPN
 while a streaming app leaves from the US, a second app from Italy and everything else from the Netherlands, all
