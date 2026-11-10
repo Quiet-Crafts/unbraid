@@ -1,10 +1,53 @@
+<p align="center">
+  <img src="fastlane/metadata/android/en-US/images/featureGraphic.png" alt="unbraid: every app, its own exit" width="720">
+</p>
+
+<p align="center">
+  <a href="https://github.com/quiet-crafts/unbraid/releases/latest"><img src="https://img.shields.io/github/v/release/quiet-crafts/unbraid?label=download&color=ffa86b" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/Android-13%2B-8fdca4" alt="Android 13 or later">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-GPL--3.0-7cc1ff" alt="GPL-3.0 licence"></a>
+  <a href="https://unbraid.app"><img src="https://img.shields.io/badge/website-unbraid.app-c9a7ff" alt="Website"></a>
+</p>
+
 # unbraid
 
 unbraid is a split tunneling VPN client for Android that lets every app take its own exit. Your banking app can skip the VPN
 while a streaming app leaves from the US, a second app from Italy and everything else from the Netherlands, all
 at the same time. If you use Tailscale, your home network stays reachable too.
 
-Project website: [unbraid.app](https://unbraid.app)
+<p align="center">
+  <a href="https://github.com/quiet-crafts/unbraid/releases/latest"><b>Download the APK</b></a>
+  &nbsp;·&nbsp; <a href="https://unbraid.app">Website</a>
+  &nbsp;·&nbsp; <a href="https://unbraid.app/privacy">Privacy policy</a>
+  &nbsp;·&nbsp; <a href="https://github.com/quiet-crafts/unbraid/issues">Report a bug</a>
+</p>
+
+<table align="center">
+  <tr>
+    <td align="center" width="25%"><img src=".github/screenshots/routes.png" alt="Routes screen: a default exit in the Netherlands, with Chrome and YouTube in the US, Gmail in Sweden, Drive in Japan and Photos set to Direct" width="200"></td>
+    <td align="center" width="25%"><img src=".github/screenshots/apps.png" alt="Apps screen: every installed app with the exit it uses" width="200"></td>
+    <td align="center" width="25%"><img src=".github/screenshots/providers.png" alt="Choosing a location for a new route, with the list of signed-in providers open" width="200"></td>
+    <td align="center" width="25%"><img src=".github/screenshots/stats.png" alt="Stats screen: data used per provider, live speed, connected time and speed tests" width="200"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Each app gets its own exit</sub></td>
+    <td align="center"><sub>See every app's route at a glance</sub></td>
+    <td align="center"><sub>Mix providers and countries</sub></td>
+    <td align="center"><sub>Usage, speed and connected time</sub></td>
+  </tr>
+</table>
+
+## Highlights
+
+- Give any app its own exit country or server, or let it skip the VPN with Direct. Several exits stay connected at
+  once.
+- Use the VPN accounts you already have. One route can go through Mullvad while another uses NordVPN.
+- Reach your home network through Tailscale or Headscale, or send chosen apps out through a Tailscale exit node.
+- A low-load server is picked for you when the provider publishes load, or you can pin one server yourself.
+- Ad and tracker blocking per route with the provider's own blocking DNS, where it has one.
+- Saved profiles, a home-screen widget, a quick-settings tile and a pause that reconnects by itself.
+- Stats on the phone: data per provider, connected time and speed tests across several exits at once.
+- No ads, no unbraid account and no analytics of our own. Free software under the GPL.
 
 ## What it works with
 
