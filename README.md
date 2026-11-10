@@ -59,6 +59,68 @@ key, or join a Tailscale tailnet (a self-hosted Headscale works as well).
 
 Routes can mix providers. One app can use Mullvad in Sweden while another uses NordVPN in Japan.
 
+## Getting started
+
+1. Download the APK from the [releases page](https://github.com/quiet-crafts/unbraid/releases/latest) and open it
+   on your phone to install it. Android may ask you to allow installs from your browser or file manager first.
+2. Turn off any other VPN app, including your provider's own app, and its "Always-on VPN" setting. Android only
+   lets one VPN app run at a time.
+3. Open unbraid, accept the terms and choose your VPN. You can sign in to a provider, import a WireGuard or
+   OpenVPN file, paste a Shadowsocks key, or use Tailscale on its own.
+4. On the Routes tab, tap the default route, choose Change location and pick a country. This is where every app
+   goes unless you say otherwise. If you imported a file, its server is already set. Then tap the power button to
+   connect and allow the VPN when Android asks. With Tailscale on its own, connect first and then tap Sign in to
+   Tailscale.
+5. To send some apps somewhere else, tap +, then Route, and choose another country or server. Open the Apps tab
+   and tap Show my apps (the list stays on your phone). Then tap an app and pick its route. Pick Direct for apps
+   that should not use the VPN at all, like a banking app.
+
+Each release lists the APK's SHA-256 checksum and the fingerprint of the signing certificate.
+[unbraid.app/download](https://unbraid.app/download/) explains how to check them before you install.
+
+## Good to know
+
+unbraid is a VPN app, not a VPN service. It has no servers, so you need an account with a supported provider
+(the free Proton VPN plan works) or a server of your own.
+
+Because Android runs only one VPN app at a time, unbraid takes the place of your provider's app while it is on.
+If you connect another VPN app, Android stops unbraid. If you allow its notifications, unbraid tells you it is
+off.
+
+Your provider's limits still apply. Providers with a connection limit count each route in use as a connection,
+while Mullvad counts unbraid as one device. The default route stays connected while unbraid is on. Other routes
+connect as soon as an app is assigned to them, even if that app is idle.
+
+The app needs Android 13 or later on a 64-bit ARM phone. It is not on Google Play yet. To update, download the
+new APK from the releases page and install it over the old one; your settings stay.
+
+## Questions
+
+### How is this different from the split tunneling in my VPN app?
+
+In many VPN apps, split tunneling means you can pick apps that skip the VPN, while every other app leaves from the
+same place. unbraid lets you choose an exit for each app, and those exits can come from different providers.
+
+### Can I use it without a VPN subscription?
+
+Yes. The free Proton VPN plan works, and so does a server of your own. You can import a WireGuard or OpenVPN file,
+paste a Shadowsocks key, or use only Tailscale, for example with an exit node at home.
+
+### Can I reach my home network while I use a VPN?
+
+Yes. With Tailscale, or with your router's WireGuard config added as a home tunnel, apps can reach devices at home
+and still use their VPN exit for everything else.
+
+### Does it have a kill switch?
+
+It works with Android's own "Always-on VPN" and "Block connections without VPN" settings, which you can open from
+the app's settings. With blocking on, apps stay offline while unbraid is paused or off. Apps you set to Direct
+still use your normal connection while unbraid is connected.
+
+### Does it get around my provider's device limit?
+
+No. Providers with a connection limit count each route in use against it. Mullvad counts unbraid as one device.
+
 ## How it works
 
 Android allows one VPN app at a time, so unbraid runs a single `VpnService` with one TUN interface and the
@@ -82,15 +144,6 @@ For NordVPN, unbraid picks a server from the provider's low-load recommendations
 pinned one. Server lists
 come from each provider's public API where there is one, and otherwise from
 [gluetun-servers](https://github.com/qdm12/gluetun-servers).
-
-## Install
-
-Download the APK from the [releases page](https://github.com/quiet-crafts/unbraid/releases/latest). It needs
-Android 13 or later on a 64-bit ARM phone. Each release lists the APK's SHA-256 checksum and the fingerprint of
-the signing certificate, so you can check the file before you install it.
-
-Turn off any other VPN app first, including your provider's own app, and its "Always-on VPN" setting. Android
-only lets one of them run.
 
 ## Build
 
