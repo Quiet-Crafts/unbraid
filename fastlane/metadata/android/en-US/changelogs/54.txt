@@ -1,0 +1,2 @@
+• Turning on Check for updates now checks right away, even if an earlier check failed.
+• A check that gets no answer tries again after an hour instead of a day.
