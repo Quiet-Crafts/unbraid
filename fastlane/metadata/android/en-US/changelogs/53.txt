@@ -1,0 +1,5 @@
+• Optional update check, asked at first start: unbraid tells you when a new version is out. Off unless you say yes.
+• Your own WireGuard, OpenVPN and Shadowsocks servers are checked too and show Not answering when they stop working.
+• Copy a report in About & support, for bug reports, without keys, accounts or server addresses.
+• A link to the provider list when adding a VPN, and a rare, dismissible support card.
+• The connection engine now builds the same on every computer.
