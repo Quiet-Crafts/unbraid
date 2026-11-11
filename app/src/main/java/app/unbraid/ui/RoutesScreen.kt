@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.fillMaxSize
@@ -276,12 +277,14 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     val done = { f: () -> Unit -> visit = 2; f() }
                     AskCard(
                         "Free and open source", "Support $APP",
-                        "Made by one person. If it's useful to you, there are a few ways to help on our website. Some provider links there earn us a commission; they're marked. Everything stays free either way.",
+                        "Made by one person. If it’s useful to you, there are a few ways to help on our website. Some provider links there earn us a commission; they’re marked. Everything stays free either way.",
                         { visit = 2 }, "Not now", footer = "We ask a few times a year.",
                     ) {
-                        app.unbraid.support.Tips.sponsors?.let { url -> Primary("Ways to help", { done { context.openUrl(url) } }) }
-                        Secondary("Browse providers", { done { context.openUrl(PROVIDERS_URL) } })
-                        Secondary("Don't ask again", { done { kotlin.concurrent.thread { Unbraid.nudge(Nudges::disable) } } }, color = Ink.dim)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            app.unbraid.support.Tips.sponsors?.let { url -> Pill("Ways to help", true) { done { context.openUrl(url) } } }
+                            Pill("Browse providers", false) { done { context.openUrl(PROVIDERS_URL) } }
+                        }
+                        Secondary("Don’t ask again", { done { kotlin.concurrent.thread { Unbraid.nudge(Nudges::disable) } } }, color = Ink.dim)
                     }
                 }
                 privateDns?.let { host ->
@@ -477,6 +480,14 @@ private fun AskCard(overline: String, title: String, text: String, onClose: () -
         footer?.let { Text(it, style = Type.caption, color = Ink.faint) }
     }
 }
+
+/** A card button as a pill, 48 dp high: filled for the main one, outlined for the other. */
+@Composable
+private fun Pill(text: String, filled: Boolean, onClick: () -> Unit) = Box(
+    Modifier.height(48.dp).clip(RoundedCornerShape(24.dp)).then(if (filled) Modifier.background(Ink.accent) else Modifier.border(1.dp, Ink.line, RoundedCornerShape(24.dp)))
+        .tap(onClick, role = Role.Button).padding(horizontal = 20.dp),
+    Alignment.Center,
+) { Text(text, style = Type.title.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Medium), color = if (filled) Ink.onAccent else Ink.text) }
 
 /** A switch row in a route's sheet; the whole row toggles. */
 @Composable

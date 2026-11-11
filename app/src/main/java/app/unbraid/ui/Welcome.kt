@@ -1,6 +1,10 @@
 package app.unbraid.ui
 
 import app.unbraid.APP
+import app.unbraid.BuildConfig
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.text.font.FontWeight
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
@@ -67,38 +71,49 @@ import kotlin.math.PI
 import kotlin.math.sin
 
 /**
- * First start: the idea, the four places, then the terms. [fresh] false = someone updating
- * from before the terms: only the terms page, as "One thing first". Close skips to the terms, which can't be skipped.
+ * First start: the idea, (in the GitHub build) the update question, the four places, then the terms. [fresh] false =
+ * someone updating from before the terms: only the terms page, as "One thing first". Close skips ahead, but never over
+ * the update question, which has to be answered (it is asked once; [answer] saves it) and never over the terms.
  */
 @Composable
-fun Welcome(fresh: Boolean, accept: () -> Unit) {
-    var page by rememberSaveable { mutableIntStateOf(if (fresh) 0 else 2) }
+fun Welcome(fresh: Boolean, answer: (Boolean) -> Unit, accept: () -> Unit) {
+    val pages = remember { listOfNotNull("welcome", "updates".takeIf { BuildConfig.UPDATE_CHECK }, "places", "terms") }
+    val last = pages.lastIndex
+    var page by rememberSaveable { mutableIntStateOf(if (fresh) 0 else last) }
     var agreed by rememberSaveable { mutableStateOf(false) }
+    var check by rememberSaveable { mutableStateOf<Boolean?>(null) }
+    val id = pages[page]
     BackHandler(fresh && page > 0) { page-- }
     val motion = MaterialTheme.motionScheme
     Column(Modifier.fillMaxSize().background(Ink.ground).windowInsetsPadding(WindowInsets.systemBars)) {
         Box(Modifier.height(56.dp).padding(start = 4.dp, top = 4.dp), Alignment.CenterStart) {
-            if (fresh && page < 2) IconTap(Icons.close, "Skip the introduction", { page = 2 })
+            // From the first page, skipping stops at the update question until it is answered, then at the terms.
+            if (fresh && page < last && id != "updates") IconTap(Icons.close, "Skip the introduction", { page = if (check == null && "updates" in pages) pages.indexOf("updates") else last })
         }
         AnimatedContent(page, Modifier.weight(1f), transitionSpec = { fadeIn(motion.fastEffectsSpec()) togetherWith fadeOut(motion.fastEffectsSpec()) }, label = "welcome") { p ->
+            val now = pages[p]
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp)) {
-                Text(listOf("Welcome", "Four places", if (fresh) "Terms" else "Updated")[p].uppercase(), style = Type.overline, color = Ink.dim)
+                Text(when (now) { "welcome" -> "Welcome"; "updates" -> "Updates"; "places" -> "Four places"; else -> if (fresh) "Terms" else "Updated" }.uppercase(), style = Type.overline, color = Ink.dim)
                 Gap(6.dp)
-                Text(
-                    buildAnnotatedString {
-                        val (t, end) = listOf("Every app, its own exit" to ".", "Find your way" to ".", (if (fresh) "Before you start" else "One thing first") to ".")[p]
-                        append(t.uppercase()); withStyle(SpanStyle(color = Ink.accent)) { append(end) }
-                    },
-                    style = Type.headline.copy(fontSize = 52.sp, lineHeight = 52.sp), color = Ink.text,
-                )
+                Headline(when (now) { "welcome" -> "Every app, its own exit" to "."; "updates" -> UPDATES_TITLE to "?"; "places" -> "Find your way" to "."; else -> (if (fresh) "Before you start" else "One thing first") to "." })
                 Gap(20.dp)
-                when (p) {
-                    0 -> {
+                when (now) {
+                    "welcome" -> {
                         Lead("Your bank direct, streaming through another country, everything else private. All at once, from one switch.")
                         Gap(40.dp)
                         Braid()
                     }
-                    1 -> {
+                    "updates" -> {
+                        Lead("This GitHub version doesn\u2019t install updates by itself. $APP can check for new releases and tell you when one is out.")
+                        Gap(32.dp)
+                        UpdateFacts()
+                        Gap(24.dp)
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Choice("Check for updates", "A card on Routes when a new version is out", check == true) { check = true; answer(true) }
+                            Choice("Don\u2019t check", "Nothing is checked. You can turn it on later in Settings", check == false) { check = false; answer(false) }
+                        }
+                    }
+                    "places" -> {
                         Lead("Everything $APP does lives in one of four places.")
                         Gap(32.dp)
                         Places()
@@ -109,9 +124,74 @@ fun Welcome(fresh: Boolean, accept: () -> Unit) {
             }
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (fresh) Progress(3, page, Modifier.weight(1f)) else Spacer(Modifier.weight(1f))
+            if (fresh) Progress(pages.size, page, Modifier.weight(1f)) else Spacer(Modifier.weight(1f))
             if (fresh && page > 0) IconTap(Icons.back, "Back", { page-- }, background = Ink.surfaceHigh)
-            if (page < 2) NextPill("Next", { page++ }) else NextPill("Accept and continue", accept, enabled = agreed)
+            if (page < last) NextPill("Next", { page++ }, enabled = id != "updates" || check != null)
+            else NextPill("Accept and continue", accept, enabled = agreed)
+        }
+    }
+}
+
+private const val UPDATES_TITLE = "Check for updates"
+
+@Composable
+private fun Headline(text: Pair<String, String>) = Text(
+    buildAnnotatedString { append(text.first.uppercase()); withStyle(SpanStyle(color = Ink.accent)) { append(text.second) } },
+    style = Type.headline.copy(fontSize = 52.sp, lineHeight = 52.sp), color = Ink.text,
+)
+
+/** Three icon rows, as on the terms page. */
+@Composable
+private fun IconRows(rows: List<Pair<androidx.compose.ui.graphics.vector.ImageVector, String>>) = Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    rows.forEach { (icon, text) ->
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Box(Modifier.size(36.dp).clip(RoundedCornerShape(12.dp)).background(Ink.surfaceTop), Alignment.Center) { Icon(icon, null, Modifier.size(20.dp), tint = Ink.text) }
+            Text(text, style = Type.sub.copy(fontSize = 15.sp, lineHeight = 21.sp), color = Ink.text)
+        }
+    }
+}
+
+@Composable
+private fun UpdateFacts() = IconRows(listOf(
+    Icons.clock to "When on, $APP checks unbraid.app for the newest version, about once a day.",
+    Icons.eyeOff to "No settings or browsing activity are sent. The site sees the IP address the request comes from.",
+    Icons.sliders to "Change this any time in Settings, About & support.",
+))
+
+/** One of two equal answers, announced as a radio button. */
+@Composable
+private fun Choice(title: String, sub: String, selected: Boolean, onClick: () -> Unit) = Row(
+    Modifier.fillMaxWidth().heightIn(min = 76.dp).clip(RoundedCornerShape(22.dp)).background(Ink.surface)
+        .border(1.dp, if (selected) Ink.accent else Ink.line, RoundedCornerShape(22.dp)).selectable(selected, role = Role.RadioButton, onClick = onClick).padding(horizontal = 16.dp, vertical = 14.dp),
+    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp),
+) {
+    Box(Modifier.size(22.dp).clip(CircleShape).border(if (selected) 7.dp else 2.dp, if (selected) Ink.accent else Ink.dim, CircleShape))
+    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(title, style = Type.body.copy(fontWeight = FontWeight.SemiBold), color = Ink.text)
+        Text(sub, style = Type.caption, color = Ink.dim)
+    }
+}
+
+/** Shown once, full screen, to someone updating from a version that never asked: [answer] saves the choice and ends it. */
+@Composable
+fun UpdateAsk(answer: (Boolean) -> Unit) {
+    BackHandler {}
+    Column(Modifier.fillMaxSize().background(Ink.ground).windowInsetsPadding(WindowInsets.systemBars).padding(horizontal = 24.dp)) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(top = 56.dp)) {
+            Text("NEW IN ${BuildConfig.VERSION_NAME}", style = Type.overline, color = Ink.dim)
+            Gap(6.dp)
+            Headline(UPDATES_TITLE to "?")
+            Gap(20.dp)
+            Lead("$APP can now check for new releases and tell you when one is out. It stays off unless you turn it on.")
+            Gap(32.dp)
+            UpdateFacts()
+        }
+        Column(Modifier.padding(vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Primary("Check for updates", { answer(true) })
+            Box(
+                Modifier.fillMaxWidth().height(56.dp).clip(RoundedCornerShape(28.dp)).border(1.dp, Ink.line, RoundedCornerShape(28.dp)).tap({ answer(false) }, role = Role.Button),
+                Alignment.Center,
+            ) { Text("Don\u2019t check", style = Type.title, color = Ink.text) }
         }
     }
 }

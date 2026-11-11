@@ -56,6 +56,13 @@ import kotlinx.coroutines.withContext
 /** Where unbraid's website lists VPN providers, for people without an account (foss build only). */
 const val PROVIDERS_URL = "https://unbraid.app/providers/#need-a-vpn"
 
+/**
+ * A state read from disk or returned by a check [read], published over what the screen holds now [held]: an answer or a
+ * dismissal given meanwhile is newer than anything that started before it, so it is never overwritten.
+ */
+internal fun mergeUpdates(read: UpdateState, held: UpdateState) =
+    (if (held.asked) read.copy(enabled = held.enabled, asked = true) else read).copy(dismissedCode = maxOf(read.dismissedCode, held.dismissedCode))
+
 data class AppInfo(val pkg: String, val label: String, val system: Boolean)
 
 /** Removed routes' apps follow the default; a removed default becomes [fallback], the first route left, or Direct. */
@@ -149,14 +156,27 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** True once the stored state is read: until then an empty one means unknown, not no news. */
     val updatesLoaded = MutableStateFlow(false)
     /** Asks for the newest version (the check holds back to once a day, and has its own lock); the stored answer shows meanwhile. */
-    fun checkUpdates() { viewModelScope.launch(Dispatchers.IO) { updates.value = store.updates; updatesLoaded.value = true; updates.value = Updates.check(store, BuildConfig.VERSION_CODE) } }
+    fun checkUpdates() { viewModelScope.launch(Dispatchers.IO) { runCheck() } }
+    private suspend fun runCheck() {
+        updates.update { mergeUpdates(store.updates, it) }
+        updatesLoaded.value = true
+        val checked = Updates.check(store, BuildConfig.VERSION_CODE)
+        updates.update { mergeUpdates(checked, it) }
+    }
     /** Hides the update card until a newer version than [code] comes. */
     fun dismissUpdate(code: Int) = setUpdates { it.copy(dismissedCode = code) }
+    /** The answer to the opt-in question (welcome page or the one-time screen): either way it is not asked again. */
+    fun answerUpdates(on: Boolean) = setUpdates { it.copy(enabled = on, asked = true) }
     /** Turning it on is an answer to the question too. Takes effect at once; the write happens off the main thread. */
     fun setUpdateCheck(on: Boolean) = setUpdates { it.copy(enabled = on, asked = it.asked || on) }
     private fun setUpdates(f: (UpdateState) -> UpdateState) {
+        val was = updates.value.enabled
         updates.update(f)
-        viewModelScope.launch(Dispatchers.IO) { synchronized(store) { store.updates = f(store.updates) } }
+        viewModelScope.launch(Dispatchers.IO) {
+            val now = synchronized(store) { f(store.updates).also { store.updates = it } }
+            // Just turned on: the first check runs now, not at the next resume.
+            if (BuildConfig.UPDATE_CHECK && now.enabled && !was) runCheck()
+        }
     }
 
     /** Puts the report for a bug report on the clipboard, marked sensitive so Android hides its preview. */
