@@ -73,11 +73,20 @@ data class Route(
     val filter: Boolean? = null,
     /** The saved [OwnServer] whose config [wg]/[ovpn]/[ss] is a copy of, so renaming or removing it reaches this route. */
     val own: String? = null,
+    /** Whether unbraid checks that this own server still reaches the internet; null follows the config. */
+    val checkInternet: Boolean? = null,
 ) {
     val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: tsName ?: tsExit ?: loc.country ?: "Fastest"
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OV"; ss != null -> "SS"; tsExit != null -> "TS"; else -> loc.code }
     /** Not tied to a provider account. */
     val imported get() = wg != null || ovpn != null || ss != null || tsExit != null
+    val checksInternet: Boolean get() = when {
+        tsExit != null || !imported -> false
+        checkInternet != null -> checkInternet
+        ss != null -> true
+        wg != null -> wg.allowedIps.any { it == "0.0.0.0/0" || it == "::/0" }
+        else -> ovpn?.config?.lineSequence()?.any { it.trim().startsWith("redirect-gateway", ignoreCase = true) } == true
+    }
     /** Who carries this route: the provider, or the kind of own server. */
     val source get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; ss != null -> "Shadowsocks"; tsExit != null -> "Tailscale"; else -> Providers.short(loc.provider) }
 }

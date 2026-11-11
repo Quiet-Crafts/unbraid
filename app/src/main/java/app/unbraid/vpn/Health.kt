@@ -20,6 +20,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  * server, a server taken down) otherwise stays up but silent, and its apps just time out.
  */
 object Health {
+    fun eligible(route: app.unbraid.data.Route) = !route.imported || route.checksInternet
+    fun movable(route: app.unbraid.data.Route) = !route.imported && route.loc.pinned == null && route.loc.group != app.unbraid.data.Nord.DEDICATED_IP
+    fun answering(marked: Set<String>, eligible: Set<String>, passed: Set<String>, dead: Set<String>): Set<String> =
+        (marked intersect eligible) - passed + (dead intersect eligible)
+
     private val SERVERS = listOf("stun.l.google.com:19302", "stun.cloudflare.com:3478")
 
     /** One check's whole budget; a slower answer counts as none. */

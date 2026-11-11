@@ -1,5 +1,6 @@
 package app.unbraid.data
 
+import app.unbraid.support.NudgeState
 import android.content.Context
 import android.util.Log
 import android.security.keystore.KeyGenParameterSpec
@@ -177,6 +178,14 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         return m
     }
 
+
+    var updates: UpdateState
+        get() = synchronized(this) { runCatching { read("updates.json")?.let { json.decodeFromString(UpdateState.serializer(), it) } }.getOrNull() ?: UpdateState() }
+        set(v) { synchronized(this) { safely { write("updates.json", json.encodeToString(UpdateState.serializer(), v)) } } }
+
+    var nudges: NudgeState
+        get() = runCatching { read("nudges.json")?.let { json.decodeFromString(NudgeState.serializer(), it) } }.getOrNull() ?: NudgeState()
+        set(v) { safely { write("nudges.json", json.encodeToString(NudgeState.serializer(), v)) } }
 
     /** The tailnet's MagicDNS domain, learned once Tailscale is signed in. */
     var tsSuffix: String?

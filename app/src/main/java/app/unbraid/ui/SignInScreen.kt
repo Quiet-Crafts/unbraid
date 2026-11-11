@@ -1,6 +1,13 @@
 package app.unbraid.ui
 
+import app.unbraid.BuildConfig
 import app.unbraid.WORDMARK
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.Row
 import androidx.compose.runtime.remember
 import androidx.activity.result.contract.ActivityResultContracts
@@ -70,6 +77,22 @@ private fun Choose(ui: Ui, onClose: (() -> Unit)?, pick: (Provider) -> Unit) {
         )
         itemsIndexed(other) { i, o -> GroupRow(i, other.size, o.title, o.sub, onClick = o.go, trailing = { Chevron() }) }
         importer.error?.let { e -> item { Caption(e, color = Ink.bad) } }
+        // For people without an account: the website lists providers (its links are marked when they may earn a commission).
+        if (BuildConfig.SUPPORT_ASKS) {
+            item {
+                val context = androidx.compose.ui.platform.LocalContext.current
+                Row(
+                    Modifier.padding(start = Gutter, end = Gutter, top = 24.dp).fillMaxWidth().height(56.dp).clip(RoundedCornerShape(28.dp)).background(Ink.accentContainer)
+                        .clickable(role = Role.Button) { context.openUrl(PROVIDERS_URL) },
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.search, null, Modifier.size(22.dp), tint = Ink.accent)
+                    Text("Need a VPN account?", style = Type.body, color = Ink.text)
+                    Icon(Icons.external, null, Modifier.size(18.dp), tint = Ink.dim)
+                }
+            }
+            item { Caption("Opens unbraid.app. Links marked Affiliate link may earn us a commission if you subscribe.") }
+        }
     }
     importer.Dialogs()
 }

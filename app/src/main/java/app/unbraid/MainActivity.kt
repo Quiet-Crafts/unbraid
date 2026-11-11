@@ -83,6 +83,7 @@ import app.unbraid.ui.Onboarding
 import app.unbraid.ui.TourStop
 import app.unbraid.ui.TourOverlay
 import app.unbraid.ui.VpnDisclosure
+import app.unbraid.ui.UpdateAsk
 import app.unbraid.ui.Welcome
 import app.unbraid.ui.settingsHub
 import app.unbraid.ui.reselected
@@ -126,7 +127,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // Android's Always-on and Block connections, and the installed apps, can change while unbraid is in the background.
-    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); if (!Unbraid.store.unreadable.value) ui.refreshApps(); Stats.maintain() }
+    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); if (!Unbraid.store.unreadable.value) ui.refreshApps(); Stats.maintain(); if (BuildConfig.UPDATE_CHECK && Onboarding.termsOk && !Unbraid.store.unreadable.value) ui.checkUpdates() }
 
     // The open sheet and a connect waiting on it outlive a rotation (never a secret here); nothing connects by itself.
     override fun onSaveInstanceState(out: Bundle) { super.onSaveInstanceState(out); out.putString("sheet", sheet); out.putBoolean("connectAfter", connectAfter) }
@@ -175,6 +176,7 @@ class MainActivity : ComponentActivity() {
         // Started on unreadable settings: what onResume and the shortcut skipped runs once they open.
         if (Unbraid.store.unreadable.value) lifecycleScope.launch {
             Unbraid.store.unreadable.first { !it }
+            if (BuildConfig.UPDATE_CHECK && Onboarding.termsOk) ui.checkUpdates()
             ui.refreshApps()
             if (savedInstanceState == null) showProfile(intent)
         }
@@ -182,11 +184,16 @@ class MainActivity : ComponentActivity() {
             UnbraidTheme {
               // Saved settings that won't open come first: the view model is only built from what they hold once they do.
               val unreadable by Unbraid.store.unreadable.collectAsStateWithLifecycle()
+              // Someone updating from a version that never asked gets the update question once, instead of the app.
+              val updateState by ui.updates.collectAsStateWithLifecycle()
+              val updatesLoaded by ui.updatesLoaded.collectAsStateWithLifecycle()
               if (unreadable) Unreadable()
               else if (!Onboarding.termsOk) {
                 // A new install gets the whole welcome; someone updating from before the terms only the terms.
                 val fresh = remember { !ui.signedIn.value && !ui.disclosed.value }
-                Welcome(fresh) { Onboarding.acceptTerms(fresh) }
+                Welcome(fresh, ui::answerUpdates) { Onboarding.acceptTerms(fresh); if (BuildConfig.UPDATE_CHECK) ui.checkUpdates() }
+              } else if (BuildConfig.UPDATE_CHECK && updatesLoaded && !updateState.asked) {
+                UpdateAsk(ui::answerUpdates)
               } else {
                 val signedIn by ui.signedIn.collectAsStateWithLifecycle()
                 var tab by rememberSaveable { mutableStateOf(Tab.Routes) }
@@ -195,6 +202,7 @@ class MainActivity : ComponentActivity() {
 
                 var adding by rememberSaveable { mutableStateOf(false) }
                 val vpn by ui.vpn.collectAsStateWithLifecycle()
+                val limit by ui.limitAsk.collectAsStateWithLifecycle()
                 val disclosed by ui.disclosed.collectAsStateWithLifecycle()
                 val routesWanted by ui.routesWanted.collectAsStateWithLifecycle()
                 LaunchedEffect(routesWanted) {
@@ -267,7 +275,7 @@ class MainActivity : ComponentActivity() {
                                                 )
                                             }
                                         }
-                                        screen == Tab.Routes.name -> RoutesScreen(ui, ::connect, leakSetup = { sheet = "leak" }) { picker = it }
+                                        screen == Tab.Routes.name -> RoutesScreen(ui, ::connect, leakSetup = { sheet = "leak" }, quiet = tour < 0 && sheet == null && limit == null) { picker = it }
                                         screen == Tab.Apps.name -> AppsScreen(ui, disclose = { sheet = "apps" }) { picker = it }
                                         screen == Tab.Stats.name -> StatsScreen(ui)
                                         else -> SettingsScreen(ui, addProvider = { adding = true }, tour = { tour = 0 })
@@ -287,6 +295,7 @@ class MainActivity : ComponentActivity() {
                     next = { if (tour == TourStop.entries.lastIndex) endTour() else tour++ },
                 )
                 }
+                // Someone updating from a version that never asked gets the update question once, before anything else.
                 // Asked before a route change goes over a provider's connection limit, wherever it was made.
                 LimitSheet(ui)
                 when (sheet) {
