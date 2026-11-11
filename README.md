@@ -7,6 +7,7 @@
   <img src="https://img.shields.io/badge/Android-13%2B-8EE0A8" alt="Android 13 or later">
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-GPL--3.0-7CC4FF" alt="GPL-3.0 licence"></a>
   <a href="https://unbraid.app"><img src="https://img.shields.io/badge/website-unbraid.app-C9A7FF" alt="Website"></a>
+  <a href="https://github.com/quiet-crafts/unbraid-mac"><img src="https://img.shields.io/badge/also%20on-macOS-8EE0A8?logo=apple&logoColor=white" alt="Also on macOS"></a>
 </p>
 
 unbraid is a split tunneling VPN client for Android that lets every app take its own exit. Your banking app can skip the VPN
@@ -15,6 +16,7 @@ at the same time. If you use Tailscale, your home network stays reachable too.
 
 <p align="center">
   <a href="https://github.com/quiet-crafts/unbraid/releases/latest"><b>Download the APK</b></a>
+  &nbsp;·&nbsp; <a href="https://github.com/quiet-crafts/unbraid-mac">unbraid for Mac</a>
   &nbsp;·&nbsp; <a href="https://unbraid.app">Website</a>
   &nbsp;·&nbsp; <a href="https://unbraid.app/privacy">Privacy policy</a>
   &nbsp;·&nbsp; <a href="https://github.com/quiet-crafts/unbraid/issues">Report a bug</a>
@@ -34,6 +36,9 @@ at the same time. If you use Tailscale, your home network stays reachable too.
     <td align="center"><sub>Usage, speed and connected time</sub></td>
   </tr>
 </table>
+
+There is also [unbraid for Mac](https://github.com/quiet-crafts/unbraid-mac), with the same idea and the same
+providers. It needs macOS 26 or later.
 
 ## Highlights
 
