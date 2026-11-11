@@ -1,6 +1,10 @@
 package app.unbraid
 
 import app.unbraid.vpn.Health
+import app.unbraid.data.Route
+import app.unbraid.data.WgPeer
+import app.unbraid.data.OvpnProfile
+import app.unbraid.data.SsProfile
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -80,5 +84,28 @@ class HealthTest {
         assertEquals(hold, Health.due(s, hold))
         assertTrue(Health.dead(Health.next(s, ok = false, now = hold), hold, hold))
         assertEquals(hold, Health.due(Health.next(Health.Streak(), ok = false, now = 0), hold)) // quick re-checks wait too
+    }
+    @Test fun routeEligibilityAndMovement() {
+        val wg = WgPeer("wg", "private", listOf("10.0.0.2/32"), "public", endpoint = "host:1", allowedIps = listOf("10.0.0.0/8"))
+        val provider = Route("provider")
+        val privateWg = Route("wg", wg = wg)
+        val publicWg = privateWg.copy(wg = wg.copy(allowedIps = listOf("::/0")))
+        val ovpn = Route("ovpn", ovpn = OvpnProfile("vpn", "client\nredirect-gateway def1"))
+        val ss = Route("ss", ss = SsProfile("ss", "host", 1, "method", "secret"))
+        val ts = Route("ts", tsExit = "node", checkInternet = true)
+        assertTrue(Health.eligible(provider)); assertTrue(Health.movable(provider))
+        assertFalse(Health.eligible(privateWg)); assertTrue(Health.eligible(publicWg))
+        assertTrue(Health.eligible(ovpn)); assertFalse(Health.eligible(ovpn.copy(ovpn = OvpnProfile("vpn", "client"))))
+        assertTrue(Health.eligible(ss)); assertFalse(Health.eligible(ts))
+        assertTrue(Health.eligible(privateWg.copy(checkInternet = true)))
+        assertFalse(Health.eligible(publicWg.copy(checkInternet = false)))
+        listOf(privateWg, publicWg, ovpn, ss, ts).forEach { assertFalse(Health.movable(it)) }
+    }
+
+    @Test fun marksConfirmedFailuresAndClearsPassingAndIneligibleRoutes() {
+        val eligible = setOf("a", "b")
+        assertEquals(setOf("a"), Health.answering(emptySet(), eligible, emptySet(), setOf("a")))
+        assertEquals(setOf("b"), Health.answering(setOf("a", "b", "removed"), eligible, setOf("a"), emptySet()))
+        assertEquals(emptySet<String>(), Health.answering(setOf("a"), emptySet(), emptySet(), setOf("a")))
     }
 }

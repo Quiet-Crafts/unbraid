@@ -126,7 +126,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // Android's Always-on and Block connections, and the installed apps, can change while unbraid is in the background.
-    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); if (!Unbraid.store.unreadable.value) ui.refreshApps(); Stats.maintain() }
+    override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); if (!Unbraid.store.unreadable.value) ui.refreshApps(); Stats.maintain(); if (BuildConfig.UPDATE_CHECK && Onboarding.termsOk && !Unbraid.store.unreadable.value) ui.checkUpdates() }
 
     // The open sheet and a connect waiting on it outlive a rotation (never a secret here); nothing connects by itself.
     override fun onSaveInstanceState(out: Bundle) { super.onSaveInstanceState(out); out.putString("sheet", sheet); out.putBoolean("connectAfter", connectAfter) }
@@ -195,6 +195,7 @@ class MainActivity : ComponentActivity() {
 
                 var adding by rememberSaveable { mutableStateOf(false) }
                 val vpn by ui.vpn.collectAsStateWithLifecycle()
+                val limit by ui.limitAsk.collectAsStateWithLifecycle()
                 val disclosed by ui.disclosed.collectAsStateWithLifecycle()
                 val routesWanted by ui.routesWanted.collectAsStateWithLifecycle()
                 LaunchedEffect(routesWanted) {
@@ -267,7 +268,7 @@ class MainActivity : ComponentActivity() {
                                                 )
                                             }
                                         }
-                                        screen == Tab.Routes.name -> RoutesScreen(ui, ::connect, leakSetup = { sheet = "leak" }) { picker = it }
+                                        screen == Tab.Routes.name -> RoutesScreen(ui, ::connect, leakSetup = { sheet = "leak" }, quiet = tour < 0 && sheet == null && limit == null) { picker = it }
                                         screen == Tab.Apps.name -> AppsScreen(ui, disclose = { sheet = "apps" }) { picker = it }
                                         screen == Tab.Stats.name -> StatsScreen(ui)
                                         else -> SettingsScreen(ui, addProvider = { adding = true }, tour = { tour = 0 })

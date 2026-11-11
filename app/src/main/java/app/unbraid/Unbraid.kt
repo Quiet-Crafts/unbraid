@@ -13,6 +13,16 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import app.unbraid.support.NudgeState
+import app.unbraid.support.Nudges
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.temporal.ChronoUnit
 
 /** The app's name, always lowercase: launcher label (@string/app_name), widget, notifications, running text. Change them together. */
 const val APP = "unbraid"
@@ -24,6 +34,14 @@ class Unbraid : Application() {
     companion object {
         lateinit var store: Store
             private set
+        /** The support card's rules state; null until read from disk. */
+        val nudges = MutableStateFlow<NudgeState?>(null)
+        private val nudgeLock = Any()
+
+        /** Changes the nudge state and saves it (disk: call off the main thread). Nothing happens before it was read. */
+        fun nudge(f: (NudgeState) -> NudgeState) = synchronized(nudgeLock) {
+            nudges.value?.let { f(it).also { n -> nudges.value = n; store.nudges = n } }
+        }
     }
 
     override fun onCreate() {
@@ -52,5 +70,16 @@ class Unbraid : Application() {
             Stats.phase(if (on) p else Phase.Off)
             if (on && p == Phase.On) Stats.start() else Stats.stop()
         }.launchIn(scope)
+        // Days the VPN was connected, for the support card: read once, then noted while connected, also over midnight.
+        scope.launch(Dispatchers.IO) {
+            val first = runCatching { packageManager.getPackageInfo(packageName, 0).firstInstallTime }.getOrDefault(System.currentTimeMillis())
+            synchronized(nudgeLock) { nudges.value = store.nudges.let { if (it.installedAtMs == 0L) it.copy(installedAtMs = first).also { n -> store.nudges = n } else it } }
+            UnbraidVpn.state.map { it.phase == Phase.On }.distinctUntilChanged().collectLatest { on ->
+                while (on && (nudges.value?.connectedDays?.size ?: 0) < 3) {
+                    nudge { Nudges.connectedDay(it, LocalDate.now().toEpochDay()) }
+                    delay(ChronoUnit.MILLIS.between(LocalDateTime.now(), LocalDate.now().plusDays(1).atStartOfDay()) + 1_000)
+                }
+            }
+        }
     }
 }

@@ -243,6 +243,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
         if (on && context.needsLocalNetwork(setup.copy(home = home.copy(tailscale = true)))) askLan.launch(LOCAL_NETWORK)
     }
 
+    val updates by ui.updates.collectAsStateWithLifecycle()
     val tips = ui.tips?.tips?.collectAsStateWithLifecycle()?.value.orEmpty()
     val thanked = ui.tips?.thanked?.collectAsStateWithLifecycle()?.value == true
     LaunchedEffect(thanked) { if (thanked) { delay(6_000); ui.tips?.thanked?.value = false } }
@@ -565,9 +566,20 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 group(null, listOf(
                     Item("Take the tour", "How $APP works, in eight stops", tour, icon = Icons.routes) { Chevron() },
                     Item("$WORDMARK ${BuildConfig.VERSION_NAME}", "sing-box 1.14 · GPL-3.0", icon = Icons.info),
-                    Item("Privacy policy", "No analytics, no ads, no account with us", { context.openUrl(PRIVACY) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) },
+                    Item("Privacy policy", "No analytics, no account with us", { context.openUrl(PRIVACY) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) },
                     Item("Terms of use", TERMS_URL.removePrefix("https://"), { context.openUrl(TERMS_URL) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) },
                 ))
+                if (BuildConfig.UPDATE_CHECK) {
+                    val newer = app.unbraid.data.Updates.newer(updates, BuildConfig.VERSION_CODE)
+                    // Only a release the app has really read says what is newest; otherwise just the installed version.
+                    val line = newer?.let { "Version ${it.versionName} is out" } ?: if (updates.latest != null) "You have the latest version" else "Version ${BuildConfig.VERSION_NAME}"
+                    group(null, listOfNotNull(
+                        Item("Updates", line, newer?.let { { context.openUrl(app.unbraid.data.Updates.DOWNLOAD) } },
+                            trailing = newer?.let { { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } }).takeIf { updates.enabled },
+                        Item("Check for updates", "Once a day, asks unbraid.app for the newest version number. The site sees your IP address, like any visit.",
+                            { ui.setUpdateCheck(!updates.enabled) }, checked = updates.enabled) { Toggle(updates.enabled) },
+                    ))
+                }
                 group("Support", listOf(
                     when {
                         jar == null && Tips.sponsors != null -> Item("Free and open source", "Made by one person. A donation helps keep it going.", { context.openUrl(Tips.sponsors) }) {
@@ -576,6 +588,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         jar == null || tips.isEmpty() -> Item("Free and open source", "Made by one person in spare time.")
                         else -> Item("Support $APP", if (thanked) "Thank you for the tip!" else "Free and made by one person. A tip keeps it going.")
                     },
+                    Item("Copy a report", "For bug reports. Leaves out keys, accounts, server addresses and app names.", { ui.copyReport() }),
                 ))
                 if (jar != null && tips.isNotEmpty()) item {
                     Row(Modifier.padding(horizontal = Gutter, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

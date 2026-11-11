@@ -12,7 +12,11 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import app.unbraid.BuildConfig
 import app.unbraid.Unbraid
+import app.unbraid.data.UpdateState
+import app.unbraid.data.Updates
+import app.unbraid.support.Report
 import app.unbraid.data.DIRECT
 import app.unbraid.stats.Stats
 import app.unbraid.data.Home
@@ -48,6 +52,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** Where unbraid's website lists VPN providers, for people without an account (foss build only). */
+const val PROVIDERS_URL = "https://unbraid.app/providers/#need-a-vpn"
 
 data class AppInfo(val pkg: String, val label: String, val system: Boolean)
 
@@ -136,6 +143,35 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         uiPrefs.edit { putBoolean("disclosure_accepted", true) }
         if (!disclosed.value) { disclosed.value = true; loadApps() }
     }
+
+    /** The update notice's state ([app.unbraid.data.Updates]); read and written one at a time, off the main thread. */
+    val updates = MutableStateFlow(UpdateState())
+    /** True once the stored state is read: until then an empty one means unknown, not no news. */
+    val updatesLoaded = MutableStateFlow(false)
+    /** Asks for the newest version (the check holds back to once a day, and has its own lock); the stored answer shows meanwhile. */
+    fun checkUpdates() { viewModelScope.launch(Dispatchers.IO) { updates.value = store.updates; updatesLoaded.value = true; updates.value = Updates.check(store, BuildConfig.VERSION_CODE) } }
+    /** Hides the update card until a newer version than [code] comes. */
+    fun dismissUpdate(code: Int) = setUpdates { it.copy(dismissedCode = code) }
+    /** Turning it on is an answer to the question too. Takes effect at once; the write happens off the main thread. */
+    fun setUpdateCheck(on: Boolean) = setUpdates { it.copy(enabled = on, asked = it.asked || on) }
+    private fun setUpdates(f: (UpdateState) -> UpdateState) {
+        updates.update(f)
+        viewModelScope.launch(Dispatchers.IO) { synchronized(store) { store.updates = f(store.updates) } }
+    }
+
+    /** Puts the report for a bug report on the clipboard, marked sensitive so Android hides its preview. */
+    fun copyReport() {
+        val text = Report.build(
+            BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")", BuildConfig.FLAVOR, android.os.Build.VERSION.RELEASE, android.os.Build.MODEL,
+            setup.value, vpn.value, UnbraidVpn.running, apps.value.size.takeIf { disclosed.value },
+        )
+        val clip = android.content.ClipData.newPlainText("unbraid report", text)
+        clip.description.extras = android.os.PersistableBundle().apply { putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true) }
+        getApplication<Application>().getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
+    }
+
+    /** Whether Check internet access is on for own-server route [id]: written as an explicit choice. */
+    fun setCheckInternet(id: String, on: Boolean) = store.edit { s -> s.copy(routes = s.routes.map { if (it.id == id) it.copy(checkInternet = on) else it }) }
 
     /** Something sign-out couldn't finish and the user must do by hand; shown in Settings, cleared by setting null. */
     val notice = MutableStateFlow<String?>(null)

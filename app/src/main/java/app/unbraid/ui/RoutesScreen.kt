@@ -37,6 +37,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -64,6 +66,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -91,6 +94,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
+import app.unbraid.BuildConfig
+import app.unbraid.Unbraid
+import app.unbraid.data.Updates
+import app.unbraid.stats.SpeedTest
+import app.unbraid.support.Nudges
 import app.unbraid.data.DIRECT
 import app.unbraid.data.MAX_PROFILES
 import app.unbraid.data.Home
@@ -103,7 +111,9 @@ import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
 import app.unbraid.vpn.VpnState.Phase
 import app.unbraid.vpn.vpnOn
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
 private fun count(n: Int) = if (n == 1) "1 app" else "$n apps"
@@ -133,7 +143,8 @@ private fun place(r: Route, live: Map<String, Server>) = when {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker: (String) -> Unit) {
+/** [quiet]: no sheet, dialog or tour is open over the app (the support card waits for that). */
+fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Boolean = true, openPicker: (String) -> Unit) {
     val reveal = firstShow("routes")
     val context = LocalContext.current
     val openSettings = { action: String -> runCatching { context.startActivity(Intent(action)) } }
@@ -148,6 +159,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     var profileSheet by rememberSaveable { mutableStateOf<String?>(null) }
     var sheetEmpty by rememberSaveable { mutableStateOf(false) }
     var full by rememberSaveable { mutableStateOf(false) }
+    var adding by rememberSaveable { mutableStateOf(false) }
     val switching by ui.switching.collectAsStateWithLifecycle()
     val failed by ui.switchFailed.collectAsStateWithLifecycle()
     val addProfile = { empty: Boolean -> if (setup.profiles.size < MAX_PROFILES) { full = false; sheetEmpty = empty; profileSheet = "" } else full = true }
@@ -195,6 +207,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
             delay(5_000)
         }
     }
+    val scroll = rememberLazyListState()
     var resumed by remember { mutableStateOf(0) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { resumed++ }
     val privateDns = remember(resumed) { context.privateDnsHost() }
@@ -203,17 +216,34 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
     var tick by remember { mutableStateOf(0) }
     LaunchedEffect(Onboarding.leakUntil) { (Onboarding.leakUntil - System.currentTimeMillis()).takeIf { it > 0 }?.let { delay(it); tick++ } }
     val leakDue = remember(resumed, tick, Onboarding.leak, Onboarding.leakUntil) { Onboarding.leakDue }
+    val leakShown = leakDue && on && !(vpn.alwaysOn && vpn.lockdown)
+
+    // One card slot at the top: a newer version first, otherwise (rarely) the support ask on a calm visit.
+    val updates by ui.updates.collectAsStateWithLifecycle()
+    val loaded by ui.updatesLoaded.collectAsStateWithLifecycle()
+    val news = BuildConfig.UPDATE_CHECK && updates.enabled && Updates.showCard(updates, BuildConfig.VERSION_CODE)
+    val nudges by Unbraid.nudges.collectAsStateWithLifecycle()
+    val calm = quiet && (vpn.phase == Phase.On || vpn.phase == Phase.Off) && vpn.error == null && switching == null && failed == null && sheet == null && profileSheet == null &&
+        renaming == null && !managing && !adding && !full && draft == null && !news && !leakShown && privateDns == null && !Onboarding.consentFailed &&
+        !Onboarding.tourPending && setup.testing.isEmpty() && !SpeedTest.testing
+    // The ask counts once, when it is really on screen (the update state is known, the list is at its top). The visit then
+    // keeps it (0 = not yet, 1 = counted, 2 = closed), but it shows only while the screen is calm.
+    var visit by rememberSaveable { mutableIntStateOf(0) }
+    val due = BuildConfig.SUPPORT_ASKS && (!BuildConfig.UPDATE_CHECK || loaded) && nudges?.let { Nudges.due(it, System.currentTimeMillis(), calm) } == true
+    val support = BuildConfig.SUPPORT_ASKS && calm && visit != 2 && (visit == 1 || due)
+    val onTop = scroll.firstVisibleItemIndex == 0
+    LaunchedEffect(support && onTop && visit == 0) {
+        if (support && onTop && visit == 0) { visit = 1; withContext(Dispatchers.IO) { Unbraid.nudge { Nudges.shown(it, System.currentTimeMillis()) } } }
+    }
 
     // A connect the service hasn't taken up yet counts as on, so a second tap offers to stop instead of connecting again.
     val asked by UnbraidVpn.asked.collectAsStateWithLifecycle()
     val power = { if (vpnOn(vpn.phase, asked)) sheet = "power" else connect() }
-    val scroll = rememberLazyListState()
     OnReselect(Tab.Routes) { if (managing) managing = false else scroll.animateScrollToItem(0) }
     BackHandler(managing) { managing = false }
     if (managing) {
         ProfilesPage(ui, setup, onBack = { managing = false }, onAdd = { addProfile(it) }, onEdit = { profileSheet = it })
     } else Box(Modifier.fillMaxSize()) {
-        var adding by rememberSaveable { mutableStateOf(false) }
         BackHandler(adding) { adding = false }
         Box(if (adding) Modifier.clearAndSetSemantics {} else Modifier) {
             Screen(
@@ -237,6 +267,23 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                 onHeader = { power() },
                 headerLabel = when (vpn.phase) { Phase.On, Phase.Connecting -> "Pause or disconnect"; Phase.Paused -> "Resume"; Phase.Off -> "Connect" },
             ) {
+                if (news) item(key = "update") {
+                    val release = updates.latest!!
+                    AskCard("Update", "Version ${release.versionName} is out", "Download it from GitHub and install it over this one. Your settings stay.", { ui.dismissUpdate(release.versionCode) }, "Dismiss") {
+                        Primary("Download", { context.openUrl(Updates.DOWNLOAD) })
+                    }
+                } else if (support) item(key = "support") {
+                    val done = { f: () -> Unit -> visit = 2; f() }
+                    AskCard(
+                        "Free and open source", "Support $APP",
+                        "Made by one person. If it's useful to you, there are a few ways to help on our website. Some provider links there earn us a commission; they're marked. Everything stays free either way.",
+                        { visit = 2 }, "Not now", footer = "We ask a few times a year.",
+                    ) {
+                        app.unbraid.support.Tips.sponsors?.let { url -> Primary("Ways to help", { done { context.openUrl(url) } }) }
+                        Secondary("Browse providers", { done { context.openUrl(PROVIDERS_URL) } })
+                        Secondary("Don't ask again", { done { kotlin.concurrent.thread { Unbraid.nudge(Nudges::disable) } } }, color = Ink.dim)
+                    }
+                }
                 privateDns?.let { host ->
                     item(key = "privateDns") {
                         Text(
@@ -286,7 +333,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                         title = route?.name ?: "Direct", meta = route?.let { place(it, live) } ?: "No VPN for these apps",
                         extra = if (route != null && server != null) serverId(route, server) else null,
                         border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
-                        exit = exitOf(shown.defaultRoute)?.let { it to pendingOf(it) },
+                        exit = exitOf(shown.defaultRoute)?.let { it to pendingOf(it) }, notAnswering = lit && shown.defaultRoute in vpn.notAnswering,
                     ) { sheet = shown.defaultRoute } }
                 }
                 // Android refused the VPN: most often another VPN app holds Always-on.
@@ -296,7 +343,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                     }
                 }
                 // The leak-proof setup was snoozed: one quiet reminder once the snooze is over; closing it snoozes it again.
-                if (leakDue && on && !(vpn.alwaysOn && vpn.lockdown)) item(key = "leak") {
+                if (leakShown) item(key = "leak") {
                     Notice(Icons.shield, Ink.accent, "Apps go online without $APP when it's off", "Set up", dismiss = { Onboarding.snoozeLeak() }, dismissLabel = "Not now", onAction = leakSetup)
                 }
                 if (exceptions.isNotEmpty()) item(key = "exLabel") { SectionLabel("Exceptions", tall = true) }
@@ -304,7 +351,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                     val route = shown.route(id)
                     Rise("routes", i + 1, reveal) { RouteRow(
                         ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size),
-                        exit = if (route == null) null else exitOf(id)?.let { it to pendingOf(it) },
+                        exit = if (route == null) null else exitOf(id)?.let { it to pendingOf(it) }, notAnswering = lit && id in vpn.notAnswering,
                     ) { sheet = id } }
                 }
                 // Nothing set apart yet: say what that means instead of leaving the page empty.
@@ -364,6 +411,10 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, openPicker:
                     } else {
                         setup.route(id)?.takeIf { it.imported }?.let { r -> SheetAction("Rename") { act { newName = r.name; renaming = id } } }
                     }
+                    // An own server may not reach the internet by design (a home network only): its check is the user's call.
+                    setup.route(id)?.takeIf { draft == null && (it.wg != null || it.ovpn != null || it.ss != null) }?.let { r ->
+                        SheetSwitch("Check internet access", "Shows Not answering when this server stops reaching the internet. Turn off for a server that only reaches a private network.", r.checksInternet) { ui.setCheckInternet(id, it) }
+                    }
                     if (draft == null && id != setup.defaultRoute) {
                         SheetAction("Make default") { act { ui.setDefault(id) } }
                         SheetAction("Remove route", Ink.bad) { act { ui.removeRoute(id) } }
@@ -406,6 +457,38 @@ private fun Notice(
     }
     if (!large) Secondary(action, onAction)
     dismiss?.let { IconTap(Icons.close, dismissLabel, it, size = 40.dp, tint = Ink.dim) }
+}
+
+/** A card on Routes that asks or tells one thing: [buttons] under the text, [onClose] puts it away. */
+@Composable
+private fun AskCard(overline: String, title: String, text: String, onClose: () -> Unit, closeLabel: String, footer: String? = null, buttons: @Composable () -> Unit) = Column(
+    Modifier.padding(horizontal = Gutter, vertical = 8.dp).fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Ink.surface)
+        .border(1.dp, Ink.line, RoundedCornerShape(28.dp)).padding(start = 20.dp, end = 4.dp, top = 4.dp, bottom = 8.dp),
+    verticalArrangement = Arrangement.spacedBy(6.dp),
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(overline.uppercase(), style = Type.overline, color = Ink.accent, modifier = Modifier.weight(1f))
+        IconTap(Icons.close, closeLabel, onClose, size = 48.dp, tint = Ink.dim)
+    }
+    Column(Modifier.padding(end = 16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(title, style = Type.title, color = Ink.text)
+        Text(text, style = Type.sub, color = Ink.dim)
+        buttons()
+        footer?.let { Text(it, style = Type.caption, color = Ink.faint) }
+    }
+}
+
+/** A switch row in a route's sheet; the whole row toggles. */
+@Composable
+private fun SheetSwitch(title: String, sub: String, on: Boolean, onChange: (Boolean) -> Unit) = Row(
+    Modifier.fillMaxWidth().heightIn(min = 56.dp).toggleable(on, role = Role.Switch, onValueChange = onChange).padding(horizontal = 24.dp, vertical = 8.dp),
+    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp),
+) {
+    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(title, style = Type.body, color = Ink.text)
+        Text(sub, style = Type.caption, color = Ink.dim)
+    }
+    Toggle(on)
 }
 
 @Composable
@@ -536,7 +619,7 @@ private fun appsLabel(pkgs: List<String>, labels: Map<String, String>) = when {
 @Composable
 private fun DefaultTile(
     key: String, apps: Int, code: String?, chip: Color, direct: Boolean, title: String, meta: String, extra: String?, border: Color,
-    exit: Pair<ExitReport, Boolean>? = null, onClick: () -> Unit,
+    exit: Pair<ExitReport, Boolean>? = null, notAnswering: Boolean = false, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
@@ -566,6 +649,7 @@ private fun DefaultTile(
             Text(meta, style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             extra?.let { Text(it, style = Type.code, color = Ink.dim, maxLines = 1) }
         }
+        if (notAnswering) Text("Not answering", style = Type.caption, color = Ink.bad)
         exit?.let { (r, pending) -> ExitLine(r, pending) }
     }
 }
@@ -574,7 +658,7 @@ private fun DefaultTile(
 @Composable
 private fun RouteRow(
     ui: Ui, route: Route?, live: Map<String, Server>, pkgs: List<String>, labels: Map<String, String>, lit: Boolean, shape: Shape,
-    exit: Pair<ExitReport, Boolean>? = null, onClick: () -> Unit,
+    exit: Pair<ExitReport, Boolean>? = null, notAnswering: Boolean = false, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val press = squish(source)
@@ -592,6 +676,7 @@ private fun RouteRow(
     val where = @Composable { end: Boolean ->
         Text(route?.name ?: "Direct", style = Type.title, color = Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
         Text(route?.let { place(it, live) } ?: "Skips the VPN", style = Type.caption, color = Ink.dim, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
+        if (notAnswering) Text("Not answering", style = Type.caption, color = Ink.bad, textAlign = if (end) TextAlign.End else null)
         if (!wide) exit?.let { (r, pending) -> ExitLine(r, pending) }
     }
     Column(

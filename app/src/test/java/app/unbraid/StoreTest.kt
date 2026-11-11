@@ -1,6 +1,9 @@
 package app.unbraid
 
 import app.unbraid.data.Store
+import app.unbraid.data.UpdateState
+import app.unbraid.data.Release
+import app.unbraid.support.NudgeState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -268,4 +271,27 @@ class StoreTest {
         assertFalse(s.unsaved.value)
         assertEquals("{\"node\":1}", Store(dir) { key }.tsState)
     }
+    @Test fun updateAndNudgeSettingsRoundTripAndDefaultOnCorruption() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        assertEquals(UpdateState(), s.updates); assertFalse(s.updates.enabled); assertFalse(s.updates.asked); assertEquals(NudgeState(), s.nudges)
+        val updates = UpdateState(true, 123, 4, Release(5, "1.2"), asked = true)
+        val nudges = NudgeState(10, listOf(1, 2), listOf(20), 30, true)
+        s.updates = updates; s.nudges = nudges
+        val again = Store(dir) { key }
+        assertEquals(updates, again.updates); assertEquals(nudges, again.nudges)
+        File(dir, "updates.json").writeText("bad"); File(dir, "nudges.json").writeText("bad")
+        assertEquals(UpdateState(), again.updates); assertEquals(NudgeState(), again.nudges)
+    }
+    @Test fun updateAndNudgeWritesTolerateIoFailure() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        File(dir, "updates.json.tmp").mkdir()
+        File(dir, "nudges.json.tmp").mkdir()
+        s.updates = UpdateState(enabled = true)
+        s.nudges = NudgeState(disabled = true)
+        assertFalse(s.updates.enabled)
+        assertFalse(s.nudges.disabled)
+    }
+
 }
