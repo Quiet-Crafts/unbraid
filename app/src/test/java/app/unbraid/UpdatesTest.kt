@@ -38,6 +38,9 @@ class UpdatesTest {
         val s = UpdateState(enabled = true, lastAttemptMs = 100)
         assertFalse(Updates.due(s, 100 + 86_400_000 - 1))
         assertTrue(Updates.due(s, 100 + 86_400_000))
+        val failed = s.copy(failed = true)
+        assertFalse(Updates.due(failed, 100 + 3_600_000 - 1))
+        assertTrue(Updates.due(failed, 100 + 3_600_000))
         assertTrue(Updates.due(s, 99)); assertFalse(Updates.due(s.copy(enabled = false), 99))
     }
 
@@ -45,10 +48,25 @@ class UpdatesTest {
         val s = store(); val old = Release(3, "1.0")
         s.updates = UpdateState(enabled = true, latest = old)
         val result = Updates.check(s, 1, 100_000_000) { null }
-        assertEquals(100_000_000L, result.lastAttemptMs); assertEquals(old, result.latest)
+        assertEquals(100_000_000L, result.lastAttemptMs); assertEquals(old, result.latest); assertTrue(result.failed)
         var fetched = false
         Updates.check(s, 1, 100_000_001) { fetched = true; null }
         assertFalse(fetched); assertEquals(result, s.updates)
+    }
+
+    @Test fun forceAndFailureRecovery() = runBlocking {
+        val s = store()
+        s.updates = UpdateState(enabled = true, lastAttemptMs = 100_000_000)
+        var fetched = false
+        Updates.check(s, 1, 100_000_001) { fetched = true; null }
+        assertFalse(fetched)
+        val garbage = Updates.check(s, 1, 100_000_002, force = true) { "garbage" }
+        assertTrue(garbage.failed); assertEquals(100_000_002L, garbage.lastAttemptMs)
+        val success = Updates.check(s, 1, 100_000_003, force = true) { """{"versionCode":4,"versionName":"1.1"}""" }
+        assertFalse(success.failed); assertEquals(Release(4, "1.1"), success.latest)
+        s.updates = success.copy(enabled = false)
+        Updates.check(s, 1, 100_000_004, force = true) { fetched = true; null }
+        assertFalse(fetched); assertEquals(success.copy(enabled = false), s.updates)
     }
 
     @Test fun oversizedResponseIsRejected() = runBlocking {
@@ -65,6 +83,6 @@ class UpdatesTest {
             s.updates = s.updates.copy(enabled = false)
             """{"versionCode":4,"versionName":"1.1"}"""
         }
-        assertFalse(result.enabled); assertEquals(old, result.latest); assertEquals(result, s.updates)
+        assertFalse(result.enabled); assertEquals(old, result.latest); assertFalse(result.failed); assertEquals(result, s.updates)
     }
 }

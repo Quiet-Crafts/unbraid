@@ -155,12 +155,12 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     val updates = MutableStateFlow(UpdateState())
     /** True once the stored state is read: until then an empty one means unknown, not no news. */
     val updatesLoaded = MutableStateFlow(false)
-    /** Asks for the newest version (the check holds back to once a day, and has its own lock); the stored answer shows meanwhile. */
+    /** Asks for the newest version (checks are throttled and serialized); the stored answer shows meanwhile. */
     fun checkUpdates() { viewModelScope.launch(Dispatchers.IO) { runCheck() } }
-    private suspend fun runCheck() {
+    private suspend fun runCheck(force: Boolean = false) {
         updates.update { mergeUpdates(store.updates, it) }
         updatesLoaded.value = true
-        val checked = Updates.check(store, BuildConfig.VERSION_CODE)
+        val checked = Updates.check(store, BuildConfig.VERSION_CODE, force = force)
         updates.update { mergeUpdates(checked, it) }
     }
     /** Hides the update card until a newer version than [code] comes. */
@@ -175,7 +175,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         viewModelScope.launch(Dispatchers.IO) {
             val now = synchronized(store) { f(store.updates).also { store.updates = it } }
             // Just turned on: the first check runs now, not at the next resume.
-            if (BuildConfig.UPDATE_CHECK && now.enabled && !was) runCheck()
+            if (BuildConfig.UPDATE_CHECK && now.enabled && !was) runCheck(force = true)
         }
     }
 

@@ -18,6 +18,11 @@ class UpdateMergeTest {
         assertEquals(read, mergeUpdates(read, UpdateState()))
     }
 
+    @Test fun failureComesFromTheCheck() {
+        assertEquals(true, mergeUpdates(UpdateState(failed = true), UpdateState(asked = true)).failed)
+        assertEquals(false, mergeUpdates(UpdateState(), UpdateState(asked = true, failed = true)).failed)
+    }
+
     @Test fun aNewerDismissalIsKept() {
         assertEquals(9, mergeUpdates(UpdateState(dismissedCode = 4), UpdateState(dismissedCode = 9)).dismissedCode)
     }
