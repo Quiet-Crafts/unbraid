@@ -25,6 +25,25 @@ gomobile bind -o "$OUT" -target android/arm64 -androidapi 33 -javapkg=io.nekohas
   -ldflags "-X github.com/sagernet/sing-box/constant.Version=1.14.4 -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0 -s -w -buildid=" \
   -tags with_gvisor,with_wireguard,with_utls,with_tailscale,ts_omit_logtail,ts_omit_cachenetmap,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,with_openvpn,badlinkname,tfogo_checklinkname0 \
   ./experimental/libbox
+# The NDK's start-up object (crtbegin_so.o) carries the label of the compiler that built that NDK, and the macOS and
+# Linux NDKs differ in it, so the same source gave a different libbox.so on each. Drop that label (.comment, unused at
+# run time) and store the entries uncompressed, so the AAR is the same on every host.
+python3 - "$OUT" "$(ls "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-objcopy)" <<'PY'
+import os, subprocess, sys, tempfile, zipfile
+aar, objcopy = sys.argv[1:]
+with zipfile.ZipFile(aar) as z:
+    items = [(i, z.read(i)) for i in z.infolist()]
+with tempfile.TemporaryDirectory() as d, zipfile.ZipFile(aar + ".tmp", "w") as out:
+    for info, data in items:
+        if info.filename.endswith(".so"):
+            p = os.path.join(d, "lib.so")
+            open(p, "wb").write(data)
+            subprocess.run([objcopy, "--remove-section=.comment", p], check=True)
+            data = open(p, "rb").read()
+        info.compress_type = zipfile.ZIP_STORED
+        out.writestr(info, data)
+os.replace(aar + ".tmp", aar)
+PY
 mv "$OUT" "$ROOT/app/libs/libbox.aar"
 # The app build checks this: commit it with the change that needs the new engine.
 (cd "$ROOT/app/libs" && shasum -a 256 libbox.aar > libbox.aar.sha256)
