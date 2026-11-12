@@ -152,8 +152,8 @@ fun graphemes(s: String): Int = chars(s).let { b -> var n = 0; while (b.next() !
 /** The first [n] characters people see of [s], never splitting one. */
 fun String.takeGraphemes(n: Int): String = chars(this).let { b -> var end = 0; repeat(n) { b.next().takeIf { it != java.text.BreakIterator.DONE }?.let { end = it } }; take(end) }
 
-/** The current [Setup.version]. */
-const val VERSION = 1
+/** The current [Setup.version]. 2: every value is written, defaults too (older files left out those equal to a default). */
+const val VERSION = 2
 
 @Serializable
 data class Setup(
@@ -169,7 +169,7 @@ data class Setup(
     val home: Home = Home(),
     val prefs: Prefs = Prefs(),
     val servers: List<OwnServer> = emptyList(),
-    /** Saved format: 1 = provider pages and unbraid's filter. New setups start at the current one ([Store]). */
+    /** Saved format: 1 = provider pages and unbraid's filter; 2 = defaults written. New setups start at the current one ([Store]). */
     val version: Int = 0,
     /** Each provider's page settings: provider id → [Opt.key] → value. Unset keys take [Provider.defaults]. */
     val opts: Map<String, Map<String, String>> = emptyMap(),
@@ -279,10 +279,14 @@ data class Setup(
      */
     fun migrated(): Setup {
         if (version >= VERSION) return this
-        // NordVPN routes had no blocking switch of their own: a flag one kept from another provider meant nothing then.
-        var s = copy(version = VERSION, routes = routes.map { if (!it.imported && it.loc.provider == "nord") it.copy(filter = null) else it })
-        if (!prefs.threatProtection) s = s.copy(opts = opts + ("nord" to (opts["nord"].orEmpty() + (PROTECT to "off"))), prefs = s.prefs.copy(threatProtection = true))
-        prefs.customDns.firstOrNull()?.let { s = s.copy(prefs = s.prefs.copy(customDns = emptyList(), filter = s.prefs.filter.takeIf { it.id != null } ?: Filter(Filters.OWN, it, routes = true))) }
+        var s = copy(version = VERSION)
+        if (version < 1) {
+            // NordVPN routes had no blocking switch of their own: a flag one kept from another provider meant nothing then.
+            s = s.copy(routes = routes.map { if (!it.imported && it.loc.provider == "nord") it.copy(filter = null) else it })
+            if (!prefs.threatProtection) s = s.copy(opts = opts + ("nord" to (opts["nord"].orEmpty() + (PROTECT to "off"))), prefs = s.prefs.copy(threatProtection = true))
+            prefs.customDns.firstOrNull()?.let { s = s.copy(prefs = s.prefs.copy(customDns = emptyList(), filter = s.prefs.filter.takeIf { it.id != null } ?: Filter(Filters.OWN, it, routes = true))) }
+        }
+        // 1 to 2 changes no value: a value missing from an older file reads as the default it had then, and is written from now on.
         return s
     }
 }

@@ -27,6 +27,11 @@ import javax.crypto.spec.GCMParameterSpec
 class Store(private val dir: File, private val keyOf: (create: Boolean) -> SecretKey = ::keystoreKey) {
     constructor(ctx: Context) : this(ctx.filesDir)
     private val json = NordApi.json
+    /**
+     * For what the user chose (settings, update and support-card state): every value is written, defaults and nulls too,
+     * so a default changed in a later version never changes a saved choice. Reads the same as [json].
+     */
+    private val explicit = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     // Declared before anything that loads sealed files at construction. A new key only while no sealed file exists: a
     // key missing beside them throws, and a failed lazy runs again on the next use, so those files are never orphaned.
@@ -53,7 +58,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     // Sealed: it can hold imported WireGuard private keys and a Tailscale auth key.
     private val _setup = MutableStateFlow(readSetup() ?: Setup(version = VERSION))
     val setup: StateFlow<Setup> = _setup.asStateFlow()
-    private fun readSetup() = marked(SETUP) { json.decodeFromString(Setup.serializer(), it).migrated() }
+    private fun readSetup() = marked(SETUP) { explicit.decodeFromString(Setup.serializer(), it).migrated() }
 
     /** Applies [f]; false when it couldn't be written (see [unsaved]), so callers keep a pasted secret on the clipboard. */
     @Synchronized
@@ -81,7 +86,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     private fun change(f: (Setup) -> Setup) = synchronized(changing) { if (_unreadable.value) false else { _setup.update { f(it).tidy() }; true } }
 
     // A Keystore hiccup must not crash a tap: the change stays in memory, the banner says so, and a retry writes it.
-    private fun saveSetup() = safely { seal("setup.bin", json.encodeToString(Setup.serializer(), _setup.value)) }
+    private fun saveSetup() = safely { seal("setup.bin", explicit.encodeToString(Setup.serializer(), _setup.value)) }
         .also { if (!it) Log.e("Unbraid", "store: setup not saved"); failed(setup = !it) }
     private fun saveAccounts() = safely { seal("accounts.bin", json.encodeToString(accountsSer, _accounts.value)) }
         .also { if (!it) Log.e("Unbraid", "store: accounts not saved"); failed(accounts = !it) }
@@ -180,12 +185,12 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
 
 
     var updates: UpdateState
-        get() = synchronized(this) { runCatching { read("updates.json")?.let { json.decodeFromString(UpdateState.serializer(), it) } }.getOrNull() ?: UpdateState() }
-        set(v) { synchronized(this) { safely { write("updates.json", json.encodeToString(UpdateState.serializer(), v)) } } }
+        get() = synchronized(this) { runCatching { read("updates.json")?.let { explicit.decodeFromString(UpdateState.serializer(), it) } }.getOrNull() ?: UpdateState() }
+        set(v) { synchronized(this) { safely { write("updates.json", explicit.encodeToString(UpdateState.serializer(), v)) } } }
 
     var nudges: NudgeState
-        get() = runCatching { read("nudges.json")?.let { json.decodeFromString(NudgeState.serializer(), it) } }.getOrNull() ?: NudgeState()
-        set(v) { safely { write("nudges.json", json.encodeToString(NudgeState.serializer(), v)) } }
+        get() = runCatching { read("nudges.json")?.let { explicit.decodeFromString(NudgeState.serializer(), it) } }.getOrNull() ?: NudgeState()
+        set(v) { safely { write("nudges.json", explicit.encodeToString(NudgeState.serializer(), v)) } }
 
     /** The tailnet's MagicDNS domain, learned once Tailscale is signed in. */
     var tsSuffix: String?

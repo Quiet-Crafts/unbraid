@@ -1,6 +1,17 @@
 package app.unbraid
 
+import app.unbraid.data.Filter
+import app.unbraid.data.Home
+import app.unbraid.data.Location
+import app.unbraid.data.NordApi
+import app.unbraid.data.OwnServer
+import app.unbraid.data.Prefs
+import app.unbraid.data.Profile
+import app.unbraid.data.Route
+import app.unbraid.data.Setup
 import app.unbraid.data.Store
+import app.unbraid.data.VERSION
+import app.unbraid.data.WgPeer
 import app.unbraid.data.UpdateState
 import app.unbraid.data.Release
 import app.unbraid.support.NudgeState
@@ -14,6 +25,7 @@ import java.io.File
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 class StoreTest {
     @get:Rule val tmp = TemporaryFolder()
@@ -294,4 +306,40 @@ class StoreTest {
         assertFalse(s.nudges.disabled)
     }
 
+
+    private fun opened(f: File) = f.readBytes().let { b -> String(Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, b, 0, 12)) }.doFinal(b, 12, b.size - 12)) }
+
+    /** A file as earlier versions wrote it (values equal to a default left out) loads to the same setup; saved again, every value is written. */
+    @Test fun olderFormatLoadsTheSameAndSavesEveryValue() {
+        val dir = tmp.newFolder()
+        // Verbatim shape of a version 1 file: no "provider":"nord", no "defaultRoute":"nl", no "lan":true, no "hue":0.
+        val v1 = """{"routes":[{"id":"nl","loc":{"countryId":153,"countryCode":"NL","country":"Netherlands"}},""" +
+            """{"id":"us","loc":{"provider":"mullvad","countryCode":"US","country":"United States","region":"us-nyc"},"hue":1}],""" +
+            """"apps":{"org.example.mail":"us"},"version":1,"profiles":[{"name":"Home","defaultRoute":"nl","apps":{"org.example.mail":"us"},"added":["us"]}],""" +
+            """"added":["us"],"profile":"Home"}"""
+        File(dir, "setup.bin").writeBytes(sealed(v1))
+        val expected = Setup(
+            routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands")), Route("us", Location("mullvad", countryCode = "US", country = "United States", region = "us-nyc"), hue = 1)),
+            defaultRoute = "nl", apps = mapOf("org.example.mail" to "us"), version = VERSION,
+            profiles = listOf(Profile("Home", "nl", mapOf("org.example.mail" to "us"), listOf("us"))), added = listOf("us"), profile = "Home",
+        )
+        val s = Store(dir) { key }
+        assertEquals(expected, s.setup.value)
+        assertTrue(s.update { it })
+        val text = opened(File(dir, "setup.bin"))
+        for (k in listOf("\"provider\":\"nord\"", "\"defaultRoute\":\"nl\"", "\"lan\":true", "\"threatProtection\":true", "\"hue\":0", "\"stats\":false", "\"version\":$VERSION"))
+            assertTrue(k, k in text)
+        assertEquals(expected, Store(dir) { key }.setup.value)
+
+        // A fuller setup written by the earlier encoder (defaults left out) reads back whole, only its version moves on.
+        val full = Setup(
+            routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands")), Route("w", wg = WgPeer("Home VPS", "k", listOf("10.0.0.2/32"), "p", endpoint = "192.0.2.1:51820", allowedIps = listOf("0.0.0.0/0")), own = "s1", filter = false)),
+            defaultRoute = "w", apps = mapOf("a" to "nl", "b" to "direct"), home = Home(tailscale = true, subnets = listOf("192.168.1.0/24")),
+            prefs = Prefs(lan = false, stats = true, filter = Filter("adguard", routes = true)), servers = listOf(OwnServer("s1", wg = WgPeer("Home VPS", "k", listOf("10.0.0.2/32"), "p", endpoint = "192.0.2.1:51820", allowedIps = listOf("0.0.0.0/0")))),
+            version = 1, opts = mapOf("nord" to mapOf("protect" to "off")),
+        )
+        val old = tmp.newFolder()
+        File(old, "setup.bin").writeBytes(sealed(NordApi.json.encodeToString(Setup.serializer(), full)))
+        assertEquals(full.copy(version = VERSION), Store(old) { key }.setup.value)
+    }
 }
