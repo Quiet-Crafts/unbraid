@@ -25,7 +25,8 @@ object NordApi {
         try { fetch(path, token) } catch (e: java.net.UnknownHostException) { Thread.sleep(1500); fetch(path, token) }
 
     private fun fetch(path: String, token: String?): String {
-        val c = URL(BASE + path).openConnection() as HttpURLConnection
+        val c = Http.open(URL(BASE + path)) as HttpURLConnection
+        c.instanceFollowRedirects = false
         c.connectTimeout = 10_000
         c.readTimeout = 15_000
         token?.let { c.setRequestProperty("Authorization", "Basic " + Base64.getEncoder().encodeToString("token:$it".toByteArray())) }

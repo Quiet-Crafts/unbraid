@@ -3,6 +3,7 @@ package app.unbraid.data
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLConnection
 import java.net.URLEncoder
 import java.net.UnknownHostException
 import javax.net.ssl.HttpsURLConnection
@@ -13,6 +14,9 @@ object Http {
     private const val MAX_BODY = 8 shl 20
 
     class Status(val code: Int, message: String) : IOException(message)
+
+    /** Opens a connection to a URL; tests put a fake one here. */
+    internal var open: (URL) -> URLConnection = { it.openConnection() }
 
     fun get(url: String, headers: Map<String, String> = emptyMap(), tls: SSLSocketFactory? = null, verifyHost: String? = null) =
         call("GET", url, headers, null, null, tls, verifyHost)
@@ -48,8 +52,11 @@ object Http {
         try { once(method, url, headers, body, type, tls, verifyHost) } catch (e: UnknownHostException) { Thread.sleep(1500); once(method, url, headers, body, type, tls, verifyHost) }
 
     private fun once(method: String, url: String, headers: Map<String, String>, body: String?, type: String?, tls: SSLSocketFactory?, verifyHost: String?): String {
-        val c = URL(url).openConnection() as HttpURLConnection
+        val c = open(URL(url)) as HttpURLConnection
         require(c is HttpsURLConnection) { "HTTPS only" }
+        // A redirect would take every header along, an API key among them, to whatever host it names; none of the
+        // provider APIs needs one, so a 3xx is an error like any other status.
+        c.instanceFollowRedirects = false
         tls?.let { c.sslSocketFactory = it }
         verifyHost?.let { h -> c.setHostnameVerifier { _, session -> javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier().verify(h, session) } }
         c.requestMethod = method

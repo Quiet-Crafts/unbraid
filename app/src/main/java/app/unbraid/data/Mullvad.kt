@@ -47,8 +47,9 @@ internal object WgKeys {
  */
 internal fun postJsonRaw(url: String, body: String, headers: Map<String, String> = emptyMap()): Pair<Int, String> {
     val bytes = body.toByteArray()
-    val c = URL(url).openConnection() as HttpsURLConnection
+    val c = Http.open(URL(url)) as HttpsURLConnection
     try {
+        c.instanceFollowRedirects = false
         c.requestMethod = "POST"
         c.setFixedLengthStreamingMode(bytes.size)
         c.connectTimeout = 10_000
