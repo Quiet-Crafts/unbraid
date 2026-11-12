@@ -616,8 +616,16 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         return saved
     }
 
-    /** Route [target] exits through saved server [s]; returns the route id. */
-    fun useServer(target: String, s: OwnServer) = addImported(target) { it.copy(wg = s.wg, ovpn = s.ovpn, ss = s.ss, own = s.id) }
+    /**
+     * Route [target] exits through saved server [s]; returns the route id. For a new route ("", "app:<pkg>", "default") a
+     * route already through [s] is reused, as a provider location's is, instead of adding another.
+     */
+    fun useServer(target: String, s: OwnServer): String {
+        val reuse = setup.value.takeIf { it.route(target) == null }?.serverRoute(s, draft)
+            ?: return addImported(target) { it.copy(wg = s.wg, ovpn = s.ovpn, ss = s.ss, own = s.id) }
+        if (target.startsWith("app:")) assign(target.removePrefix("app:"), reuse) else if (target.isEmpty()) keep(reuse)
+        return reuse
+    }
 
     /** Renames a saved server and every route using it. */
     fun renameServer(id: String, name: String) = name.trim().take(40).takeIf { it.isNotEmpty() }?.let { n ->

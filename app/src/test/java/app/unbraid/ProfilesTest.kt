@@ -407,4 +407,20 @@ class ProfilesTest {
         assertEquals(emptySet<String>(), base.appsOnMissing)
         assertEquals(emptyList<String>(), base.profilesMissingDefault)
     }
+
+    /** A saved server already carried by a route is reused, the one the profile shows first; apps are offered only the profile's routes. */
+    @Test fun savedServerRouteIsReusedAndOnlyTheProfilesRoutesAreOffered() {
+        val peer = app.unbraid.data.WgPeer("Home VPS", "k", listOf("10.0.0.2/32"), "p", endpoint = "192.0.2.1:51820", allowedIps = listOf("0.0.0.0/0"))
+        val server = app.unbraid.data.OwnServer("s1", wg = peer)
+        val a = Route("a", wg = peer, own = "s1")
+        val b = Route("b", wg = peer, own = "s1")
+        val s = base.copy(routes = listOf(nl, us, it, a, b)).saveAs("Home").copy(added = listOf("b"))
+            .add("Trip", true).editing("Trip") { p -> p.copy(defaultRoute = "it", added = listOf("a")) }
+        assertEquals("b", s.serverRoute(server, null))
+        assertEquals("a", s.serverRoute(server, "Trip"))
+        assertNull(s.serverRoute(server.copy(id = "s2"), null))
+        assertNull(s.serverRoute(server.copy(wg = peer.copy(endpoint = "192.0.2.9:51820")), null)) // a copy no longer like it
+        assertEquals(listOf("it", "a"), s.offered("Trip").map { r -> r.id })
+        assertEquals(base.routes, base.offered(null)) // no profiles: every route
+    }
 }

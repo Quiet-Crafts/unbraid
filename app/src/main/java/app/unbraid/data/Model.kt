@@ -236,6 +236,16 @@ data class Setup(
      */
     fun hiddenRoutes(name: String?): Set<String> = if (profiles.isEmpty()) emptySet() else routes.map { it.id }.toSet() - viewAs(name).live.own
 
+    /** The routes profile [name] (null = the setup in use) offers its apps: those it lists, never another profile's or one no profile uses. */
+    fun offered(name: String?) = hiddenRoutes(name).let { h -> routes.filter { it.id !in h } }
+
+    /** A route already exiting through saved server [s], to reuse rather than add another; one profile [name] shows comes first. */
+    fun serverRoute(s: OwnServer, name: String?): String? {
+        val rs = routes.filter { it.own == s.id && it.wg == s.wg && it.ovpn == s.ovpn && it.ss == s.ss }
+        val hidden = hiddenRoutes(name)
+        return (rs.firstOrNull { it.id !in hidden } ?: rs.firstOrNull())?.id
+    }
+
     /** Changes the default and exceptions of profile [name] with [f]: only its saved copy, unless it is the one in use (or null). */
     fun editing(name: String?, f: (Profile) -> Profile): Setup {
         if (name == null || name == profile || profiles.none { it.name == name }) return f(live).let { copy(defaultRoute = it.defaultRoute, apps = it.apps, added = it.added) }
