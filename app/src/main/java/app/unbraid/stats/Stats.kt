@@ -44,6 +44,7 @@ object Stats {
     private const val HOUR = 3_600_000L
     private const val TESTS_KEPT = 100
     /** A test's combined run: its start (0 = tested alone) and how many exits shared the line. */
+    private const val APP_TABLE = "CREATE TABLE appname(pkg TEXT PRIMARY KEY, name TEXT NOT NULL, shared INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID"
     private const val RUN_COLUMNS = "grp INTEGER NOT NULL DEFAULT 0, n INTEGER NOT NULL DEFAULT 1"
 
     @SuppressLint("StaticFieldLeak")
@@ -65,7 +66,7 @@ object Stats {
     fun hourOf(ms: Long) = (ms + TimeZone.getDefault().getOffset(ms)) / HOUR
     fun dayOf(ms: Long) = Math.floorDiv(hourOf(ms), 24L)
 
-    private class Helper(c: Context) : SQLiteOpenHelper(c, FILE, null, 3) {
+    private class Helper(c: Context) : SQLiteOpenHelper(c, FILE, null, 4) {
         override fun onCreate(d: SQLiteDatabase) = listOf(
             "CREATE TABLE hourly(h INTEGER, exit TEXT, up INTEGER, down INTEGER, PRIMARY KEY(h, exit)) WITHOUT ROWID",
             "CREATE TABLE daily(d INTEGER, app TEXT, exit TEXT, up INTEGER, down INTEGER, PRIMARY KEY(d, app, exit)) WITHOUT ROWID",
@@ -73,13 +74,15 @@ object Stats {
             "CREATE TABLE peak(d INTEGER, exit TEXT, bps INTEGER, at INTEGER, up INTEGER NOT NULL DEFAULT 0, up_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(d, exit)) WITHOUT ROWID",
             "CREATE TABLE span(start INTEGER PRIMARY KEY, end INTEGER, paused INTEGER)",
             "CREATE TABLE exit(id TEXT PRIMARY KEY, code TEXT, name TEXT, hue INTEGER, via TEXT)",
+            APP_TABLE,
             "CREATE TABLE test(at INTEGER PRIMARY KEY, exit TEXT, via TEXT, server TEXT, ip TEXT, down INTEGER, up INTEGER, idle INTEGER, busy_down INTEGER, busy_up INTEGER, $RUN_COLUMNS)",
         ).forEach(d::execSQL)
 
-        // 2: peaks keep upload apart from download (bps/at stay the download's). 3: tests remember a combined run.
+        // 2: peaks keep upload apart from download (bps/at stay the download's). 3: tests remember a combined run. 4: apps keep the name they had when first seen.
         override fun onUpgrade(d: SQLiteDatabase, old: Int, new: Int) {
             if (old < 2) listOf("ALTER TABLE peak ADD COLUMN up INTEGER NOT NULL DEFAULT 0", "ALTER TABLE peak ADD COLUMN up_at INTEGER NOT NULL DEFAULT 0").forEach(d::execSQL)
             if (old < 3) RUN_COLUMNS.split(", ").forEach { d.execSQL("ALTER TABLE test ADD COLUMN $it") }
+            if (old < 4) d.execSQL(APP_TABLE)
         }
     }
 
@@ -112,6 +115,11 @@ object Stats {
             daily.forEach { (k, s) -> d.execSQL("INSERT INTO daily VALUES(?,?,?,?,?) ON CONFLICT(d, app, exit) DO UPDATE SET up=up+excluded.up, down=down+excluded.down", arrayOf<Any>(k.first, k.second, k.third, s.up, s.down)) }
             servers.forEach { (k, b) -> d.execSQL("INSERT INTO server VALUES(?,?,?,?) ON CONFLICT(d, exit, name) DO UPDATE SET bytes=bytes+excluded.bytes", arrayOf<Any>(k.first, k.second, k.third, b)) }
             labelExits(d, daily.keys.map { it.third } + hourly.keys.map { it.second })
+            daily.keys.map { it.second }.distinct().forEach { pkg ->
+                val a = appLabels[pkg] ?: return@forEach
+                // The first name stays (the app may be gone when it is shown); only "shared with others" can be added later.
+                d.execSQL("INSERT INTO appname VALUES(?,?,?) ON CONFLICT(pkg) DO UPDATE SET shared=MAX(shared, excluded.shared)", arrayOf<Any>(pkg, a.name, if (a.shared) 1 else 0))
+            }
         }
         clearPending()
         maybePrune()
@@ -128,6 +136,41 @@ object Stats {
         val e = labels[id] ?: return@forEach
         d.execSQL("INSERT OR REPLACE INTO exit VALUES(?,?,?,?,?)", arrayOf<Any>(id, e.code, e.name, e.hue, e.via))
     }
+
+    /** An app's name and whether its user id is shared with other apps, as first seen. */
+    data class AppName(val name: String, val shared: Boolean)
+
+    /** The apps' names noted this run, written with their data. */
+    private val appLabels = java.util.concurrent.ConcurrentHashMap<String, AppName>()
+
+    /** An app as a connection names it: [pkg], or "?" (no uid), or "uid:N" (a uid with no app); [shared]: other apps use its uid. */
+    internal data class AppId(val pkg: String, val shared: Boolean)
+
+    /** Every package of a uid (the alphabetically first one carries the traffic) or the uid itself when it has none. */
+    internal fun resolveApp(pkg: String?, uid: Int, packages: List<String>?): AppId {
+        val all = packages.orEmpty().sorted()
+        return AppId(pkg ?: if (uid < 0) "?" else all.firstOrNull() ?: "uid:$uid", all.size > 1)
+    }
+
+    /** Notes an installed app's name the first time it is seen, so history keeps it after the app is removed. */
+    internal fun noteApp(a: AppId) {
+        if (a.pkg == "?" || a.pkg.startsWith("uid:")) return
+        val prev = appLabels[a.pkg]
+        if (prev != null && (prev.shared || !a.shared)) return
+        val name = prev?.name ?: runCatching { ctx.packageManager.getApplicationInfo(a.pkg, 0).loadLabel(ctx.packageManager).toString() }.getOrNull() ?: return
+        appLabels[a.pkg] = AppName(name, a.shared)
+    }
+
+    /** A real package name (not "?" or a bare uid). */
+    internal fun isPackage(pkg: String) = pkg != "?" && !pkg.startsWith("uid:")
+
+    /** The row every uid-only app ("uid:N") is folded into. */
+    const val OTHER = "uid:"
+
+    /** Folds the uid-only apps into one [OTHER] row per exit, largest first. */
+    internal fun foldUid(rows: List<Triple<String, String, Long>>) =
+        rows.groupBy { (if (it.first.startsWith("uid:")) OTHER else it.first) to it.second }
+            .map { (k, v) -> Triple(k.first, k.second, v.sumOf { it.third }) }.sortedByDescending { it.third }
 
     /** Each exit's label as last noted, taken when its connections open or its test starts, not when the bytes are written. */
     private val labels = java.util.concurrent.ConcurrentHashMap<String, Exit>()
@@ -183,6 +226,7 @@ object Stats {
         d.execSQL("DELETE FROM test WHERE at < ? OR (CASE grp WHEN 0 THEN at ELSE grp END) NOT IN " +
             "(SELECT DISTINCT CASE grp WHEN 0 THEN at ELSE grp END k FROM test ORDER BY k DESC LIMIT $TESTS_KEPT)", arrayOf<Any>(now - 400 * 24 * HOUR))
         // An exit's name and colour go with the last row that needs them.
+        d.execSQL("DELETE FROM appname WHERE pkg NOT IN (SELECT app FROM daily)")
         d.execSQL("DELETE FROM exit WHERE id NOT IN (SELECT exit FROM hourly UNION SELECT exit FROM daily UNION SELECT exit FROM server UNION SELECT exit FROM test)")
     }
 
@@ -271,7 +315,10 @@ object Stats {
     private fun List<Triple<Long, String, Bytes>>.byKey(): Map<Long, Map<String, Bytes>> = groupBy({ it.first }, { it.second to it.third }).mapValues { it.value.toMap() }
 
     /** Bytes per app and exit over days [from, to], largest first. */
-    fun apps(from: Long, to: Long) = rows("SELECT app, exit, SUM(up)+SUM(down) b FROM daily WHERE d BETWEEN ? AND ? GROUP BY app, exit ORDER BY b DESC", arrayOf("$from", "$to")) { Triple(it.getString(0), it.getString(1), it.getLong(2)) }
+    fun apps(from: Long, to: Long) = foldUid(rows("SELECT app, exit, SUM(up)+SUM(down) b FROM daily WHERE d BETWEEN ? AND ? GROUP BY app, exit ORDER BY b DESC", arrayOf("$from", "$to")) { Triple(it.getString(0), it.getString(1), it.getLong(2)) })
+
+    /** The names apps had when first seen, for those still in the data. */
+    fun appNames(): Map<String, AppName> = rows("SELECT pkg, name, shared FROM appname") { it.getString(0) to AppName(it.getString(1), it.getInt(2) == 1) }.toMap()
 
     fun servers(exit: String, from: Long, to: Long) = rows("SELECT name, SUM(bytes) b FROM server WHERE exit = ? AND d BETWEEN ? AND ? GROUP BY name ORDER BY b DESC", arrayOf(exit, "$from", "$to")) { it.getString(0) to it.getLong(1) }
 
@@ -420,9 +467,10 @@ internal object Collector {
     private fun apply(events: List<Ev>, reset: Boolean) {
         val now = System.currentTimeMillis()
         val (setup, tags, servers) = engine
+        uidPackages.clear() // a uid can change hands between batches
         val ids = HashMap<String, String>() // the recorded id of each exit, worked out once per batch (a replay lists hundreds)
         val open = { e: Ev ->
-            val app = if (e.own) Stats.ctx.packageName else appOf(e)
+            val app = if (e.own) Stats.ctx.packageName else appOf(e).also(Stats::noteApp).pkg
             val exit = (if (e.own) SpeedTest.exitOn(e.tag) else SpeedTest.nodeExitOn(e.tag)) ?: exitOf(e.tag, app, setup, tags)
             Conn(app, ids.getOrPut(exit) { Stats.note(exit, setup) }, servers[exit]?.name, 0, 0)
         }
@@ -499,8 +547,10 @@ internal object Collector {
         window.clear(); windowUp = 0; closing.clear(); closingUp = 0
     }
 
-    /** The app as the engine found it for this connection; looked up afresh otherwise (a uid can change hands). */
-    private fun appOf(e: Ev) = e.pkg ?: if (e.uid < 0) "?" else Stats.ctx.packageManager.getPackagesForUid(e.uid)?.minOrNull() ?: "uid:${e.uid}"
+    private val uidPackages = HashMap<Int, List<String>>()
+
+    /** The app as the engine found it for this connection, and whether other apps share its uid; looked up afresh each batch. */
+    private fun appOf(e: Ev) = Stats.resolveApp(e.pkg, e.uid, if (e.uid < 0) null else uidPackages.getOrPut(e.uid) { Stats.ctx.packageManager.getPackagesForUid(e.uid)?.toList().orEmpty() })
 
     /** The tunnel tag says which tunnel; when routes share it, the app's own route among them says which route. */
     private fun exitOf(tag: String?, app: String, setup: app.unbraid.data.Setup, tags: Map<String, String>): String {

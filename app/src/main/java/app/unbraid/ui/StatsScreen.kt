@@ -123,6 +123,8 @@ private class View(
     val from: Long, val to: Long, val exits: Map<String, Ex>, val byExit: List<Pair<String, Stats.Bytes>>, val total: Stats.Bytes,
     val columns: List<Map<String, Stats.Bytes>>, val labels: List<String>, val selected: Int,
     val apps: List<Triple<String, String, Long>>,
+    /** What each app in [apps] is called: its current name, else the one saved when it was first seen. */
+    val appNames: Map<String, String>,
     /** Each exit's fastest speed test in the period (by download). */
     val tests: Map<String, Stats.Test>,
     val week: List<Float>, val weekMs: Long, val heat: List<Float>, val heatStart: LocalDate,
@@ -153,6 +155,19 @@ private fun View.fastestDown(e: String) = tests[e]?.down ?: 0
 
 private fun View.byProvider(): List<Pair<String, Long>> =
     byExit.groupBy({ providerOf(it.first, exits[it.first]) }, { it.second.total }).mapValues { it.value.sum() }.entries.sortedByDescending { it.value }.map { it.key to it.value }
+
+/**
+ * What an app is called in App flows: its current name; after it is removed, the name saved when it was first seen
+ * ("Removed app (Name)", never a piece of its package name); traffic of a uid with no app is one "Other system traffic".
+ * An app that shares its uid with others is named "Name and others", since their traffic counts under it.
+ */
+internal fun appLabel(pkg: String, installed: String?, saved: Stats.AppName?): String = when {
+    pkg == "?" -> "Unknown app"
+    pkg == Stats.OTHER -> "Other system traffic"
+    installed != null -> if (saved?.shared == true) "$installed and others" else installed
+    saved != null -> "Removed app (${saved.name})"
+    else -> "Removed app"
+}
 
 /** [part] of [total] as a whole percent, rounded to the nearest. Every share on the Stats pages divides by the same total. */
 internal fun sharePct(part: Long, total: Long): Int = ((part * 100.0 / total.coerceAtLeast(1)) + 0.5).toInt()
@@ -203,6 +218,12 @@ private fun load(p: Period, ui: Ui): View {
             else -> Ex(id, "?", id, "", Ink.faint)
         }
     }
+    val apps = Stats.apps(from, to)
+    val saved = Stats.appNames()
+    val pm = Stats.ctx.packageManager
+    val appNames = apps.map { it.first }.distinct().associateWith { pkg ->
+        appLabel(pkg, runCatching { pm.getApplicationInfo(pkg, 0).loadLabel(pm).toString() }.getOrNull().takeIf { Stats.isPackage(pkg) }, saved[pkg])
+    }
     val days = Stats.perDay(from, to)
     val byExit = HashMap<String, Stats.Bytes>()
     days.values.forEach { m -> m.forEach { (e, v) -> byExit.merge(e, v) { x, y -> Stats.Bytes(x.up + y.up, x.down + y.down) } } }
@@ -231,7 +252,7 @@ private fun load(p: Period, ui: Ui): View {
         from, to, exits, byExit.entries.sortedByDescending { it.value.total }.map { it.key to it.value },
         byExit.values.fold(Stats.Bytes(0, 0)) { x, y -> Stats.Bytes(x.up + y.up, x.down + y.down) }, columns, labels,
         if (p == Period.Day) java.time.LocalTime.now().hour else (today.toEpochDay() - from).toInt(),
-        Stats.apps(from, to), tests, week, weekMs, heat, heatStart,
+        apps, appNames, tests, week, weekMs, heat, heatStart,
     )
 }
 
@@ -576,8 +597,7 @@ private fun Live(v: View, go: (String?) -> Unit) {
 
 @Composable
 private fun Flows(ui: Ui, v: View, p: Period, periodPicker: LazyListScope.() -> Unit, go: (String?) -> Unit) {
-    val labels = remember { ui.apps.value.associate { it.pkg to it.label } }
-    val name = { pkg: String -> when (pkg) { "?" -> "Unknown app"; BuildConfig.APPLICATION_ID -> APP /* its own: speed tests, health checks */; else -> labels[pkg] ?: pkg.substringAfterLast('.') } }
+    val name = { pkg: String -> if (pkg == BuildConfig.APPLICATION_ID) APP /* its own: speed tests, health checks */ else v.appNames[pkg] ?: appLabel(pkg, null, null) }
     val apps = v.apps.filter { it.second != DIRECT }
     val exits = v.byExit.map { it.first }.filter { it != DIRECT }
     val total = v.total.total.coerceAtLeast(1) // of all the data, as in Usage

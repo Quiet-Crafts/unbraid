@@ -1,6 +1,8 @@
 package app.unbraid
 
 import app.unbraid.stats.SpeedTest
+import app.unbraid.stats.Stats
+import app.unbraid.ui.appLabel
 import app.unbraid.ui.leavesPage
 import app.unbraid.ui.sharePct
 import org.junit.Assert.assertEquals
@@ -54,5 +56,24 @@ class StatsFixesTest {
         assertEquals(75, sharePct(6_000_000_000, 8_000_000_000))
         assertEquals(67, sharePct(2, 3)) // 66.7, not 66
         assertEquals(0, sharePct(0, 0))
+    }
+
+    @Test fun removedUidOnlyAndSharedAppsAreNamedPlainly() {
+        val saved = Stats.AppName("Spotify", false)
+        assertEquals("Spotify", appLabel("com.spotify.music", "Spotify", saved))
+        assertEquals("Removed app (Spotify)", appLabel("com.spotify.music", null, saved))
+        assertEquals("Removed app", appLabel("com.spotify.music", null, null)) // never "music"
+        assertEquals("Other system traffic", appLabel(Stats.OTHER, null, null))
+        assertEquals("Unknown app", appLabel("?", null, null))
+        assertEquals("Mail and others", appLabel("a.mail", "Mail", Stats.AppName("Mail", true)))
+    }
+
+    @Test fun uidOnlyTrafficFoldsIntoOneRowAndSharedUidsAreFlagged() {
+        val rows = listOf(Triple("uid:10234", "r1", 5L), Triple("a.b", "r1", 9L), Triple("uid:10555", "r1", 7L), Triple("uid:10234", "r2", 1L))
+        assertEquals(listOf(Triple("uid:", "r1", 12L), Triple("a.b", "r1", 9L), Triple("uid:", "r2", 1L)), Stats.foldUid(rows))
+        assertEquals(Stats.AppId("uid:42", false), Stats.resolveApp(null, 42, emptyList()))
+        assertEquals(Stats.AppId("a.one", true), Stats.resolveApp(null, 42, listOf("b.two", "a.one")))
+        assertEquals(Stats.AppId("x.pkg", false), Stats.resolveApp("x.pkg", 42, listOf("x.pkg")))
+        assertEquals(Stats.AppId("?", false), Stats.resolveApp(null, -1, null))
     }
 }
