@@ -694,6 +694,41 @@ class CompilerTest {
         assertNotEquals(key(p), key(p.copy(plugin = null, pluginOpts = null)))
     }
 
+    private val ssPlain = SsProfile("s", "h.example", 8388, "aes-256-gcm", "pw")
+    private fun ssSetup(p: SsProfile, prefs: Prefs = Prefs(lan = false)) = Setup(routes = listOf(Route("s", ss = p)), defaultRoute = "s", home = Home(), prefs = prefs)
+    private fun ssCompile(p: SsProfile, prefs: Prefs = Prefs(lan = false)) = compile(ssSetup(p, prefs), links = mapOf("s" to SsLink(sv("s"), p)))
+
+    /** A plugin carries TCP only, so lookups go over TCP through the route and no UDP is handed to the server past the plugin. */
+    @Test fun shadowsocksRouteWithAPluginResolvesOverTcp() = listOf("obfs-local" to "obfs=http;obfs-host=a.example", "v2ray-plugin" to "tls;host=a.example").forEach { (plugin, opts) ->
+        val p = ssPlain.copy(plugin = plugin, pluginOpts = opts)
+        val c = ssCompile(p)
+        c.dnsServers()["dns-r-s"]!!.let { assertEquals(plugin, "tcp", it.str("type")); assertEquals(plugin, "r-s", it.str("detour")); assertEquals("9.9.9.9", it.str("server")) }
+        val out = c["outbounds"]!!.jsonArray.map { it.jsonObject }.single { it.str("tag") == "r-s" }
+        assertEquals(plugin, "tcp", out.str("network"))
+        assertEquals(plugin, plugin, out.str("plugin"))
+        // A filter by address on VPN routes is asked over TCP too; one by name is looked up over TCP first.
+        val plainFilter = ssCompile(p, Prefs(lan = false, filter = Filter(Filters.OWN, "1.1.1.1", routes = true))).dnsServers()
+        assertEquals("tcp", plainFilter["dns-r-s"]!!.str("type")); assertEquals("r-s", plainFilter["dns-r-s"]!!.str("detour"))
+        val named = ssCompile(p, Prefs(lan = false, filter = Filter(Filters.OWN, "tls://dns.example.org", routes = true))).dnsServers()
+        assertEquals("tls", named["dns-r-s"]!!.str("type"))
+        assertEquals("tcp", named["boot-r-s"]!!.str("type")); assertEquals("r-s", named["boot-r-s"]!!.str("detour"))
+        // The same plugin route as an app's exit, with a plain route beside it: only the plugin route changes.
+        val mixed = Setup(routes = listOf(Route("s", ss = p), Route("t", ss = ssPlain.copy(server = "t.example"))), defaultRoute = "t", apps = mapOf("com.s" to "s"), home = Home(), prefs = Prefs(lan = false))
+        val m = compile(mixed, links = mapOf("s" to SsLink(sv("s"), p), "t" to SsLink(sv("t"), ssPlain.copy(server = "t.example"))))
+        assertEquals("tcp", m.dnsServers()["dns-r-s"]!!.str("type")); assertEquals("udp", m.dnsServers()["dns-r-t"]!!.str("type"))
+        assertNull(m["outbounds"]!!.jsonArray.map { it.jsonObject }.single { it.str("tag") == "r-t" }["network"])
+    }
+
+    /** A Shadowsocks route without a plugin compiles exactly as it always has. */
+    @Test fun shadowsocksRouteWithoutAPluginIsUnchanged() {
+        assertEquals(
+            """{"log":{"level":"warn","timestamp":false},"dns":{"servers":[{"type":"fakeip","tag":"fake","inet4_range":"198.18.0.0/18"},{"type":"local","tag":"local"},{"type":"udp","tag":"dns-r-s","server":"9.9.9.9","detour":"r-s"}],"rules":[{"query_type":["A","AAAA"],"server":"fake","rewrite_ttl":1}],"final":"dns-r-s","strategy":"ipv4_only","optimistic":{"enabled":true,"timeout":"1h"},"timeout":"5s","cache_capacity":4096},"inbounds":[{"type":"tun","tag":"tun","address":["172.19.0.1/30"],"mtu":9000,"auto_route":true,"strict_route":true,"stack":"gvisor","udp_timeout":"30m","exclude_package":["app.unbraid"]}],"endpoints":[],"outbounds":[{"type":"direct","tag":"direct"},{"type":"shadowsocks","tag":"r-s","server":"h.example","server_port":8388,"method":"aes-256-gcm","password":"pw"}],"route":{"rules":[{"inbound":["tun"],"protocol":"dns","action":"hijack-dns"},{"inbound":["tun"],"port":53,"network":"udp","action":"hijack-dns"},{"ip_cidr":["198.18.64.0/18","198.18.128.0/18","198.18.192.0/18","198.19.0.0/18","198.19.64.0/18","198.19.128.0/18","198.19.192.0/18"],"action":"reject","no_drop":true},{"action":"resolve","server":"dns-r-s"}],"final":"r-s","auto_detect_interface":true,"default_domain_resolver":"local"},"experimental":{"cache_file":{"enabled":true,"path":"/tmp/cache.db","store_fakeip":true}}}""",
+            ssCompile(ssPlain).toString(),
+        )
+        val plainFilter = ssCompile(ssPlain, Prefs(lan = false, filter = Filter(Filters.OWN, "1.1.1.1", routes = true))).dnsServers()
+        assertEquals("udp", plainFilter["dns-r-s"]!!.str("type"))
+    }
+
     // ---- WireGuard keys ----
 
     private fun keyError(f: (WgLink) -> WgLink): String {

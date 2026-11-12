@@ -140,6 +140,9 @@ object Compiler {
         val ovpnDns = { id: String -> i.links[id] is OvpnLink && s.route(id)?.let(pushedDns) == true }
         // A filter reached by name, on an imported OpenVPN route, is looked up with that tunnel's pushed DNS (it may only be known there).
         val ovpnBoot = { id: String -> filterRoutes && filter != null && Filters.byName(filter) && i.links[id] is OvpnLink && s.route(id)?.imported == true }
+        // A Shadowsocks plugin (obfs-local, v2ray-plugin) carries TCP only: the engine sends UDP straight to the server,
+        // past the plugin, where a server behind one often doesn't answer. Such routes look names up over TCP and carry no UDP.
+        val tcpOnly = { id: String -> (i.links[id] as? SsLink)?.profile?.plugin != null }
         val dnsFor = { id: String -> if (id == FILTERED) "dns-filter" else if (id == DIRECT) "local" else if (ovpnDns(id)) "dns-ovpn-${tag(id)}" else "dns-r-$id" }
         val directFiltered = filter != null && s.prefs.filter.direct && s.defaultRoute == DIRECT
         val defaultDns = if (directFiltered && !defaultBlocked) "dns-filter" else if (s.defaultRoute == DIRECT || defaultBlocked || active.isEmpty()) "local" else dnsFor(s.defaultRoute)
@@ -167,14 +170,14 @@ object Compiler {
                     val boots = HashSet<String>() // one lookup server per tunnel: the engine allows one OpenVPN DNS server per endpoint
                     active.filter { !ovpnDns(it.id) }.forEach { r ->
                         val boot = "boot-${tag(r.id)}"
-                        val own = obj("type" to "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))
+                        val own = obj("type" to if (tcpOnly(r.id)) "tcp" else "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))
                         if (filter == null || !filterRoutes) add(own) else {
                             // A filter reached by name is looked up first through the same tunnel, with the route's own resolver.
                             if (Filters.byName(filter) && boots.add(boot)) add(
                                 if (ovpnBoot(r.id)) obj("type" to "openvpn", "tag" to boot, "endpoint" to tag(r.id), "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9")
                                 else JsonObject(own + ("tag" to JsonPrimitive(boot))),
                             )
-                            add(filterDns(filter, "dns-r-${r.id}", tag(r.id), boot))
+                            add(filterDns(filter, "dns-r-${r.id}", tag(r.id), boot, tcpOnly(r.id)))
                         }
                     }
                     // Direct traffic the filter applies to goes to it straight, not through a tunnel.
@@ -258,7 +261,9 @@ object Compiler {
             }
             putJsonArray("outbounds") {
                 add(obj("type" to "direct", "tag" to "direct"))
-                active.filter { shared[it.id] == "r-${it.id}" }.forEach { r -> (i.links[r.id] as? SsLink)?.let { add(Manual.ssOutbound(tag(r.id), it.profile)) } }
+                active.filter { shared[it.id] == "r-${it.id}" }.forEach { r -> (i.links[r.id] as? SsLink)?.let {
+                    add(Manual.ssOutbound(tag(r.id), it.profile).let { o -> if (tcpOnly(r.id)) JsonObject(o + ("network" to JsonPrimitive("tcp"))) else o })
+                } }
             }
             putJsonObject("route") {
                 putJsonArray("rules") {
@@ -358,9 +363,9 @@ object Compiler {
         p.address.mapNotNull(::canonical).filter(::isPrivate).distinct()
     }
 
-    /** A DNS server in the engine for filter [d]: over HTTPS or TLS by its address and TLS name, or plain; [boot] looks up a name. */
-    private fun filterDns(d: Filters.Dns, tag: String, detour: String, boot: String) = buildJsonObject {
-        put("type", if (d.path != null) "https" else if (d.tls != null) "tls" else "udp"); put("tag", tag)
+    /** A DNS server in the engine for filter [d]: over HTTPS or TLS by its address and TLS name, or plain (over TCP if [tcp]); [boot] looks up a name. */
+    private fun filterDns(d: Filters.Dns, tag: String, detour: String, boot: String, tcp: Boolean = false) = buildJsonObject {
+        put("type", if (d.path != null) "https" else if (d.tls != null) "tls" else if (tcp) "tcp" else "udp"); put("tag", tag)
         put("server", d.ip); put("server_port", d.port)
         d.path?.let { put("path", it) }
         if (d.path != null || d.tls != null) putJsonObject("tls") { put("enabled", true); d.tls?.let { put("server_name", it) } }
