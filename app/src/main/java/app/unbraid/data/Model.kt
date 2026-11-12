@@ -250,16 +250,28 @@ data class Setup(
             profiles.none { it.name != except && it.name.equals(n, ignoreCase = true) }
     }
 
-    /** Profiles left pointing at a removed route: its apps follow the profile's default, a removed default becomes the first route. Apps that chose the default keep it. */
+    /**
+     * Profiles left pointing at a removed route: its apps follow the profile's default, and the lists drop it. A default is
+     * never changed here: removing one is refused first ([refusesRemoving]).
+     */
     fun tidy(): Setup {
         val ok = { id: String -> id == DIRECT || id.isEmpty() || routes.any { it.id == id } }
-        if (added.all(ok) && profiles.all { p -> ok(p.defaultRoute) && p.apps.values.all(ok) && p.added.all(ok) }) return this
-        val first = routes.firstOrNull()?.id ?: DIRECT
-        return copy(added = added.filter(ok), profiles = profiles.map { p ->
-            val d = p.defaultRoute.takeIf(ok) ?: first
-            p.copy(defaultRoute = d, apps = p.apps.filterValues(ok), added = p.added.filter(ok))
-        })
+        if (added.all(ok) && profiles.all { p -> p.apps.values.all(ok) && p.added.all(ok) }) return this
+        return copy(added = added.filter(ok), profiles = profiles.map { p -> p.copy(apps = p.apps.filterValues(ok), added = p.added.filter(ok)) })
     }
+
+    /**
+     * Why routes [gone] (what the user removes, named [name]) can't go: one is the default of the setup in use or of a
+     * saved profile. Null when they may go. Nothing picks another default by itself.
+     */
+    fun refusesRemoving(gone: Set<String>, name: String): CarriesDefault? {
+        val live = defaultRoute in gone
+        val saved = profiles.filter { it.name != profile && it.defaultRoute in gone }.map { it.name }
+        return if (live || saved.isNotEmpty()) CarriesDefault(name, live, saved) else null
+    }
+
+    /** As a new install starts: only the placeholder route, as the default, and nothing chosen or saved yet. */
+    val untouched get() = Setup().let { routes == it.routes && defaultRoute == it.defaultRoute } && apps.isEmpty() && profiles.isEmpty() && added.isEmpty()
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute
     /** App [pkg] has no route of its own: it goes where the default goes. */
     fun follows(pkg: String) = pkg !in apps
@@ -299,6 +311,13 @@ data class Setup(
         if (version < 2) s = s.copy(apps = s.apps.filterValues { it != s.defaultRoute }, profiles = s.profiles.map { p -> p.copy(apps = p.apps.filterValues { it != p.defaultRoute }) })
         return s
     }
+}
+
+/** A removal refused: [name] carries the default route of the setup in use ([live]) or of the saved [profiles]. */
+data class CarriesDefault(val name: String, val live: Boolean, val profiles: List<String>) {
+    /** One sentence for the screen. */
+    val text get() = if (live) "$name carries your default route. Choose another default route first."
+        else "$name carries the default route of ${profiles.joinToString(", ")}. Choose another default route there first."
 }
 
 @Serializable

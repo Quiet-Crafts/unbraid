@@ -1,5 +1,6 @@
 package app.unbraid
 
+import app.unbraid.data.CarriesDefault
 import app.unbraid.data.DIRECT
 import app.unbraid.data.Location
 import app.unbraid.data.Profile
@@ -61,13 +62,34 @@ class ProfilesTest {
         assertEquals("ét", "été".takeGraphemes(2)) // never splits an accent from its letter
     }
 
-    /** A removed route: profiles' apps on it follow their default; a removed default becomes the first route. */
+    /** A removed route: profiles' apps on it follow their default; a default is never moved to another route. */
     @Test fun tidyAfterRouteRemoved() {
         val s = base.saveAs("Home").copy(profiles = listOf(Profile("Home", "nl", mapOf("netflix" to "us")), Profile("Trip", "us", mapOf("rai" to "it"))))
         val t = s.copy(routes = listOf(nl, it)).tidy()
         assertEquals(Profile("Home", "nl", emptyMap()), t.profiles[0])
-        assertEquals(Profile("Trip", "nl", mapOf("rai" to "it")), t.profiles[1])
+        assertEquals(Profile("Trip", "us", mapOf("rai" to "it")), t.profiles[1])
         assertEquals(s, s.tidy()) // nothing to mend: the same setup
+    }
+
+    /** Removing what carries a default, live or saved, is refused with its name; anything else may go. */
+    @Test fun removingADefaultIsRefused() {
+        val s = base.saveAs("Home").add("Trip", false).editing("Trip") { p -> p.copy(defaultRoute = "us") }
+        assertEquals(CarriesDefault("Home VPS", true, emptyList()), s.refusesRemoving(setOf("nl", "x"), "Home VPS"))
+        assertEquals("Home VPS carries your default route. Choose another default route first.", s.refusesRemoving(setOf("nl"), "Home VPS")!!.text)
+        val trip = s.refusesRemoving(setOf("us"), "United States")!!
+        assertEquals(CarriesDefault("United States", false, listOf("Trip")), trip)
+        assertEquals("United States carries the default route of Trip. Choose another default route there first.", trip.text)
+        assertNull(s.refusesRemoving(setOf("it"), "Italy"))
+        // The profile in use counts by its live default, not a stale saved copy.
+        assertNull(s.copy(defaultRoute = "it").refusesRemoving(setOf("nl"), "Netherlands"))
+    }
+
+    /** Only a setup as a new install has it is untouched (a sign-in or an import may replace its placeholder). */
+    @Test fun untouchedSetup() {
+        assertEquals(true, Setup().untouched)
+        assertEquals(false, Setup().copy(apps = mapOf("a" to "nl")).untouched)
+        assertEquals(false, Setup().copy(routes = Setup().routes.map { r -> r.copy(loc = r.loc.copy(provider = "mullvad")) }).untouched)
+        assertEquals(false, base.untouched)
     }
 
     /** A switch is done once the engine runs that exact setup in full, undone once it refused it, and waits otherwise. */
@@ -170,7 +192,7 @@ class ProfilesTest {
         }
     }
 
-    @Test fun tidyPreservesEmptyAndMendsRemovedRoutes() {
+    @Test fun tidyPreservesEmptyAndDefaultsAndMendsRemovedRoutes() {
         val s = base.copy(routes = listOf(nl, it), profiles = listOf(
             Profile("Empty", ""),
             Profile("Draft", "", mapOf("lost" to "us", "kept" to "it")),
@@ -179,7 +201,7 @@ class ProfilesTest {
         val tidy = s.tidy()
         assertEquals(Profile("Empty", ""), tidy.profiles[0])
         assertEquals(Profile("Draft", "", mapOf("kept" to "it")), tidy.profiles[1])
-        assertEquals(Profile("Trip", "nl", mapOf("kept" to "it")), tidy.profiles[2])
+        assertEquals(Profile("Trip", "us", mapOf("kept" to "it")), tidy.profiles[2]) // its default stays: refused before removal, refused at connect if missing
         assertEquals(tidy, tidy.tidy())
     }
 

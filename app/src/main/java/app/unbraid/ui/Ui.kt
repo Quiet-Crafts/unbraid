@@ -65,11 +65,12 @@ internal fun mergeUpdates(read: UpdateState, held: UpdateState) =
 
 data class AppInfo(val pkg: String, val label: String, val system: Boolean)
 
-/** Removed routes' apps follow the default; a removed default becomes [fallback], the first route left, or Direct. */
-private fun Setup.without(gone: Set<String>, fallback: String? = null): Setup {
-    val left = routes.filter { it.id !in gone }
-    return copy(routes = left, defaultRoute = if (defaultRoute in gone) fallback ?: left.firstOrNull()?.id ?: DIRECT else defaultRoute, apps = apps.filterValues { it !in gone })
-}
+/** Removed routes' apps follow the default. The default itself never moves: check [Setup.refusesRemoving] first. */
+private fun Setup.without(gone: Set<String>) = copy(routes = routes.filter { it.id !in gone }, apps = apps.filterValues { it !in gone })
+
+/** [f]'s setup, unless removing routes [gone] of it (named [name]) is refused: then [refused] gets why and nothing changes. */
+private inline fun Setup.removing(gone: Set<String>, name: String, refused: (app.unbraid.data.CarriesDefault) -> Unit, f: Setup.() -> Setup) =
+    refusesRemoving(gone, name)?.let { refused(it); this } ?: f()
 
 /** The single screen-facing model. Thin: state lives in [app.unbraid.data.Store] and [UnbraidVpn.state]. */
 class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : AndroidViewModel(app) {
@@ -344,24 +345,36 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         checkTailscale()
     }
 
-    /** Turns Tailscale off, drops its exit routes (their apps follow the default) and logs this device out of its tailnet. */
-    fun signOutTailscale() {
+    private val Setup.tsRoutes get() = routes.filter { it.tsExit != null }.map { it.id }.toSet()
+
+    /** Why Tailscale can't be signed out of now (an exit route of it is a default), or null. */
+    fun signOutTailscaleRefused() = setup.value.let { s -> s.refusesRemoving(s.tsRoutes, "Tailscale") }
+
+    /**
+     * Turns Tailscale off, drops its exit routes (their apps follow the default) and logs this device out of its tailnet.
+     * Refused, changing nothing, while one of those routes is a default ([signOutTailscaleRefused]).
+     */
+    fun signOutTailscale(): app.unbraid.data.CarriesDefault? {
+        signOutTailscaleRefused()?.let { return it }
         val had = setup.value.tailscale
         viewModelScope.launch(Dispatchers.IO) {
             val loggedOut = stopVpn(had)
+            var refused: app.unbraid.data.CarriesDefault? = null
             if (!whileStopped("turn Tailscale off") {
-                store.update { s ->
-                    val gone = s.routes.filter { it.tsExit != null }.map { it.id }.toSet()
-                    s.without(gone).copy(home = s.home.copy(tailscale = false, tsAuthKey = null))
+                // Checked again: a default moved onto a Tailscale route meanwhile keeps Tailscale as it is.
+                store.update { s -> s.removing(s.tsRoutes, "Tailscale", { refused = it }) { without(s.tsRoutes).copy(home = home.copy(tailscale = false, tsAuthKey = null)) } }
+                if (refused == null) {
+                    File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
+                    store.tsSuffix = null
                 }
-                File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
-                store.tsSuffix = null
             }) return@launch
+            refused?.let { notice.value = it.text; return@launch }
             // Off already (only a node left behind): the engine isn't running, so the tailnet still lists this phone.
             tailscaleLeft(if (had) loggedOut else false)
             checkTailscale()
             resetIfEmpty()
         }
+        return null
     }
 
     fun signOut() {
@@ -567,15 +580,18 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         }
     }
 
-    /** Removes a saved server and the routes using it; their apps follow the default route (or go Direct if that was one). */
-    fun removeServer(id: String) {
-        dropServer(id)
-        resetIfEmpty()
-    }
+    private fun Setup.serverRoutes(id: String) = routes.filter { it.own == id }.map { it.id }.toSet()
+    private fun Setup.serverName(id: String) = servers.firstOrNull { it.id == id }?.name.orEmpty().ifEmpty { "This server" }
 
-    private fun dropServer(id: String) = store.edit { s ->
-        val gone = s.routes.filter { it.own == id }.map { it.id }.toSet()
-        s.without(gone).copy(servers = s.servers.filter { it.id != id })
+    /** Why saved server [id] can't be removed now (a route using it is a default), or null. */
+    fun removeServerRefused(id: String) = setup.value.let { s -> s.refusesRemoving(s.serverRoutes(id), s.serverName(id)) }
+
+    /** Removes a saved server and the routes using it; their apps follow the default route. Refused, changing nothing, while one of them is a default. */
+    fun removeServer(id: String): app.unbraid.data.CarriesDefault? {
+        var refused: app.unbraid.data.CarriesDefault? = null
+        store.edit { s -> s.removing(s.serverRoutes(id), s.serverName(id), { refused = it }) { without(serverRoutes(id)).copy(servers = servers.filter { it.id != id }) } }
+        if (refused == null) resetIfEmpty()
+        return refused
     }
 
     /**
@@ -589,11 +605,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null) ?: Route(id, hue = nextHue(s))
             val r = source(blank)
             var next = s.copy(routes = if (s.route(id) != null) s.routes.map { if (it.id == id) r else it } else s.routes + r)
-            // With no provider account left, provider routes go; not while editing a profile not in use (nothing live changes).
-            if (store.accounts.value.isEmpty() && draft == null) {
-                val dead = next.routes.filter { !it.imported }.map { it.id }.toSet()
-                next = next.without(dead, fallback = id)
-            }
+            // A new install's placeholder route goes, as no provider carries it, and the new route is the default. Anything
+            // set up before stays as it was: its default never moves by itself.
+            if (store.accounts.value.isEmpty() && draft == null && s.untouched) next = next.without(s.routes.map { it.id }.toSet()).copy(defaultRoute = id)
             next
         }
         if (target.startsWith("app:")) assign(target.removePrefix("app:"), id)
@@ -620,15 +634,11 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         return old != null
     }
 
-    /** Skips providers: Tailscale becomes the only network feature, and the unusable provider route goes. */
+    /** Skips providers: Tailscale becomes the only network feature. A new install's unusable placeholder route goes (Direct is the default then); routes set up before stay. */
     fun useTailscaleOnly() {
         store.edit { s ->
-            val routes = if (store.accounts.value.isEmpty()) s.routes.filter { it.imported } else s.routes
-            s.copy(
-                routes = routes, home = s.home.copy(tailscale = true),
-                defaultRoute = if (routes.any { it.id == s.defaultRoute }) s.defaultRoute else routes.firstOrNull()?.id ?: DIRECT,
-                apps = s.apps.filterValues { v -> v == DIRECT || routes.any { it.id == v } },
-            )
+            val on = s.copy(home = s.home.copy(tailscale = true))
+            if (store.accounts.value.isEmpty() && s.untouched) on.copy(routes = emptyList(), defaultRoute = DIRECT) else on
         }
         _signedIn.value = true
     }
@@ -644,9 +654,16 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         }
     }
 
-    fun removeRoute(id: String) = store.edit { s ->
-        if (s.routes.size <= 1 && s.defaultRoute == id) return@edit s
-        s.without(setOf(id))
+    private fun Setup.routeName(id: String) = route(id)?.name ?: "This route"
+
+    /** Why route [id] can't be removed now (it is a default, here or in a saved profile), or null. */
+    fun removeRouteRefused(id: String) = setup.value.let { s -> s.refusesRemoving(setOf(id), s.routeName(id)) }
+
+    /** Removes route [id]; its apps follow the default. Refused, changing nothing, while it is a default. */
+    fun removeRoute(id: String): app.unbraid.data.CarriesDefault? {
+        var refused: app.unbraid.data.CarriesDefault? = null
+        store.edit { s -> s.removing(setOf(id), s.routeName(id), { refused = it }) { without(setOf(id)) } }
+        return refused
     }
 
     /**
