@@ -36,4 +36,15 @@ class StatsFixesTest {
         assertNull(SpeedTest.missingCountry(true, "Netherlands", null))
         assertNull(SpeedTest.missingCountry(false, "", null))
     }
+
+    /** While another Tailscale node is tested, the apps on Tailscale's tunnel are counted to that node too. */
+    @Test fun nodeTestTrafficIsCountedToTheTestedNode() {
+        val tag = app.unbraid.vpn.Compiler.TS_TAG
+        val node = SpeedTest.Run(SpeedTest.NODE + "100.64.0.5", SpeedTest.Phase.Download)
+        assertEquals("ts:100.64.0.5", SpeedTest.nodeExit(node, tag))
+        assertNull(SpeedTest.nodeExit(node, "direct")) // other tunnels are not Tailscale's
+        assertNull(SpeedTest.nodeExit(node.copy(phase = SpeedTest.Phase.Done), tag)) // test over
+        assertNull(SpeedTest.nodeExit(SpeedTest.Run("r1", SpeedTest.Phase.Download), tag)) // a route test, not a node test
+        assertNull(SpeedTest.nodeExit(null, tag))
+    }
 }

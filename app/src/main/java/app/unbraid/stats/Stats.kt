@@ -423,7 +423,7 @@ internal object Collector {
         val ids = HashMap<String, String>() // the recorded id of each exit, worked out once per batch (a replay lists hundreds)
         val open = { e: Ev ->
             val app = if (e.own) Stats.ctx.packageName else appOf(e)
-            val exit = (if (e.own) SpeedTest.exitOn(e.tag) else null) ?: exitOf(e.tag, app, setup, tags)
+            val exit = (if (e.own) SpeedTest.exitOn(e.tag) else SpeedTest.nodeExitOn(e.tag)) ?: exitOf(e.tag, app, setup, tags)
             Conn(app, ids.getOrPut(exit) { Stats.note(exit, setup) }, servers[exit]?.name, 0, 0)
         }
         val replayed = HashSet<String>()

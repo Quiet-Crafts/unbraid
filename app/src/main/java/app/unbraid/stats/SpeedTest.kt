@@ -359,6 +359,16 @@ object SpeedTest {
         else _run.value?.exit?.takeIf { e -> tag == if (e.startsWith(NODE)) Compiler.TS_TAG else UnbraidVpn.tags[e] }
             ?: _all.value?.legs?.firstOrNull { UnbraidVpn.tags[it.exit] == tag }?.exit
 
+    /**
+     * The tested node's exit id while a Tailscale node test runs and [tag] is Tailscale's tunnel: whatever goes through
+     * it then leaves by the tested node, the apps on the Tailscale route included, so it is counted there.
+     */
+    internal fun nodeExit(run: Run?, tag: String?): String? =
+        run?.takeIf { it.phase.busy && it.exit.startsWith(NODE) && tag == Compiler.TS_TAG }?.exit
+
+    /** [nodeExit] for the running test. */
+    fun nodeExitOn(tag: String?): String? = nodeExit(_run.value, tag)
+
     private val Phase?.busy get() = this == Phase.Preparing || this == Phase.Download || this == Phase.Upload
 
     /** A test is under way (Tailscale may be on its test node on purpose). */
