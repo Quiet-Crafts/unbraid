@@ -562,7 +562,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                   val appliedAccounts: Map<String, String>, val refused: Map<String, Exception>, val last: Map<String, Link>, val generation: Int)
         val ask = lock.withLock {
             // While the settings won't open, what the store holds are defaults, not the user's setup: nothing to apply.
-            if (state.value.phase != VpnState.Phase.On || holding) return
+            // A destroyed instance's phase is the next instance's: never act on that connection.
+            if (destroyed || state.value.phase != VpnState.Phase.On || holding) return
             val srv = server ?: return
             val setup = store.setup.value
             val accounts = store.accounts.value
@@ -583,7 +584,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val picked = LinkPicker.pick(ask.setup, ask.ready.links, ask.applied, ask.appliedAccounts, ask.accounts, ask.last, avoid + failing, ask.refused, false, Providers::get)
         lock.withLock {
             // Stopped, reloaded or edited during the provider calls: the newer state wins (the watcher reloads an edit).
-            if (state.value.phase != VpnState.Phase.On || generation != ask.generation || store.setup.value != ask.setup || store.accounts.value != ask.accounts) return
+            if (destroyed || state.value.phase != VpnState.Phase.On || generation != ask.generation || store.setup.value != ask.setup || store.accounts.value != ask.accounts) return
             noteRefusals(ask.setup, ask.accounts, picked)
             runCatching { store.rememberLinks(picked.remember) }.onFailure { Log.w(TAG, "last servers not saved") }
             install(ask.srv, ask.setup, picked, ask.accounts)
@@ -953,6 +954,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         cleanup = bg.launch {
             before?.join() // an older instance's cleanup first, so it can never undo a newer engine's files
             lock.withLock {
+                // Whatever this instance still had waiting (provider answers, a stop from outside) is about its own connection.
+                generation++
+                session++
                 // Closing the command server alone leaves a running engine (and its own copy of the tunnel) alive.
                 runCatching { server?.closeService() }
                 runCatching { server?.close() }
