@@ -2,6 +2,8 @@ package app.unbraid
 
 import app.unbraid.data.CarriesDefault
 import app.unbraid.data.DIRECT
+import app.unbraid.data.MAX_PROFILES
+import app.unbraid.data.PREVIOUS
 import app.unbraid.data.Location
 import app.unbraid.data.Profile
 import app.unbraid.data.Route
@@ -368,5 +370,27 @@ class ProfilesTest {
         assertEquals(Setup(), Setup().signedIn("proton", setOf("nord")))
         val none = Setup(routes = emptyList(), defaultRoute = DIRECT).signedIn("ivpn", emptySet())
         assertEquals(listOf(Route("main", Location("ivpn"))), none.routes)
+    }
+
+    /** With no profile in use, a switch can keep the setup in use as a profile first; "Previous" is replaced, never the target. */
+    @Test fun useFromNoProfileKeepsLiveSetup() {
+        val live = base.add("Travel", true).editing("Travel") { p -> p.copy(defaultRoute = "us") }
+        assertEquals(true, live.loose)
+        assertEquals(listOf("Travel"), live.use("Travel").profiles.map { p -> p.name }) // without keepAs it is lost, as asked
+        val kept = live.use("Travel", PREVIOUS)
+        assertEquals("Travel", kept.profile)
+        assertEquals("us", kept.defaultRoute)
+        assertEquals(Profile(PREVIOUS, "nl", base.apps), kept.profiles[1])
+        assertEquals(base.apps, kept.use(PREVIOUS).apps) // and it can be used again
+        // Later, from no profile again: the older "Previous" is replaced, not added twice.
+        val later = kept.forget("Travel").copy(apps = mapOf("rai" to "it")).add("Trip", true).editing("Trip") { p -> p.copy(defaultRoute = "it") }
+        val again = later.use("Trip", PREVIOUS)
+        assertEquals(listOf(PREVIOUS, "Trip"), again.profiles.map { p -> p.name })
+        assertEquals(mapOf("rai" to "it"), again.profiles[0].apps)
+        assertEquals(later, later.use(PREVIOUS, PREVIOUS)) // the profile to use is never written over
+        // Nothing to keep: the setup is in a profile already, or one holds it.
+        assertEquals(false, base.saveAs("Home").forget("Home").add("Home", false).loose)
+        val full = base.copy(profiles = (1..MAX_PROFILES).map { n -> Profile("P$n", "nl") })
+        assertEquals(full, full.use("P1", PREVIOUS)) // no room: nothing changes, the app asks instead
     }
 }

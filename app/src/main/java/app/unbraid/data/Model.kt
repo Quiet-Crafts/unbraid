@@ -141,6 +141,8 @@ data class Profile(
 }
 
 const val MAX_PROFILES = 20
+/** The profile a quick-settings tile saves a setup in no profile as before switching, as it can't ask (an older one is replaced). */
+const val PREVIOUS = "Previous"
 /** A profile name's length in characters people see: an emoji or an accented letter counts once. */
 const val PROFILE_NAME = 12
 
@@ -192,8 +194,28 @@ data class Setup(
     /** The live setup as a profile: what is in use. */
     private val live get() = Profile(profile.orEmpty(), defaultRoute, apps, added)
 
-    /** Switches to profile [name] (not an empty one); the one in use keeps what it has now. */
-    fun use(name: String) = if (name == profile) this else profiles.firstOrNull { it.name == name && it.ready }?.let { p -> copy(profiles = saved, profile = p.name, defaultRoute = p.defaultRoute, apps = p.apps, added = p.added) } ?: this
+    /** No profile is in use and none holds the setup in use: switching to another would lose it, unless [use] keeps it. */
+    val loose get() = profile == null && profiles.none { it.defaultRoute == defaultRoute && it.apps == apps && it.added == added }
+
+    /**
+     * Switches to profile [name] (not an empty one); the one in use keeps what it has now. With [keepAs], a [loose] setup
+     * in use is first saved as that profile (replacing an older one of that name); unchanged if it can't be (no room, or
+     * [keepAs] is [name] itself).
+     */
+    fun use(name: String, keepAs: String? = null): Setup {
+        if (name == profile) return this
+        val p = profiles.firstOrNull { it.name == name && it.ready } ?: return this
+        val from = if (keepAs != null && loose) kept(keepAs, name) ?: return this else this
+        return from.copy(profiles = from.saved, profile = p.name, defaultRoute = p.defaultRoute, apps = p.apps, added = p.added)
+    }
+
+    /** The setup in use saved as profile [name], not in use, over an older one of that name (any case) but never over [target]; null without room. */
+    private fun kept(name: String, target: String): Setup? {
+        val i = profiles.indexOfFirst { it.name.equals(name, ignoreCase = true) }
+        if (i >= 0 && profiles[i].name == target) return null
+        val mine = live.copy(name = name)
+        return if (i >= 0) copy(profiles = profiles.toMutableList().apply { set(i, mine) }) else if (profiles.size < MAX_PROFILES) copy(profiles = profiles + mine) else null
+    }
 
     /** Saves the current setup as profile [name], now in use (nothing changes on the connection). */
     fun saveAs(name: String): Setup {

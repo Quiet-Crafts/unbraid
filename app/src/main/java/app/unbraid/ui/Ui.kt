@@ -748,14 +748,24 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     val switching = Profiles.switching
     val switchFailed = Profiles.refused
 
-    /** Switches to profile [name]; [then] runs once it is saved (at once, or after the user's yes to a provider's limit). */
-    fun useProfile(name: String, then: () -> Unit = {}) {
+    /** Switching to profile [name] now would lose the setup in use (no profile holds it): ask whether to save it first. */
+    fun switchLoses(name: String) = setup.value.let { s -> s.loose && s.profiles.any { it.name == name && it.ready } }
+
+    /**
+     * Switches to profile [name]; [then] runs once it is saved (at once, or after the user's yes to a provider's limit).
+     * With [keepAs] (the user chose Save), a setup in use that no profile holds is first saved as that profile. False,
+     * changing nothing, when it can't be: [MAX_PROFILES] already, or [keepAs] names [name] itself.
+     */
+    fun useProfile(name: String, keepAs: String? = null, then: () -> Unit = {}): Boolean {
         switchFailed.value = null
-        val p = setup.value.profiles.firstOrNull { it.name == name } ?: return
-        if (setup.value.profile == name) { viewing.value = null; return then() }
+        val s = setup.value
+        val p = s.profiles.firstOrNull { it.name == name } ?: return true
+        if (s.profile == name) { viewing.value = null; then(); return true }
         // An empty profile can't be used yet: it is shown, to be given a default route.
-        if (!p.ready) { viewing.value = name; return }
-        guarded({ viewing.value = null; Profiles.started(name); then() }) { it.use(name) }
+        if (!p.ready) { viewing.value = name; return true }
+        if (keepAs != null && s.loose && s.use(name, keepAs).profile != name) return false
+        guarded({ viewing.value = null; Profiles.started(name); then() }) { it.use(name, keepAs) }
+        return true
     }
 
     /**
