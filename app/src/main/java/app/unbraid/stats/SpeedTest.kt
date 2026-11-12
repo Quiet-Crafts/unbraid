@@ -28,6 +28,27 @@ object SpeedTest {
     /** M-Lab's limit for interactive users (measurementlab.net/aup). */
     const val PER_DAY = 40
     private const val DAY_LIMIT = "M-Lab allows $PER_DAY tests a day. Try again tomorrow."
+    private const val NO_SERVER = "No test server can be reached through this exit."
+    private const val NO_SERVER_LEG = "M-Lab's test server can't be reached through it. Not in the totals."
+
+    /** The allowance ran out when the first data arrived (never while one test runs alone; a safeguard). */
+    private class DayLimit : Exception()
+
+    /** What a failed single test says: before any data flowed the test server was out of reach, after it the test broke off. */
+    internal fun failText(flowed: Boolean) = if (flowed) "The test couldn't finish. Check the connection and try again." else NO_SERVER
+
+    /** What a combined run's leg says when its [phase] (lower case) stopped; [flowed]: data had arrived through it. */
+    internal fun legFailText(phase: String, flowed: Boolean) = if (flowed) "Stopped during the $phase: the exit stopped answering. Not in the totals." else NO_SERVER_LEG
+
+    /** Whether [n] more tests fit in today's allowance after [used]. */
+    internal fun fits(used: Int, n: Int) = used + n <= PER_DAY
+
+    /**
+     * The country a "no test server" note names: none when the test already ran anywhere (the nearest server), so the
+     * page says that no server answered instead of repeating the same country.
+     */
+    internal fun missingCountry(anywhere: Boolean, routeCountry: String?, country: String?): String? =
+        if (anywhere) null else (routeCountry ?: country)?.ifBlank { null }
 
     /**
      * Speeds in bits/s, [ping] in ms (median, low, high); null = not measured yet. [server] is the M-Lab server once located; [missing]
@@ -58,9 +79,9 @@ object SpeedTest {
         return s.tsExitNodes.filter { it.online && it.id.isNotEmpty() && it.ip != routed }
     }
 
-    /** Counts [n] tests against M-Lab's daily allowance, unless a newer test took over or they don't fit. */
+    /** Counts [n] tests against M-Lab's daily allowance, unless a newer test took over or they don't fit. Called once data flows. */
     private fun reserve(n: Int, mine: Int) = synchronized(lock) {
-        (attempt == mine && Unbraid.store.testsToday + n <= PER_DAY).also { if (it) Unbraid.store.testsToday += n }
+        (attempt == mine && fits(Unbraid.store.testsToday, n)).also { if (it) Unbraid.store.testsToday += n }
     }
 
     /** Runs [f] on the located server, then on Locate's other candidates while they turn the test away. */
@@ -86,24 +107,24 @@ object SpeedTest {
         val mine = synchronized(lock) { _run.value = Run(exit); ++attempt }
         val stop = { attempt != mine }
         val set = { f: (Run) -> Run -> synchronized(lock) { if (!stop()) _run.value?.let { _run.value = f(it) } } }
+        var flowed = false // data has come from the test server: only then does the test use up one of the day's
         val test = Runnable {
             try {
                 val located = Ndt7.locate(tag, country)
                 if (stop()) return@Runnable
                 if (located == null) {
                     // With no country to name there is nothing for "missing" to say: say that no server answered.
-                    val named = (route?.loc?.country ?: country)?.ifBlank { null }
+                    val named = missingCountry(anywhere, route?.loc?.country, country)
                     set { it.copy(phase = Phase.Failed, missing = named, error = "No test server answered. Try again later.".takeIf { named == null }) }
                     return@Runnable
                 }
-                if (!reserve(1, mine)) { set { it.copy(phase = Phase.Failed, error = DAY_LIMIT) }; return@Runnable }
                 set { it.copy(server = located) }
                 val ping = Ndt7.ping(tag, located)
                 if (stop()) return@Runnable
                 set { it.copy(ping = ping, phase = Phase.Download) }
                 val t0 = SystemClock.elapsedRealtime()
                 val elapsed = { SystemClock.elapsedRealtime() - t0 }
-                val (server, down) = anyOf(located) { s -> Ndt7.download(tag, s.download, stop) { bps -> set { it.copy(now = bps, elapsedMs = elapsed()) } } }
+                val (server, down) = anyOf(located) { s -> Ndt7.download(tag, s.download, stop, firstData = { if (!flowed) { flowed = true; if (!reserve(1, mine) && !stop()) throw DayLimit() } }) { bps -> set { it.copy(now = bps, elapsedMs = elapsed()) } } }
                 if (stop()) return@Runnable
                 set { it.copy(phase = Phase.Upload, down = down, now = 0, server = server, ping = it.ping.takeIf { server == located }) }
                 val up = Ndt7.upload(tag, server.upload, stop) { bps -> set { it.copy(now = bps, elapsedMs = elapsed()) } }
@@ -115,8 +136,10 @@ object SpeedTest {
                 Stats.saveTests(listOf(Stats.Test(System.currentTimeMillis(), recordAs, via, name, ip, down, up, done.ping?.median ?: 0, 0, 0)), epoch)
             } catch (e: Ndt7.Limited) {
                 set { it.copy(phase = Phase.Failed, error = "M-Lab is limiting tests from this exit's address right now (VPN servers share theirs). Try again later.") }
+            } catch (e: DayLimit) {
+                set { it.copy(phase = Phase.Failed, error = DAY_LIMIT) }
             } catch (e: Exception) {
-                set { it.copy(phase = Phase.Failed, error = "The test couldn't finish. Check the connection and try again.") }
+                set { it.copy(phase = Phase.Failed, error = failText(flowed)) }
             } finally {
                 if (node != null) restoreNode()
             }
@@ -202,7 +225,7 @@ object SpeedTest {
         var start: (Set<String>) -> Unit = {}
 
         /** One phase through every exit: their own results, and each one's (time, bytes) samples. */
-        fun phase(p: Phase, exits: List<String>, t0: Long, f: (String, (Long, Long) -> Unit, (Long) -> Unit) -> Long): Map<String, List<Pair<Long, Long>>> {
+        fun phase(p: Phase, exits: List<String>, t0: Long, flowed: Set<String>, f: (String, (Long, Long) -> Unit, (Long) -> Unit) -> Long): Map<String, List<Pair<Long, Long>>> {
             set { it.copy(phase = p) }
             val samples = exits.associateWith { java.util.Collections.synchronizedList(mutableListOf<Pair<Long, Long>>()) }
             parallel(exits) { e ->
@@ -211,7 +234,7 @@ object SpeedTest {
                     leg(e) { if (p == Phase.Download) it.copy(down = r, now = 0) else it.copy(up = r, now = 0) }
                 } catch (x: Exception) {
                     android.util.Log.w("Unbraid", "speed test: ${p.name.lowercase()} through one exit stopped: ${x.javaClass.simpleName}")
-                    leg(e) { it.copy(now = 0, error = "Stopped during the ${p.name.lowercase()}: the exit stopped answering. Not in the totals.") }
+                    leg(e) { it.copy(now = 0, error = if (x is DayLimit) DAY_LIMIT else legFailText(p.name.lowercase(), e in flowed)) }
                 }
             }
             return samples.mapValues { it.value.toList() }
@@ -222,7 +245,7 @@ object SpeedTest {
             if (UnbraidVpn.metered && _all.value?.metered == false) { set { it.copy(metered = true, phase = Phase.Deciding) }; armed(start); return }
             val going = _all.value?.legs.orEmpty().filter { it.usable && (!it.missing || it.exit in nearest) }
             if (going.size < 2) return failed("At least two exits need a test server to run together.")
-            if (!reserve(going.size, mine)) return failed("M-Lab allows $PER_DAY tests a day; this run needs ${going.size} of them. Try fewer exits, or tomorrow.")
+            if (!fits(Unbraid.store.testsToday, going.size)) return failed("M-Lab allows $PER_DAY tests a day; this run needs ${going.size} of them. Try fewer exits, or tomorrow.")
             set { it.copy(legs = going, phase = Phase.Preparing) }
             parallel(going.map { it.exit }) { e -> val p = Ndt7.ping(tag(e), going.first { it.exit == e }.server!!); leg(e) { it.copy(ping = p) } }
             if (stop()) return
@@ -230,17 +253,19 @@ object SpeedTest {
             // the exits' addresses to each other (no run id): they are published, and some are the person's own.
             val extra = "concurrent=${going.size}"
             val used = java.util.concurrent.ConcurrentHashMap<String, Ndt7.Server>()
+            // Each exit counts as one test of the day once its data starts to flow; one that never gets there costs nothing.
+            val flowed = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
             val t0 = SystemClock.elapsedRealtime()
             val ok = { _all.value?.legs.orEmpty().filter { it.error == null }.map { it.exit } }
-            val down = phase(Phase.Download, going.map { it.exit }, t0) { e, sample, rate ->
-                val (s, r) = anyOf(going.first { it.exit == e }.server!!) { s -> Ndt7.download(tag(e), s.download, stop, extra, sample, rate) }
+            val down = phase(Phase.Download, going.map { it.exit }, t0, flowed) { e, sample, rate ->
+                val (s, r) = anyOf(going.first { it.exit == e }.server!!) { s -> Ndt7.download(tag(e), s.download, stop, extra, sample, { if (flowed.add(e) && !reserve(1, mine) && !stop()) throw DayLimit() }, rate) }
                 // Another of Locate's servers took the test: its ping wasn't measured, and the card names it.
                 if (s != going.first { it.exit == e }.server) leg(e) { it.copy(server = s, ping = null) }
                 used[e] = s; r
             }
             if (stop()) return
             combined(ok().takeIf { it.size >= 2 }.orEmpty().map { down.getValue(it) })?.let { (bps, ms) -> set { it.copy(down = bps, windowMs = ms) } } ?: return failed(apart(ok().size))
-            val up = phase(Phase.Upload, ok(), t0) { e, sample, rate -> Ndt7.upload(tag(e), used.getValue(e).upload, stop, extra, sample, rate) }
+            val up = phase(Phase.Upload, ok(), t0, flowed) { e, sample, rate -> Ndt7.upload(tag(e), used.getValue(e).upload, stop, extra, sample, rate) }
             if (stop()) return
             // An exit moved to another provider or server meanwhile: its numbers belong to neither.
             val running = UnbraidVpn.running ?: setup

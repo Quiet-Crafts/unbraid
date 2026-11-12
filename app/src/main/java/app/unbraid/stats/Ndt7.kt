@@ -78,14 +78,15 @@ object Ndt7 {
     /**
      * Receives until the server ends the test; [rate] gets bits/s every quarter second. [sample] gets the time
      * (elapsedRealtime ms) and running count at most every 20 ms and at the end ([extra] URL parameters tag a combined run).
+     * [firstData] runs once, when the first data arrives from the server (a throw from it ends the test).
      */
-    fun download(tag: String, url: String, stop: () -> Boolean, extra: String = "", sample: (Long, Long) -> Unit = { _, _ -> }, rate: (Long) -> Unit): Long {
+    fun download(tag: String, url: String, stop: () -> Boolean, extra: String = "", sample: (Long, Long) -> Unit = { _, _ -> }, firstData: () -> Unit = {}, rate: (Long) -> Unit): Long {
         val c = socket(tag, url, extra)
         val input = DataInputStream(c.input)
         val scratch = ByteArray(1 shl 16)
         val start = SystemClock.elapsedRealtime()
         var got = 0L; var told = start; var noted = start
-        val count = { n: Long -> got += n; val now = SystemClock.elapsedRealtime(); if (now - noted >= 20) { noted = now; sample(now, got) } }
+        val count = { n: Long -> if (got == 0L && n > 0) firstData(); got += n; val now = SystemClock.elapsedRealtime(); if (now - noted >= 20) { noted = now; sample(now, got) } }
         sample(start, 0)
         try {
             while (!stop() && SystemClock.elapsedRealtime() - start < (SECONDS + 3) * 1000) {
