@@ -54,6 +54,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
@@ -142,6 +143,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         /** Pauses in this process; a timed resume for an older one, or after a disconnect, does nothing. */
         @Volatile private var pauses = 0
         private const val CHANNEL = "vpn"
+        /** The foreground notice while [hold] keeps apps offline. */
+        private const val UNREADABLE = "$APP can't open your settings, so apps are offline. Open $APP."
         private const val TAG = "Unbraid"
 
         /** Starting a foreground service that can't go foreground crashes the app, so consent is checked first. */
@@ -353,15 +356,16 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun connect() {
         if (state.value.phase == VpnState.Phase.On) { // a repeated start (Always-on, tile)
             readFlags()
-            if (state.value.phase == VpnState.Phase.On) notify(store.setup.value) // a failed reload may have ended it
+            if (state.value.phase == VpnState.Phase.On) if (holding) notice(UNREADABLE) else notify(store.setup.value) // a failed reload may have ended it
             return
         }
         cancelResume()
         state.value = VpnState(VpnState.Phase.Connecting)
         try {
             net.start()
-            // Saved settings that won't open would start on defaults, another routing policy: the app offers to recover them.
-            if (store.unreadable.value && !store.reopen()) throw Fail("Couldn't open your saved settings. Open $APP.")
+            // Saved settings that won't open would start on defaults, another routing policy: the app offers to recover
+            // them. Meanwhile no app goes online at all, rather than on the normal connection.
+            if (store.unreadable.value && !store.reopen()) { hold(); return }
             val setup = store.setup.value
             // Refused before any provider is asked for a server: the engine would refuse it anyway.
             if (setup.noDefault()) throw Compiler.MissingDefault()
@@ -396,6 +400,44 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${Redact.log(e)}")
             teardown(Redact.message(e, "Could not connect"))
+        }
+    }
+
+    /** The engine runs [Compiler.blockAll] because the saved settings won't open ([hold]); nothing else is applied then. */
+    private var holding = false
+
+    /**
+     * Runs the engine with every app's connections refused, until the saved settings open (the app's Try again) or the
+     * user starts fresh; then connects with them. Disconnect and Pause work as always. Caller holds [lock].
+     */
+    private fun hold() {
+        forgetLookups(this)
+        val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
+        generation++
+        val block = fakeBlock()
+        val json = Compiler.blockAll(packageName, File(filesDir, "cache.db").path, block)
+        engine("The connection engine rejected this setup.") { Libbox.checkConfig(json) }
+        if (block != lastBlock) engine("$APP couldn't save its state. Try again.") { store.fakeBlock = block }
+        lastBlock = block
+        openTable(true)
+        engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
+        starts++
+        holding = true
+        state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
+        stopWanted = false
+        notice(UNREADABLE)
+        val mine = session
+        watch = scope.launch {
+            store.unreadable.first { !it }
+            lock.withLock {
+                if (session != mine || !holding || destroyed) return@withLock
+                // Connect replaces the refusing engine with the real setup; its tunnel stays until the new one is up.
+                holding = false
+                watch = null
+                net.stop()
+                state.value = VpnState(VpnState.Phase.Connecting)
+                connect()
+            }
         }
     }
 
@@ -517,7 +559,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         class Ask(val srv: CommandServer, val setup: Setup, val accounts: Map<String, String>, val ready: LinkPicker.Result, val applied: Setup?,
                   val appliedAccounts: Map<String, String>, val refused: Map<String, Exception>, val last: Map<String, Link>, val generation: Int)
         val ask = lock.withLock {
-            if (state.value.phase != VpnState.Phase.On) return
+            // While the settings won't open, what the store holds are defaults, not the user's setup: nothing to apply.
+            if (state.value.phase != VpnState.Phase.On || holding) return
             val srv = server ?: return
             val setup = store.setup.value
             val accounts = store.accounts.value
@@ -817,6 +860,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         retry?.cancel(); retry = null; retries = 0; retrying = emptyMap(); net.onChange = null; refusals = emptyMap(); gone = emptyMap(); failing = emptySet()
         runCatching { ts?.close() }; ts = null
         tsLoginPending = false
+        holding = false
         runCatching { server?.closeService() }
         runCatching { tun?.close() }; tun = null
         openTable(false)
@@ -937,10 +981,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     private fun notify(setup: Setup) {
-        getSystemService(NotificationManager::class.java).cancel(2)
-        val text = setup.activeRoutes.joinToString("  ·  ") { r ->
+        notice(setup.activeRoutes.joinToString("  ·  ") { r ->
             if (r.id == setup.defaultRoute) "${r.code} default" else "${r.code} ${setup.apps.count { it.value == r.id }}"
-        }.ifEmpty { "Only selected apps" }
+        }.ifEmpty { "Only selected apps" })
+    }
+
+    /** The running notice says [text]; a problem alert from before goes. */
+    private fun notice(text: String) {
+        getSystemService(NotificationManager::class.java).cancel(2)
         getSystemService(NotificationManager::class.java).notify(1, notification(text))
     }
 
