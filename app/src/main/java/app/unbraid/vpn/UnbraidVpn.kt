@@ -155,9 +155,20 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 // Paused while another VPN app took over: the paused service ends itself on this start (alarm, notification).
                 if (state.value.phase == VpnState.Phase.Paused) runCatching { ctx.startService(Intent(ctx, UnbraidVpn::class.java)) }
                 state.value = VpnState(error = "Open $APP to allow it as your VPN")
+                // From the widget nothing else would show: say so, and redraw it so its button opens the app.
+                alert(ctx, "Open $APP to allow it as your VPN")
+                StatusWidget.update(ctx)
                 return
             }
             ask(true) { ctx.startForegroundService(Intent(ctx, UnbraidVpn::class.java).putExtra(EXTRA_ASK, it)) }
+        }
+        /** "unbraid is off" with [text]; a tap opens the app. */
+        private fun alert(ctx: Context, text: String) {
+            val nm = ctx.getSystemService(NotificationManager::class.java)
+            nm.createNotificationChannel(NotificationChannel("alerts", "Problems", NotificationManager.IMPORTANCE_DEFAULT))
+            val open = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+            nm.notify(2, Notification.Builder(ctx, "alerts").setSmallIcon(R.drawable.ic_tile).setContentTitle("$APP is off")
+                .setContentText(text).setContentIntent(open).setAutoCancel(true).build())
         }
         fun stop(ctx: Context) = ask(false) { ctx.startService(Intent(ctx, UnbraidVpn::class.java).setAction(ACTION_STOP).putExtra(EXTRA_ASK, it)) }
         /** Drops the tunnel for [minutes] (0 = until resumed); a start while paused resumes. */
@@ -995,13 +1006,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             .build()
     }
 
-    private fun alert(text: String) {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel("alerts", "Problems", NotificationManager.IMPORTANCE_DEFAULT))
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        nm.notify(2, Notification.Builder(this, "alerts").setSmallIcon(R.drawable.ic_tile).setContentTitle("$APP is off")
-            .setContentText(text).setContentIntent(open).setAutoCancel(true).build())
-    }
+    private fun alert(text: String) = alert(this, text)
 
     private fun notify(setup: Setup) {
         notice(setup.activeRoutes.joinToString("  ·  ") { r ->
