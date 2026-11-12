@@ -69,6 +69,16 @@ internal fun mergeUpdates(read: UpdateState, held: UpdateState) =
  */
 internal fun checkAtOnce(available: Boolean, was: Boolean, now: Boolean, termsOk: Boolean) = available && now && !was && termsOk
 
+/** A provider's server list being fetched, or why the last fetch failed. None: no fetch under way, the list shown is the latest. */
+sealed interface Fetch {
+    object Loading : Fetch
+    /** [reason] is a sentence for the screen ([Http.explain]). */
+    data class Failed(val reason: String) : Fetch
+}
+
+/** [fetches] with [provider]'s marked as loading, or null while one is under way already (a Retry then starts no second one). */
+internal fun startFetch(fetches: Map<String, Fetch>, provider: String) = if (fetches[provider] == Fetch.Loading) null else fetches + (provider to Fetch.Loading)
+
 data class AppInfo(val pkg: String, val label: String, val system: Boolean)
 
 /** Removed routes' apps follow the default. The default itself never moves: check [Setup.refusesRemoving] first. */
@@ -425,14 +435,21 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         }
     }
 
+    /** Each provider's server-list fetch under way or failed ([Fetch]); the picker says "loading" or why, never both. */
+    val fetches = MutableStateFlow<Map<String, Fetch>>(emptyMap())
+
     fun refreshCountries(provider: String = "nord") = viewModelScope.launch(Dispatchers.IO) {
         val p = Providers.get(provider) ?: return@launch
         val acc = store.accounts.value[provider] ?: return@launch
+        var mine = false
+        fetches.update { m -> startFetch(m, provider).also { mine = it != null } ?: m }
+        if (!mine) return@launch
         runCatching { p.countries(acc) }.onSuccess { c ->
             _countries.update { it + (provider to c) }
+            fetches.update { it - provider }
             // A fetched list is shown even when its cache can't be written; only a saved one counts as refreshed.
             if (runCatching { store.countries(provider, c) }.isSuccess) refreshed.update { it + 1 }
-        }
+        }.onFailure { e -> fetches.update { it + (provider to Fetch.Failed(Http.explain(e, p.name))) } }
     }
 
     private val groupCountries = mutableMapOf<String, Set<String>>()
