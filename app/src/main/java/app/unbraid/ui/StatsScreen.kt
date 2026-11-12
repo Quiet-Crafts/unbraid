@@ -848,8 +848,10 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
     val busy = SpeedTest.testing || together?.phase == SpeedTest.Phase.Deciding
     val motion = MaterialTheme.motionScheme
     // Leaving the page, or the app going to the background, stops a running test: it runs only while you watch it.
-    LifecycleStartEffect(Unit) { onStopOrDispose { SpeedTest.cancel() } }
-    DisposableEffect(Unit) { onDispose { SpeedTest.clear() } }
+    // Turning the phone, dark mode or the font size recreate the screen: that is no leaving, the test carries on.
+    val activity = androidx.activity.compose.LocalActivity.current
+    LifecycleStartEffect(Unit) { onStopOrDispose { if (leavesPage(activity?.isChangingConfigurations == true)) SpeedTest.cancel() } }
+    DisposableEffect(Unit) { onDispose { if (leavesPage(activity?.isChangingConfigurations == true)) SpeedTest.clear() } }
     val server = if (node) null else vpn.servers[exit]?.name
     val over = if (allMode) "All exits · together" else listOfNotNull(ex?.name, server ?: ex?.via?.takeIf { node }).joinToString(" · ")
     Section("speed", over, "Speed test", back = { go("live") }) {
@@ -967,6 +969,9 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
         }
     }
 }
+
+/** The screen stopped or went away: a real leave cancels a running test, a recreation for a new configuration does not. */
+internal fun leavesPage(changingConfigurations: Boolean) = !changingConfigurations
 
 /** One of the speed test's number cards; the one being measured is outlined in [color]. */
 @Composable
