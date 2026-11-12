@@ -299,17 +299,21 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // Android's own start (Always-on) names the VPN interface; it must go foreground like the app's.
         if ((intent?.action == null || intent.action == VpnService.SERVICE_INTERFACE) && !timedWhilePaused) {
             // Another VPN app may have taken the slot since: Android then refuses this service type. Never crash on it.
-            val allowed = prepare(this) == null && runCatching {
+            // Tried even without consent: a start Android was promised a foreground service for must call it before the
+            // service stops, or Android ends the app. It succeeds then on 13 (no type); from 14 the type needs consent.
+            val consent = prepare(this) == null
+            val allowed = runCatching {
                 // The systemExempted type exists from Android 14; on 13 a foreground service needs no type.
                 if (android.os.Build.VERSION.SDK_INT >= 34) startForeground(1, notification("Connecting…"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
                 else startForeground(1, notification("Connecting…"))
-            }.isSuccess
-            // Refused while off or paused, so no engine runs: stop now, as Android requires without startForeground.
+            }.isSuccess && consent
+            // Refused while off or paused, so no engine runs: the service goes, once no earlier command is still waiting.
             if (!allowed && (state.value.phase == VpnState.Phase.Off || state.value.phase == VpnState.Phase.Paused)) {
                 cancelResume()
                 state.value = VpnState(error = "Open $APP to allow it as your VPN")
                 handled(intent)
-                stopSelf()
+                stopWanted = true
+                stopIfIdle()
                 return START_NOT_STICKY
             }
         }
