@@ -69,4 +69,44 @@ class RedactTest {
         assertEquals("fallback", Redact.message(RuntimeException("private_key=$key"), "fallback"))
         assertEquals("Couldn't reach the server. Check the connection.", Redact.message(IOException("GET https://x/?token=$key"), "fallback"))
     }
+
+    /** Credential shapes that engine, library and provider texts carry; each marker must be gone after cleaning. */
+    @Test fun credentialShapesAreHidden() {
+        val p = "SyntheticPass7"
+        val cases = listOf(
+            "Authorization: Bearer $p", "{\"Authorization\":\"Bearer $p\"}", "Bearer $p", "Proxy-Authorization: Basic $p", "X-Api-Key: $p",
+            "Cookie: session=$p; path=/", "Set-Cookie: sid=$p; HttpOnly",
+            "api_key=$p", "api-key: $p", "apiKey: $p", "secret_key=$p", "private-key=$p", "passphrase = $p", "pass=$p", "passwd=$p", "pwd=$p",
+            "refresh_token $p", "access_token $p", "pre_shared_key $p", "{\"psk\":\"$p\"}", "{\"credentials\":\"$p\"}", "{\"secrets\":[\"$p\"]}",
+            "login=fakeuser&pass=$p&x=1", "OvpnProfile(user=fakeuser, pass=$p)", "wrong password \"$p\"", "invalid token $p here", "Invalid key $p",
+            "ss://aes-256-gcm:$p@192.0.2.9:8388", "socks5://fakeuser:$p@192.0.2.9:1080", "https://fakeuser:Syn@$p@host.example/path", "trojan://$p@h.example:443",
+            "Get \"https://fakeuser:$p@host.example/x\": dial tcp", "https://host.example/api?key=$p", "https://192.0.2.20:1337/addKey?pt=$p&pubkey=x",
+            "<tls-crypt>\n-----BEGIN OpenVPN Static key V1-----\n$p\n-----END OpenVPN Static key V1-----\n</tls-crypt>", "<secret>\n$p", "-----BEGIN ENCRYPTED PRIVATE KEY-----\n$p",
+            "<auth-user-pass>\nfakeuser\n$p\n</auth-user-pass>", "auth-user-pass fakeuser $p",
+        )
+        for (c in cases) assertFalse(c, Redact.clean(c).contains(p))
+        val ids = mapOf(
+            "vless://12345678-1234-1234-1234-1234567890ab@h.example:443" to "1234567890ab", "invalid account 1234567890123456" to "1234567890123456",
+            "account 1234 5678 9012 3456 not found" to "9012", "unknown account i-SYNT-1234-5678" to "i-SYNT", "login failed for p1234567" to "p1234567",
+            "key c0ffeec0ffeec0ffeec0ffeec0ffeeab bad" to "c0ffeec0ffee", "--auth-key=tskey-auth-kSYNTH1CNTRL-AbCd1234" to "AbCd1234",
+            "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJTeW50aGV0aWMifQ.SynthSig" to "SynthSig", "rejected SyntheticNordToken0123456789Abcde" to "0123456789",
+            "PrivateKey=$key".dropLast(24) + "\n" + key.takeLast(24) to key.takeLast(24),
+        )
+        for ((c, mark) in ids) assertFalse(c, Redact.clean(c).contains(mark))
+    }
+
+    /** A value of any length or quoting is cleaned in one pass, without overflowing the stack. */
+    @Test fun hugeQuotedValuesAreCleanedQuickly() {
+        for (s in listOf("password=\"" + "\\\"".repeat(500_000), "token='" + "a".repeat(1_000_000), "{\"token\":\"" + "a".repeat(1_000_000) + "\"}", "password=\"".repeat(100_000))) {
+            val t0 = System.nanoTime()
+            assertFalse(Redact.clean(s).contains("aaaa"))
+            assertTrue((System.nanoTime() - t0) / 1_000_000 < 5_000)
+        }
+    }
+
+    /** Plain words after a name stay: only values that look like credentials go. */
+    @Test fun ordinaryTextAfterNamesStays() {
+        for (s in listOf("Invalid WireGuard key for Sweden", "Your token has expired. Sign in again", "account number has 16 digits", "login failed", "auth-user-pass"))
+            assertEquals(s, Redact.clean(s))
+    }
 }
