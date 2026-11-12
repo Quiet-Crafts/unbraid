@@ -61,4 +61,14 @@ class HttpTest {
         assertEquals(2, opened.size)
         assertTrue(opened.none { it.instanceFollowRedirects })
     }
+
+    /** A 401 means refused credentials only for a request that carried them; a public list's 401 is an ordinary failure. */
+    @Test fun only401sToSignedRequestsAreRefusals() {
+        answer(401)
+        try { Http.get("https://api.example/public/list"); fail() } catch (e: Exception) { assertTrue(e is Http.Status && e.code == 401) }
+        try { Http.get("https://api.example/me", mapOf("Authorization" to "Bearer t")); fail() } catch (e: Exception) { assertTrue(e is app.unbraid.data.AuthException) }
+        try { Http.get("https://192.0.2.1:1337/addKey?pt=t", signed = true); fail() } catch (e: Exception) { assertTrue(e is app.unbraid.data.AuthException) }
+        try { Http.postForm("https://api.example/token", mapOf("username" to "u")); fail() } catch (e: Exception) { assertTrue(e is app.unbraid.data.AuthException) }
+        try { app.unbraid.data.NordApi.countries(); fail() } catch (e: Exception) { assertTrue(e is Http.Status && e.code == 401) }
+    }
 }

@@ -166,12 +166,21 @@ object Mullvad : Provider {
         false
     }
 
-    /** Mullvad answers 404 for a device removed from the account. */
-    override fun revoked(account: String): Boolean = try {
-        val a = account(account)
-        Http.get("$API/accounts/v1/devices/${Http.enc(a.deviceId)}", bearer(accessToken(a.account)))
-        false
-    } catch (e: Http.Status) { e.code == 404 } catch (e: AuthException) { true } catch (e: IOException) { false }
+    override fun revoked(account: String): Boolean {
+        val a = try { account(account) } catch (e: IOException) { return false }
+        return revoked({ tokenReply(a.account) }) { token ->
+            Http.get("$API/accounts/v1/devices/${Http.enc(a.deviceId)}", bearer(token))
+        }
+    }
+
+    /**
+     * Gone only when Mullvad says so: the account number is no longer valid, or the device lookup answers 404. Any
+     * other refusal (a 401 means the request wasn't authorised, not that the device was removed) or failure is not proof.
+     */
+    internal fun revoked(tokenReply: () -> Pair<Int, String>, lookup: (token: String) -> Unit): Boolean = try {
+        val reply = tokenReply()
+        if (reply.first == 400 && "INVALID_ACCOUNT" in reply.second) true else { lookup(token(reply)); false }
+    } catch (e: Http.Status) { e.code == 404 } catch (e: IOException) { false }
 
     /** This phone's device and how many of the slots are taken (the page's device count); offline, the name saved at sign-in. */
     override fun device(account: String): Device {
@@ -195,7 +204,9 @@ object Mullvad : Provider {
 
     private fun bearer(token: String) = mapOf("Authorization" to "Bearer $token")
 
-    private fun accessToken(account: String) = token(postJsonRaw("$API/auth/v1/token", """{"account_number":"$account"}"""))
+    private fun tokenReply(account: String) = postJsonRaw("$API/auth/v1/token", """{"account_number":"$account"}""")
+
+    private fun accessToken(account: String) = token(tokenReply(account))
 
     /** The device Mullvad registered for [keys] although its reply never arrived, if the account lists one. */
     private fun adopted(token: String, account: String, keys: WgKeys.Keys): String? = try {

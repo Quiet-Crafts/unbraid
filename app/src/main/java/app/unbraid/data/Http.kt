@@ -18,10 +18,14 @@ object Http {
     /** Opens a connection to a URL; tests put a fake one here. */
     internal var open: (URL) -> URLConnection = { it.openConnection() }
 
-    fun get(url: String, headers: Map<String, String> = emptyMap(), tls: SSLSocketFactory? = null, verifyHost: String? = null) =
-        call("GET", url, headers, null, null, tls, verifyHost)
+    /**
+     * [signed]: the request carries the account's credentials (in a header by default), so a 401 means they were
+     * refused. A 401 to a request without them, such as a public server list, is an ordinary failed request.
+     */
+    fun get(url: String, headers: Map<String, String> = emptyMap(), tls: SSLSocketFactory? = null, verifyHost: String? = null, signed: Boolean = headers.isNotEmpty()) =
+        call("GET", url, headers, null, null, tls, verifyHost, signed)
 
-    fun delete(url: String, headers: Map<String, String> = emptyMap()) = call("DELETE", url, headers, null, null, null, null)
+    fun delete(url: String, headers: Map<String, String> = emptyMap()) = call("DELETE", url, headers, null, null, null, null, true)
 
     /**
      * Parses a provider reply. kotlinx parse errors quote the input, which may hold tokens or keys, so they are
@@ -40,7 +44,7 @@ object Http {
     }
 
     fun postForm(url: String, form: Map<String, String>, headers: Map<String, String> = emptyMap()) =
-        call("POST", url, headers, form.entries.joinToString("&") { (k, v) -> enc(k) + "=" + enc(v) }, "application/x-www-form-urlencoded", null, null)
+        call("POST", url, headers, form.entries.joinToString("&") { (k, v) -> enc(k) + "=" + enc(v) }, "application/x-www-form-urlencoded", null, null, true)
 
     fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
@@ -48,10 +52,10 @@ object Http {
      * [tls] replaces the trust store (e.g. a provider's pinned CA); [verifyHost] checks the certificate against that
      * name instead of the URL host (needed when connecting to a server by IP).
      */
-    private fun call(method: String, url: String, headers: Map<String, String>, body: String?, type: String?, tls: SSLSocketFactory?, verifyHost: String?): String =
-        try { once(method, url, headers, body, type, tls, verifyHost) } catch (e: UnknownHostException) { Thread.sleep(1500); once(method, url, headers, body, type, tls, verifyHost) }
+    private fun call(method: String, url: String, headers: Map<String, String>, body: String?, type: String?, tls: SSLSocketFactory?, verifyHost: String?, signed: Boolean): String =
+        try { once(method, url, headers, body, type, tls, verifyHost, signed) } catch (e: UnknownHostException) { Thread.sleep(1500); once(method, url, headers, body, type, tls, verifyHost, signed) }
 
-    private fun once(method: String, url: String, headers: Map<String, String>, body: String?, type: String?, tls: SSLSocketFactory?, verifyHost: String?): String {
+    private fun once(method: String, url: String, headers: Map<String, String>, body: String?, type: String?, tls: SSLSocketFactory?, verifyHost: String?, signed: Boolean): String {
         val c = open(URL(url)) as HttpURLConnection
         require(c is HttpsURLConnection) { "HTTPS only" }
         // A redirect would take every header along, an API key among them, to whatever host it names; none of the
@@ -71,7 +75,7 @@ object Http {
                 c.outputStream.use { it.write(body.toByteArray()) }
             }
             val code = c.responseCode
-            if (code == 401) throw AuthException("Sign-in was refused")
+            if (code == 401 && signed) throw AuthException("Sign-in was refused")
             if (code !in 200..299) throw Status(code, "HTTP $code")
             return c.inputStream.use { String(it.readNBytes(MAX_BODY + 1).also { b -> if (b.size > MAX_BODY) throw IOException("Response too large") }) }
         } finally {

@@ -200,4 +200,18 @@ class MullvadTest {
             try { Mullvad.signIn(mapOf("account" to bad)); fail() } catch (e: IllegalArgumentException) { }
         }
     }
+
+    /** Only Mullvad's own "gone" answers mean the phone was removed; a 401 or an outage is not proof. */
+    @Test fun revokedOnlyOnMullvadsOwnAnswer() {
+        val ok = 200 to """{"access_token":"t"}"""
+        fun lookup(code: Int?): (String) -> Unit = { if (code == 401) throw AuthException("Sign-in was refused") else if (code != null) throw app.unbraid.data.Http.Status(code, "HTTP $code") }
+        assertTrue(Mullvad.revoked({ ok }, lookup(404)))
+        assertTrue(Mullvad.revoked({ 400 to """{"code":"INVALID_ACCOUNT"}""" }, lookup(null)))
+        assertFalse(Mullvad.revoked({ ok }, lookup(null)))
+        assertFalse(Mullvad.revoked({ ok }, lookup(401)))
+        assertFalse(Mullvad.revoked({ ok }, lookup(403)))
+        assertFalse(Mullvad.revoked({ ok }, lookup(503)))
+        assertFalse(Mullvad.revoked({ 401 to "" }, lookup(null)))
+        assertFalse(Mullvad.revoked({ throw IOException("offline") }, lookup(null)))
+    }
 }

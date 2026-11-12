@@ -187,7 +187,7 @@ object Pia : Provider {
     /** `curl --connect-to cn::ip: --cacert ca.rsa.4096.crt https://cn:1337/addKey?pt=..&pubkey=..` */
     private fun addKey(sv: Wg, token: String, pubKey: String): AddKey {
         require(sv.cn.matches(Regex("[A-Za-z0-9._-]+")) && sv.ip.matches(Regex("[0-9.]+"))) { "Unexpected PIA server ${sv.cn}" }
-        return parseAddKey(Http.get("https://${sv.ip}:1337/addKey?pt=${Http.enc(token)}&pubkey=${Http.enc(pubKey)}", tls = tls, verifyHost = sv.cn))
+        return parseAddKey(Http.get("https://${sv.ip}:1337/addKey?pt=${Http.enc(token)}&pubkey=${Http.enc(pubKey)}", tls = tls, verifyHost = sv.cn, signed = true))
     }
 
     internal fun parseAddKey(body: String): AddKey {

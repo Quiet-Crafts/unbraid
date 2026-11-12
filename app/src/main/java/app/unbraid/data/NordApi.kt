@@ -31,11 +31,11 @@ object NordApi {
         c.readTimeout = 15_000
         token?.let { c.setRequestProperty("Authorization", "Basic " + Base64.getEncoder().encodeToString("token:$it".toByteArray())) }
         try {
-            when (c.responseCode) {
-                200 -> return c.inputStream.use { String(it.readNBytes(MAX_BODY + 1).also { b -> if (b.size > MAX_BODY) throw IOException("Response too large") }) }
-                401 -> throw AuthException("NordVPN rejected the token. Sign in again.")
-                else -> throw Http.Status(c.responseCode, "NordVPN API ${c.responseCode}")
-            }
+            val code = c.responseCode
+            if (code == 200) return c.inputStream.use { String(it.readNBytes(MAX_BODY + 1).also { b -> if (b.size > MAX_BODY) throw IOException("Response too large") }) }
+            // Only a request that carried the token can have it rejected; the public lists' 401 is a plain failure.
+            if (code == 401 && token != null) throw AuthException("NordVPN rejected the token. Sign in again.")
+            throw Http.Status(code, "NordVPN API $code")
         } finally {
             c.disconnect()
         }
