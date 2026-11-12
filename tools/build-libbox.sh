@@ -13,15 +13,21 @@ git checkout -q -f $PIN && git clean -qfd
 [ "$(git rev-parse HEAD)" = $PIN ] || { echo "sing-box checkout is not v1.14.4"; exit 1; }
 git apply "$ROOT"/tools/sing-box-*.patch
 # go1.26.10: the toolchain sing-box builds 1.14.4 with upstream; Go 1.25 no longer gets security fixes.
-# The pinned gomobile goes first on PATH, so another installed version cannot win.
-export GOTOOLCHAIN=go1.26.10 PATH=$(go env GOPATH)/bin:$PATH
+# The pinned gomobile and gobind are installed into a private folder that is first on PATH, so neither a custom
+# GOBIN nor an older copy in GOPATH or elsewhere on PATH can be picked up instead.
+BIN="$WORK/bin"
+rm -rf "$BIN" && mkdir -p "$BIN"
+export GOTOOLCHAIN=go1.26.10 GOBIN="$BIN" PATH="$BIN:$PATH"
 export ANDROID_HOME=${ANDROID_HOME:-$HOME/Library/Android/sdk} ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-$HOME/Library/Android/sdk/ndk/28.2.13676358}
 # gomobile needs a JDK; Android Studio ships one.
 export JAVA_HOME=${JAVA_HOME:-"/Applications/Android Studio.app/Contents/jbr/Contents/Home"}
 go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.13 github.com/sagernet/gomobile/cmd/gobind@v0.1.13
+for h in gomobile gobind; do
+  go version -m "$BIN/$h" | grep -q "mod[[:space:]]*github.com/sagernet/gomobile[[:space:]]*v0.1.13" || { echo "$h in $BIN is not v0.1.13"; exit 1; }
+done
 # Build beside the real AAR and swap only on success: a failed bind truncates its output file.
 OUT="$ROOT/app/libs/libbox.new.aar" # gomobile insists on the .aar suffix
-gomobile bind -o "$OUT" -target android/arm64 -androidapi 33 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false \
+"$BIN/gomobile" bind -o "$OUT" -target android/arm64 -androidapi 33 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false \
   -ldflags "-X github.com/sagernet/sing-box/constant.Version=1.14.4 -X runtime.godebugDefault=multipathtcp=0,tlssha1=1 -checklinkname=0 -s -w -buildid=" \
   -tags with_gvisor,with_wireguard,with_utls,with_tailscale,ts_omit_logtail,ts_omit_cachenetmap,ts_omit_ssh,ts_omit_drive,ts_omit_taildrop,ts_omit_webclient,ts_omit_doctor,ts_omit_capture,ts_omit_kube,ts_omit_aws,ts_omit_synology,ts_omit_bird,with_openvpn,badlinkname,tfogo_checklinkname0 \
   ./experimental/libbox
