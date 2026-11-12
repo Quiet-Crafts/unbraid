@@ -67,10 +67,11 @@ class ProfilesTest {
     /** A removed route: profiles' apps on it follow their default; a default is never moved to another route. */
     @Test fun tidyAfterRouteRemoved() {
         val s = base.saveAs("Home").copy(profiles = listOf(Profile("Home", "nl", mapOf("netflix" to "us")), Profile("Trip", "us", mapOf("rai" to "it"))))
-        val t = s.copy(routes = listOf(nl, it)).tidy()
+        val t = s.copy(routes = listOf(nl, it)).tidy(setOf("us"))
         assertEquals(Profile("Home", "nl", emptyMap()), t.profiles[0])
         assertEquals(Profile("Trip", "us", mapOf("rai" to "it")), t.profiles[1])
-        assertEquals(s, s.tidy()) // nothing to mend: the same setup
+        assertEquals(s, s.tidy(emptySet())) // nothing to mend: the same setup
+        assertEquals(s, s.tidy(setOf("gone"))) // nothing used it
     }
 
     /** Removing what carries a default, live or saved, is refused with its name; anything else may go. */
@@ -200,11 +201,12 @@ class ProfilesTest {
             Profile("Draft", "", mapOf("lost" to "us", "kept" to "it")),
             Profile("Trip", "us", mapOf("lost" to "us", "kept" to "it")),
         ))
-        val tidy = s.tidy()
+        val tidy = s.tidy(setOf("us"))
         assertEquals(Profile("Empty", ""), tidy.profiles[0])
         assertEquals(Profile("Draft", "", mapOf("kept" to "it")), tidy.profiles[1])
         assertEquals(Profile("Trip", "us", mapOf("kept" to "it")), tidy.profiles[2]) // its default stays: refused before removal, refused at connect if missing
-        assertEquals(tidy, tidy.tidy())
+        assertEquals(tidy, tidy.tidy(setOf("us")))
+        assertEquals(s, s.tidy(emptySet())) // a route missing since the settings were read is left named
     }
 
     @Test fun backRestoresRunningProfileWithEmptyDraftPresent() {
@@ -291,7 +293,7 @@ class ProfilesTest {
     @Test fun tidyRemovesAddedFromLiveAndSavedProfiles() {
         val s = base.saveAs("Home").copy(added = listOf("us", "it"))
             .add("Trip", true).editing("Trip") { it.copy(added = listOf("us", "nl")) }
-        val t = s.copy(routes = listOf(nl, it)).tidy()
+        val t = s.copy(routes = listOf(nl, it)).tidy(setOf("us"))
         assertEquals(listOf("it"), t.added)
         assertEquals(listOf("it"), t.profiles.first().added)
         assertEquals(listOf("nl"), t.profiles.last().added)
@@ -330,7 +332,7 @@ class ProfilesTest {
     /** Mending after a route removal keeps apps that chose their profile's default. */
     @Test fun tidyKeepsEntriesEqualToDefault() {
         val s = base.saveAs("Home").copy(profiles = listOf(Profile("Home", "nl", mapOf("bank" to "nl", "netflix" to "us")), Profile("Trip", "it", mapOf("rai" to "it", "news" to "us"))))
-        val t = s.copy(routes = listOf(nl, it)).tidy()
+        val t = s.copy(routes = listOf(nl, it)).tidy(setOf("us"))
         assertEquals(mapOf("bank" to "nl"), t.profiles[0].apps)
         assertEquals(mapOf("rai" to "it"), t.profiles[1].apps)
     }
@@ -392,5 +394,17 @@ class ProfilesTest {
         assertEquals(false, base.saveAs("Home").forget("Home").add("Home", false).loose)
         val full = base.copy(profiles = (1..MAX_PROFILES).map { n -> Profile("P$n", "nl") })
         assertEquals(full, full.use("P1", PREVIOUS)) // no room: nothing changes, the app asks instead
+    }
+
+    /** A setup naming routes that don't exist is reported, never repaired to Direct or to another route. */
+    @Test fun missingRoutesAreReported() {
+        val s = base.copy(defaultRoute = "gone", apps = mapOf("netflix" to "us", "mail" to "lost", "bank" to DIRECT), profiles = listOf(Profile("Trip", "away", mapOf("rai" to "x")), Profile("Empty", "")))
+        assertEquals(true, s.defaultMissing)
+        assertEquals(setOf("mail"), s.appsOnMissing)
+        assertEquals(listOf("Trip"), s.profilesMissingDefault)
+        assertEquals(false, base.defaultMissing)
+        assertEquals(false, base.copy(defaultRoute = DIRECT).defaultMissing)
+        assertEquals(emptySet<String>(), base.appsOnMissing)
+        assertEquals(emptyList<String>(), base.profilesMissingDefault)
     }
 }

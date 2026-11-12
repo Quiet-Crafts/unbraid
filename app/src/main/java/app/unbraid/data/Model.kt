@@ -273,14 +273,22 @@ data class Setup(
     }
 
     /**
-     * Profiles left pointing at a removed route: its apps follow the profile's default, and the lists drop it. A default is
-     * never changed here: removing one is refused first ([refusesRemoving]).
+     * After routes [gone] were removed: apps on them follow their default, here and in every saved profile, and the lists
+     * drop them. A default is never changed here: removing one is refused first ([refusesRemoving]). Only [gone] is
+     * mended: a route missing since the settings were read stays named, for [defaultMissing] and [appsOnMissing] to report.
      */
-    fun tidy(): Setup {
-        val ok = { id: String -> id == DIRECT || id.isEmpty() || routes.any { it.id == id } }
-        if (added.all(ok) && profiles.all { p -> p.apps.values.all(ok) && p.added.all(ok) }) return this
-        return copy(added = added.filter(ok), profiles = profiles.map { p -> p.copy(apps = p.apps.filterValues(ok), added = p.added.filter(ok)) })
+    fun tidy(gone: Set<String>): Setup {
+        val ok = { id: String -> id !in gone }
+        if (gone.isEmpty() || (apps.values.all(ok) && added.all(ok) && profiles.all { p -> p.apps.values.all(ok) && p.added.all(ok) })) return this
+        return copy(apps = apps.filterValues(ok), added = added.filter(ok), profiles = profiles.map { p -> p.copy(apps = p.apps.filterValues(ok), added = p.added.filter(ok)) })
     }
+
+    /** The default of the setup in use names no route (damaged or older settings): the engine refuses to connect until another is chosen. */
+    val defaultMissing get() = defaultRoute != DIRECT && route(defaultRoute) == null
+    /** Apps whose chosen route no longer exists: blocked until they get another route or follow the default. */
+    val appsOnMissing get() = apps.filterValues { it != DIRECT && route(it) == null }.keys
+    /** Saved profiles, not in use, whose default names no route: they need another default before they can be used. */
+    val profilesMissingDefault get() = profiles.filter { it.name != profile && it.ready && it.defaultRoute != DIRECT && route(it.defaultRoute) == null }.map { it.name }
 
     /**
      * Why routes [gone] (what the user removes, named [name]) can't go: one is the default of the setup in use or of a

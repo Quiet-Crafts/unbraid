@@ -81,9 +81,12 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     private val queued = java.util.concurrent.atomic.AtomicBoolean()
     private val writer = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "store").apply { isDaemon = true } }
 
-    // Wherever a route is removed, profiles that used it are mended here.
+    // Wherever a route is removed, what used it is mended here: only the routes this change removed, so a setup read with a
+    // missing route keeps naming it (the screens say so; the engine refuses or blocks it).
     // False while [unreadable]: nothing changes then.
-    private fun change(f: (Setup) -> Setup) = synchronized(changing) { if (_unreadable.value) false else { _setup.update { f(it).tidy() }; true } }
+    private fun change(f: (Setup) -> Setup) = synchronized(changing) {
+        if (_unreadable.value) false else { _setup.update { old -> f(old).let { new -> new.tidy(old.routes.map { it.id }.toSet() - new.routes.map { it.id }.toSet()) } }; true }
+    }
 
     // A Keystore hiccup must not crash a tap: the change stays in memory, the banner says so, and a retry writes it.
     private fun saveSetup() = safely { seal("setup.bin", explicit.encodeToString(Setup.serializer(), _setup.value)) }

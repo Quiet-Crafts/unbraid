@@ -342,4 +342,22 @@ class StoreTest {
         File(old, "setup.bin").writeBytes(sealed(NordApi.json.encodeToString(Setup.serializer(), full)))
         assertEquals(full.copy(version = VERSION), Store(old) { key }.setup.value)
     }
+
+    /** Settings that name a missing route load as they are and stay so through later edits: nothing goes to Direct or elsewhere. */
+    @Test fun missingRoutesStayNamedAfterLoadAndEdits() {
+        val dir = tmp.newFolder()
+        val damaged = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands"))), defaultRoute = "gone",
+            apps = mapOf("mail" to "lost", "maps" to "nl"), profiles = listOf(Profile("Trip", "away", mapOf("rai" to "x"))), version = VERSION)
+        File(dir, "setup.bin").writeBytes(sealed(NordApi.json.encodeToString(Setup.serializer(), damaged)))
+        val s = Store(dir) { key }
+        assertEquals(damaged, s.setup.value)
+        assertTrue(s.update { it.copy(favorites = emptyList()) }) // an unrelated edit
+        assertEquals(damaged.copy(favorites = emptyList()), s.setup.value)
+        assertTrue(s.setup.value.defaultMissing)
+        // Removing a route mends only what used that route.
+        assertTrue(s.update { it.copy(routes = emptyList()) })
+        assertEquals(mapOf("mail" to "lost"), s.setup.value.apps)
+        assertEquals(Profile("Trip", "away", mapOf("rai" to "x")), s.setup.value.profiles.single())
+        assertEquals("gone", Store(dir) { key }.setup.value.defaultRoute)
+    }
 }
