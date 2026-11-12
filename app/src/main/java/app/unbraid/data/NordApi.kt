@@ -45,7 +45,7 @@ object NordApi {
     fun credentials(token: String): Triple<String, String, String> {
         val o = Http.parsed("NordVPN") { json.parseToJsonElement(get("/users/services/credentials", token)).jsonObject }
         fun f(k: String) = o[k]?.jsonPrimitive?.content ?: throw app.unbraid.vpn.Fail("Unexpected reply from NordVPN. Try again later")
-        return Triple(f("nordlynx_private_key"), f("username"), f("password"))
+        return Triple(f("nordlynx_private_key").takeIf(::validWgKey) ?: throw Addr.unexpected("NordVPN"), f("username"), f("password"))
     }
 
     fun countries(): List<Country> = json.decodeFromString(get("/servers/countries"))
@@ -132,12 +132,13 @@ object NordApi {
             ?.get("metadata")?.jsonArray?.map { it.jsonObject }
             ?.firstOrNull { it["name"]?.jsonPrimitive?.content == "public_key" }
             ?.get("value")?.jsonPrimitive?.content ?: if (needKey) return@mapNotNull null else ""
+        val ip = o["station"]!!.jsonPrimitive.content.takeIf(Addr::server) ?: return@mapNotNull null
         val where = ((o["locations"] as? JsonArray)?.firstOrNull() as? JsonObject)?.get("country")?.jsonObject
         val city = where?.get("city")?.jsonObject?.get("name")?.jsonPrimitive?.content.orEmpty()
         Server(
             name = o["name"]!!.jsonPrimitive.content,
             host = o["hostname"]!!.jsonPrimitive.content,
-            ip = o["station"]!!.jsonPrimitive.content,
+            ip = ip,
             publicKey = key,
             load = o["load"]?.jsonPrimitive?.int ?: 0,
             city = city,

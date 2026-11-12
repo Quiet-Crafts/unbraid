@@ -146,9 +146,13 @@ object Pia : Provider {
         return pool.sortedBy { it.geo }.firstOrNull() ?: throw IOException("PIA has no WireGuard server for ${loc.label}")
     }
 
-    /** The server list is one line of JSON, then a blank line and a signature (not checked here, as in PIA's scripts). */
+    /**
+     * The server list is one line of JSON, then a blank line and a signature (not checked here, as in PIA's scripts).
+     * Servers at an address no server can have are left out.
+     */
     internal fun parseRegions(body: String): List<Region> =
         Http.parsed("PIA") { json.decodeFromString(ServerList.serializer(), body.substringBefore('\n')).regions }
+            .map { r -> r.copy(servers = Servers(r.servers.wg.filter { Addr.server(it.ip) })) }
             .filter { !it.offline && it.servers.wg.isNotEmpty() }
 
     internal fun countries(regions: List<Region>): List<Country> = regions.groupBy { it.country.uppercase() }.map { (code, rs) ->
@@ -186,7 +190,7 @@ object Pia : Provider {
 
     /** `curl --connect-to cn::ip: --cacert ca.rsa.4096.crt https://cn:1337/addKey?pt=..&pubkey=..` */
     private fun addKey(sv: Wg, token: String, pubKey: String): AddKey {
-        require(sv.cn.matches(Regex("[A-Za-z0-9._-]+")) && sv.ip.matches(Regex("[0-9.]+"))) { "Unexpected PIA server ${sv.cn}" }
+        require(sv.cn.matches(Regex("[A-Za-z0-9._-]+")) && Addr.server(sv.ip)) { "Unexpected PIA server ${sv.cn}" }
         return parseAddKey(Http.get("https://${sv.ip}:1337/addKey?pt=${Http.enc(token)}&pubkey=${Http.enc(pubKey)}", tls = tls, verifyHost = sv.cn, signed = true))
     }
 
@@ -194,9 +198,9 @@ object Pia : Provider {
         val r = Http.parsed("PIA") { json.decodeFromString(AddKeyReply.serializer(), body) }
         if (r.status != "OK") throw IOException("PIA refused the key")
         return AddKey(
-            r.serverKey ?: throw IOException("PIA's reply has no server_key"),
+            (r.serverKey ?: throw IOException("PIA's reply has no server_key")).takeIf(::validWgKey) ?: throw Addr.unexpected("PIA"),
             r.serverPort ?: throw IOException("PIA's reply has no server_port"),
-            r.peerIp ?: throw IOException("PIA's reply has no peer_ip"),
+            Addr.assigned(r.peerIp ?: throw IOException("PIA's reply has no peer_ip")) ?: throw Addr.unexpected("PIA"),
             r.dns,
         )
     }

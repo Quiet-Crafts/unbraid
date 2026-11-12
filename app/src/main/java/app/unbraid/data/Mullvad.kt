@@ -115,8 +115,8 @@ object Mullvad : Provider {
 
     @Serializable
     internal data class RelayList(val locations: Map<String, Loc> = emptyMap(), val wireguard: Wireguard = Wireguard()) {
-        /** Active relays whose location is known. */
-        val usable get() = wireguard.relays.filter { it.active && it.location in locations }
+        /** Active relays whose location is known, at an address a server can have. */
+        val usable get() = wireguard.relays.filter { it.active && it.location in locations && Addr.server(it.ip) }
     }
 
     private const val API = "https://api.mullvad.net"
@@ -233,8 +233,10 @@ object Mullvad : Provider {
         return blob(account, privateKey, Http.parsed("Mullvad") { NordApi.json.decodeFromString(DeviceReply.serializer(), body) })
     }
 
-    private fun blob(account: String, privateKey: String, d: DeviceReply) =
-        NordApi.json.encodeToString(Account.serializer(), Account(account, privateKey, d.ipv4Address, d.id, d.name))
+    private fun blob(account: String, privateKey: String, d: DeviceReply): String {
+        Addr.assigned(d.ipv4Address) ?: throw Addr.unexpected("Mullvad")
+        return NordApi.json.encodeToString(Account.serializer(), Account(account, privateKey, d.ipv4Address, d.id, d.name))
+    }
 
     fun account(blob: String) = Http.parsed("Mullvad") { NordApi.json.decodeFromString(Account.serializer(), blob) }
 

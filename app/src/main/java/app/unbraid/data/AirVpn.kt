@@ -248,10 +248,10 @@ object AirVpn : KeyProvider() {
 
     internal fun parse(body: String, serverKey: String): List<Catalog.Entry> =
         Http.parsed("AirVPN") { NordApi.json.decodeFromString(Status.serializer(), body) }.servers
-            .filter { it.health == "ok" && '.' in it.ip && it.country.isNotBlank() && it.code.isNotBlank() }
+            .filter { it.health == "ok" && Addr.server(it.ip) && it.country.isNotBlank() && it.code.isNotBlank() }
             .map {
                 val city = it.location.replace(", ", " ").replace(",", "").takeIf(String::isNotBlank)
-                Catalog.Entry("wireguard", it.country, it.continent, city, it.name, "${it.code}.vpn.airdns.org", serverKey, listOfNotNull(it.ip, it.ip3.takeIf { '.' in it }),
+                Catalog.Entry("wireguard", it.country, it.continent, city, it.name, "${it.code}.vpn.airdns.org", serverKey, listOfNotNull(it.ip, it.ip3.takeIf(Addr::server)),
                     load = it.load?.coerceIn(0, 100) ?: -1)
             }
 }

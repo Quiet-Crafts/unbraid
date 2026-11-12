@@ -191,6 +191,7 @@ object Ivpn : Provider {
             else -> throw Http.Status(status, "IVPN error $status")
         }
         val ip = o.wireguard?.ipAddress ?: throw app.unbraid.vpn.Fail("IVPN didn't assign a WireGuard address. Try again later")
+        Addr.assigned(ip) ?: throw Addr.unexpected("IVPN")
         val token = o.token ?: throw app.unbraid.vpn.Fail("IVPN didn't return a session. Try again later")
         return NordApi.json.encodeToString(Account.serializer(), Account(account, token, privateKey, ip.substringBefore('/'), o.device.orEmpty().take(64), o.service?.deviceLimit ?: 0))
     }
@@ -207,7 +208,9 @@ object Ivpn : Provider {
 
     private fun fetch() = parse(Http.get("$API/v5/servers.json"))
 
+    /** The list, without hosts at an address no server can have. */
     internal fun parse(body: String) = Http.parsed("IVPN") { NordApi.json.decodeFromString(ServerList.serializer(), body) }
+        .let { l -> l.copy(wireguard = l.wireguard.map { g -> g.copy(hosts = g.hosts.filter { Addr.server(it.host) }) }) }
 
     internal fun countries(l: ServerList): List<Country> =
         l.wireguard.filter { it.hosts.isNotEmpty() }.groupBy { it.countryCode }.values.sortedBy { it.first().country }.map { gs ->

@@ -106,7 +106,7 @@ object Windscribe : Provider {
     /** Nodes that have a WireGuard address and a valid group key, in regions that are up. */
     internal fun rows(l: ServerList): List<Row> = l.data.filter { it.status == 1 && it.name.isNotBlank() }.flatMap { r ->
         r.groups.filter { validWgKey(it.publicKey) && it.city.isNotBlank() }.flatMap { g ->
-            g.nodes.filter { IPV4.matches(it.ip3) && it.hostname.isNotBlank() }.map { Row(r.name, r.code.uppercase(), g.city, it, g.publicKey) }
+            g.nodes.filter { Addr.server(it.ip3) && it.hostname.isNotBlank() }.map { Row(r.name, r.code.uppercase(), g.city, it, g.publicKey) }
         }
     }
 

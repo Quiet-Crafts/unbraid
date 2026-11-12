@@ -65,20 +65,20 @@ class ProviderFixesTest {
     // ---- pinned servers are refreshed
 
     private val relays = """{"locations":{"se-got":{"country":"Sweden","city":"Gothenburg"}},"wireguard":{"relays":[
-        {"hostname":"se-got-wg-001","location":"se-got","active":true,"ipv4_addr_in":"10.0.0.9","public_key":"$key2","weight":1},
-        {"hostname":"se-got-wg-002","location":"se-got","active":false,"ipv4_addr_in":"10.0.0.10","public_key":"$key2","weight":1}]}}"""
+        {"hostname":"se-got-wg-001","location":"se-got","active":true,"ipv4_addr_in":"185.65.135.9","public_key":"$key2","weight":1},
+        {"hostname":"se-got-wg-002","location":"se-got","active":false,"ipv4_addr_in":"185.65.135.10","public_key":"$key2","weight":1}]}}"""
     private val mullvad = Mullvad.Account("1234567890123456", priv, "10.66.12.34/32", "dev-1")
 
     @Test fun mullvadPinnedServerUsesTheFreshAddressAndKey() {
         val stale = Server("se-got-wg-001", "se-got-wg-001", "10.0.0.1", key1, 0, "Gothenburg")
         val l = Mullvad.link(Mullvad.parse(relays), Location("mullvad", pinned = stale), mullvad)
-        assertEquals("10.0.0.9:51820", l.peer.endpoint)
+        assertEquals("185.65.135.9:51820", l.peer.endpoint)
         assertEquals(key2, l.peer.publicKey)
         assertEquals(key2, l.server.publicKey)
         // The list is down: the pinned values stand in.
         assertEquals("10.0.0.1:51820", Mullvad.link(null, Location("mullvad", pinned = stale), mullvad).peer.endpoint)
         // A relay the list no longer offers is an error, not a stale endpoint.
-        for (gone in listOf(stale.copy(name = "se-got-wg-002", host = "se-got-wg-002", ip = "10.0.0.10"), stale.copy(name = "se-got-wg-777", host = "se-got-wg-777"))) {
+        for (gone in listOf(stale.copy(name = "se-got-wg-002", host = "se-got-wg-002", ip = "185.65.135.10"), stale.copy(name = "se-got-wg-777", host = "se-got-wg-777"))) {
             try { Mullvad.link(Mullvad.parse(relays), Location("mullvad", pinned = gone), mullvad); fail() } catch (e: IOException) { }
         }
     }
@@ -121,7 +121,7 @@ class ProviderFixesTest {
         assertEquals(setOf(947235L, 947238L), ids)
         assertTrue(NordApi.dedicatedIds("[]").isEmpty())
 
-        fun sv(id: Long, host: String) = """{"id":$id,"name":"United States #$id","hostname":"$host.nordvpn.com","station":"89.187.175.$id","load":3,
+        fun sv(id: Long, host: String) = """{"id":$id,"name":"United States #$id","hostname":"$host.nordvpn.com","station":"89.187.175.${id % 250}","load":3,
             "locations":[{"country":{"code":"US","city":{"name":"Dallas"}}}],
             "technologies":[{"identifier":"wireguard_udp","metadata":[{"name":"public_key","value":"$key1"}]}]}"""
         val all = "[${sv(947235, "us2943")},${sv(947238, "us2944")},${sv(5, "us1")}]"
