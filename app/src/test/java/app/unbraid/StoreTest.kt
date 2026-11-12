@@ -395,4 +395,18 @@ class StoreTest {
         assertEquals(setOf("nord"), Store(dir) { key }.accounts.value.keys)
         assertEquals(2, s.pendingReleases.size)
     }
+
+    /** A catalogue counts as fresh for a day; one dated in the future (the clock was ahead) is refreshed. */
+    @Test fun catalogueFromTheFutureIsNotFresh() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        assertFalse(s.countriesFresh("nord"))
+        assertTrue(s.countries("nord", emptyList()))
+        val f = File(dir, "countries-nord.json")
+        val now = f.lastModified()
+        assertTrue(s.countriesFresh("nord", now + 60_000))
+        assertFalse(s.countriesFresh("nord", now + 86_400_000))
+        assertFalse(s.countriesFresh("nord", now - 60_000)) // written a minute from now
+        assertFalse(s.countriesFresh("nord", now - 86_400_000))
+    }
 }

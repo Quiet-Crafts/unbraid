@@ -112,8 +112,9 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     fun countries(provider: String): List<Country> =
         read("countries-$provider.json")?.let { runCatching { json.decodeFromString(countriesSer, it) }.getOrNull() }.orEmpty()
 
-    /** True when [provider]'s cached catalog is under a day old. */
-    fun countriesFresh(provider: String) = File(dir, "countries-$provider.json").let { it.exists() && System.currentTimeMillis() - it.lastModified() < 86_400_000 }
+    /** True when [provider]'s cached catalog is under a day old. One written while the clock was ahead (a time to come) is not. */
+    fun countriesFresh(provider: String, now: Long = System.currentTimeMillis()) =
+        File(dir, "countries-$provider.json").let { it.exists() && now - it.lastModified() in 0 until 86_400_000 }
 
     @Synchronized
     fun countries(provider: String, v: List<Country>) = write("countries-$provider.json", json.encodeToString(countriesSer, v))
