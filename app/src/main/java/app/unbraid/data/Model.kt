@@ -123,7 +123,8 @@ data class OwnServer(val id: String, val wg: WgPeer? = null, val ovpn: OvpnProfi
 }
 
 /**
- * A saved setup: a default exit and app exceptions. Routes are shared by every profile. An empty profile has no
+ * A saved setup: a default exit and the apps' chosen routes. An app with an entry in [apps] chose that route, also when it
+ * is the default, and keeps it when the default changes; an app without one follows the default. Routes are shared by every profile. An empty profile has no
  * [defaultRoute] yet ("") and can't be used until it gets one.
  */
 @Serializable
@@ -133,6 +134,8 @@ data class Profile(
     val added: List<String> = emptyList(),
 ) {
     val ready get() = defaultRoute.isNotEmpty()
+    /** App [pkg] on route [routeId], its default included: a choice that stays when the default changes. Null = it follows the default. */
+    fun assigned(pkg: String, routeId: String?) = copy(apps = if (routeId == null) apps - pkg else apps + (pkg to routeId))
     /** The routes this profile lists: its default, those its apps use, and those added to it. */
     val own get() = setOf(defaultRoute) + apps.values + added
 }
@@ -247,17 +250,21 @@ data class Setup(
             profiles.none { it.name != except && it.name.equals(n, ignoreCase = true) }
     }
 
-    /** Profiles left pointing at a removed route: its apps follow the profile's default, a removed default becomes the first route. */
+    /** Profiles left pointing at a removed route: its apps follow the profile's default, a removed default becomes the first route. Apps that chose the default keep it. */
     fun tidy(): Setup {
         val ok = { id: String -> id == DIRECT || id.isEmpty() || routes.any { it.id == id } }
         if (added.all(ok) && profiles.all { p -> ok(p.defaultRoute) && p.apps.values.all(ok) && p.added.all(ok) }) return this
         val first = routes.firstOrNull()?.id ?: DIRECT
         return copy(added = added.filter(ok), profiles = profiles.map { p ->
             val d = p.defaultRoute.takeIf(ok) ?: first
-            p.copy(defaultRoute = d, apps = p.apps.filterValues { ok(it) && it != d }, added = p.added.filter(ok))
+            p.copy(defaultRoute = d, apps = p.apps.filterValues(ok), added = p.added.filter(ok))
         })
     }
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute
+    /** App [pkg] has no route of its own: it goes where the default goes. */
+    fun follows(pkg: String) = pkg !in apps
+    /** How many of [installed] follow the default: the apps a new default would move. */
+    fun followers(installed: Collection<String>) = installed.count(::follows)
     /** Routes that carry traffic right now: the default plus any with apps (and those up for a speed test). */
     val activeRoutes get() = routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) }
     /** The Tailscale exit node in use, if any active route goes out through one (Tailscale allows one at a time). */
@@ -286,7 +293,10 @@ data class Setup(
             if (!prefs.threatProtection) s = s.copy(opts = opts + ("nord" to (opts["nord"].orEmpty() + (PROTECT to "off"))), prefs = s.prefs.copy(threatProtection = true))
             prefs.customDns.firstOrNull()?.let { s = s.copy(prefs = s.prefs.copy(customDns = emptyList(), filter = s.prefs.filter.takeIf { it.id != null } ?: Filter(Filters.OWN, it, routes = true))) }
         }
-        // 1 to 2 changes no value: a value missing from an older file reads as the default it had then, and is written from now on.
+        // 1 to 2: a value missing from an older file reads as the default it had then, and is written from now on. An app's
+        // entry equal to its default now means it chose that route; older versions never kept one, so any such entry is
+        // dropped and every app without a choice starts by following the default, as it did (nothing moves).
+        if (version < 2) s = s.copy(apps = s.apps.filterValues { it != s.defaultRoute }, profiles = s.profiles.map { p -> p.copy(apps = p.apps.filterValues { it != p.defaultRoute }) })
         return s
     }
 }

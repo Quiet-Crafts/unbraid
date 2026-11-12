@@ -488,8 +488,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun addRouteFor(pkg: String, loc: Location) {
         val f = { s: Setup ->
             val r = s.routes.firstOrNull { !it.imported && it.loc.ident() == loc.ident() } ?: Route(newId(), loc, hue = nextHue(s))
-            // As [assign]: an app given the default route follows the default.
-            s.copy(routes = if (r in s.routes) s.routes else s.routes + r).editing(draft) { p -> p.copy(apps = if (r.id == p.defaultRoute) p.apps - pkg else p.apps + (pkg to r.id)) }
+            // As [assign]: the app chose this route, also when it is the default.
+            s.copy(routes = if (r in s.routes) s.routes else s.routes + r).editing(draft) { p -> p.assigned(pkg, r.id) }
         }
         if (draft != null) store.edit(f) else guarded(f = f)
     }
@@ -649,8 +649,14 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         s.without(setOf(id))
     }
 
-    /** Makes route [id] the default of the profile being viewed (saved only, nothing connects) or of the live setup. */
-    fun setDefault(id: String) = editRoutes { p -> p.copy(defaultRoute = id, apps = p.apps.filterValues { it != id }) }
+    /**
+     * Makes route [id] the default of the profile being viewed (saved only, nothing connects) or of the live setup. Apps
+     * that chose a route keep it; returns how many installed apps follow the default and so move ([moving], asked first).
+     */
+    fun setDefault(id: String): Int = moving(id).also { editRoutes { p -> p.copy(defaultRoute = id) } }
+
+    /** How many installed apps would move if route [id] became the default of the profile being viewed: those that follow it. 0 for the same default, or before the app list is read. */
+    fun moving(id: String) = setup.value.viewAs(draft).let { s -> if (id == s.defaultRoute) 0 else s.followers(apps.value.map { it.pkg }) }
 
     /** [f] on the profile being viewed when it isn't the one in use (nothing connects, no limit to check), else live and guarded. */
     private fun editRoutes(f: (app.unbraid.data.Profile) -> app.unbraid.data.Profile) {
@@ -762,10 +768,11 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun forgetProfile(name: String) { store.edit { it.forget(name) }; if (viewing.value == name) viewing.value = null }
     fun moveProfile(name: String, by: Int) = store.edit { it.move(name, by) }
 
-    /** [routeId] null or equal to the default → app follows the default. */
-    fun assign(pkg: String, routeId: String?) = editRoutes { p ->
-        p.copy(apps = if (routeId == null || routeId == p.defaultRoute) p.apps - pkg else p.apps + (pkg to routeId))
-    }
+    /** App [pkg] chose route [routeId] (the default too: it stays there when the default changes); null = it follows the default. */
+    fun assign(pkg: String, routeId: String?) = editRoutes { p -> p.assigned(pkg, routeId) }
+
+    /** App [pkg] gives up its own route and follows the default of the profile being viewed. */
+    fun followDefault(pkg: String) = assign(pkg, null)
 
     /** Route [id]'s own blocking choice; one equal to its provider page's is dropped, so the route follows the page again. */
     fun setFilter(id: String, on: Boolean) = store.update { s ->

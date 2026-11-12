@@ -289,4 +289,48 @@ class ProfilesTest {
         assertNull(back.profile)
         assertEquals(listOf("us"), back.saved.last().added)
     }
+
+    /** An app put on the default route keeps it: a later default change moves only the apps that follow. */
+    @Test fun assignToDefaultSticksAcrossDefaultChange() {
+        val chosen = base.editing(null) { p -> p.assigned("signal", "nl") }
+        assertEquals("nl", chosen.apps["signal"])
+        val direct = chosen.editing(null) { p -> p.copy(defaultRoute = DIRECT) }
+        assertEquals("nl", direct.routeOf("signal")) // chosen: stays on the VPN route
+        assertEquals(DIRECT, direct.routeOf("maps")) // follows: moves with the default
+        assertEquals(1, direct.followers(listOf("signal", "maps", "netflix")))
+        val back = direct.editing(null) { p -> p.assigned("signal", null) }
+        assertEquals(true, back.follows("signal"))
+        assertEquals(DIRECT, back.routeOf("signal"))
+    }
+
+    /** Mending after a route removal keeps apps that chose their profile's default. */
+    @Test fun tidyKeepsEntriesEqualToDefault() {
+        val s = base.saveAs("Home").copy(profiles = listOf(Profile("Home", "nl", mapOf("bank" to "nl", "netflix" to "us")), Profile("Trip", "it", mapOf("rai" to "it", "news" to "us"))))
+        val t = s.copy(routes = listOf(nl, it)).tidy()
+        assertEquals(mapOf("bank" to "nl"), t.profiles[0].apps)
+        assertEquals(mapOf("rai" to "it"), t.profiles[1].apps)
+    }
+
+    /** A choice equal to the default survives switching profiles and saving. */
+    @Test fun chosenDefaultSurvivesSwitchAndSaving() {
+        val home = base.saveAs("Home").editing(null) { p -> p.assigned("bank", "nl") }
+        val trip = home.add("Trip", false).use("Trip").editing(null) { p -> p.copy(defaultRoute = "it") }
+        assertEquals("nl", trip.routeOf("bank"))
+        val again = trip.use("Home")
+        assertEquals(mapOf("netflix" to "us", "bank" to "nl"), again.apps)
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        val read = json.decodeFromString(Setup.serializer(), json.encodeToString(Setup.serializer(), again.copy(version = app.unbraid.data.VERSION))).migrated()
+        assertEquals(again.apps, read.apps)
+        assertEquals(again.profiles, read.profiles)
+    }
+
+    /** Data from before choices stuck starts clean: nothing is pinned, and every app goes where it went. */
+    @Test fun olderDataStartsClean() {
+        val old = base.copy(version = 1, apps = mapOf("netflix" to "us", "odd" to "nl"), profiles = listOf(Profile("Trip", "us", mapOf("netflix" to "us", "rai" to "it"))))
+        val now = old.migrated()
+        assertEquals(mapOf("netflix" to "us"), now.apps)
+        assertEquals(mapOf("rai" to "it"), now.profiles[0].apps)
+        for (pkg in listOf("netflix", "odd", "rai", "other")) assertEquals(old.routeOf(pkg), now.routeOf(pkg))
+        assertEquals(now, now.migrated())
+    }
 }
