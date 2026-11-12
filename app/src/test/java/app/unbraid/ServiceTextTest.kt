@@ -35,4 +35,14 @@ class ServiceTextTest {
         assertTrue(both.startsWith("Apps on ${nl.name} are blocked: Sign in again"))
         assertTrue(both.endsWith(gone))
     }
+
+    /** Release logs keep only the class of a foreign error, which can echo a key with no name; the app's own text stays. */
+    @Test fun releaseLogsNoForeignErrorText() {
+        val key = "aGVsbG8gd29ybGQgdGhpcyBpcyBhIGtleQ"
+        val foreign = IllegalStateException("bad value $key")
+        assertEquals("IllegalStateException", app.unbraid.vpn.logLine(foreign, debug = false))
+        assertFalse(app.unbraid.vpn.logText("parse $key", debug = false).contains(key))
+        assertEquals("Fail: The connection engine couldn't start.", app.unbraid.vpn.logLine(app.unbraid.vpn.Fail("The connection engine couldn't start."), debug = false))
+        assertTrue(app.unbraid.vpn.logLine(foreign, debug = true).startsWith("IllegalStateException: bad value"))
+    }
 }

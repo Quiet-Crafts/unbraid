@@ -415,7 +415,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 }) scope.launch { reload() }
             }.launchIn(scope)
         } catch (e: Exception) {
-            Log.e(TAG, "connect: ${Redact.log(e)}")
+            Log.e(TAG, "connect: ${logLine(e)}")
             teardown(Redact.message(e, "Could not connect"))
         }
     }
@@ -562,7 +562,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** Engine errors can quote the config, keys included: log them cleaned, show a fixed text, and drop the cause. */
     private inline fun engine(failure: String, f: () -> Unit) {
         try { f() } catch (e: Exception) {
-            Log.e(TAG, "engine: ${Redact.log(e)}")
+            Log.e(TAG, "engine: ${logLine(e)}")
             throw Fail(failure)
         }
     }
@@ -614,7 +614,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (setup.tailscale && ts == null) watchTailscale()
         true
     } catch (e: Exception) {
-        Log.e(TAG, "reload: ${Redact.log(e)}")
+        Log.e(TAG, "reload: ${logLine(e)}")
         rejected = setup to accounts // don't retry the same broken pair in a loop; [applied] stays what runs
         // libbox stops the old engine before starting the new one: only then bring the last good config back. It comes
         // back with a new probe pair too: the old password may have been seen while the old engine's port was free.
@@ -845,7 +845,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun watchTailscale() {
         ts = runCatching {
             Libbox.newStandaloneCommandClient().subscribeTailscaleStatus(object : TailscaleStatusHandler {
-                override fun onError(message: String?) { Log.w(TAG, "tailscale: ${Redact.clean(message)}") }
+                override fun onError(message: String?) { Log.w(TAG, "tailscale: ${logText(message)}") }
                 override fun onStatusUpdate(u: TailscaleStatusUpdate) {
                     val it = u.endpoints()
                     if (!it.hasNext()) return
@@ -878,7 +878,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     }
                 }
             })
-        }.onFailure { Log.w(TAG, "tailscale status: ${Redact.log(it)}") }.getOrNull()
+        }.onFailure { Log.w(TAG, "tailscale status: ${logLine(it)}") }.getOrNull()
     }
 
     /** Counts connections ended ([stopEngine]): a stop from outside applies only to the one it was sent for. */
@@ -1129,7 +1129,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     override fun setSystemProxyEnabled(enabled: Boolean) {}
     override fun connectSSHAgent() = error("unsupported")
     override fun triggerNativeCrash() {}
-    override fun writeDebugMessage(message: String?) { Log.d(TAG, Redact.clean(message)) }
+    override fun writeDebugMessage(message: String?) { if (app.unbraid.BuildConfig.DEBUG) Log.d(TAG, Redact.clean(message)) }
 }
 
 private class Strings(list: List<String>) : StringIterator {
@@ -1165,3 +1165,12 @@ fun vpnOn(phase: VpnState.Phase, ask: Ask?): Boolean = ask?.on ?: (phase == VpnS
 
 /** A stop or pause the service hasn't handled yet while the tunnel still runs: tiles show it under way, not done. */
 fun stopping(phase: VpnState.Phase, ask: Ask?): Boolean = ask?.on == false && (phase == VpnState.Phase.On || phase == VpnState.Phase.Connecting)
+
+/**
+ * One logcat line about [e]. Errors from the engine or a library can echo a key with no name the scrubber knows, so
+ * release builds keep only their class name; the app's own failures ([Fail]) and debug builds keep the cleaned text.
+ */
+internal fun logLine(e: Throwable, debug: Boolean = app.unbraid.BuildConfig.DEBUG): String = if (debug || e is Fail) Redact.log(e) else e.javaClass.simpleName
+
+/** Engine text for logcat: cleaned in debug builds, left out in release ones (see [logLine]). */
+internal fun logText(text: String?, debug: Boolean = app.unbraid.BuildConfig.DEBUG): String = if (debug) Redact.clean(text) else "(not logged)"
