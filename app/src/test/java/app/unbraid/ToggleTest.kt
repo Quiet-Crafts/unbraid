@@ -26,6 +26,18 @@ class ToggleTest {
         assertFalse(vpnOn(Phase.Connecting, Ask(2, false)))
     }
 
+    /** The tile's text agrees with its on or off look: a stop still being handled says so, never "On" while off. */
+    @Test fun tileSaysWhatIsUnderWay() {
+        assertEquals("Disconnecting", app.unbraid.vpn.tileSubtitle(Phase.On, Ask(2, false)))
+        assertEquals("Disconnecting", app.unbraid.vpn.tileSubtitle(Phase.Connecting, Ask(2, false)))
+        assertEquals("Connecting", app.unbraid.vpn.tileSubtitle(Phase.Off, Ask(1, true)))
+        assertEquals("On", app.unbraid.vpn.tileSubtitle(Phase.On, null))
+        assertEquals("Off", app.unbraid.vpn.tileSubtitle(Phase.Off, Ask(2, false)))
+        assertEquals("Paused", app.unbraid.vpn.tileSubtitle(Phase.Paused, null))
+        for (phase in Phase.values()) for (ask in listOf(null, Ask(1, true), Ask(1, false)))
+            if (!vpnOn(phase, ask)) assertTrue(app.unbraid.vpn.tileSubtitle(phase, ask) != "On")
+    }
+
     /** Tailscale's states read as what they are; no status yet while connected is starting, not idle. */
     @Test fun tailscaleStatusText() {
         assertEquals("Starting", tailscaleSub(enabled = true, connected = true, state = null))

@@ -113,7 +113,7 @@ abstract class ProfileTile(private val slot: Int) : LiveTile<Setup>({ combine(Un
         updateTile {
             label = p?.name ?: "Profile ${slot + 1}"
             state = if (p == null) QsTile.STATE_UNAVAILABLE else if (lit) QsTile.STATE_ACTIVE else QsTile.STATE_INACTIVE
-            subtitle = if (lit) "In use" else null
+            subtitle = if (lit) "In use" else if (p != null && value.profile == p.name && stopping(UnbraidVpn.state.value.phase, UnbraidVpn.asked.value)) "Disconnecting" else null
         }
     }
 

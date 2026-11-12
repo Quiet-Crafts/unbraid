@@ -1154,3 +1154,6 @@ class Ask(val n: Int, val on: Boolean)
  * phase, so a second quick tap undoes the first instead of repeating it, however long the first one takes.
  */
 fun vpnOn(phase: VpnState.Phase, ask: Ask?): Boolean = ask?.on ?: (phase == VpnState.Phase.On || phase == VpnState.Phase.Connecting)
+
+/** A stop or pause the service hasn't handled yet while the tunnel still runs: tiles show it under way, not done. */
+fun stopping(phase: VpnState.Phase, ask: Ask?): Boolean = ask?.on == false && (phase == VpnState.Phase.On || phase == VpnState.Phase.Connecting)

@@ -9,10 +9,8 @@ import kotlinx.coroutines.flow.combine
 
 class Tile : LiveTile<VpnState>({ combine(UnbraidVpn.state, UnbraidVpn.asked) { s, _ -> s } }) {
     override fun render(value: VpnState) = updateTile {
-        val on = running(value.phase)
-        state = if (on) QsTile.STATE_ACTIVE else QsTile.STATE_INACTIVE
-        // "On", "Connecting", "Off", "Paused"; a start not yet under way already reads as one.
-        subtitle = if (on && value.phase != Phase.On) Phase.Connecting.name else value.phase.name
+        state = if (running(value.phase)) QsTile.STATE_ACTIVE else QsTile.STATE_INACTIVE
+        subtitle = tileSubtitle(value.phase, UnbraidVpn.asked.value)
     }
 
     override fun onClick() = unlockAndRun(::toggle)
@@ -24,4 +22,14 @@ class Tile : LiveTile<VpnState>({ combine(UnbraidVpn.state, UnbraidVpn.asked) { 
             else -> openApp(Intent(this, MainActivity::class.java))
         }
     }
+}
+
+/**
+ * "On", "Connecting", "Off", "Paused", agreeing with the tile's on or off look ([vpnOn]): a start not yet under way
+ * already reads as connecting, a stop or pause not yet done as disconnecting.
+ */
+fun tileSubtitle(phase: Phase, ask: Ask?): String = when {
+    stopping(phase, ask) -> "Disconnecting"
+    vpnOn(phase, ask) && phase != Phase.On -> Phase.Connecting.name
+    else -> phase.name
 }
