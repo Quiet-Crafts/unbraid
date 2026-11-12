@@ -95,6 +95,8 @@ data class VpnState(
     val stuck: Map<String, Boolean> = emptyMap(),
     /** Routes whose tunnel keeps dropping ([app.unbraid.vpn.Health.dropping]). */
     val dropping: Set<String> = emptySet(),
+    /** Provider routes moved to other servers again and again that still don't work: not moved again on this network ([Health.doesntWork]). */
+    val stalled: Set<String> = emptySet(),
     /** Own-server routes whose internet check failed; never moved. */
     val notAnswering: Set<String> = emptySet(),
     /** Counts engine starts, each of which restarts every tunnel: what was observed of an earlier one no longer holds. */
@@ -626,12 +628,16 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private suspend fun watchHealth() {
         val streaks = HashMap<String, Health.Streak>() // tag → its failed checks; tags that answered have none
         val history = HashMap<String, List<Boolean>>() // tag → its latest regular checks, for routes that keep dropping
-        val holds = HashMap<String, Long>() // tag → when a dead tunnel there may be handled again; survives restarts
+        val holds = HashMap<String, Long>() // tag → when a dead tunnel there may be handled again; survives engine restarts
+        val moves = HashMap<String, Health.Moves>() // tag → its dead tunnels handled in a row on this network
+        var moved = -1 // the engine start the last move made: its restart keeps the history the move was judged on
         var slow = 1
         var grace = SystemClock.elapsedRealtime() + Health.GRACE // no check before this
         var round = SystemClock.elapsedRealtime() + jitter() // the next regular round
         var basis: Pair<Int, android.net.Network?>? = null // the engine start and network the streaks are about
-        fun restart(now: Long) { streaks.clear(); history.clear(); undrop(); failing = emptySet(); state.update { it.copy(notAnswering = emptySet()) }; grace = now + Health.GRACE; round = grace }
+        fun restart(now: Long, keep: Boolean = false) {
+            streaks.clear(); if (!keep) { history.clear(); undrop() }; failing = emptySet(); state.update { it.copy(notAnswering = emptySet()) }; grace = now + Health.GRACE; round = grace
+        }
         while (true) {
             val wake = maxOf(grace, streaks.entries.mapNotNull { (t, s) -> Health.due(s, holds[t] ?: 0) }.fold(round, ::minOf))
             val slept = asleep()
@@ -662,7 +668,15 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     .also { m -> servers = m.mapValues { (_, ids) -> ids.mapNotNull { id -> s.route(id)?.takeIf { !it.imported }?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } } } }
             }
             // Restarted tunnels or another network: earlier checks don't carry over, and the new ones get time to settle.
-            if (basis != (engine to network)) { val first = basis == null; basis = engine to network; if (!first) { slow = 1; restart(now); continue } }
+            if (basis != (engine to network)) {
+                val first = basis == null
+                val newNetwork = !first && basis?.second != network
+                basis = engine to network
+                // What didn't work on the last network may work on this one.
+                if (newNetwork) { moves.clear(); holds.clear(); if (state.value.stalled.isNotEmpty()) state.update { it.copy(stalled = emptySet()) } }
+                // A move's own restart keeps the history: otherwise a route that never works would never be shown failing.
+                if (!first) { slow = 1; restart(now, keep = !newNetwork && engine == moved); continue }
+            }
             if (now < grace) continue
             val regular = now >= round
             // A provider whose new key is still reaching its servers isn't judged yet.
@@ -701,22 +715,27 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     val s = Health.next(streaks[t] ?: Health.Streak(), t !in down, now)
                     if (s.fails == 0) streaks.remove(t) else { streaks[t] = s; Log.i(TAG, "health: $t failed ${s.fails}x, ${(now - s.since) / 1000} s") }
                     // Quick re-checks don't count here: one outage would look like a tunnel that keeps dropping.
-                    if (regular) history[t] = Health.record(history[t].orEmpty(), t !in down)
+                    if (regular) history[t] = Health.record(history[t].orEmpty(), t !in down).also { h -> if (Health.settled(h)) { moves.remove(t); holds.remove(t) } }
                 }
                 // The next connect, even a manual one, avoids them.
                 failing = streaks.keys.flatMap { servers[it].orEmpty() }.toSet()
                 val dropping = byTag.filterKeys { it != null && Health.dropping(history[it].orEmpty()) }.values.flatten().filter { current.route(it)?.imported == false }.toSet()
                 if (dropping != state.value.dropping) state.update { it.copy(dropping = dropping) }
                 val deadTags = checked.filter { t -> streaks[t]?.let { Health.dead(it, now, holds[t] ?: 0) } == true }
+                deadTags.forEach { t -> Health.moved(moves[t] ?: Health.Moves(), now).let { moves[t] = it; holds[t] = it.hold } }
+                val given = moves.filterValues(Health::doesntWork).keys
+                val stalled = byTag.filterKeys { it in given }.values.flatten().filter { current.route(it)?.imported == false }.toSet()
+                if (stalled != state.value.stalled) state.update { it.copy(stalled = stalled) }
                 if (deadTags.isEmpty()) return@withLock null
-                deadTags.forEach { holds[it] = now + Health.COOLDOWN }
                 val dead = byTag.filterKeys { it in deadTags }.values.flatten().filter { current.route(it)?.imported == false }
                 if (dead.isEmpty()) return@withLock null
                 val s = running ?: return@withLock null
+                // Given up on: still checked for a removed device, but neither moved nor port-stepped (each restarts every tunnel).
+                val moving = byTag.filterKeys { it in deadTags && it !in given }.values.flatten().filter { it in dead }
                 // A dead tunnel on Automatic also tries its provider's next port: a failed check can't tell a blocked port from a dead server.
-                val stepped = dead.mapNotNull { id -> s.route(id)?.loc?.provider?.takeIf { p -> (links[id] as? app.unbraid.data.WgLink)?.ports.orEmpty().size > 1 && s.opt(p, app.unbraid.data.PORT_OPT) == app.unbraid.data.AUTO } }.toSet()
+                val stepped = moving.mapNotNull { id -> s.route(id)?.loc?.provider?.takeIf { p -> (links[id] as? app.unbraid.data.WgLink)?.ports.orEmpty().size > 1 && s.opt(p, app.unbraid.data.PORT_OPT) == app.unbraid.data.AUTO } }.toSet()
                 portStep = portStep + stepped.associateWith { (portStep[it] ?: 0) + 1 }
-                val movable = dead.filter { id -> s.route(id)?.let(Health::movable) == true }
+                val movable = moving.filter { id -> s.route(id)?.let(Health::movable) == true }
                 Log.w(TAG, "health: ${dead.size} route(s) stopped answering, ${movable.size} to move to another server")
                 Move(links - movable.toSet(), movable.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } }.toSet(), generation,
                     dead.mapNotNull { id -> s.route(id)?.loc?.provider }.toSet(), movable.isNotEmpty() || stepped.isNotEmpty())
@@ -731,7 +750,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 dropped.forEach { p -> refusals = refusals + (p to (accounts[p] to AuthException("${Providers.get(p)?.name ?: p} no longer has this phone (it was removed from your account). Sign in again"))) }
             }
             // The newest setup, not the running one: a change still waiting to apply must never be undone here.
-            if (move.anyMovable || dropped.isNotEmpty()) reload(move.keep, move.avoid, move.generation)
+            if (move.anyMovable || dropped.isNotEmpty()) { reload(move.keep, move.avoid, move.generation); moved = starts }
         }
     }
 

@@ -91,6 +91,27 @@ object Health {
     /** Dead: four failures over at least [RECOVER], so it had its chance to come back on the same server. */
     fun dead(s: Streak, now: Long, hold: Long = 0) = s.fails >= 4 && now - s.since >= RECOVER && now >= hold
 
+    /** After a dead tunnel was moved and its new server doesn't work either, the waits before the next move: 2, 5, 15, 30 min. */
+    val BACKOFF = listOf(COOLDOWN, 5 * 60_000L, 15 * 60_000L, 30 * 60_000L)
+
+    /** A route's dead tunnels handled in a row on this network, and when it may be handled again (elapsed-realtime ms). */
+    data class Moves(val count: Int = 0, val hold: Long = 0)
+
+    /**
+     * A dead tunnel handled at [now]. Each move waits the next of [BACKOFF] before another; the move after the last wait
+     * is judged as soon as it is dead again; dead after that too, it is never handled again on this network.
+     */
+    fun moved(m: Moves, now: Long): Moves {
+        val count = m.count + 1
+        return Moves(count, when { count <= BACKOFF.size -> now + BACKOFF[count - 1]; count == BACKOFF.size + 1 -> now; else -> Long.MAX_VALUE })
+    }
+
+    /** Moved after every wait and still dead: it doesn't work on this network, so it stays where it is. */
+    fun doesntWork(m: Moves) = m.count > BACKOFF.size + 1
+
+    /** Answered its last three regular checks: the moves before no longer count. */
+    fun settled(history: List<Boolean>) = history.size >= 3 && history.takeLast(3).all { it }
+
     /** One HTTPS request over [network] itself, past every tunnel. */
     suspend fun direct(network: android.net.Network?) = withContext(Dispatchers.IO) {
         runCatching {

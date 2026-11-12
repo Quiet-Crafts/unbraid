@@ -85,6 +85,45 @@ class HealthTest {
         assertTrue(Health.dead(Health.next(s, ok = false, now = hold), hold, hold))
         assertEquals(hold, Health.due(Health.next(Health.Streak(), ok = false, now = 0), hold)) // quick re-checks wait too
     }
+    /**
+     * A route whose new servers never work: moved at once, then after waits of 2, 5, 15 and 30 minutes, then left alone
+     * as not working on this network. Three answers in a row end the run, so a later failure is moved at once again.
+     */
+    @Test fun aRouteThatNeverWorksBacksOffThenStops() {
+        val min = 60_000L
+        var clock = 0L
+        var m = Health.Moves()
+        var s = Health.Streak()
+        val movedAt = mutableListOf<Long>()
+        // Checked every 10 s: dead after a minute of failures, once its hold has passed.
+        while (clock < 6 * 60 * min) {
+            s = Health.next(s, ok = false, now = clock)
+            if (Health.dead(s, clock, m.hold)) {
+                m = Health.moved(m, clock)
+                if (!Health.doesntWork(m)) movedAt += clock
+                s = Health.Streak() // the engine restart starts its checks again
+            }
+            clock += 10_000
+        }
+        // The first move after a minute of failures, then never sooner than each wait after the one before.
+        assertEquals(6, m.count)
+        assertTrue(Health.doesntWork(m))
+        assertEquals(Long.MAX_VALUE, m.hold)
+        assertEquals(5, movedAt.size)
+        listOf(2 * min, 5 * min, 15 * min, 30 * min).forEachIndexed { i, wait -> assertTrue(movedAt[i + 1] - movedAt[i] >= wait) }
+        assertTrue(movedAt.last() < 60 * min)
+        // Not before: four moves in, it still gets its fifth.
+        assertFalse(Health.doesntWork(Health.Moves(5, 0)))
+        assertEquals(Health.COOLDOWN, Health.BACKOFF.first())
+    }
+
+    /** Three regular answers in a row end a run of moves; on and off doesn't. */
+    @Test fun settledAfterThreeAnswers() {
+        assertFalse(Health.settled(listOf(true, true)))
+        assertFalse(Health.settled(listOf(false, true, true, false, true, true)))
+        assertTrue(Health.settled(listOf(false, false, true, true, true)))
+    }
+
     @Test fun routeEligibilityAndMovement() {
         val wg = WgPeer("wg", "private", listOf("10.0.0.2/32"), "public", endpoint = "host:1", allowedIps = listOf("10.0.0.0/8"))
         val provider = Route("provider")
