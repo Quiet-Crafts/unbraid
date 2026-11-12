@@ -647,6 +647,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         var grace = SystemClock.elapsedRealtime() + Health.GRACE // no check before this
         var round = SystemClock.elapsedRealtime() + jitter() // the next regular round
         var basis: Pair<Int, android.net.Network?>? = null // the engine start and network the streaks are about
+        var lockdown = isLockdownEnabled // Android's Block setting as last seen here
         fun restart(now: Long, keep: Boolean = false) {
             streaks.clear(); if (!keep) { history.clear(); undrop() }; failing = emptySet(); state.update { it.copy(notAnswering = emptySet()) }; grace = now + Health.GRACE; round = grace
         }
@@ -656,8 +657,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // At least 5 s, then in slices: waits don't count deep sleep, and a sleep, an engine start or a new network
             // ends one early.
             kotlinx.coroutines.delay(5_000)
-            while (SystemClock.elapsedRealtime() < wake && asleep() - slept < Health.SLEPT && basis == (starts to net.network))
+            while (SystemClock.elapsedRealtime() < wake && asleep() - slept < Health.SLEPT && basis == (starts to net.network) && lockdown == isLockdownEnabled)
                 kotlinx.coroutines.delay((wake - SystemClock.elapsedRealtime()).coerceIn(1, 15_000))
+            // Block turned on or off in Android's settings while connected: excluded apps and networks change at once
+            // (Android sends no event for it), not only when the app is opened next. Once per change.
+            if (lockdown != isLockdownEnabled) { lockdown = isLockdownEnabled; lock.withLock { if (!destroyed && state.value.phase == VpnState.Phase.On) readFlags() } }
             var now = SystemClock.elapsedRealtime()
             holds.values.removeIf { it <= now }
             // A sleep in between (Doze, screen off) says nothing about the servers.
