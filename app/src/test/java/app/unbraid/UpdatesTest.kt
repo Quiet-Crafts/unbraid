@@ -85,4 +85,15 @@ class UpdatesTest {
         }
         assertFalse(result.enabled); assertEquals(old, result.latest); assertFalse(result.failed); assertEquals(result, s.updates)
     }
+
+    /** The check names only the app: no phone model or Android version, which the system's own agent would send. */
+    @Test fun updateCheckSendsANeutralAgent() = runBlocking {
+        val original = app.unbraid.data.Http.open
+        var sent: FakeHttps? = null
+        app.unbraid.data.Http.open = { u -> FakeHttps(u, 200, """{"versionCode":5,"versionName":"2.9.0"}""").also { sent = it } }
+        try {
+            assertEquals("""{"versionCode":5,"versionName":"2.9.0"}""", Updates.fetchLatest())
+            assertEquals("unbraid", sent!!.headers["User-Agent"])
+        } finally { app.unbraid.data.Http.open = original }
+    }
 }

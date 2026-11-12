@@ -44,11 +44,15 @@ object Updates {
 
     fun due(s: UpdateState, now: Long) = s.enabled && (now < s.lastAttemptMs || now - s.lastAttemptMs >= if (s.failed) FAILURE_INTERVAL_MS else SUCCESS_INTERVAL_MS)
 
-    private suspend fun fetchLatest(): String? = withContext(Dispatchers.IO) {
+    /** Sent instead of the system's own agent, which names the phone model and Android version. */
+    const val AGENT = "unbraid"
+
+    internal suspend fun fetchLatest(): String? = withContext(Dispatchers.IO) {
         runCatching {
-            val c = NetURL(URL).openConnection() as HttpURLConnection
+            val c = Http.open(NetURL(URL)) as HttpURLConnection
             try {
                 c.instanceFollowRedirects = false
+                c.setRequestProperty("User-Agent", AGENT)
                 c.connectTimeout = 5_000; c.readTimeout = 5_000
                 c.useCaches = false
                 if (c.responseCode != 200) return@runCatching null
