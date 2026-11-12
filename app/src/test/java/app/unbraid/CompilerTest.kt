@@ -310,6 +310,29 @@ class CompilerTest {
         }
     }
 
+    /** While settings can't be read, every app's connections and lookups are refused; nothing reaches the direct outbound. */
+    @Test fun blockAllRefusesEverything() = Compiler.FAKE_RANGES.indices.forEach { b ->
+        val raw = Compiler.blockAll("app.unbraid", "/tmp/cache.db", b)
+        File("build/compiled").apply { mkdirs() }.resolve("blockall-$b.json").writeText(raw)
+        val c = Json.parseToJsonElement(raw).jsonObject
+        assertEquals(listOf("app.unbraid"), c.excluded())
+        val tun = c["inbounds"]!!.jsonArray.single().jsonObject
+        assertNull(tun["route_exclude_address"]) // no LAN or other range left outside the VPN
+        assertTrue(c["endpoints"]!!.jsonArray.isEmpty())
+        assertEquals(listOf("direct"), c["outbounds"]!!.jsonArray.map { it.jsonObject["tag"]!!.jsonPrimitive.content })
+        // No rule sends anything anywhere; the last one refuses whatever is left, so the final outbound is never reached.
+        val rules = c.rules()
+        assertTrue(rules.none { it["outbound"] != null })
+        assertEquals(mapOf("action" to "reject", "no_drop" to "true"), rules.last().mapValues { it.value.jsonPrimitive.content })
+        assertTrue(rules.all { it["action"]?.jsonPrimitive?.content in setOf("reject", "hijack-dns", "resolve") })
+        // Lookups: names get a fake address (which is then refused), everything else is refused; nothing is asked upstream.
+        val dns = c["dns"]!!.jsonObject
+        assertEquals(setOf("fakeip", "local"), dns["servers"]!!.jsonArray.map { it.jsonObject["type"]!!.jsonPrimitive.content }.toSet())
+        assertEquals(mapOf("action" to "\"reject\""), dns["rules"]!!.jsonArray.last().jsonObject.mapValues { it.value.toString() })
+        assertEquals(Compiler.FAKE_RANGES[b], dns["servers"]!!.jsonArray.first().jsonObject["inet4_range"]!!.jsonPrimitive.content)
+        assertFalse(raw.contains("probe"))
+    }
+
     @Test fun unusedRoutesDoNotConnect() {
         val c = compile(example.copy(apps = mapOf("com.a" to "us")))
         assertEquals(listOf("r-nl", "r-us", "home-ts"), c.endpointTags())

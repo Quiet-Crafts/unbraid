@@ -98,6 +98,17 @@ object Compiler {
     /** Route ids that apps are set to but the setup no longer has: their apps are refused, never sent to the default. */
     fun missing(s: Setup): Set<String> = s.apps.values.filterTo(HashSet()) { it != DIRECT && s.route(it) == null }
 
+    /**
+     * A config that refuses every app's connections and lookups ($APP itself stays outside the VPN, as always): what runs
+     * while the saved settings can't be read, so no app falls back to the normal connection. Built as a setup whose only
+     * route, the default, has no tunnel: the same config a signed-out default gets.
+     */
+    fun blockAll(selfPackage: String, cacheFile: String, fakeBlock: Int): String {
+        val none = Route("unreadable", app.unbraid.data.Location())
+        val s = Setup(routes = listOf(none), defaultRoute = none.id, home = Home(), prefs = app.unbraid.data.Prefs(lan = false))
+        return compile(Input(s, emptyMap(), selfPackage, false, "", cacheFile, fakeBlock = fakeBlock, blocked = setOf(none.id)))
+    }
+
     fun compile(i: Input): String {
         val s = i.setup
         if (s.defaultRoute != DIRECT && s.route(s.defaultRoute) == null) throw MissingDefault()
