@@ -2,6 +2,7 @@ package app.unbraid
 
 import app.unbraid.stats.SpeedTest
 import app.unbraid.ui.leavesPage
+import app.unbraid.ui.sharePct
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
@@ -46,5 +47,12 @@ class StatsFixesTest {
         assertNull(SpeedTest.nodeExit(node.copy(phase = SpeedTest.Phase.Done), tag)) // test over
         assertNull(SpeedTest.nodeExit(SpeedTest.Run("r1", SpeedTest.Phase.Download), tag)) // a route test, not a node test
         assertNull(SpeedTest.nodeExit(null, tag))
+    }
+
+    /** 6 GB through one exit and 2 GB direct: the exit is 75% everywhere; shares round to the nearest percent. */
+    @Test fun sharesDivideBySameTotalAndRound() {
+        assertEquals(75, sharePct(6_000_000_000, 8_000_000_000))
+        assertEquals(67, sharePct(2, 3)) // 66.7, not 66
+        assertEquals(0, sharePct(0, 0))
     }
 }

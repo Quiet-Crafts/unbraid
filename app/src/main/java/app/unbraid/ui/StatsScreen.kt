@@ -154,6 +154,9 @@ private fun View.fastestDown(e: String) = tests[e]?.down ?: 0
 private fun View.byProvider(): List<Pair<String, Long>> =
     byExit.groupBy({ providerOf(it.first, exits[it.first]) }, { it.second.total }).mapValues { it.value.sum() }.entries.sortedByDescending { it.value }.map { it.key to it.value }
 
+/** [part] of [total] as a whole percent, rounded to the nearest. Every share on the Stats pages divides by the same total. */
+internal fun sharePct(part: Long, total: Long): Int = ((part * 100.0 / total.coerceAtLeast(1)) + 0.5).toInt()
+
 private fun bytesText(b: Long) = bytes(b).let { "${it.first} ${it.second}" }
 /** A live speed: kbps under 1 Mbps so small transfers don't read as zero. */
 private fun rate(bps: Long): Pair<String, String> = when {
@@ -405,7 +408,8 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                                     Text("into ${exits.size} ${if (exits.size == 1) "exit" else "exits"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
                                 }
                             }
-                            exits.take(2).forEach { (id, b) -> Legend(v.exits[id], (100 * b.total / exits.sumOf { it.second.total }.coerceAtLeast(1)).toInt()) }
+                            // Of all the data, Direct included: the same total as the Usage tile's shares.
+                            exits.take(2).forEach { (id, b) -> Legend(v.exits[id], sharePct(b.total, v.total.total)) }
                         }
                     }
                 }
@@ -445,7 +449,7 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
 private fun ProviderMeter(name: String, bytes: Long, total: Long) = Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
     Text(name, style = Type.caption.copy(fontSize = 12.sp), color = Ink.text, maxLines = 1, modifier = Modifier.width(110.dp))
     Meter(bytes.toFloat() / total.coerceAtLeast(1), Ink.text.copy(alpha = 0.75f), Modifier.weight(1f))
-    Text("${100 * bytes / total.coerceAtLeast(1)}%", style = Type.code.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
+    Text("${sharePct(bytes, total)}%", style = Type.code.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
 }
 
 @Composable
@@ -518,7 +522,7 @@ private fun Usage(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, go
         val (name, b) = providers[i]
         GroupRow(i, providers.size, name, null, trailing = {
             Column(Modifier.width(150.dp), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("${bytesText(b)}  ${100 * b / v.total.total.coerceAtLeast(1)}%", style = Type.code.copy(fontSize = 14.sp), color = Ink.text)
+                Text("${bytesText(b)}  ${sharePct(b, v.total.total)}%", style = Type.code.copy(fontSize = 14.sp), color = Ink.text)
                 Meter(b.toFloat() / v.total.total.coerceAtLeast(1), Ink.text.copy(alpha = 0.75f), Modifier.fillMaxWidth())
             }
         })
@@ -576,7 +580,7 @@ private fun Flows(ui: Ui, v: View, p: Period, periodPicker: LazyListScope.() -> 
     val name = { pkg: String -> when (pkg) { "?" -> "Unknown app"; BuildConfig.APPLICATION_ID -> APP /* its own: speed tests, health checks */; else -> labels[pkg] ?: pkg.substringAfterLast('.') } }
     val apps = v.apps.filter { it.second != DIRECT }
     val exits = v.byExit.map { it.first }.filter { it != DIRECT }
-    val total = v.byExit.filter { it.first != DIRECT }.sumOf { it.second.total }.coerceAtLeast(1)
+    val total = v.total.total.coerceAtLeast(1) // of all the data, as in Usage
     val biggest = v.byExit.firstOrNull { it.first != DIRECT }?.second?.total?.coerceAtLeast(1) ?: 1
     var picked by rememberSaveable { mutableStateOf<String?>(null) }
     val only = picked?.takeIf { it in exits } // an exit with no data in this period filters nothing
@@ -652,7 +656,7 @@ private fun Lane(
             Text(ex?.name ?: "?", style = Type.body, color = Ink.text, modifier = Modifier.weight(1f), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
             Text("${apps.size} ${if (apps.size == 1) "app" else "apps"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
             Text(bytesText(bytes), style = Type.code.copy(fontSize = 15.sp, fontWeight = FontWeight.Medium), color = Ink.text)
-            Text("${100 * bytes / total}%", style = Type.code.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
+            Text("${sharePct(bytes, total)}%", style = Type.code.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
         }
         // Segments: the five biggest apps, fading, then the rest; the bar's length is the exit's data.
         Row(
@@ -811,7 +815,7 @@ private fun Tunnel(v: View, p: Period, id: String, periodPicker: LazyListScope.(
             val (name, b) = servers[i]
             GroupRow(i, servers.size, name, null, trailing = {
                 Row(Modifier.width(150.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Meter(b.toFloat() / total, ex?.color ?: Ink.faint, Modifier.weight(1f)); Text("${100 * b / total}%", style = Type.code.copy(fontSize = 14.sp), color = Ink.text)
+                    Meter(b.toFloat() / total, ex?.color ?: Ink.faint, Modifier.weight(1f)); Text("${sharePct(b, total)}%", style = Type.code.copy(fontSize = 14.sp), color = Ink.text)
                 }
             })
         }
