@@ -63,6 +63,12 @@ const val PROVIDERS_URL = "https://unbraid.app/providers/#need-a-vpn"
 internal fun mergeUpdates(read: UpdateState, held: UpdateState) =
     (if (held.asked) read.copy(enabled = held.enabled, asked = true) else read).copy(dismissedCode = maxOf(read.dismissedCode, held.dismissedCode))
 
+/**
+ * Whether turning update checks on ([was] off, [now] on) asks unbraid.app at once: only in a build that checks
+ * ([available]) and once the terms are accepted. The welcome page asks before that; its check runs on accepting.
+ */
+internal fun checkAtOnce(available: Boolean, was: Boolean, now: Boolean, termsOk: Boolean) = available && now && !was && termsOk
+
 data class AppInfo(val pkg: String, val label: String, val system: Boolean)
 
 /** Removed routes' apps follow the default. The default itself never moves: check [Setup.refusesRemoving] first. */
@@ -182,8 +188,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         updates.update(f)
         viewModelScope.launch(Dispatchers.IO) {
             val now = synchronized(store) { f(store.updates).also { store.updates = it } }
-            // Just turned on: the first check runs now, not at the next resume.
-            if (BuildConfig.UPDATE_CHECK && now.enabled && !was) runCheck(force = true)
+            // Just turned on: the first check runs now, not at the next resume (nor before the terms are accepted).
+            if (checkAtOnce(BuildConfig.UPDATE_CHECK, was, now.enabled, Onboarding.termsOk)) runCheck(force = true)
         }
     }
 
