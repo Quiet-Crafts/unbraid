@@ -26,6 +26,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.runtime.State
@@ -49,6 +50,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.selection.selectable
@@ -168,6 +170,25 @@ internal fun appLabel(pkg: String, installed: String?, saved: Stats.AppName?): S
     saved != null -> "Removed app (${saved.name})"
     else -> "Removed app"
 }
+
+/** The spoken summary of a bar chart: per [unit] ("hour", "day"), the busiest column, the selected one and the sum. */
+internal fun dataSummary(unit: String, totals: List<Long>, selected: Int, format: (Long) -> String): String {
+    val peak = totals.maxOrNull() ?: 0L
+    val sel = totals.getOrNull(selected)
+    return "Data per $unit. Total ${format(totals.sum())}. Busiest $unit ${format(peak)}." + (sel?.let { " Now ${format(it)}." } ?: "")
+}
+
+/** The spoken summary of the 13-week calendar: its busiest day and the chosen one ([heat] = hours per day, negative = not yet). */
+internal fun heatSummary(heat: List<Float>, start: LocalDate, selected: Int, date: DateTimeFormatter): String {
+    val best = heat.indices.maxByOrNull { heat[it] } ?: return "Hours connected per day, last 13 weeks."
+    val h = { x: Float -> "${String.format(Locale.US, "%.1f", x.coerceAtLeast(0f))} hours" }
+    return "Hours connected per day, last 13 weeks. Busiest day ${start.plusDays(best.toLong()).format(date)}, ${h(heat[best])}." +
+        (heat.getOrNull(selected)?.let { " Chosen day ${start.plusDays(selected.toLong()).format(date)}, ${h(it)}." } ?: "")
+}
+
+/** The spoken summary of the hub's week marks: each day with its hours. */
+internal fun weekSummary(days: List<String>, hours: List<Float>): String =
+    "Connected this week: " + days.indices.joinToString(", ") { "${days[it]} ${String.format(Locale.US, "%.1f", hours.getOrElse(it) { 0f }.coerceAtLeast(0f))} h" }
 
 /** [part] of [total] as a whole percent, rounded to the nearest. Every share on the Stats pages divides by the same total. */
 internal fun sharePct(part: Long, total: Long): Int = ((part * 100.0 / total.coerceAtLeast(1)) + 0.5).toInt()
@@ -341,7 +362,7 @@ private fun Num(parts: List<Pair<String, String>>, size: Int = 32) = Text(
             if (u.isNotEmpty()) withStyle(SpanStyle(fontSize = maxOf(12f, size * 0.42f).sp, color = Ink.dim)) { append(" $u") }
         }
     },
-    style = Type.code.copy(fontSize = size.sp, lineHeight = (size + 4).sp, fontWeight = FontWeight.Medium), color = Ink.text, maxLines = 1,
+    style = Type.code.copy(fontSize = size.sp, lineHeight = (size + 4).sp, fontWeight = FontWeight.Medium), color = Ink.text,
 )
 
 /** A duration as measurement parts: 3 h 20 m, or 45 m under an hour. */
@@ -415,7 +436,7 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                             Num(listOf(rate(live.downNow)), 28)
                             Text("download now", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
                             val total = remember(live) { FloatArray(60) { i -> live.down.values.sumOf { it[i].toDouble() }.toFloat() } }
-                            Spark(total, Ink.text, Modifier.fillMaxWidth())
+                            Spark(total, Ink.text, Modifier.fillMaxWidth(), "Download over the last minute, now ${rate(live.downNow).let { "${it.first} ${it.second}" }}")
                         } else Text("Not connected", style = Type.sub, color = Ink.dim)
                     }
                     HubTile("flows", "App flows", Icons.flows, 2, play, go) {
@@ -426,7 +447,7 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                                 Ring(exits.map { (id, b) -> b.total.toFloat() to (v.exits[id]?.color ?: Ink.faint) }, "Share by exit: " + exits.joinToString { (id, b) -> "${v.exits[id]?.name} ${bytesText(b.total)}" }, size = 56.dp, stroke = 8.dp)
                                 Column {
                                     Num(v.apps.filter { it.second != DIRECT }.map { it.first }.distinct().size.toString(), "apps", 26)
-                                    Text("into ${exits.size} ${if (exits.size == 1) "exit" else "exits"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
+                                    Text("into ${exits.size} ${if (exits.size == 1) "exit" else "exits"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
                             // Of all the data, Direct included: the same total as the Usage tile's shares.
@@ -439,7 +460,8 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                     HubTile("journal", "Journal", Icons.calendar, 3, play, go) {
                         Num(hmParts(v?.weekMs ?: 0), 28)
                         Text("connected this week", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
-                        if (v != null) WeekMarks(v.week.map { it.coerceAtLeast(0f) }, DayOfWeek.entries.map { it.getDisplayName(DayStyle.NARROW, locale()) }, LocalDate.now().dayOfWeek.ordinal)
+                        if (v != null) WeekMarks(v.week.map { it.coerceAtLeast(0f) }, DayOfWeek.entries.map { it.getDisplayName(DayStyle.NARROW, locale()) }, LocalDate.now().dayOfWeek.ordinal,
+                            weekSummary(DayOfWeek.entries.map { it.getDisplayName(DayStyle.SHORT, locale()) }, v.week))
                     }
                     HubTile("tunnels", "Tunnels", Icons.tunnel, 3, play, go) {
                         // Each exit's fastest download test.
@@ -447,7 +469,7 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                         val best = fastest.maxByOrNull { it.value }
                         if (v == null || best == null) Text("No speed tests yet", style = Type.sub, color = Ink.dim) else {
                             Num(mbps(best.value), "Mbps", 28)
-                            Text("best test · ${v.exits[best.key]?.name}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
+                            Text("best test · ${v.exits[best.key]?.name}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             // The two fastest, like App flows' legend: the hub fits one Pixel screen without scrolling.
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 fastest.entries.sortedByDescending { it.value }.take(2).forEach { (id, b) ->
@@ -468,7 +490,7 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
 /** A provider's share: its name, a neutral meter and the percentage. */
 @Composable
 private fun ProviderMeter(name: String, bytes: Long, total: Long) = Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-    Text(name, style = Type.caption.copy(fontSize = 12.sp), color = Ink.text, maxLines = 1, modifier = Modifier.width(110.dp))
+    Text(name, style = Type.caption.copy(fontSize = 12.sp), color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(min = 110.dp, max = 160.dp))
     Meter(bytes.toFloat() / total.coerceAtLeast(1), Ink.text.copy(alpha = 0.75f), Modifier.weight(1f))
     Text("${sharePct(bytes, total)}%", style = Type.code.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
 }
@@ -531,7 +553,7 @@ private fun Usage(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, go
                 // How much, when: neutral bars (which exit is App flows' subject, in the exits' colours).
                 StackedBars(
                     v.columns.map { c -> listOf((c.values.sumOf { it.total } / div).toFloat() to Ink.text.copy(alpha = 0.75f)) },
-                    v.labels, cap.toFloat(), "${scaleText(cap.toFloat())} $unit", "Data per ${if (p == Period.Day) "hour" else "day"}", v.selected,
+                    v.labels, cap.toFloat(), "${scaleText(cap.toFloat())} $unit", dataSummary(if (p == Period.Day) "hour" else "day", v.columns.map { c -> c.values.sumOf { it.total } }, v.selected, ::bytesText), v.selected,
                 )
             }
         }
@@ -673,7 +695,7 @@ private fun Lane(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Chip(ex)
-            Text(ex?.name ?: "?", style = Type.body, color = Ink.text, modifier = Modifier.weight(1f), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            Text(ex?.name ?: "?", style = Type.body, color = Ink.text, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("${apps.size} ${if (apps.size == 1) "app" else "apps"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
             Text(bytesText(bytes), style = Type.code.copy(fontSize = 15.sp, fontWeight = FontWeight.Medium), color = Ink.text)
             Text("${sharePct(bytes, total)}%", style = Type.code.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
@@ -701,12 +723,15 @@ private fun Lane(
 private fun FilterPill(ex: Ex?, text: String, count: Int, on: Boolean, onClick: () -> Unit) {
     val color = ex?.color ?: Ink.accent
     val bg by animateColorAsState(if (on) color else Ink.surfaceHigh, MaterialTheme.motionScheme.fastEffectsSpec(), label = "pill")
-    Row(
-        Modifier.height(36.dp).clip(RoundedCornerShape(18.dp)).background(bg).selectable(on, role = Role.RadioButton, onClick = onClick).padding(horizontal = 14.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        ex?.let { Text(it.code, style = Type.code.copy(fontSize = 12.sp), color = if (on) Ink.ground else it.color) }
-        Text("$text $count", style = Type.sub.copy(fontWeight = FontWeight.Medium), color = if (on) Ink.ground else Ink.text, maxLines = 1)
+    // The pill looks 36 dp high (more at large text); the touch target around it is at least 48 dp.
+    Box(Modifier.heightIn(min = 48.dp).selectable(on, role = Role.RadioButton, onClick = onClick), contentAlignment = Alignment.Center) {
+        Row(
+            Modifier.heightIn(min = 36.dp).clip(RoundedCornerShape(18.dp)).background(bg).padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            ex?.let { Text(it.code, style = Type.code.copy(fontSize = 12.sp), color = if (on) Ink.ground else it.color) }
+            Text("$text $count", style = Type.sub.copy(fontWeight = FontWeight.Medium), color = if (on) Ink.ground else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 
@@ -730,7 +755,8 @@ private fun Journal(v: View, go: (String?) -> Unit) {
                 // A month's name over the week it starts in; the first column only if no month starts in the next two.
                 val starts = (0 until 13).filter { w -> v.heatStart.plusWeeks(w.toLong()).dayOfMonth <= 7 }
                 val months = (listOf(0).filter { starts.none { s -> s in 1..2 } } + starts).associateWith { w -> v.heatStart.plusWeeks(w.toLong()).plusDays(6).month.getDisplayName(DayStyle.SHORT, locale()) }
-                Heatmap(v.heat, day, DayOfWeek.entries.map { it.getDisplayName(DayStyle.NARROW, locale()) }, months, "Hours connected per day, last 13 weeks")
+                Heatmap(v.heat, day, DayOfWeek.entries.map { it.getDisplayName(DayStyle.NARROW, locale()) }, months,
+                    heatSummary(v.heat, v.heatStart, day, DateTimeFormatter.ofPattern("EEEE d MMMM", locale())))
             }
         }
         item(key = "day") {
@@ -758,7 +784,7 @@ private fun Journal(v: View, go: (String?) -> Unit) {
                 ).forEach { (a, b) ->
                     Column(Modifier.weight(1f).clip(RoundedCornerShape(20.dp)).background(Ink.surface).padding(horizontal = 14.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Num(a, 20)
-                        Text(b, style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
+                        Text(b, style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 2)
                     }
                 }
             }
@@ -815,7 +841,7 @@ private fun SpeedPair(label: String, down: Long, up: Long, color: Color) = Text(
         withStyle(SpanStyle(color = Ink.dim, fontSize = 11.sp)) { append("$label ") }
         append("↓${mbps(down)} ↑${if (up > 0) mbps(up) else "—"}")
     },
-    style = Type.code.copy(fontSize = 12.sp), color = color, maxLines = 1, softWrap = false,
+    style = Type.code.copy(fontSize = 12.sp), color = color, maxLines = 2,
 )
 
 @Composable
@@ -885,26 +911,28 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
                 if (routed.size >= 2) item(key = SpeedTest.ALL) {
                     // White, not an exit's colour: all of them; a stripe of their colours names them.
                     val bg by animateColorAsState(if (allMode) Ink.text else Ink.surfaceHigh, MaterialTheme.motionScheme.fastEffectsSpec(), label = "exit")
+                    Box(Modifier.heightIn(min = 48.dp).selectable(allMode, enabled = !busy, role = Role.RadioButton) { chosen = SpeedTest.ALL; SpeedTest.clear() }, contentAlignment = Alignment.Center) {
                     Row(
-                        Modifier.height(40.dp).clip(RoundedCornerShape(20.dp)).background(bg)
-                            .selectable(allMode, enabled = !busy, role = Role.RadioButton) { chosen = SpeedTest.ALL; SpeedTest.clear() }.padding(start = 12.dp, end = 16.dp),
+                        Modifier.heightIn(min = 40.dp).clip(RoundedCornerShape(20.dp)).background(bg).padding(start = 12.dp, end = 16.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Row(Modifier.size(22.dp, 8.dp).clip(RoundedCornerShape(4.dp)), horizontalArrangement = Arrangement.spacedBy(1.dp)) { routed.forEach { Box(Modifier.weight(1f).fillMaxHeight().background(it.color)) } }
                         Text("ALL", style = Type.code.copy(fontSize = 12.sp), color = if (allMode) Ink.ground else Ink.text)
-                        Text("${routed.size} exits", style = Type.sub.copy(fontWeight = FontWeight.Medium), color = if (allMode) Ink.ground else if (busy) Ink.dim else Ink.text, maxLines = 1)
+                        Text("${routed.size} exits", style = Type.sub.copy(fontWeight = FontWeight.Medium), color = if (allMode) Ink.ground else if (busy) Ink.dim else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                     }
                 }
                 items(options, key = { it.id }) { e ->
                     val on = e.id == exit && !allMode
                     val bg by animateColorAsState(if (on) e.color else Ink.surfaceHigh, MaterialTheme.motionScheme.fastEffectsSpec(), label = "exit")
+                    Box(Modifier.heightIn(min = 48.dp).selectable(on, enabled = !busy, role = Role.RadioButton) { chosen = e.id; SpeedTest.clear() }, contentAlignment = Alignment.Center) {
                     Row(
-                        Modifier.height(40.dp).clip(RoundedCornerShape(20.dp)).background(bg)
-                            .selectable(on, enabled = !busy, role = Role.RadioButton) { chosen = e.id; SpeedTest.clear() }.padding(start = 12.dp, end = 16.dp),
+                        Modifier.heightIn(min = 40.dp).clip(RoundedCornerShape(20.dp)).background(bg).padding(start = 12.dp, end = 16.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(e.code, style = Type.code.copy(fontSize = 12.sp), color = if (on) Ink.ground else e.color)
-                        Text(e.name, style = Type.sub.copy(fontWeight = FontWeight.Medium), color = if (on) Ink.ground else if (busy) Ink.dim else Ink.text, maxLines = 1)
+                        Text(e.name, style = Type.sub.copy(fontWeight = FontWeight.Medium), color = if (on) Ink.ground else if (busy) Ink.dim else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                     }
                 }
             }
@@ -1102,9 +1130,9 @@ private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbra
                         ) {
                             Chip(e)
                             Column(Modifier.weight(1f)) {
-                                Text(e.name, style = Type.body, color = Ink.text, maxLines = 1)
+                                Text(e.name, style = Type.body, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(listOfNotNull(e.via.ifEmpty { null }, UnbraidVpn.state.value.servers[e.id]?.name ?: "connects for the test".takeIf { setup.activeRoutes.none { it.id == e.id } }).joinToString(" · "),
-                                    style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
+                                    style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             when {
                                 !working -> androidx.compose.material3.Checkbox(on, null, colors = androidx.compose.material3.CheckboxDefaults.colors(checkedColor = Ink.text, checkmarkColor = Ink.ground, uncheckedColor = Ink.dim))
@@ -1194,7 +1222,7 @@ private fun LegRows(legs: List<SpeedTest.Leg>, ex: (String) -> Ex?, setup: app.u
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Chip(ex(l.exit))
                 Column(Modifier.weight(1f)) {
-                    Text(ex(l.exit)?.name ?: l.exit, style = Type.body, color = Ink.text, maxLines = 1)
+                    Text(ex(l.exit)?.name ?: l.exit, style = Type.body, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(l.error ?: "M-Lab ${l.server?.city.orEmpty()}${if (l.missing) " (nearest)" else ""}", style = Type.caption.copy(fontSize = 12.sp), color = if (l.error != null) Ink.bad else Ink.dim)
                 }
                 if (l.error == null) HistoryCols(
@@ -1378,7 +1406,7 @@ private fun History(v: View, go: (String?) -> Unit) {
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (t.exit == SpeedTest.ALL) Code("ALL", Ink.text) else Chip(ex)
-                    Text(t.at.local(f), style = Type.body, color = Ink.text, modifier = Modifier.weight(1f), maxLines = 1)
+                    Text(t.at.local(f), style = Type.body, color = Ink.text, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     HistoryCols({ Text(mbps(t.down), style = Type.code.copy(fontSize = 16.sp, fontWeight = FontWeight.Medium), color = Ink.text) },
                         { Text(mbps(t.up), style = Type.code.copy(fontSize = 14.sp), color = Ink.text) },
                         { Text(if (t.idle > 0) "${t.idle}" else "—", style = Type.code.copy(fontSize = 14.sp), color = Ink.dim) })
@@ -1388,7 +1416,7 @@ private fun History(v: View, go: (String?) -> Unit) {
                     together.forEach { m ->
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             Chip(v.exits[m.exit])
-                            Text(v.exits[m.exit]?.name ?: m.exit, style = Type.caption.copy(fontSize = 13.sp), color = Ink.dim, modifier = Modifier.weight(1f), maxLines = 1)
+                            Text(v.exits[m.exit]?.name ?: m.exit, style = Type.caption.copy(fontSize = 13.sp), color = Ink.dim, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                             HistoryCols({ Text(mbps(m.down), style = Type.code.copy(fontSize = 13.sp), color = Ink.text) }, { Text(mbps(m.up), style = Type.code.copy(fontSize = 13.sp), color = Ink.text) },
                                 { Text("${m.idle}", style = Type.code.copy(fontSize = 13.sp), color = Ink.dim) })
                         }

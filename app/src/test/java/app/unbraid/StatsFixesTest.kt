@@ -3,6 +3,13 @@ package app.unbraid
 import app.unbraid.stats.SpeedTest
 import app.unbraid.stats.Stats
 import app.unbraid.ui.appLabel
+import app.unbraid.ui.dataSummary
+import app.unbraid.ui.heatAlpha
+import app.unbraid.ui.heatSummary
+import app.unbraid.ui.weekSummary
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import app.unbraid.ui.leavesPage
 import app.unbraid.ui.sharePct
 import org.junit.Assert.assertEquals
@@ -75,5 +82,25 @@ class StatsFixesTest {
         assertEquals(Stats.AppId("a.one", true), Stats.resolveApp(null, 42, listOf("b.two", "a.one")))
         assertEquals(Stats.AppId("x.pkg", false), Stats.resolveApp("x.pkg", 42, listOf("x.pkg")))
         assertEquals(Stats.AppId("?", false), Stats.resolveApp(null, -1, null))
+    }
+
+    /** Every calendar level is told apart, and an empty day is drawn outlined (no alpha). */
+    @Test fun calendarLevelsDiffer() {
+        assertNull(heatAlpha(0f))
+        val levels = listOf(0.5f, 2f, 4f, 8f).map { heatAlpha(it)!! }
+        assertEquals(levels.sorted(), levels)
+        assertEquals(levels.size, levels.toSet().size)
+        assertTrue(levels.zipWithNext().all { (a, b) -> b - a >= 0.15f })
+    }
+
+    @Test fun chartDescriptionsCarryFigures() {
+        val d = DateTimeFormatter.ofPattern("EEEE d MMMM", Locale.US)
+        val heat = listOf(1f, 11.5f, 3f, -1f)
+        val text = heatSummary(heat, LocalDate.of(2026, 11, 2), 2, d)
+        assertTrue(text, "Tuesday 3 November, 11.5 hours" in text)
+        assertTrue("3.0 hours" in text)
+        assertTrue("Total 3 MB" in dataSummary("day", listOf(1_000_000L, 2_000_000L), 1, { "${it / 1_000_000} MB" }))
+        assertTrue("Mon 3.0 h" in weekSummary(listOf("Mon", "Tue"), listOf(3f, -1f)))
+        assertTrue("Tue 0.0 h" in weekSummary(listOf("Mon", "Tue"), listOf(3f, -1f)))
     }
 }

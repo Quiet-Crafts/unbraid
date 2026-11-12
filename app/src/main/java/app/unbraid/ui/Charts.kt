@@ -34,6 +34,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextMeasurer
@@ -120,7 +121,7 @@ fun StackedBars(columns: List<List<Pair<Float, Color>>>, labels: List<String>, m
                 }
             }
             label(tm, scale, Offset(size.width, 0f), end = true)
-            label(tm, "0", Offset(size.width, size.height - 16.dp.toPx()), end = true)
+            label(tm, "0", Offset(size.width, size.height), end = true, above = true)
         }
         Row(Modifier.fillMaxWidth().padding(end = 48.dp, top = 6.dp)) {
             labels.forEachIndexed { i, l ->
@@ -130,9 +131,10 @@ fun StackedBars(columns: List<List<Pair<Float, Color>>>, labels: List<String>, m
     }
 }
 
-private fun DrawScope.label(tm: TextMeasurer, text: String, at: Offset, end: Boolean = false, color: Color = Ink.dim, size: Float = 12f) {
+/** Draws [text] with its top at [at]; [above]: with its bottom at [at], so large text never runs into what is under it. */
+private fun DrawScope.label(tm: TextMeasurer, text: String, at: Offset, end: Boolean = false, color: Color = Ink.dim, size: Float = 12f, above: Boolean = false) {
     val l = tm.measure(text, TextStyle(fontFamily = Mono, fontSize = size.sp, color = color))
-    drawText(l, topLeft = Offset(if (end) at.x - l.size.width else at.x - l.size.width / 2f, at.y))
+    drawText(l, topLeft = Offset(if (end) at.x - l.size.width else at.x - l.size.width / 2f, if (above) at.y - l.size.height else at.y))
 }
 
 /** Stacked areas of the last samples per exit (oldest left, now right) with an outline of the total and a 0…[cap] scale. */
@@ -163,7 +165,7 @@ fun LiveArea(series: List<Pair<FloatArray, Color>>, cap: Float, unit: String, su
         drawLine(Ink.line, Offset(0f, size.height), Offset(w, size.height), 1.dp.toPx())
         // Unit on the top label, as on the bar charts; a bare 0 at the bottom keeps clear of the now-dot.
         label(tm, "${scaleText(cap)} $unit", Offset(size.width, 0f), end = true)
-        label(tm, "0", Offset(size.width, size.height - 16.dp.toPx()), end = true)
+        label(tm, "0", Offset(size.width, size.height), end = true, above = true)
     }
 }
 
@@ -172,9 +174,9 @@ fun scaleText(v: Float): String = if (v == v.toInt().toFloat()) v.toInt().toStri
 
 /** A small line of recent values ending in a dot at "now". */
 @Composable
-fun Spark(values: FloatArray, color: Color, modifier: Modifier = Modifier) {
+fun Spark(values: FloatArray, color: Color, modifier: Modifier = Modifier, summary: String? = null) {
     val reveal by drawIn()
-    Canvas(modifier.height(36.dp).drawWithContent { if (reveal >= 1f) drawContent() else clipRect(right = size.width * reveal) { this@drawWithContent.drawContent() } }.graphicsLayer {}) {
+    Canvas(modifier.height(36.dp).then(if (summary != null) Modifier.semantics { contentDescription = summary } else Modifier).drawWithContent { if (reveal >= 1f) drawContent() else clipRect(right = size.width * reveal) { this@drawWithContent.drawContent() } }.graphicsLayer {}) {
         if (values.isEmpty()) return@Canvas
         val max = (values.maxOrNull() ?: 0f).coerceAtLeast(1f) * 1.15f
         val x = { i: Int -> size.width * i / (values.size - 1).coerceAtLeast(1) }
@@ -191,20 +193,38 @@ fun Spark(values: FloatArray, color: Color, modifier: Modifier = Modifier) {
  * One cell per day, oldest first, weeks as columns (Monday on top); negative = not yet (not drawn). [selected] is
  * outlined. Weekday letters on the left, month names above the week they start in.
  */
+/**
+ * How strongly a day with [hours] connected is drawn, in steps so neighbouring levels are told apart; null for a day
+ * with (almost) none, which is drawn as an outlined empty cell instead.
+ */
+internal fun heatAlpha(hours: Float): Float? = when {
+    hours < 0.05f -> null
+    hours < 1f -> 0.35f
+    hours < 3f -> 0.55f
+    hours < 6f -> 0.75f
+    else -> 1f
+}
+
 @Composable
 fun Heatmap(hours: List<Float>, selected: Int, weekdays: List<String>, months: Map<Int, String>, summary: String, modifier: Modifier = Modifier) {
     val tm = rememberTextMeasurer()
     Canvas(modifier.fillMaxWidth().height(176.dp).semantics { contentDescription = summary }) {
         val weeks = (hours.size + 6) / 7
-        val gap = 4.dp.toPx(); val left = 20.dp.toPx(); val head = 18.dp.toPx()
+        // The labels' room follows their measured size, so large text pushes the cells aside instead of overlapping them.
+        val text = TextStyle(fontFamily = Mono, fontSize = 12.sp)
+        val textH = tm.measure("Jan", text).size.height
+        val gap = 4.dp.toPx(); val left = maxOf(20.dp.toPx(), tm.measure("W", text).size.width + 10.dp.toPx()); val head = maxOf(18.dp.toPx(), textH + 2.dp.toPx())
         val cell = minOf((size.width - left - gap * (weeks - 1)) / weeks, (size.height - head - gap * 6) / 7)
-        listOf(0, 2, 4, 6).forEach { r -> label(tm, weekdays[r], Offset(6.dp.toPx(), head + r * (cell + gap) + (cell - 16.dp.toPx()) / 2)) }
+        listOf(0, 2, 4, 6).forEach { r -> label(tm, weekdays[r], Offset(6.dp.toPx(), head + r * (cell + gap) + (cell - textH) / 2)) }
         months.forEach { (w, m) -> label(tm, m, Offset(left + w * (cell + gap) + tm.measure(m, TextStyle(fontFamily = Mono, fontSize = 12.sp)).size.width / 2f, 0f)) }
         hours.forEachIndexed { i, h ->
             if (h < 0) return@forEachIndexed
             val x = left + (i / 7) * (cell + gap); val y = head + (i % 7) * (cell + gap)
-            val c = if (h < 0.05f) Ink.line else Ink.good.copy(alpha = 0.22f + 0.78f * (h / 12f).coerceIn(0f, 1f))
-            drawRoundRect(c, Offset(x, y), Size(cell, cell), CornerRadius(cell * 0.28f))
+            val a = heatAlpha(h)
+            if (a == null) {
+                // No time connected: an outlined cell, not a faint fill that a few minutes could be mistaken for.
+                drawRoundRect(Ink.line, Offset(x, y), Size(cell, cell), CornerRadius(cell * 0.28f), style = Stroke(1.5.dp.toPx()))
+            } else drawRoundRect(Ink.good.copy(alpha = a), Offset(x, y), Size(cell, cell), CornerRadius(cell * 0.28f))
             if (i == selected) drawRoundRect(Ink.text, Offset(x, y), Size(cell, cell), CornerRadius(cell * 0.28f), style = Stroke(2.dp.toPx()))
         }
     }
@@ -264,9 +284,10 @@ fun Dial(mbps: () -> Float, color: Color, label: String, modifier: Modifier = Mo
 
 /** Seven small columns of hours protected (0–12 h), today strongest; for the hub's Journal tile. */
 @Composable
-fun WeekMarks(hours: List<Float>, labels: List<String>, today: Int) {
+fun WeekMarks(hours: List<Float>, labels: List<String>, today: Int, summary: String) {
     val reveal by drawIn()
-    Row(horizontalArrangement = Arrangement.spacedBy(1.dp)) {
+    // One spoken description with every day's hours, instead of seven bare letters.
+    Row(Modifier.clearAndSetSemantics { contentDescription = summary }, horizontalArrangement = Arrangement.spacedBy(1.dp)) {
         hours.forEachIndexed { i, h ->
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Canvas(Modifier.width(12.dp).height(36.dp)) {
