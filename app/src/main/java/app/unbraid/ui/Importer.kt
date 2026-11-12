@@ -19,6 +19,7 @@ import androidx.compose.ui.platform.LocalContext
 import app.unbraid.data.Manual
 import app.unbraid.data.OwnServer
 import app.unbraid.data.WgConf
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -54,6 +55,9 @@ class ImportDraft {
     fun clear() { ovpn = null; user = ""; pass = ""; link = null; wg = null; name = ""; error = null; warning = null }
 }
 
+/** What to show for a config that failed to parse: our own reason, cleaned of anything that looks like a secret. */
+internal fun problem(e: Throwable): String = app.unbraid.vpn.Redact.message(e, "Couldn't read that config")
+
 /** Imports a WireGuard/OpenVPN file or a Shadowsocks link as a saved server, also used by route [target] unless null (see [Ui.importServer]). */
 @Stable
 class Importer(
@@ -62,6 +66,7 @@ class Importer(
     private val draft = ui.importDraft
     var error by mutableStateOf<String?>(null)
     internal var launcher: () -> Unit = {}
+    private var busy = false
 
     /** Opens the file picker. [kind] is "wg", "ovpn" or "any"; [prefix] names the route "<prefix> · <file>". */
     fun file(kind: String = "any", prefix: String? = null) {
@@ -72,7 +77,7 @@ class Importer(
     fun shadowsocks() { error = null; draft.clear(); draft.link = "" }
 
     /** The name typed in the open prompt, or [fallback] when it was left empty. */
-    private fun named(fallback: String) = draft.name.trim().take(40).ifEmpty { fallback }
+    private fun named(fallback: String) = Manual.cleanName(draft.name, 40).ifEmpty { fallback }
 
     internal fun picked(uri: Uri?) {
         if (uri == null) return
@@ -81,13 +86,13 @@ class Importer(
             if (text == null) { error = "Couldn't read that file. Config files must be under 64 KB."; return@launch }
             val name = draft.prefix?.let { "$it · $file" } ?: file
             draft.clear(); draft.name = name
-            // A broken config fails here, before the user is asked to name it.
+            // A broken config fails here, before the user is asked to name it. Parsing runs off the main thread.
             if (draft.kind == "wg" || (draft.kind == "any" && text.contains("[Interface]", ignoreCase = true))) {
-                error = runCatching { WgConf.parse(text, name).also(WgConf::requireFullTunnel) }.exceptionOrNull()?.let { it.message ?: "Couldn't read that config" }
+                error = withContext(Dispatchers.Default) { runCatching { WgConf.parse(text, name).also(WgConf::requireFullTunnel) }.exceptionOrNull()?.let(::problem) }
                 if (error == null) draft.wg = text
             } else {
                 // Placeholder login: everything but the login is checked before the prompt asks for a name and login.
-                error = runCatching { Manual.parseOvpn(text, name, "check", "check") }.exceptionOrNull()?.let { it.message ?: "Couldn't read that config" }
+                error = withContext(Dispatchers.Default) { runCatching { Manual.parseOvpn(text, name, "check", "check") }.exceptionOrNull()?.let(::problem) }
                 if (error == null) draft.ovpn = text to name
             }
         }
@@ -96,36 +101,46 @@ class Importer(
     private fun read(uri: Uri): Pair<String?, String> {
         val cr = context.contentResolver
         val file = runCatching { cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) it.getString(0) else null } }.getOrNull()
-        return readCapped(cr, uri) to (file?.substringBeforeLast('.')?.take(40)?.ifBlank { null } ?: "Imported")
+        return readCapped(cr, uri) to (file?.substringBeforeLast('.')?.let { Manual.cleanName(it, 40) }?.ifBlank { null } ?: "Imported")
     }
 
     /**
-     * Runs [block] (true = saved, null = stay open for a warning); on success closes any prompt and the screen, else returns
-     * the reason. [secrets] leave the clipboard only once saved: if the write failed, the clipboard may be the user's only copy.
+     * Parses off the main thread with [parse], then runs [save] (true = saved, null = stay open for a warning); on success closes
+     * any prompt and the screen, else shows the reason. [secrets] leave the clipboard only once saved: if the write failed, the
+     * clipboard may be the user's only copy. A tap while an import is running is ignored.
      */
-    private fun attempt(secrets: List<String>, block: () -> Boolean?): String? = try {
-        val saved = block() ?: return null
-        if (saved) secrets.forEach(ui::clearClipboardIf)
-        draft.clear(); done(); null
-    } catch (e: Exception) { e.message?.ifBlank { null } ?: "Couldn't read that config" }
+    private fun <T> attempt(secrets: List<String>, parse: () -> T, save: (T) -> Boolean?) {
+        if (busy) return
+        busy = true
+        scope.launch {
+            draft.error = try {
+                val parsed = withContext(Dispatchers.Default) { parse() }
+                val saved = save(parsed)
+                if (saved != null) { if (saved) secrets.forEach(ui::clearClipboardIf); draft.clear(); done() }
+                null
+            } catch (e: Exception) { if (e is CancellationException) throw e else problem(e) } finally { busy = false }
+        }
+    }
 
     /** False the first time [weakness] is seen: the prompt shows it and the next tap goes ahead. */
     private fun accepted(weakness: String?) = weakness == null || weakness == draft.warning || run { draft.warning = weakness; false }
 
+    // The prompt's fields are read here, on the main thread, before the parse runs elsewhere.
     private fun wg(text: String) {
-        draft.error = attempt(listOf(text)) { val p = WgConf.parse(text, named("WireGuard")); ui.importServer(target, OwnServer("", wg = p)) }
+        val n = named("WireGuard")
+        attempt(listOf(text), { WgConf.parse(text, n) }) { p -> ui.importServer(target, OwnServer("", wg = p)) }
     }
 
     private fun importOvpn(text: String, name: String) {
-        draft.error = attempt(listOf(text, draft.pass)) {
-            val p = Manual.parseOvpn(text, named(name), draft.user.trim(), draft.pass)
+        val n = named(name); val user = draft.user.trim(); val pass = draft.pass
+        attempt(listOf(text, pass), { Manual.parseOvpn(text, n, user, pass) }) { p ->
             if (accepted(Manual.weakness(p))) ui.importServer(target, OwnServer("", ovpn = p)) else null
         }
     }
 
     private fun importSs(link: String) {
-        draft.error = attempt(listOf(link)) {
-            val p = Manual.parseSs(link.trim()).let { it.copy(name = named(it.name.ifBlank { it.server })) }
+        val typed = Manual.cleanName(draft.name, 40)
+        attempt(listOf(link), { Manual.parseSs(link.trim()).let { it.copy(name = typed.ifEmpty { it.name.ifBlank { it.server } }) } }) { p ->
             if (accepted(Manual.weakness(p))) ui.importServer(target, OwnServer("", ss = p)) else null
         }
     }

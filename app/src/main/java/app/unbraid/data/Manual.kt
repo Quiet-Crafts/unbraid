@@ -15,13 +15,19 @@ object Manual {
     private val DEFAULT_CIPHERS = listOf("AES-256-GCM", "AES-128-GCM", "CHACHA20-POLY1305")
     private val CIPHERS = Regex("AES-(128|192|256)-(CBC|GCM)|CHACHA20-POLY1305|(CAMELLIA|ARIA)-(128|192|256)-CBC")
     private val DIGESTS = setOf("SHA1", "SHA224", "SHA256", "SHA384", "SHA512")
-    private val PEM = Regex("-----BEGIN ([A-Za-z0-9 ]+)-----[\\s\\S]*?-----END \\1-----")
     private val TLS_VERSIONS = setOf("1.0", "1.1", "1.2", "1.3")
     private val PROFILES = setOf("legacy", "preferred", "insecure", "suiteb")
     private const val MAX_SS_LINK = 8 * 1024
     private const val MAX_SS_USERINFO = 1024
     private const val MAX_SS_NAME = 128
     private const val MAX_HOST = 253
+    private const val BIDI = "\u200E\u200F\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069\u061C\u2028\u2029"
+
+    /** [raw] without control or direction-override characters (they could disguise a name or break it over two lines), trimmed. */
+    private fun plain(raw: String) = raw.filterNot { it.isISOControl() || it in BIDI }.trim()
+
+    /** [plain], cut to at most [max] characters people see, never in the middle of one. */
+    fun cleanName(raw: String, max: Int): String = plain(raw).takeGraphemes(max)
 
     /** The TLS 1.2 suites sing-openvpn's `tls.cipher` accepts, by OpenSSL and by IANA name. */
     private val TLS_CIPHERS = (
@@ -137,20 +143,62 @@ object Manual {
             d.getOrPut(name) { mutableListOf() } += t.drop(1)
             seq += name to t.drop(1)
         }
-        require(open == null) { "Unterminated <$open> block" }
+        require(open == null) { "Unterminated block${shown(open.orEmpty())}" }
         return Cfg(d, blocks, seq)
+    }
+
+    private const val DASHES = "-----"
+    private const val BEGIN = "-----BEGIN "
+    private const val END = "-----END "
+
+    /** The label at [at] (letters, digits and spaces) when five dashes follow it, and where those dashes end; else null. */
+    private fun label(s: String, at: Int): Pair<String, Int>? {
+        var i = at
+        while (i < s.length && (s[i] in 'A'..'Z' || s[i] in 'a'..'z' || s[i] in '0'..'9' || s[i] == ' ')) i++
+        return if (i > at && s.startsWith(DASHES, i)) s.substring(at, i) to i + DASHES.length else null
+    }
+
+    /**
+     * Every BEGIN..END pair of one label (the first END after the BEGIN), none overlapping. Each END is looked up once and each
+     * BEGIN scans forward only, so a hostile block of thousands of unmatched BEGIN lines costs no more than a normal one.
+     */
+    internal fun pemBlocks(block: String): List<String> {
+        val ends = HashMap<String, ArrayDeque<Int>>() // label -> where each of its END markers starts, in order
+        var i = block.indexOf(END)
+        while (i >= 0) {
+            label(block, i + END.length)?.let { (l, _) -> ends.getOrPut(l) { ArrayDeque() }.addLast(i) }
+            i = block.indexOf(END, i + 1)
+        }
+        val out = mutableListOf<String>()
+        i = block.indexOf(BEGIN)
+        while (i >= 0) {
+            val (l, bodyAt) = label(block, i + BEGIN.length) ?: (null to 0)
+            // BEGINs come in file order, so an END before this body is before every later one too.
+            val q = l?.let { ends[it] }
+            while (q != null && q.isNotEmpty() && q.first() < bodyAt) q.removeFirst()
+            val e = q?.firstOrNull()
+            if (l != null && e != null) {
+                val stop = e + END.length + l.length + DASHES.length
+                out += block.substring(i, stop)
+                i = block.indexOf(BEGIN, stop)
+            } else i = block.indexOf(BEGIN, i + 1)
+        }
+        return out
     }
 
     private fun pems(name: String, block: String): String {
         require(!Regex("ENCRYPTED|Proc-Type").containsMatchIn(block)) { "Encrypted private keys aren't supported" }
-        val found = PEM.findAll(block).map { it.value.lines().joinToString("\n") { l -> l.trim() } }.toList()
+        val found = pemBlocks(block).map { it.lines().joinToString("\n") { l -> l.trim() } }
         require(found.isNotEmpty()) { "The <$name> block is empty or malformed" }
         return found.joinToString("\n")
     }
 
+    /** `: name` for a directive that looks like a real one (lowercase letters and dashes), else nothing: a stray line of a key or password must not be quoted. */
+    private fun shown(name: String) = if (Regex("[a-z][a-z-]{1,30}").matches(name)) ": $name" else ""
+
     private fun network(s: String): String {
         val n = s.lowercase().removeSuffix("-client")
-        require(n in setOf("udp", "udp4", "udp6", "tcp", "tcp4", "tcp6")) { "Unsupported protocol: $s" }
+        require(n in setOf("udp", "udp4", "udp6", "tcp", "tcp4", "tcp6")) { "Unsupported protocol (use udp or tcp)" }
         return n
     }
 
@@ -161,7 +209,7 @@ object Manual {
     }
 
     private fun ciphers(k: String, v: String): List<String> = v.uppercase().split(':').filter { it.isNotEmpty() }.onEach {
-        require(CIPHERS.matches(it)) { "Unsupported cipher in $k: $it (use AES-GCM, ChaCha20 or an AES/Camellia/ARIA CBC cipher)" }
+        require(CIPHERS.matches(it)) { "Unsupported cipher in $k (use AES-GCM, ChaCha20 or an AES/Camellia/ARIA CBC cipher)" }
     }
 
     private fun JsonObjectBuilder.put(key: String, v: List<String>) = putJsonArray(key) { v.forEach { add(it) } }
@@ -218,11 +266,11 @@ object Manual {
         val c = read(p.config)
         for (k in c.d.keys) {
             REJECTED[k]?.let { throw IllegalArgumentException(it) }
-            require(k in USED || k in IGNORED) { "Unsupported OpenVPN option: $k" }
+            require(k in USED || k in IGNORED) { "Unsupported OpenVPN option${shown(k)}" }
         }
         for (k in c.blocks.keys) {
             REJECTED[k]?.let { throw IllegalArgumentException(it) }
-            require(k in BLOCKS) { "Unsupported OpenVPN block: <$k>" }
+            require(k in BLOCKS) { "Unsupported OpenVPN block${shown(k)}" }
         }
         require(c.has("client") || (c.has("tls-client") && c.has("pull"))) { "Not a client profile (no 'client' line)" }
         val dev = c.arg("dev")
@@ -230,13 +278,13 @@ object Manual {
         require(devType in listOf(null, "tun") && (dev?.startsWith("tun") ?: (devType == "tun"))) { "Only tun (layer 3) profiles are supported" }
         require(c.arg("key-method") in listOf(null, "2")) { "Unsupported key-method" }
 
-        val defaultPort = c.last("port", "rport")?.second?.firstOrNull()?.let { it.toIntOrNull() ?: throw IllegalArgumentException("Invalid port: $it") } ?: 1194
+        val defaultPort = c.last("port", "rport")?.second?.firstOrNull()?.let { it.toIntOrNull() ?: throw IllegalArgumentException("Invalid port") } ?: 1194
         val defaultNet = network(c.arg("proto") ?: "udp")
         val remotes = c.d["remote"].orEmpty().map { a ->
             val host = a.getOrNull(0).orEmpty()
             require(host.isNotBlank()) { "Empty remote host" }
-            val port = a.getOrNull(1)?.let { it.toIntOrNull() ?: throw IllegalArgumentException("Invalid remote port: $it") } ?: defaultPort
-            require(port in 1..65535) { "Remote port out of range: $port" }
+            val port = a.getOrNull(1)?.let { it.toIntOrNull() ?: throw IllegalArgumentException("Invalid remote port") } ?: defaultPort
+            require(port in 1..65535) { "Remote port out of range" }
             Triple(host, port, a.getOrNull(2)?.let(::network) ?: defaultNet)
         }
         require(remotes.isNotEmpty()) { "The profile has no 'remote' server" }
@@ -260,7 +308,7 @@ object Manual {
 
         val compat = c.arg("compat-mode")?.let { v ->
             Regex("(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})").matchEntire(v)?.destructured?.let { (a, b, p) -> a.toInt() * 10000 + b.toInt() * 100 + p.toInt() }
-                ?: throw IllegalArgumentException("Invalid compat-mode: $v")
+                ?: throw IllegalArgumentException("Invalid compat-mode")
         } ?: 0
         val before24 = compat in 1 until 20400
         val before25 = compat in 1 until 20500
@@ -275,15 +323,15 @@ object Manual {
         val base = explicit ?: DEFAULT_CIPHERS
         val dataCiphers = pinned ?: (if (before25 && named != null && named !in base) base + named else base).takeIf { explicit != null || it != DEFAULT_CIPHERS }
         val tlsCipher = c.arg("tls-cipher")?.also { v ->
-            v.split(':').firstOrNull { it !in TLS_CIPHERS }?.let { throw IllegalArgumentException("Unsupported tls-cipher: $it (only the TLS 1.2 suites sing-box implements, by OpenSSL or IANA name)") }
+            v.split(':').firstOrNull { it !in TLS_CIPHERS }?.let { throw IllegalArgumentException("Unsupported tls-cipher (only the TLS 1.2 suites sing-box implements, by OpenSSL or IANA name)") }
         }
-        val auth = c.arg("auth")?.uppercase()?.also { require(it in DIGESTS) { "Unsupported auth digest: $it" } }
+        val auth = c.arg("auth")?.uppercase()?.also { require(it in DIGESTS) { "Unsupported auth digest" } }
 
         val lzo = if (c.has("comp-lzo")) (c.arg("comp-lzo") ?: "adaptive").lowercase().also {
-            require(it in setOf("yes", "no", "adaptive", "asym")) { "Unsupported comp-lzo value: $it" }
+            require(it in setOf("yes", "no", "adaptive", "asym")) { "Unsupported comp-lzo value" }
         } else null
         val compress = if (c.has("compress")) (c.arg("compress") ?: "stub").lowercase().also {
-            require(it in setOf("stub", "stub-v2", "lz4", "lz4-v2")) { "Unsupported compression: compress $it" }
+            require(it in setOf("stub", "stub-v2", "lz4", "lz4-v2")) { "Unsupported compression" }
         } else null
         val compressing = (lzo != null && lzo != "no") || compress?.startsWith("lz4") == true
         val allow = c.arg("allow-compression")?.also { require(it in setOf("no", "asym", "yes")) { "Invalid allow-compression" } }
@@ -311,12 +359,12 @@ object Manual {
                 c.d["verify-x509-name"]?.last()?.let { a ->
                     require(!a.firstOrNull().isNullOrEmpty()) { "verify-x509-name needs a name" }
                     put("server_name", a[0])
-                    val type = (a.getOrNull(1) ?: "subject").also { require(it in setOf("subject", "name", "name-prefix")) { "Invalid verify-x509-name type: $it" } }
+                    val type = (a.getOrNull(1) ?: "subject").also { require(it in setOf("subject", "name", "name-prefix")) { "Invalid verify-x509-name type" } }
                     put("server_name_type", type)
                     // The engine compares a name with the certificate's CN only: a profile asking for another field would
                     // pass certificates it means to refuse.
                     c.d["x509-username-field"]?.last()?.let { f ->
-                        require(type == "subject" || f.singleOrNull()?.equals("CN", true) == true) { "verify-x509-name with x509-username-field ${f.joinToString(" ")} isn't supported: only the certificate's CN can be checked" }
+                        require(type == "subject" || f.singleOrNull()?.equals("CN", true) == true) { "verify-x509-name with this x509-username-field isn't supported: only the certificate's CN can be checked" }
                     }
                 }
                 c.blocks["ca"]?.let { put("certificate", pems("ca", it)) }
@@ -340,7 +388,7 @@ object Manual {
                     when {
                         shorthand != null -> put("remote_certificate_tls", shorthand.also { require(it == "server" || it == "client") { "Invalid remote-cert-tls" } })
                         needsKu && ku.isNullOrEmpty() -> throw IllegalArgumentException(
-                            "remote-cert-eku $v can't be combined with remote-cert-tls or a bare remote-cert-ku (which require a key-usage extension); list the key usages (remote-cert-ku a0 88) or drop one",
+                            "This remote-cert-eku can't be combined with remote-cert-tls or a bare remote-cert-ku (which require a key-usage extension); list the key usages (remote-cert-ku a0 88) or drop one",
                         )
                         else -> put("remote_certificate_eku", v)
                     }
@@ -353,13 +401,13 @@ object Manual {
                 c.arg("tls-version-min")?.let { put("version_min", it.also { v -> require(v in TLS_VERSIONS) { "Invalid tls-version-min" } }) }
                 c.arg("tls-version-max")?.let { put("version_max", it.also { v -> require(v in TLS_VERSIONS) { "Invalid tls-version-max" } }) }
                 tlsCipher?.let { put("cipher", it) }
-                c.arg("tls-cert-profile")?.let { put("certificate_profile", it.also { v -> require(v in PROFILES) { "Unsupported tls-cert-profile: $v" } }) }
+                c.arg("tls-cert-profile")?.let { put("certificate_profile", it.also { v -> require(v in PROFILES) { "Unsupported tls-cert-profile" } }) }
                 wraps.singleOrNull()?.let { w ->
                     putJsonObject("control_wrap") {
                         put("type", w.replace('-', '_'))
                         put("key", pems(w, c.blocks.getValue(w)))
                         if (w == "tls-auth") (c.arg("tls-auth", 1)?.takeIf { it != "[inline]" } ?: c.arg("key-direction"))?.let {
-                            put("direction", when (it) { "0" -> "server"; "1" -> "client"; else -> throw IllegalArgumentException("Invalid key-direction: $it") })
+                            put("direction", when (it) { "0" -> "server"; "1" -> "client"; else -> throw IllegalArgumentException("Invalid key-direction") })
                         }
                     }
                 }
@@ -428,7 +476,7 @@ object Manual {
         require(!s.startsWith("ssconf://", ignoreCase = true)) { "Dynamic ssconf:// keys aren't supported; use the ss:// key" }
         require(s.startsWith("ss://", ignoreCase = true)) { "Not a Shadowsocks link (expected ss://…)" }
         val rest = s.substring(5)
-        val tag = rest.substringAfter('#', "").let(::unpercent).trim()
+        val tag = rest.substringAfter('#', "").let(::unpercent).let(::plain)
         val noFrag = rest.substringBefore('#')
         val query = noFrag.substringAfter('?', "")
         val body = noFrag.substringBefore('?').trimEnd('/')
@@ -448,7 +496,7 @@ object Manual {
         require(':' in userinfo) { "The link has no method or password" }
         val method = userinfo.substringBefore(':').lowercase()
         val password = userinfo.substringAfter(':')
-        require(method in SS_METHODS) { "Unsupported Shadowsocks cipher: $method" }
+        require(method in SS_METHODS) { "Unsupported Shadowsocks cipher" }
         require(password.isNotEmpty()) { "The link has an empty password" }
 
         val host = if (hostPort.startsWith("[")) hostPort.substringAfter('[').substringBefore(']') else hostPort.substringBeforeLast(':')
@@ -460,7 +508,7 @@ object Manual {
         val params = query.split('&').filter { it.isNotEmpty() }.associate { it.substringBefore('=') to unpercent(it.substringAfter('=', "")) }
         require("prefix" !in params) { "Outline connection prefixes aren't supported" }
         val spec = params["plugin"]?.takeIf { it.isNotBlank() }
-        val pluginName = spec?.substringBefore(';')?.let { SS_PLUGINS[it] ?: throw IllegalArgumentException("Unsupported Shadowsocks plugin: $it (only obfs-local and v2ray-plugin)") }
+        val pluginName = spec?.substringBefore(';')?.let { SS_PLUGINS[it] ?: throw IllegalArgumentException("Unsupported Shadowsocks plugin (only obfs-local and v2ray-plugin)") }
         val label = name.ifBlank { tag }.ifBlank { host }
         require(label.length <= MAX_SS_NAME || label == host) { "The server name is too long (at most $MAX_SS_NAME characters)" }
         val opts = spec?.substringAfter(';', "")?.ifEmpty { null }

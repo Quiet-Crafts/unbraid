@@ -134,7 +134,7 @@ class ManualTest {
         rejects("inline") { Manual.parseOvpn(without("(?s)<ca>.*?</ca>\\n").let { it + "\nca ca.crt" }, "x", "u", "p") }
         rejects("inline") { Manual.parseOvpn(with("cert client.crt"), "x", "u", "p") }
         rejects("both <cert> and <key>") { Manual.parseOvpn(with("<cert>\n-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n</cert>"), "x", "u", "p") }
-        rejects("compress lzo") { Manual.parseOvpn(with("compress lzo"), "x", "u", "p") }
+        rejects("Unsupported compression") { Manual.parseOvpn(with("compress lzo"), "x", "u", "p") }
         rejects("proxy") { Manual.parseOvpn(with("http-proxy 10.0.0.1 8080"), "x", "u", "p") }
         rejects("2FA") { Manual.parseOvpn(with("static-challenge \"Code\" 1"), "x", "u", "p") }
         rejects("fragment only works over UDP") { Manual.parseOvpn(ex.replace("proto udp", "proto tcp"), "x", "u", "p") }
