@@ -1,5 +1,6 @@
 package app.unbraid.vpn
 
+import app.unbraid.APP
 import app.unbraid.data.DIRECT
 import app.unbraid.data.Filters
 import app.unbraid.data.Home
@@ -89,9 +90,20 @@ object Compiler {
         }
     }
 
+    const val MISSING_DEFAULT = "Your default route no longer exists. Choose one in $APP."
+
+    /** The setup's default route names a route it no longer has: nothing starts, so no app ends up on the normal connection. */
+    class MissingDefault : Fail(MISSING_DEFAULT)
+
+    /** Route ids that apps are set to but the setup no longer has: their apps are refused, never sent to the default. */
+    fun missing(s: Setup): Set<String> = s.apps.values.filterTo(HashSet()) { it != DIRECT && s.route(it) == null }
+
     fun compile(i: Input): String {
         val s = i.setup
-        // Blocked routes get no tunnel, DNS server or probe; their apps still match, to be refused.
+        if (s.defaultRoute != DIRECT && s.route(s.defaultRoute) == null) throw MissingDefault()
+        // Blocked routes get no tunnel, DNS server or probe; their apps still match, to be refused. So do apps on a route
+        // that no longer exists.
+        val refused = i.blocked + missing(s)
         val active = s.activeRoutes.filter { it.id !in i.blocked }
         val defaultBlocked = s.defaultRoute in i.blocked
         require(active.mapNotNull { it.tsExit }.distinct().size <= 1) { "Tailscale allows one exit node at a time. Use the same node for every Tailscale route." }
@@ -125,7 +137,7 @@ object Compiler {
             .apply { if (s.tailscale) putIfAbsent(TS_TAG, defaultDns); if (app.unbraid.BuildConfig.DEBUG) put("direct", "local") } // debug: the line itself, for comparisons
         // Apps with their own route, grouped. Direct only appears here under lockdown (otherwise excluded at OS level).
         val perApp = s.apps.entries.groupBy({ if (it.key in through) FILTERED else it.value }, { it.key }).toSortedMap()
-            .filterKeys { id -> id != s.defaultRoute && when (id) { DIRECT -> i.lockdown; FILTERED -> true; else -> s.activeRoutes.any { it.id == id } } }
+            .filterKeys { id -> id != s.defaultRoute && when (id) { DIRECT -> i.lockdown; else -> true } }
             .mapValues { (_, p) -> JsonArray(p.sorted().map(::JsonPrimitive)) }
         // Destination rules that beat any app rule. Repeated after every resolve, because fake-IP connections
         // only get a real address there.
@@ -167,7 +179,7 @@ object Compiler {
                     if (s.prefs.lan) add(obj("domain_suffix" to arr("local", "lan", "home.arpa", "fritz.box"), "server" to "local"))
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
                     // Other query types (HTTPS, SVCB, TXT…) go to the asking app's own exit, never the ISP.
-                    for ((id, pkgs) in perApp) add(if (id in i.blocked) obj("package_name" to pkgs, "action" to "reject") else obj("package_name" to pkgs, "server" to dnsFor(id)))
+                    for ((id, pkgs) in perApp) add(if (id in refused) obj("package_name" to pkgs, "action" to "reject") else obj("package_name" to pkgs, "server" to dnsFor(id)))
                     // A blocked default never falls back to another resolver: the phone's network would see the names.
                     if (defaultBlocked) add(obj("action" to "reject"))
                 }
@@ -273,7 +285,7 @@ object Compiler {
                     )
                     val onTs = { id: String -> s.route(id)?.tsExit != null }
                     for ((id, p) in perApp) {
-                        if (id in i.blocked) { add(obj("package_name" to p, "action" to "reject", "no_drop" to true)); continue }
+                        if (id in refused) { add(obj("package_name" to p, "action" to "reject", "no_drop" to true)); continue }
                         // Before its exit's DNS, which an exit node not yet signed in can't answer; Direct resolves locally.
                         if (onTs(id)) tsLogin.forEach { add(obj("package_name" to p, it, "outbound" to "direct")) }
                         add(obj("package_name" to p, "action" to "resolve", "server" to dnsFor(id)))

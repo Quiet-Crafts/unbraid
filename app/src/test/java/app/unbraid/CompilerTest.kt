@@ -279,6 +279,37 @@ class CompilerTest {
         assertEquals("direct", c["route"]!!.jsonObject["final"]!!.jsonPrimitive.content)
     }
 
+    /** A default route the setup no longer has is refused with its own message, never run as Direct or as another route. */
+    @Test fun missingDefaultRefuses() {
+        val noRouteLeft = example.copy(defaultRoute = "gone", apps = mapOf("com.x" to DIRECT), home = Home())
+        val withOthers = example.copy(defaultRoute = "gone")
+        for (s in listOf(noRouteLeft, withOthers)) {
+            val e = assertThrows(Compiler.MissingDefault::class.java) { compile(s) }
+            assertEquals(Compiler.MISSING_DEFAULT, e.message)
+            assertEquals(Compiler.MISSING_DEFAULT, app.unbraid.vpn.Redact.message(e, "fallback"))
+        }
+        // Direct chosen as the default is a real choice and still runs.
+        assertEquals("direct", compile(example.copy(defaultRoute = DIRECT, home = Home()))["route"]!!.jsonObject["final"]!!.jsonPrimitive.content)
+    }
+
+    /** An app set to a route the setup no longer has is refused, connections and lookups, instead of following the default. */
+    @Test fun appOnMissingRouteIsBlocked() = listOf(false, true).forEach { lockdown ->
+        for (default in listOf("nl", DIRECT)) {
+            val s = example.copy(defaultRoute = default, apps = example.apps + ("com.g" to "gone"))
+            assertEquals(setOf("gone"), Compiler.missing(s))
+            val c = compile(s, lockdown)
+            val mine = { o: JsonObject -> o["package_name"]?.jsonArray?.map { it.jsonPrimitive.content } == listOf("com.g") }
+            assertEquals(listOf(mapOf("package_name" to "[\"com.g\"]", "action" to "\"reject\"", "no_drop" to "true")),
+                c.rules().filter(mine).map { r -> r.mapValues { it.value.toString() } })
+            val dns = c["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
+            assertEquals("reject", dns.single(mine)["action"]!!.jsonPrimitive.content)
+            assertFalse(c.toString().contains("r-gone"))
+            assertFalse(c.excluded().contains("com.g"))
+            // The other apps keep their routes.
+            assertTrue(c.rules().any { it["outbound"]?.jsonPrimitive?.content == "r-us" })
+        }
+    }
+
     @Test fun unusedRoutesDoNotConnect() {
         val c = compile(example.copy(apps = mapOf("com.a" to "us")))
         assertEquals(listOf("r-nl", "r-us", "home-ts"), c.endpointTags())
