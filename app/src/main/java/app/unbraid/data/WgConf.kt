@@ -23,20 +23,28 @@ object WgConf {
         }
         fun need(k: String) = kv[k] ?: throw IllegalArgumentException("Missing ${k.substringAfter('.')} in the config")
         fun list(k: String) = kv[k].orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }
-        fun key(k: String) = need(k).also { require(KEY.matches(it)) { "Invalid key in the config" } }
+        // A bad key is named by its field and never quoted.
+        fun key(k: String, field: String) = need(k).also { require(KEY.matches(it) && validWgKey(it)) { "Invalid $field in the config" } }
         val endpoint = need("[peer].endpoint")
+        val host = endpoint.substringBeforeLast(':').removePrefix("[").removeSuffix("]")
         require(endpoint.substringAfterLast(':').toIntOrNull() in 1..65535) { "Endpoint needs host:port" }
+        require(host.isNotBlank() && host.length <= 253 && host.none { it.isWhitespace() || it == '/' || it == ',' }) { "Endpoint has an invalid host" }
+        val address = list("[interface].address").filter { ':' !in it }.map { if ('/' in it) it else "$it/32" }
+        // The engine refuses a whole setup over one bad address, so each is checked here (IPv4 only: IPv6 is dropped).
+        require(address.all { app.unbraid.vpn.Compiler.ipv4(it) != null }) { "Invalid Address in the config" }
+        val allowed = list("[peer].allowedips").filter { ':' !in it }
+        allowed.forEach { require(app.unbraid.vpn.Compiler.ipv4(it) != null) { "AllowedIPs has an invalid range: $it" } }
         return WgPeer(
             name = name,
-            privateKey = key("[interface].privatekey"),
+            privateKey = key("[interface].privatekey", "PrivateKey"),
             // A bare "10.0.0.2" is a host address; the engine needs the prefix.
-            address = list("[interface].address").filter { ':' !in it }.map { if ('/' in it) it else "$it/32" }
+            address = address
                 .ifEmpty { throw IllegalArgumentException("Config has no IPv4 address") },
-            publicKey = key("[peer].publickey"),
-            presharedKey = kv["[peer].presharedkey"]?.also { require(KEY.matches(it)) { "Invalid key in the config" } },
+            publicKey = key("[peer].publickey", "PublicKey"),
+            presharedKey = kv["[peer].presharedkey"]?.also { require(KEY.matches(it) && validWgKey(it)) { "Invalid PresharedKey in the config" } },
             endpoint = endpoint,
-            allowedIps = list("[peer].allowedips").filter { ':' !in it }.ifEmpty { throw IllegalArgumentException("Config has no IPv4 AllowedIPs") },
-            dns = list("[interface].dns").filter { it.first().isDigit() && ':' !in it },
+            allowedIps = allowed.ifEmpty { throw IllegalArgumentException("Config has no IPv4 AllowedIPs") },
+            dns = list("[interface].dns").filter { app.unbraid.vpn.Compiler.ipv4(it)?.second == 32 && '/' !in it },
             mtu = kv["[interface].mtu"]?.toIntOrNull()?.coerceIn(1280, 1500) ?: 1420,
             keepalive = kv["[peer].persistentkeepalive"]?.let { v ->
                 if (v.equals("off", ignoreCase = true)) 0 else v.toIntOrNull()?.takeIf { it in 0..65535 } ?: throw IllegalArgumentException("Invalid PersistentKeepalive in the config")
