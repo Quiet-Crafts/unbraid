@@ -363,6 +363,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // Saved settings that won't open would start on defaults, another routing policy: the app offers to recover them.
             if (store.unreadable.value && !store.reopen()) throw Fail("Couldn't open your saved settings. Open $APP.")
             val setup = store.setup.value
+            // Refused before any provider is asked for a server: the engine would refuse it anyway.
+            if (setup.noDefault()) throw Compiler.MissingDefault()
             // A saved Tailscale node that won't open fails here with its own message, not as an engine error.
             if (setup.tailscale && store.tsStored) store.tsState
             val accounts = store.accounts.value
@@ -475,11 +477,6 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun stuck(setup: Setup, blocked: Map<String, Exception>) = blocked.entries.mapNotNull { (id, e) -> setup.route(id)?.takeIf { !it.imported }?.let { it.loc.provider to (e is AuthException) } }
         .groupBy({ it.first }, { it.second }).mapValues { (_, v) -> v.any { it } }
 
-    /** One line for Routes: which routes' apps are blocked and why. */
-    private fun blockedText(setup: Setup, blocked: Map<String, Exception>): String? = blocked.entries.firstOrNull()?.let { (_, e) ->
-        "Apps on ${blocked.keys.joinToString { setup.route(it)?.name ?: it }} are blocked: ${Redact.message(e, "no connection")}"
-    }
-
     /**
      * What ran before a failed reload, back on the engine exactly as it was compiled, with a fresh probe pair; false if it
      * won't start. Until then the app's own tests have no way in.
@@ -526,7 +523,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val accounts = store.accounts.value
             // [keep] was taken without the lock: only valid if nothing was installed since ([keepFrom]).
             val ready = pickLinks(setup, keep?.takeIf { keepFrom == generation } ?: links, accounts, avoid, offline = true)
-            if (ready.blocked.values.none { it is LinkPicker.Waiting }) { install(srv, setup, ready, accounts); return }
+            // Without a default route the install is refused at once (the running engine stays and the error says why),
+            // before any provider is asked.
+            if (ready.blocked.values.none { it is LinkPicker.Waiting } || setup.noDefault()) { install(srv, setup, ready, accounts); return }
             // While a provider is asked for a server, apps moving off Direct already leave through their new route, or
             // wait blocked if that is the one still waiting: never on their real address for the time it takes. A tunnel
             // whose account was signed out or refused stops now too, not once the others are found.
@@ -1061,6 +1060,15 @@ private inline fun io.nekohasekai.libbox.RoutePrefixIterator.forEach(f: (RoutePr
 private fun io.nekohasekai.libbox.RoutePrefixIterator.toList(): List<RoutePrefix> = buildList { this@toList.forEach { add(it) } }
 private inline fun StringIterator.forEachString(f: (String) -> Unit) { while (hasNext()) f(next()) }
 private fun RoutePrefix.ipPrefix() = IpPrefix(InetAddress.getByName(address()), prefix())
+
+/** The default route names a route the setup no longer has ([Compiler.MissingDefault]). */
+internal fun Setup.noDefault() = defaultRoute != app.unbraid.data.DIRECT && route(defaultRoute) == null
+
+/** One line for Routes: which routes' apps are blocked and why, and that apps on a route that is gone are blocked too. */
+internal fun blockedText(setup: Setup, blocked: Map<String, Exception>): String? = listOfNotNull(
+    blocked.entries.firstOrNull()?.let { (_, e) -> "Apps on ${blocked.keys.joinToString { setup.route(it)?.name ?: it }} are blocked: ${Redact.message(e, "no connection")}" },
+    "Apps on a route that no longer exists are blocked. Choose a route for them in $APP.".takeIf { Compiler.missing(setup).isNotEmpty() },
+).joinToString(" ").ifEmpty { null }
 
 /** A start ([on]) or a stop or pause, numbered [n] in the order asked. */
 class Ask(val n: Int, val on: Boolean)
