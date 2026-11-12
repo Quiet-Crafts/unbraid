@@ -20,6 +20,12 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+/** A provider account signed out of whose device slot isn't released yet ([Store.signOut]). [blob] holds its keys: sealed. */
+@kotlinx.serialization.Serializable
+data class PendingRelease(val provider: String, val blob: String) {
+    override fun toString() = "PendingRelease($provider)" // never the account itself
+}
+
 /**
  * Everything Unbraid persists. Plain JSON files in private storage; secrets AES-GCM sealed by the Keystore. [dir] and
  * [keyOf] can be swapped for tests.
@@ -35,7 +41,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
 
     // Declared before anything that loads sealed files at construction. A new key only while no sealed file exists: a
     // key missing beside them throws, and a failed lazy runs again on the next use, so those files are never orphaned.
-    private val key: SecretKey by lazy { keyOf(listOf(SETUP, ACCOUNTS, TS_STATE).none { File(dir, it).exists() }) }
+    private val key: SecretKey by lazy { keyOf(listOf(SETUP, ACCOUNTS, TS_STATE, RELEASES).none { File(dir, it).exists() }) }
 
     /**
      * True while the saved settings or sign-ins exist but won't open. Nothing changes them then, in memory or on disk,
@@ -136,7 +142,39 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     private val _accounts = MutableStateFlow(readAccounts() ?: if (ACCOUNTS in bad) emptyMap() else migrateNord())
     val accounts: StateFlow<Map<String, String>> = _accounts.asStateFlow()
     private fun readAccounts() = marked(ACCOUNTS) { json.decodeFromString(accountsSer, it) }
-    init { _unreadable.value = bad.isNotEmpty() }
+    init { _unreadable.value = bad.isNotEmpty(); finishSignOuts() }
+
+    /**
+     * Sign-outs whose device slot the provider hasn't released yet ([signOut]): kept sealed, retried at every start until
+     * [released]. Empty when there are none or they won't open.
+     */
+    val pendingReleases: List<PendingRelease>
+        @Synchronized get() = runCatching { open(RELEASES)?.let { explicit.decodeFromString(releasesSer, it) } }.getOrNull().orEmpty()
+
+    private fun pending(list: List<PendingRelease>) = safely { seal(RELEASES, list.takeIf { it.isNotEmpty() }?.let { explicit.encodeToString(releasesSer, it) }) }
+
+    /**
+     * Signs out of [provider]. Its account is first kept as a pending release, then forgotten: a sign-out cut short still
+     * releases the slot at the next start, and never leaves the account signed in. Returns the account to release, or
+     * null when not signed in (or the settings won't open).
+     */
+    @Synchronized
+    fun signOut(provider: String): String? {
+        if (_unreadable.value) return null
+        val blob = _accounts.value[provider] ?: return null
+        if (!pending(pendingReleases + PendingRelease(provider, blob))) Log.w("Unbraid", "store: pending release not saved")
+        account(provider, null)
+        return blob
+    }
+
+    /** The provider let go of [r]'s slot, or the user was told to remove it by hand: no longer retried. */
+    @Synchronized
+    fun released(r: PendingRelease) { pendingReleases.let { if (r in it) pending(it - r) } }
+
+    /** A sign-out cut short between keeping its release and forgetting the account: the user asked, so it is finished now. */
+    private fun finishSignOuts() {
+        if (!_unreadable.value) pendingReleases.filter { _accounts.value[it.provider] == it.blob }.forEach { account(it.provider, null) }
+    }
 
     /** Reads the files that wouldn't open again; what opens goes into memory before the mark clears. True when all did. */
     @Synchronized
@@ -144,6 +182,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         if (SETUP in bad) _setup.value = readSetup() ?: _setup.value
         if (ACCOUNTS in bad) _accounts.value = readAccounts() ?: _accounts.value
         _unreadable.value = bad.isNotEmpty()
+        finishSignOuts()
         !_unreadable.value
     }
 
@@ -156,7 +195,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         if (!_unreadable.value) return true // they opened meanwhile (a VPN start reopens them): nothing to reset
         // The old Tailscale sign-in first: if it stays, nothing else goes and the mark stays.
         if (!File(dir, "tailscale").deleteRecursively()) return false
-        listOf(SETUP, ACCOUNTS, "links.bin", "token.bin", "nlk.bin", "servers.json", "tssuffix", "cache.db", "expiry",
+        listOf(SETUP, ACCOUNTS, RELEASES, "links.bin", "token.bin", "nlk.bin", "servers.json", "tssuffix", "cache.db", "expiry",
             "setup.bin.bad", "accounts.bin.bad", "links.bin.bad").forEach { File(dir, it).delete() }
         _setup.value = Setup(version = VERSION); _accounts.value = emptyMap(); failed(false, false, false)
         bad.removeAll { !File(dir, it).exists() }
@@ -317,12 +356,14 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         const val ALIAS = "unbraid"
         const val SETUP = "setup.bin"
         const val ACCOUNTS = "accounts.bin"
+        const val RELEASES = "releases.bin"
         const val TS_UNREADABLE = "Couldn't open the saved Tailscale sign-in. Try again. If it keeps failing, sign out of Tailscale in Settings and sign in again."
         const val TS_STATE = "tailscale/state.bin"
         const val TS_PLAIN = "tailscale/tailscaled.state"
         val countriesSer = ListSerializer(Country.serializer())
         val linksSer = MapSerializer(String.serializer(), Link.serializer())
         val accountsSer = MapSerializer(String.serializer(), String.serializer())
+        val releasesSer = ListSerializer(PendingRelease.serializer())
         val datesSer = MapSerializer(String.serializer(), Long.serializer())
 
         /** The app's key; a new one only when [create] (no sealed file it would orphan), else a missing one throws. */

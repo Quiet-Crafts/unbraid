@@ -360,4 +360,39 @@ class StoreTest {
         assertEquals(Profile("Trip", "away", mapOf("rai" to "x")), s.setup.value.profiles.single())
         assertEquals("gone", Store(dir) { key }.setup.value.defaultRoute)
     }
+
+    /** A sign-out keeps the account as a pending release until the provider lets go; a later success clears it. */
+    @Test fun signOutKeepsAPendingReleaseUntilReleased() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        assertTrue(s.account("mullvad", "blob-m")); assertTrue(s.account("ivpn", "blob-i"))
+        assertEquals("blob-m", s.signOut("mullvad"))
+        assertEquals(setOf("ivpn"), s.accounts.value.keys) // signed out at once
+        assertEquals(null, s.signOut("mullvad")) // nothing left to sign out
+        // The release failed (or the app closed): it survives a restart, sealed, and the account stays out.
+        val again = Store(dir) { key }
+        assertEquals(listOf(app.unbraid.data.PendingRelease("mullvad", "blob-m")), again.pendingReleases)
+        assertEquals(setOf("ivpn"), again.accounts.value.keys)
+        assertFalse(File(dir, "releases.bin").readText(Charsets.ISO_8859_1).contains("blob-m"))
+        assertFalse(again.pendingReleases.toString().contains("blob-m"))
+        // Signed in again and out again: both slots wait, neither replaces the other.
+        assertTrue(again.account("mullvad", "blob-m2")); again.signOut("mullvad")
+        assertEquals(listOf("blob-m", "blob-m2"), again.pendingReleases.map { it.blob })
+        again.released(again.pendingReleases.first())
+        assertEquals(listOf("blob-m2"), Store(dir) { key }.pendingReleases.map { it.blob })
+        again.released(again.pendingReleases.single())
+        assertFalse(File(dir, "releases.bin").exists())
+    }
+
+    /** A sign-out cut short after its release was kept but before the account went is finished at the next start. */
+    @Test fun anInterruptedSignOutIsFinished() {
+        val dir = tmp.newFolder()
+        Store(dir) { key }.apply { assertTrue(account("airvpn", "blob-a")); assertTrue(account("nord", "blob-n")) }
+        // As if the app closed right after the release was written: the account file still lists it.
+        File(dir, "releases.bin").writeBytes(sealed("""[{"provider":"airvpn","blob":"blob-a"},{"provider":"nord","blob":"an older one"}]"""))
+        val s = Store(dir) { key }
+        assertEquals(setOf("nord"), s.accounts.value.keys) // nord signed in again since: its newer account stays
+        assertEquals(setOf("nord"), Store(dir) { key }.accounts.value.keys)
+        assertEquals(2, s.pendingReleases.size)
+    }
 }

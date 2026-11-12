@@ -74,6 +74,13 @@ private inline fun Setup.removing(gone: Set<String>, name: String, refused: (app
 
 /** The single screen-facing model. Thin: state lives in [app.unbraid.data.Store] and [UnbraidVpn.state]. */
 class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : AndroidViewModel(app) {
+    private companion object {
+        /** Outlives the screen: a device slot release finishes even after the app is closed. */
+        val background = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+        /** Releases under way in this process, so two screens never ask for the same one at once. */
+        val releasing: MutableSet<app.unbraid.data.PendingRelease> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    }
+
     private val store = Unbraid.store
     private val pm = app.packageManager
 
@@ -201,6 +208,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         // Catalogs are multi-MB: refreshed once a day, not on every launch (the picker refreshes an empty one itself).
         store.accounts.value.keys.filterNot(store::countriesFresh).forEach(::refreshCountries)
         saveImportedServers()
+        // Device slots a sign-out couldn't release, maybe because the app closed first: tried again on every start.
+        releasePending()
     }
 
     /** Sign-in form text, "provider:field" → value. In memory only (it holds secrets), so it survives rotation but not the process. */
@@ -292,11 +301,35 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         warn("Couldn't release this phone's device slot at $it. Remove it in your $it account${if (names.size > 1) "s" else ""}.")
     }
 
-    fun signOut(provider: String) = viewModelScope.launch(Dispatchers.IO) {
-        val blob = store.accounts.value[provider]
-        store.account(provider, null) // a failed save shows the unsaved banner; the account is out of memory either way
+    /** Releases that failed while this screen model lived: the user was told to remove them by hand ([dismissNotice]). */
+    private val failedReleases: MutableSet<app.unbraid.data.PendingRelease> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * Asks each provider with a pending release ([app.unbraid.data.Store.pendingReleases]) to let go of this phone's slot,
+     * outside the screen's lifetime. A release that fails stays pending, is tried again at the next start and named in
+     * [notice] meanwhile.
+     */
+    private fun releasePending() = background.launch {
+        val failed = store.pendingReleases.filter { releasing.add(it) }.map { r ->
+            async {
+                try { if (release(r.provider, r.blob)) { store.released(r); null } else r } finally { releasing.remove(r) }
+            }
+        }.awaitAll().filterNotNull()
+        if (failed.isNotEmpty()) { failedReleases += failed; unreleased(failed.map { Providers.get(it.provider)?.name ?: it.provider }.distinct()) }
+    }
+
+    /** Clears [notice]. Releases it named stop being retried: the user knows to remove those slots by hand. */
+    fun dismissNotice() {
+        notice.value = null
+        val told = failedReleases.toList().also { failedReleases.removeAll(it.toSet()) }
+        if (told.isNotEmpty()) background.launch { told.forEach(store::released) }
+    }
+
+    /** Signs out of [provider]: the account goes at once, and its device slot is released, now or at a later start. */
+    fun signOut(provider: String) = background.launch {
+        store.signOut(provider) ?: return@launch // a failed save shows the unsaved banner; the account is out of memory either way
         resetIfEmpty()
-        if (blob != null && !release(provider, blob)) unreleased(listOf(Providers.get(provider)?.name ?: provider))
+        releasePending()
     }
 
     /**
@@ -373,17 +406,16 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     }
 
     fun signOut() {
-        val accounts = store.accounts.value
         val tailscale = setup.value.tailscale
         viewModelScope.launch(Dispatchers.IO) {
             val loggedOut = stopVpn(tailscale)
-            if (!whileStopped("sign out", store::signOutAll)) return@launch
-            // Released only now: a running tunnel would lose its key while still carrying traffic.
-            val revoked = accounts.map { (id, blob) -> async { id to release(id, blob) } }
+            // Each account is kept as a pending release before it goes, so a slot is released even if the app closes now.
+            if (!whileStopped("sign out") { store.accounts.value.keys.toList().forEach(store::signOut); store.signOutAll() }) return@launch
             form.clear(); formError.clear(); importDraft.clear()
             _signedIn.value = false
             tailscaleLeft(loggedOut)
-            revoked.awaitAll().filter { !it.second }.map { Providers.get(it.first)?.name ?: it.first }.takeIf { it.isNotEmpty() }?.let(::unreleased)
+            // Released only now: a running tunnel would lose its key while still carrying traffic.
+            releasePending()
         }
     }
 
