@@ -270,6 +270,17 @@ data class Setup(
         return if (live || saved.isNotEmpty()) CarriesDefault(name, live, saved) else null
     }
 
+    /**
+     * After signing in to [provider] ([before]: the providers signed in until then). A setup with no route gets one there,
+     * and a new install's [untouched] placeholder is pointed at it unless its own provider can carry it. Any other setup
+     * stays as it is: a sign-in never rewrites a route the user set up, nor the default.
+     */
+    fun signedIn(provider: String, before: Set<String>): Setup = when {
+        routes.isEmpty() -> copy(routes = listOf(Route("main", Location(provider))), defaultRoute = "main")
+        untouched && routes.single().loc.provider !in before + provider -> copy(routes = routes.map { it.copy(loc = Location(provider)) })
+        else -> this
+    }
+
     /** As a new install starts: only the placeholder route, as the default, and nothing chosen or saved yet. */
     val untouched get() = Setup().let { routes == it.routes && defaultRoute == it.defaultRoute } && apps.isEmpty() && profiles.isEmpty() && added.isEmpty()
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute

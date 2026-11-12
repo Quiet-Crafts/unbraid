@@ -248,17 +248,12 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         viewModelScope.launch(Dispatchers.IO) {
             val failure = runCatching {
                 val clean = (provider.fields + listOfNotNull(asked?.field)).associate { f -> f.key to input[f.key].orEmpty().let { if (f.secret) it else it.trim() } } + asked?.keep.orEmpty()
-                val saved = store.account(id, provider.signIn(clean))
+                val blob = provider.signIn(clean)
+                val before = store.accounts.value.keys
+                val saved = store.account(id, blob)
                 Providers.signedInAt[id] = System.currentTimeMillis()
-                // First provider on a fresh install: point the default route at it.
-                store.update { s ->
-                    val d = s.route(s.defaultRoute)
-                    when {
-                        s.routes.isEmpty() -> s.copy(routes = listOf(Route("main", Location(id))), defaultRoute = "main")
-                        d != null && !d.imported && d.loc.provider !in store.accounts.value -> s.copy(routes = s.routes.map { if (it.id == d.id) it.copy(loc = Location(id)) else it })
-                        else -> s
-                    }
-                }
+                // First provider on a fresh install: its placeholder route goes there. Nothing else moves.
+                store.update { it.signedIn(id, before) }
                 _signedIn.value = true
                 if (saved) input.values.forEach(::clearClipboardIf)
                 refreshCountries(id)

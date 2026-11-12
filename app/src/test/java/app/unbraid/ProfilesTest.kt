@@ -355,4 +355,18 @@ class ProfilesTest {
         for (pkg in listOf("netflix", "odd", "rai", "other")) assertEquals(old.routeOf(pkg), now.routeOf(pkg))
         assertEquals(now, now.migrated())
     }
+
+    /** Signing in points only a new install's placeholder at the provider; a route the user set up, and the default, stay. */
+    @Test fun signInLeavesTheDefaultRoute() {
+        val mullvad = Setup(routes = listOf(Route("nl", Location("mullvad", countryCode = "NL", country = "Netherlands", region = "nl-ams"))), defaultRoute = "nl")
+        assertEquals(mullvad, mullvad.signedIn("proton", emptySet())) // signed out of Mullvad, then into Proton
+        assertEquals(base, base.signedIn("proton", setOf("nord")))
+        val fresh = Setup().signedIn("proton", emptySet())
+        assertEquals(listOf(Route("nl", Location("proton"))), fresh.routes)
+        assertEquals("nl", fresh.defaultRoute)
+        assertEquals(Setup(), Setup().signedIn("nord", emptySet())) // its own provider carries the placeholder: it keeps its country
+        assertEquals(Setup(), Setup().signedIn("proton", setOf("nord")))
+        val none = Setup(routes = emptyList(), defaultRoute = DIRECT).signedIn("ivpn", emptySet())
+        assertEquals(listOf(Route("main", Location("ivpn"))), none.routes)
+    }
 }
