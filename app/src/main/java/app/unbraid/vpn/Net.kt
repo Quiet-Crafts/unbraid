@@ -46,6 +46,10 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     fun listen(l: InterfaceUpdateListener?) {
         listener = l
         push(force = true) // a new engine has no interface yet
+        // The engine's thread runs this while network callbacks push on the net thread: one of them may have delivered a
+        // newer network before this delivery. Checked again on the net thread, after any such callback, so the engine
+        // ends on the current network. Nothing is held across the engine call, so the two threads can't wait on each other.
+        if (l != null) handler.post { push(retry = false) }
     }
 
     // Every update the engine sees as a new interface closes all connections, so only real changes go through:
@@ -60,7 +64,8 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     // The VPN itself is never metered (Android would warn about every app); a combined speed test asks first on a metered one.
     override fun onCapabilitiesChanged(n: Network, caps: NetworkCapabilities) { if (n == network) UnbraidVpn.metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) }
 
-    private fun push(force: Boolean = false) {
+    /** [retry]: a real move to another network, which may fix blocked routes ([onChange]). */
+    private fun push(force: Boolean = false, retry: Boolean = true) {
         val l = listener ?: return
         val name = network?.let { cm.getLinkProperties(it)?.interfaceName }
         val index = name?.let { runCatching { NetworkInterface.getByName(it)?.index }.getOrNull() }
@@ -68,7 +73,7 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
         if (!force && now == pushed) return
         pushed = now
         l.updateDefaultInterface(now.first, now.second, false, false)
-        if (!force && now.second >= 0) onChange?.invoke()
+        if (!force && retry && now.second >= 0) onChange?.invoke()
     }
 }
 
