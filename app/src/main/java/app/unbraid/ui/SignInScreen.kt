@@ -85,6 +85,7 @@ private fun Choose(ui: Ui, importFor: String, onImported: (() -> Unit)?, onClose
             Other("Import a config file", "WireGuard .conf or OpenVPN .ovpn") { importer.file() },
             Other("Shadowsocks link", "Paste an ss:// access key") { importer.shadowsocks() },
             Other("Tailscale only", "No VPN provider, just your tailnet") { ui.useTailscaleOnly() }.takeIf { onClose == null },
+            Other("Restore a backup", "A file saved with Back up settings") { ui.backup.startRestore() }.takeIf { onClose == null },
         )
         itemsIndexed(other) { i, o -> GroupRow(i, other.size, o.title, o.sub, onClick = o.go, trailing = { Chevron() }) }
         // Signed out of every provider: routes set up before stay (their apps wait offline), nothing moves them by itself.

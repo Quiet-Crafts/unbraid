@@ -336,6 +336,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                     ))
                     group("This app", listOf(
                         Item("Statistics", if (prefs.stats) "Recording · ${"%.1f".format(statsSize / 1e6)} MB" else if (statsSize > 0) "Off · ${"%.1f".format(statsSize / 1e6)} MB saved" else "Off", { go("stats") }, icon = Icons.stats) { Chevron() },
+                        Item("Backup and restore", "Save your setup to a file, or bring one back", { go("backup") }, icon = Icons.file) { Chevron() },
                         Item("About & support", "Version ${BuildConfig.VERSION_NAME} · open source", { go("about") }, icon = Icons.info, anchor = TourStop.About) { Chevron() },
                         Item("Legal", "Licences, terms and credits", { go("legal") }, icon = Icons.file) { Chevron() },
                     ))
@@ -580,6 +581,17 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                         }
                     }
                 }
+            }
+
+            p == "backup" -> Page("Backup and restore", back) {
+                notice(ui, notice)
+                group(null, listOf(
+                    Item("Back up settings", "Save a file locked with a passphrase you choose", { ui.backup.startSave() }) { Chevron() },
+                    Item("Restore settings", "Replace this setup with one from a backup file", { ui.backup.startRestore() }) { Chevron() },
+                ))
+                caption("A backup holds: ${BACKUP_HOLDS.replaceFirstChar(Char::lowercase)}")
+                caption(BACKUP_LEAVES)
+                caption("Restore works on this phone or another one with unbraid 2.9.1 or newer. unbraid 2.8.6 and older can't open a backup.")
             }
 
             p == "about" -> Page("About & support", back) {

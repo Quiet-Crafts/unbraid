@@ -820,6 +820,16 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** The profile shown on Routes and Apps when it isn't the one in use; null = the one in use (the live setup). */
     // Kept across process death: a picker or sheet restored for a profile not in use must not act on the live setup.
     val viewing = state.getMutableStateFlow<String?>("viewing", null)
+
+    /** Back up and restore; its steps outlive a rotation here. */
+    val backup = BackupFlow(this)
+
+    /** After a restore: no other profile stays shown, and a setup that now has its own servers leaves the sign-in screen. */
+    internal fun restored() {
+        viewing.value = null
+        val s = setup.value
+        if (s.routes.any { it.imported } || s.servers.isNotEmpty()) _signedIn.value = true
+    }
     /** The setup as the viewed profile routes it: what Routes and Apps show. */
     val shown = combine(setup, viewing) { s, v -> s.viewAs(v) }.stateIn(viewModelScope, SharingStarted.Eagerly, setup.value)
     /** The viewed profile, if it exists and isn't the one in use: edits go to it alone. */

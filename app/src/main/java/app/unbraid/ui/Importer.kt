@@ -100,6 +100,10 @@ class Importer(
         if (uri == null) return
         val kind = draft.kind; val prefix = draft.prefix // as the picker was opened, whatever is opened meanwhile
         scope.launch {
+            // A backup picked here is restored, not imported.
+            if (withContext(Dispatchers.IO) { runCatching { context.contentResolver.openInputStream(uri)?.use { app.unbraid.data.Backup.looksLike(it.readNBytes(32)) } }.getOrNull() } == true) {
+                ui.backup.restoreFrom(uri); return@launch
+            }
             val (text, file) = withContext(Dispatchers.IO) { read(uri) }
             if (text == null) { error = "Couldn't read that file. Config files must be under 64 KB."; return@launch }
             val name = prefix?.let { "$it · $file" } ?: file

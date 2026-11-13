@@ -112,6 +112,13 @@ data class VpnState(
 class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     companion object {
         val state = MutableStateFlow(VpnState())
+        /**
+         * Restores so far: each replaces the whole setup, and is counted before the store changes. An engine still running
+         * a setup read before the latest one ([ranRestores]) runs one that exists nowhere else, so a refused reload stops
+         * the VPN instead of keeping it ([install]). Kept by the process, whatever screen is open.
+         */
+        val restores = java.util.concurrent.atomic.AtomicLong()
+        const val RESTORE_REFUSED = "The restored setup couldn't start, so unbraid is off. Check your routes, then connect again."
         /** Route id → engine tunnel tag of the running setup (speed tests dial through it). */
         @Volatile var tags: Map<String, String> = emptyMap()
         /** Tunnel tag → the DNS server that tunnel's own lookups use (health checks look their servers up there). */
@@ -390,6 +397,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // Saved settings that won't open would start on defaults, another routing policy: the app offers to recover
             // them. Meanwhile no app goes online at all, rather than on the normal connection.
             if (store.unreadable.value && !store.reopen()) { hold(); return }
+            val seen = restores.get() // before the setup: a restore between the two reads errs on the side of stopping
             val setup = store.setup.value
             // Refused before any provider is asked for a server: the engine would refuse it anyway.
             if (setup.defaultMissing) throw Compiler.MissingDefault()
@@ -403,6 +411,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             forgetLookups(this)
             val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
             apply(srv, setup, picked, accounts)
+            ranRestores = seen
             state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, stuck = stuck(setup, picked.blocked), engine = starts,
                 applied = if (picked.blocked.values.none { it is LinkPicker.Waiting }) setup.hashCode() else 0)
             stopWanted = false
@@ -434,6 +443,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** The engine runs [Compiler.blockAll] because the saved settings won't open ([hold]); nothing else is applied then. */
     private var holding = false
+
+    /** [restores] as it was when the setup the engine runs was read. */
+    private var ranRestores = 0L
 
     /**
      * Runs the engine with every app's connections refused, until the saved settings open (the app's Try again) or the
@@ -599,25 +611,26 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      */
     private suspend fun reload(keep: Map<String, Link>? = null, avoid: Set<String> = emptySet(), keepFrom: Int = generation) {
         class Ask(val srv: CommandServer, val setup: Setup, val accounts: Map<String, String>, val ready: LinkPicker.Result, val applied: Setup?,
-                  val appliedAccounts: Map<String, String>, val refused: Map<String, Exception>, val last: Map<String, Link>, val generation: Int)
+                  val appliedAccounts: Map<String, String>, val refused: Map<String, Exception>, val last: Map<String, Link>, val generation: Int, val seen: Long)
         val ask = lock.withLock {
             // While the settings won't open, what the store holds are defaults, not the user's setup: nothing to apply.
             // A destroyed instance's phase is the next instance's: never act on that connection.
             if (destroyed || state.value.phase != VpnState.Phase.On || holding) return
             val srv = server ?: return
+            val seen = restores.get()
             val setup = store.setup.value
             val accounts = store.accounts.value
             // [keep] was taken without the lock: only valid if nothing was installed since ([keepFrom]).
             val ready = pickLinks(setup, keep?.takeIf { keepFrom == generation } ?: links, accounts, avoid, offline = true)
             // Without a default route the install is refused at once (the running engine stays and the error says why),
             // before any provider is asked.
-            if (ready.blocked.values.none { it is LinkPicker.Waiting } || setup.defaultMissing) { install(srv, setup, ready, accounts); return }
+            if (ready.blocked.values.none { it is LinkPicker.Waiting } || setup.defaultMissing) { install(srv, setup, ready, accounts, seen); return }
             // While a provider is asked for a server, apps moving off Direct already leave through their new route, or
             // wait blocked if that is the one still waiting: never on their real address for the time it takes. A tunnel
             // whose account was signed out or refused stops now too, not once the others are found.
             val stopNow = ready.blocked.any { (id, e) -> e is AuthException && id in links }
-            if ((stopNow || LinkPicker.leavesDirect(applied, setup, setup.activeRoutes.mapTo(HashSet()) { it.id })) && !install(srv, setup, ready, accounts)) return
-            Ask(srv, setup, accounts, ready, applied, appliedAccounts, refusedFor(setup, accounts), store.lastLinks, generation)
+            if ((stopNow || LinkPicker.leavesDirect(applied, setup, setup.activeRoutes.mapTo(HashSet()) { it.id })) && !install(srv, setup, ready, accounts, seen)) return
+            Ask(srv, setup, accounts, ready, applied, appliedAccounts, refusedFor(setup, accounts), store.lastLinks, generation, seen)
         }
         // A route without a tunnel (signed out, refused, unreachable) is blocked; the others keep running. Tunnels come
         // from the offline pass, which already dropped any a changed location or account can't keep.
@@ -627,13 +640,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (destroyed || state.value.phase != VpnState.Phase.On || generation != ask.generation || store.setup.value != ask.setup || store.accounts.value != ask.accounts) return
             noteRefusals(ask.setup, ask.accounts, picked)
             runCatching { store.rememberLinks(picked.remember) }.onFailure { Log.w(TAG, "last servers not saved") }
-            install(ask.srv, ask.setup, picked, ask.accounts)
+            install(ask.srv, ask.setup, picked, ask.accounts, ask.seen)
         }
     }
 
     /** Runs [picked] on the engine and shows it; on failure brings back what ran. False if it didn't apply. Caller holds [lock]. */
-    private fun install(srv: CommandServer, setup: Setup, picked: LinkPicker.Result, accounts: Map<String, String>): Boolean = try {
+    private fun install(srv: CommandServer, setup: Setup, picked: LinkPicker.Result, accounts: Map<String, String>, seen: Long): Boolean = try {
         apply(srv, setup, picked, accounts)
+        ranRestores = seen
         state.update { it.copy(servers = picked.links.mapValues { l -> l.value.server }, error = blockedText(setup, picked.blocked), stuck = stuck(setup, picked.blocked)) }
         notify(setup)
         if (setup.tailscale && ts == null) watchTailscale()
@@ -652,7 +666,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (restored && restarted) { retry?.cancel(); retry = null }
         else if (restored && setup == applied && accounts == appliedAccounts) retryBlocked(retrying)
         if (restored) app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() } // a new engine, numbered afresh
-        if (restored) state.update { it.copy(error = Redact.message(e, "Change not applied"), refused = setup.hashCode()) } else teardown(Redact.message(e, "Connection lost"))
+        if (restored && ranRestores != restores.get()) teardown(RESTORE_REFUSED)
+        else if (restored) state.update { it.copy(error = Redact.message(e, "Change not applied"), refused = setup.hashCode()) } else teardown(Redact.message(e, "Connection lost"))
         false
     }
 

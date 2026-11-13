@@ -5,6 +5,7 @@ import androidx.compose.animation.core.SeekableTransitionState
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.launch
 import app.unbraid.ui.sharedRoute
+import app.unbraid.ui.BackupHost
 import app.unbraid.ui.LocalShared
 import app.unbraid.ui.LocalScreen
 import androidx.compose.ui.unit.dp
@@ -295,6 +296,7 @@ class MainActivity : ComponentActivity() {
                     pickerAfter?.let { picker = it; pickerAfter = null } ?: run { tab = Tab.Routes }
                 }
 
+                BackupHost(ui)
                 Box(Modifier.fillMaxSize()) {
                 // While touring the app is looked at, not used: TalkBack reads the tour's note only.
                 Column(Modifier.fillMaxSize().background(Ink.ground).then(if (tour >= 0) Modifier.clearAndSetSemantics {} else Modifier)) {
