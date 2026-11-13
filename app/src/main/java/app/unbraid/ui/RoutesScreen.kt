@@ -170,8 +170,8 @@ internal fun pausedLabel(time: String?, about: Boolean) = if (time == null) "Pau
 internal fun moveText(n: Int, to: String?) =
     "${if (n == 1) "1 app that follows" else "$n apps that follow"} the default will " + if (to == null) "use Direct (no VPN)." else "move to $to."
 
-/** Server name and, where the provider publishes it, its load: "nl1256 · 9% load". */
-private fun serverId(r: Route, s: Server): String = listOfNotNull(
+/** Server name and, where the provider publishes it, its load: "nl1256 · 9% load". An own server has neither (its name is the route's). */
+internal fun serverId(r: Route, s: Server): String? = if (r.imported) null else listOfNotNull(
     if (r.loc.provider == "nord") s.host.substringBefore('.') else s.name,
     "${s.load}% load".takeIf { s.load >= 0 && Providers.get(r.loc.provider)?.hasLoad == true },
 ).joinToString(" · ")

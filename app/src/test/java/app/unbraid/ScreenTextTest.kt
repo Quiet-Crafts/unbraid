@@ -17,6 +17,9 @@ import app.unbraid.ui.routeWarning
 import app.unbraid.ui.missingAppsText
 import app.unbraid.ui.summary
 import app.unbraid.ui.pausedLabel
+import app.unbraid.ui.serverId
+import app.unbraid.data.Server
+import app.unbraid.data.WgPeer
 import app.unbraid.ui.Fetch
 import app.unbraid.data.PREVIOUS
 import app.unbraid.data.Profile
@@ -136,6 +139,14 @@ class ScreenTextTest {
         assertEquals("Resumes about 1:00 AM", pausedLabel("1:00 AM", about = true))
         assertEquals("Resumes at 13:00", pausedLabel("13:00", about = false))
         assertEquals("Paused", pausedLabel(null, about = false))
+    }
+
+    /** An imported server is not labelled like a provider's ("192 · 0% load"): its route's name says it all. */
+    @Test fun ownServerHasNoProviderServerLabel() {
+        val live = Server("192.0.2.1", "192.0.2.1", "192.0.2.1", "", 0)
+        val wg = Route("w", wg = WgPeer("Home VPS", "k", listOf("10.0.0.2/32"), "p", endpoint = "192.0.2.1:51820", allowedIps = listOf("0.0.0.0/0")))
+        assertEquals(null, serverId(wg, live))
+        assertEquals("nl1256 · 9% load", serverId(nl, Server("nl1256", "nl1256.nordvpn.com", "", "", 9)))
     }
 
     @Test fun newDefaultSaysWhoMoves() {
