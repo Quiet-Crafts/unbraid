@@ -4,6 +4,8 @@ import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.STUNTestHandler
 import io.nekohasekai.libbox.STUNTestProgress
 import io.nekohasekai.libbox.STUNTestResult
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -144,20 +146,32 @@ object Health {
      * STUN checks open now. One already past its TCP-only test must not reach a tunnel that a reload turns TCP-only (a
      * Shadowsocks plugin): the engine would send it straight to the server, past the plugin. So starting one and marking
      * tunnels TCP-only exclude each other, and the marking closes every check already open through those tunnels.
+     *
+     * Closing a check here doesn't wait for the engine to drop it: one the engine took but hadn't started yet could still
+     * start on the new engine, through the plugin route's tunnel. The engine reports a check first only once it holds the
+     * running engine and the tunnel, and a reload closes those. So the marking first waits, up to [wait] ms in all, until
+     * every check it closes has been heard from (any report, or its end); a check still silent then is closed anyway.
      */
-    internal class StunGate {
-        private val open = HashMap<Any, Pair<String, () -> Unit>>()
+    internal class StunGate(private val wait: Long = 2_000) {
+        private class Check(val tag: String, val heard: CountDownLatch, val close: () -> Unit)
+        private val open = HashMap<Any, Check>()
 
-        /** Starts a check through [tag] with [start], unless [refused] (TCP only now); [close] ends it early. */
-        @Synchronized fun <S : Any> start(tag: String, refused: (String) -> Boolean, start: () -> S?, close: (S) -> Unit): S? =
-            if (refused(tag)) null else start()?.also { s -> open[s] = tag to { close(s) } }
+        /**
+         * Starts a check through [tag] with [start], unless [refused] (TCP only now); [heard] is counted down by the
+         * check's first report or end; [close] ends it early.
+         */
+        @Synchronized fun <S : Any> start(tag: String, refused: (String) -> Boolean, heard: CountDownLatch, start: () -> S?, close: (S) -> Unit): S? =
+            if (refused(tag)) null else start()?.also { s -> open[s] = Check(tag, heard) { close(s) } }
 
         @Synchronized fun done(session: Any) { open.remove(session) }
 
         /** Runs [mark] (tunnels [tags] are TCP-only from now) and closes the checks open through any of them. */
         @Synchronized fun udpless(tags: Set<String>, mark: () -> Unit) {
             mark()
-            open.entries.filter { it.value.first in tags }.toList().forEach { (s, v) -> open.remove(s); runCatching { v.second() } }
+            val through = open.filterValues { it.tag in tags }
+            val until = System.nanoTime() + wait * 1_000_000
+            through.values.forEach { c -> runCatching { c.heard.await((until - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS) } }
+            through.forEach { (s, c) -> open.remove(s); runCatching { c.close() } }
         }
     }
     internal val stun = StunGate()
@@ -167,16 +181,17 @@ object Health {
         // patch reads "<dns server>|<host:port>"); a tunnel whose DNS server isn't known relies on HTTPS.
         val server = UnbraidVpn.tunnelDns[tag]?.let { "$it|$stun" } ?: return false
         val answer = CompletableDeferred<Boolean>()
+        val heard = CountDownLatch(1)
         // Callbacks only hand the answer over: closing the session from inside one would wait for itself.
         val handler = object : STUNTestHandler {
-            override fun onProgress(p: STUNTestProgress) { if (p.externalAddr.isNotEmpty()) answer.complete(true) } // the NAT-type phases after it aren't needed
-            override fun onResult(r: STUNTestResult) { answer.complete(true) }
-            override fun onError(message: String?) { answer.complete(false) }
+            override fun onProgress(p: STUNTestProgress) { heard.countDown(); if (p.externalAddr.isNotEmpty()) answer.complete(true) } // the NAT-type phases after it aren't needed
+            override fun onResult(r: STUNTestResult) { heard.countDown(); answer.complete(true) }
+            override fun onError(message: String?) { heard.countDown(); answer.complete(false) }
         }
         // Opened and closed in one context, so a cancelled check can't lose a session it already has.
         return withContext(Dispatchers.IO) {
             val session = runCatching {
-                this@Health.stun.start(tag, { it in UnbraidVpn.tcpOnly }, { Libbox.newStandaloneCommandClient().startSTUNTest(server, tag, handler) }) { answer.complete(false); it.close() }
+                this@Health.stun.start(tag, { it in UnbraidVpn.tcpOnly }, heard, { Libbox.newStandaloneCommandClient().startSTUNTest(server, tag, handler) }) { answer.complete(false); it.close() }
             }.getOrNull() ?: return@withContext false
             try { withTimeoutOrNull(BUDGET) { answer.await() } ?: false }
             finally { withContext(NonCancellable) { this@Health.stun.done(session); runCatching { session.close() } } }

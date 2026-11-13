@@ -263,14 +263,48 @@ class HealthTest {
         var tcpOnly = emptySet<String>()
         val closed = mutableListOf<String>()
         val refused = { t: String -> t in tcpOnly }
-        val a = gate.start("r-a", refused, { "session-a" }) { closed += it }
-        val b = gate.start("r-b", refused, { "session-b" }) { closed += it }
+        val heard = { java.util.concurrent.CountDownLatch(0) } // the engine has reported on these already
+        val a = gate.start("r-a", refused, heard(), { "session-a" }) { closed += it }
+        val b = gate.start("r-b", refused, heard(), { "session-b" }) { closed += it }
         assertEquals("session-a", a)
         gate.udpless(setOf("r-a")) { tcpOnly = tcpOnly + "r-a" } // route a replaced by a plugin route, same tag
         assertEquals(listOf("session-a"), closed) // b carries UDP still: left alone
-        assertNull(gate.start("r-a", refused, { "late" }) { closed += it })
+        assertNull(gate.start("r-a", refused, heard(), { "late" }) { closed += it })
         gate.done(b!!)
         gate.udpless(setOf("r-b")) { tcpOnly = tcpOnly + "r-b" }
         assertEquals(listOf("session-a"), closed) // b had ended already: nothing to close
+    }
+
+    /**
+     * A check the engine took but hasn't started (it hasn't reported yet) when its route turns into a plugin route: the
+     * reload doesn't go on, nor close it, until the engine reports on it (it then holds the old engine, which the reload
+     * closes), and never waits longer than its bound.
+     */
+    @Test fun reloadWaitsForAQueuedStunCheckToBeTaken() {
+        var tcpOnly = emptySet<String>()
+        val refused = { t: String -> t in tcpOnly }
+        val closed = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val gate = Health.StunGate(wait = 5_000)
+        val queued = java.util.concurrent.CountDownLatch(1)
+        gate.start("r-a", refused, queued, { "queued" }) { closed += it }
+        val reload = Thread { gate.udpless(setOf("r-a")) { tcpOnly = tcpOnly + "r-a" } }.apply { start() }
+        Thread.sleep(300)
+        assertTrue(reload.isAlive) // the new engine doesn't start yet
+        assertTrue(closed.isEmpty())
+        assertTrue("r-a" in tcpOnly) // and no new check goes through that tunnel meanwhile
+        queued.countDown() // the engine's first report: it runs on the old engine
+        reload.join(2_000)
+        assertFalse(reload.isAlive)
+        assertEquals(listOf("queued"), closed)
+
+        // An engine that never reports holds the reload only for the bound, then the check is closed anyway.
+        val short = Health.StunGate(wait = 200)
+        tcpOnly = emptySet()
+        short.start("r-b", refused, java.util.concurrent.CountDownLatch(1), { "silent" }) { closed += it }
+        val t0 = System.nanoTime()
+        short.udpless(setOf("r-b")) { tcpOnly = tcpOnly + "r-b" }
+        val ms = (System.nanoTime() - t0) / 1_000_000
+        assertTrue("waited $ms ms", ms in 150..1_500)
+        assertEquals(listOf("queued", "silent"), closed)
     }
 }
