@@ -16,6 +16,7 @@ import app.unbraid.ui.noLocations
 import app.unbraid.ui.routeWarning
 import app.unbraid.ui.missingAppsText
 import app.unbraid.ui.summary
+import app.unbraid.ui.pausedLabel
 import app.unbraid.ui.Fetch
 import app.unbraid.data.PREVIOUS
 import app.unbraid.data.Profile
@@ -128,6 +129,13 @@ class ScreenTextTest {
         assertEquals("United States · 1 app elsewhere", summary(setup, Profile("Work", "us", mapOf("a" to "us", "b" to "nl"))))
         assertEquals("Direct · no apps elsewhere", summary(setup, Profile("Work", DIRECT)))
         assertEquals("Default route no longer exists · no apps elsewhere", summary(setup, Profile("Work", "gone")))
+    }
+
+    /** The pause's end leads the status line, so a narrow screen cuts nothing that matters. */
+    @Test fun pauseLineLeadsWithTheTime() {
+        assertEquals("Resumes about 1:00 AM", pausedLabel("1:00 AM", about = true))
+        assertEquals("Resumes at 13:00", pausedLabel("13:00", about = false))
+        assertEquals("Paused", pausedLabel(null, about = false))
     }
 
     @Test fun newDefaultSaysWhoMoves() {

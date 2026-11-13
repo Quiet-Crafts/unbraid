@@ -160,6 +160,12 @@ internal fun missingAppsText(n: Int) =
 /** The service's own line for apps on a route that no longer exists; Routes says it once, with a way to fix it. */
 private val serviceMissingLine = "Apps on a route that no longer exists are blocked. Choose a route for them in $APP."
 
+/**
+ * The status line while paused: when it resumes ([time], null = only by hand), [about] when Android may wake it a
+ * little later. The title already says Paused, so the time comes first and fits beside the power button.
+ */
+internal fun pausedLabel(time: String?, about: Boolean) = if (time == null) "Paused" else "Resumes ${if (about) "about " else "at "}$time"
+
 /** Asked before a new default ([to], null = Direct) moves [n] apps that follow the default. */
 internal fun moveText(n: Int, to: String?) =
     "${if (n == 1) "1 app that follows" else "$n apps that follow"} the default will " + if (to == null) "use Direct (no VPN)." else "move to $to."
@@ -623,9 +629,10 @@ private fun Status(vpn: VpnState, switching: Boolean = false) {
         Phase.On -> "Connected · $elapsed"
         Phase.Connecting -> "Connecting"
         Phase.Off -> "Not connected"
-        Phase.Paused -> if (vpn.pausedUntil > 0) "Paused · resumes ${if (vpn.pausedAbout) "about " else ""}${java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(vpn.pausedUntil))}" else "Paused"
+        Phase.Paused -> pausedLabel(vpn.pausedUntil.takeIf { it > 0 }?.let { java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(it)) }, vpn.pausedAbout)
     }
-    Text(label.uppercase(), style = Type.overline, color = if (switching) Ink.dim else stateColor(vpn.phase), maxLines = 1)
+    // Two lines rather than a cut: the time a pause ends is the one thing this line must show.
+    Text(label.uppercase(), style = Type.overline, color = if (switching) Ink.dim else stateColor(vpn.phase), maxLines = 2, overflow = TextOverflow.Ellipsis)
 }
 
 /** Green protected, orange paused, red unprotected: the button and the status line say the same thing. */
