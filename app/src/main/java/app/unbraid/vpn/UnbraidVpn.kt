@@ -347,7 +347,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 val p = intent?.getIntExtra(EXTRA_PAUSE, 0) ?: 0
                 if (p != 0 && pauses != 0 && (p != pauses || state.value.phase != VpnState.Phase.Paused)) {
                     // Its start put up "Connecting…" if the pause had already ended: put the running notice back.
-                    if (state.value.phase == VpnState.Phase.On) notify(store.setup.value) else stopWanted = state.value.phase == VpnState.Phase.Off
+                    if (state.value.phase == VpnState.Phase.On) { if (holding) notice(UNREADABLE) else notify(store.setup.value) } else stopWanted = state.value.phase == VpnState.Phase.Off
                     return
                 }
                 connect()
