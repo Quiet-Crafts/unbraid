@@ -15,6 +15,20 @@ object Http {
 
     class Status(val code: Int, message: String) : IOException(message)
 
+    /** A provider turned down the credentials a request carried. */
+    class Refused(message: String = "Sign-in was refused") : AuthException(message)
+
+    /**
+     * Runs a sign-in's first request with what the user entered. A refusal, or a 400, 401 or 403 to it, means the
+     * provider didn't accept what was entered, so the user is told [message] (and pointed to [url]), never to try
+     * again later; server errors and network failures pass through unchanged.
+     */
+    fun <T> signingIn(message: String, url: String? = null, f: () -> T): T = try { f() } catch (e: Refused) {
+        throw AuthException(message, url)
+    } catch (e: Status) {
+        if (e.code == 400 || e.code == 401 || e.code == 403) throw AuthException(message, url) else throw e
+    }
+
     /** Opens a connection to a URL; tests put a fake one here. */
     internal var open: (URL) -> URLConnection = { it.openConnection() }
 
@@ -75,7 +89,7 @@ object Http {
                 c.outputStream.use { it.write(body.toByteArray()) }
             }
             val code = c.responseCode
-            if (code == 401 && signed) throw AuthException("Sign-in was refused")
+            if (code == 401 && signed) throw Refused()
             if (code !in 200..299) throw Status(code, "HTTP $code")
             return c.inputStream.use { String(it.readNBytes(MAX_BODY + 1).also { b -> if (b.size > MAX_BODY) throw IOException("Response too large") }) }
         } finally {

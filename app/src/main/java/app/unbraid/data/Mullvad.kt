@@ -147,7 +147,7 @@ object Mullvad : Provider {
     override fun signIn(input: Map<String, String>): String {
         val n = input["account"].orEmpty().filterNot { it.isWhitespace() || it == '-' }
         require(n.matches(Regex("\\d{16}"))) { "A Mullvad account number has 16 digits" }
-        val token = accessToken(n)
+        val token = Http.signingIn("Mullvad doesn't recognise that account number") { accessToken(n) }
         val keys = WgKeys.generate()
         val reply = try {
             postJsonRaw("$API/accounts/v1/devices", """{"pubkey":"${keys.public}","hijack_dns":false}""", bearer(token))

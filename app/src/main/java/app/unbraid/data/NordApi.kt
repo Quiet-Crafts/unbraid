@@ -34,7 +34,7 @@ object NordApi {
             val code = c.responseCode
             if (code == 200) return c.inputStream.use { String(it.readNBytes(MAX_BODY + 1).also { b -> if (b.size > MAX_BODY) throw IOException("Response too large") }) }
             // Only a request that carried the token can have it rejected; the public lists' 401 is a plain failure.
-            if (code == 401 && token != null) throw AuthException("NordVPN rejected the token. Sign in again.")
+            if (code == 401 && token != null) throw Http.Refused("NordVPN rejected the token. Sign in again.")
             throw Http.Status(code, "NordVPN API $code")
         } finally {
             c.disconnect()

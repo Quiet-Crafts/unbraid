@@ -24,7 +24,7 @@ object Nord : Provider {
     override fun signIn(input: Map<String, String>): String {
         val t = input["token"].orEmpty().filterNot(Char::isWhitespace)
         require(t.matches(Regex("[A-Za-z0-9]{32,128}"))) { "That doesn't look like a NordVPN token" }
-        val (key, user, pass) = NordApi.credentials(t)
+        val (key, user, pass) = Http.signingIn(TOKEN_REFUSED) { NordApi.credentials(t) }
         return NordApi.json.encodeToString(Account.serializer(), Account(t, key, user, pass))
     }
 
@@ -42,6 +42,7 @@ object Nord : Provider {
     override val oneKey = true
 
     const val DEDICATED_IP = "legacy_dedicated_ip"
+    internal const val TOKEN_REFUSED = "NordVPN didn't accept this token. Create a new one in your Nord Account under NordVPN, manual setup, and paste it here."
 
     override fun connect(loc: Location, account: String): Link {
         val a = account(account)

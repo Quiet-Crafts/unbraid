@@ -166,11 +166,7 @@ object Pia : Provider {
     }.sortedBy { it.name }
 
     private fun fetchToken(user: String, pass: String): String {
-        val body = try {
-            Http.postForm(TOKEN_URL, mapOf("username" to user, "password" to pass))
-        } catch (e: AuthException) {
-            throw AuthException("PIA refused that username or password")
-        }
+        val body = Http.signingIn("PIA refused that username or password") { Http.postForm(TOKEN_URL, mapOf("username" to user, "password" to pass)) }
         val token = Http.parsed("PIA") { json.decodeFromString(TokenReply.serializer(), body) }.token
         return token?.takeIf { it.isNotBlank() } ?: throw AuthException("PIA refused that username or password")
     }

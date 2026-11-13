@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 import java.io.IOException
 
 /** Credentials were refused; the user must sign in again. [url]: where the user can fix it (a device list, say). */
-class AuthException(message: String, val url: String? = null) : IOException(message)
+open class AuthException(message: String, val url: String? = null) : IOException(message)
 
 /**
  * A sign-in needs one more answer (a two-factor code, the characters in a captcha [image]): asked with [field], then

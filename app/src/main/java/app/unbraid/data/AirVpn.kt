@@ -62,6 +62,7 @@ object AirVpn : KeyProvider() {
     private const val API = "https://airvpn.org/api/"
     private const val DEVICES = "https://airvpn.org/devices/"
     private const val KEYS = "https://airvpn.org/apisettings/"
+    private const val KEY_REFUSED = "AirVPN didn't accept that API key. Check it in the Client Area under API"
     private const val DNS_LISTS = "https://airvpn.org/dns/"
     private const val DEVICE = "device"
     private val API_KEY = Regex("[0-9a-fA-F]{64}")
@@ -141,7 +142,7 @@ object AirVpn : KeyProvider() {
      * only one. The config comes from the generator, kept with the API key that made it.
      */
     private fun fromApi(key: String, wanted: String?): String {
-        val all = devices(key)
+        val all = Http.signingIn(KEY_REFUSED, KEYS) { devices(key) }
         if (wanted == null) own(key, all)?.let { return it }
         val names = all.joinToString(", ") { it.name.take(40) }
         val d = when {
@@ -224,7 +225,7 @@ object AirVpn : KeyProvider() {
     /** An API reply that is an error: a refused key needs a new one; anything else is a passing failure. */
     private fun failed(body: String) {
         val error = runCatching { NordApi.json.decodeFromString(Devices.serializer(), body).error }.getOrNull() ?: return
-        if (error.contains("authoriz", true)) throw AuthException("AirVPN didn't accept that API key. Check it in the Client Area under API", KEYS)
+        if (error.contains("authoriz", true)) throw AuthException(KEY_REFUSED, KEYS)
         throw app.unbraid.vpn.Fail("AirVPN couldn't answer right now. Try again later")
     }
 
