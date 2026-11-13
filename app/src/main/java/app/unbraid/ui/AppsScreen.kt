@@ -67,6 +67,17 @@ import app.unbraid.data.Setup
 private fun Setup.codeOf(id: String) = route(id)?.code ?: "··"
 private fun Setup.colorOf(id: String) = route(id)?.let { Ink.route(it.hue) } ?: Ink.direct
 
+/**
+ * The Apps list when nothing shows: why, and the one action that brings apps back ("Show system apps" or "Show all"),
+ * or null. [query] typed, [filter] the route filter's name (null = All), [hiddenSystem] matching system apps hidden.
+ */
+internal fun emptyApps(query: String, filter: String?, hiddenSystem: Int): Pair<String, String?> = when {
+    hiddenSystem > 0 -> "${if (hiddenSystem == 1) "1 system app matches" else "$hiddenSystem system apps match"}. System apps are hidden." to "Show system apps"
+    filter != null -> (if (query.isEmpty()) "No apps use $filter." else "No apps on $filter match \"$query\".") to "Show all"
+    query.isNotEmpty() -> "No apps match \"$query\"." to null
+    else -> "No apps" to null
+}
+
 /** The "Follow default" tile in an app's menu. */
 internal const val FOLLOW = "follow"
 
@@ -167,7 +178,17 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                 Secondary("Show my apps", disclose)
             }
         } else if (shown.isEmpty()) item("empty") {
-            Text("No apps match", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(24.dp))
+            // Say what hides them (a filter whose chip may be off-screen, or the system-apps filter) and undo it in one tap.
+            val hidden = if (showSystem) 0 else apps.count { a ->
+                a.system && a.pkg !in setup.apps && (filter == null || placeOf(a.pkg) == filter) &&
+                    (query.isEmpty() || a.label.contains(query, true) || a.pkg.contains(query, true))
+            }
+            val name = when (filter) { null -> null; DIRECT -> "Direct"; "" -> "no route yet"; else -> setup.route(filter)?.name ?: "this route" }
+            val (text, action) = emptyApps(query, name, hidden)
+            Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(text, style = Type.sub, color = Ink.dim)
+                action?.let { Secondary(it, { if (hidden > 0) showSystem = true else filter = null }) }
+            }
         }
         itemsIndexed(shown, key = { _, a -> a.pkg }) { i, a ->
             // Regrouping slides rows to their new place instead of jumping.

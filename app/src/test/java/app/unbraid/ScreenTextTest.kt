@@ -11,6 +11,7 @@ import app.unbraid.ui.keepName
 import app.unbraid.ui.blockingToApply
 import app.unbraid.ui.pendingNote
 import app.unbraid.ui.importTarget
+import app.unbraid.ui.emptyApps
 import app.unbraid.data.PREVIOUS
 import app.unbraid.data.Profile
 import app.unbraid.ui.removeText
@@ -88,6 +89,15 @@ class ScreenTextTest {
         assertEquals("", importTarget("default", setup))
         assertEquals("", importTarget("", setup))
         assertEquals("", importTarget(null, setup))
+    }
+
+    /** An empty Apps list says why and offers the way back, instead of "No apps match". */
+    @Test fun emptyAppsListSaysWhy() {
+        assertEquals("2 system apps match. System apps are hidden." to "Show system apps", emptyApps("play", null, 2))
+        assertEquals("1 system app matches. System apps are hidden." to "Show system apps", emptyApps("webview", "Direct", 1))
+        assertEquals("No apps use Direct." to "Show all", emptyApps("", "Direct", 0))
+        assertEquals("No apps on Direct match \"chr\"." to "Show all", emptyApps("chr", "Direct", 0))
+        assertEquals("No apps match \"chr\"." to null, emptyApps("chr", null, 0))
     }
 
     @Test fun newDefaultSaysWhoMoves() {
