@@ -377,7 +377,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun connect(updated: Boolean = false) {
         if (state.value.phase == VpnState.Phase.On) { // a repeated start (Always-on, tile)
             readFlags()
-            if (state.value.phase == VpnState.Phase.On) if (holding) notice(UNREADABLE) else notify(store.setup.value) // a failed reload may have ended it
+            if (state.value.phase == VpnState.Phase.On) { // a failed reload may have ended it
+                if (holding) notice(UNREADABLE) else notify(store.setup.value)
+                AfterUpdate.on(this) // still on: a start after an update may have cleared the note meanwhile
+            }
             return
         }
         cancelResume()
