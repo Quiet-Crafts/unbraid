@@ -9,6 +9,7 @@ import app.unbraid.ui.defaultLabel
 import app.unbraid.ui.dropText
 import app.unbraid.ui.keepName
 import app.unbraid.ui.blockingToApply
+import app.unbraid.ui.blockingFor
 import app.unbraid.ui.pendingNote
 import app.unbraid.ui.importTarget
 import app.unbraid.ui.emptyApps
@@ -87,6 +88,10 @@ class ScreenTextTest {
         assertEquals(null, blockingToApply(null, true)) // nothing chosen here
         assertEquals(null, blockingToApply(true, true)) // chosen back to what the route has
         assertEquals(false, blockingToApply(false, true))
+        // Sent with the location only while the route stays with its provider.
+        assertEquals(false, blockingFor(nl, Location("nord", 81, "DE", "Germany"), false, true))
+        assertEquals(null, blockingFor(nl, Location("mullvad", 81, "DE", "Germany"), false, true))
+        assertEquals(null, blockingFor(nl.copy(tsExit = "100.64.0.9"), nl.loc, false, true))
         assertEquals(null, pendingNote(null, null))
         assertEquals("OpenVPN TCP: tap a location to use it. Close keeps the route as it is.", pendingNote("OpenVPN TCP", null))
         assertEquals(

@@ -118,6 +118,10 @@ private class Pick(
  */
 internal fun blockingToApply(pending: Boolean?, now: Boolean) = pending?.takeIf { it != now }
 
+/** The blocking to set with [loc] on [route]: it belongs to the route's provider, so only when the route stays with it. */
+internal fun blockingFor(route: app.unbraid.data.Route, loc: app.unbraid.data.Location, pending: Boolean?, now: Boolean) =
+    if (!route.imported && route.loc.provider == loc.provider) blockingToApply(pending, now) else null
+
 /**
  * What the picker says while a provider lists no location: loading ([fetch] under way or not started), why the last
  * fetch failed, or (with a list that [narrowed] to nothing by server type [group]) that no country offers it. True
@@ -206,9 +210,8 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             target == "default" -> if (draft != null) ui.chooseDefault(loc) else ui.setDefault(ui.addRoute(loc))
             target.startsWith("app:") -> ui.addRouteFor(target.removePrefix("app:"), loc)
             else -> {
-                ui.setLocation(target, loc)
-                // Blocking belongs to the route's provider: taken along only when the route stays with it.
-                if (route != null && !route.imported && route.loc.provider == loc.provider) blockingToApply(blockChoice, setup.protects(route))?.let { ui.setFilter(target, it) }
+                // One change with the location: a No to the connection-limit question drops both.
+                ui.setLocation(target, loc, route?.let { blockingFor(it, loc, blockChoice, setup.protects(it)) })
             }
         }
         close()
