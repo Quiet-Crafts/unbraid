@@ -220,6 +220,27 @@ class StoreTest {
         assertEquals(true, creates.last())
     }
 
+    /**
+     * Start fresh is a new install: the setup is pristine, a release list kept aside and the sign-in times go too, and a
+     * list kept aside later in the same run is tried again.
+     */
+    @Test fun startFreshIsANewInstall() {
+        val dir = tmp.newFolder().also(::saved)
+        File(dir, "setup.bin").writeText("garbage")
+        val junk = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
+        File(dir, "releases.bin.bad").writeBytes(junk)
+        File(dir, "signins.json").writeText("""{"nord":1}""")
+        val s = Store(dir) { key }
+        assertTrue(s.unreadable.value)
+        assertTrue(s.releasesUnreadable) // the one kept aside was tried this run
+        assertTrue(s.startFresh())
+        assertTrue(s.setup.value.pristine)
+        assertTrue(listOf("releases.bin.bad", "signins.json").none { File(dir, it).exists() })
+        assertFalse(s.releasesUnreadable)
+        File(dir, "releases.bin.bad").writeBytes(sealed("""[{"provider":"mullvad","blob":"blob-m"}]"""))
+        assertEquals(listOf("blob-m"), s.pendingReleases.map { it.blob })
+    }
+
     /** A reset confirmed after the files opened again (a VPN start reopens them) deletes nothing. */
     @Test fun startFreshAfterRecoveryKeepsTheData() {
         val dir = tmp.newFolder().also(::saved)
