@@ -6,6 +6,8 @@ import app.unbraid.data.Route
 import app.unbraid.data.Setup
 import app.unbraid.ui.FOLLOW
 import app.unbraid.ui.defaultLabel
+import app.unbraid.ui.dropText
+import app.unbraid.ui.removeText
 import app.unbraid.ui.moveText
 import app.unbraid.ui.routeState
 import app.unbraid.ui.tickedTile
@@ -34,6 +36,17 @@ class ScreenTextTest {
         assertEquals("All other apps · 12", defaultLabel(12, 0))
         assertEquals("12 apps · 2 chosen", defaultLabel(12, 2))
         assertEquals("1 app · 1 chosen", defaultLabel(1, 1))
+    }
+
+    /** Removing a route says what is lost before it goes. */
+    @Test fun removalSaysWhatIsLost() {
+        assertEquals("No app chose it.", removeText(0, emptyList()))
+        assertEquals(
+            "2 apps chose it and follow the default route from now on. It also goes from Work, Trip. You can add the route again, but not those choices.",
+            removeText(2, listOf("Work", "Trip")),
+        )
+        assertEquals("No app in Work chose it. The route stays for other profiles.", dropText("Work", 0))
+        assertEquals("In Work, 1 app that chose it follows Work's default route from now on. The route stays for other profiles.", dropText("Work", 1))
     }
 
     @Test fun newDefaultSaysWhoMoves() {

@@ -129,6 +129,18 @@ internal fun defaultLabel(total: Int?, chosen: Int) = when {
     else -> "${count(total)} · $chosen chosen"
 }
 
+/** Asked before route removal: [chose] apps chose it (in use), and it also goes from the saved profiles [others]. */
+internal fun removeText(chose: Int, others: List<String>) = listOfNotNull(
+    if (chose == 0) "No app chose it." else "${if (chose == 1) "1 app chose it and follows" else "$chose apps chose it and follow"} the default route from now on.",
+    "It also goes from ${others.joinToString()}.".takeIf { others.isNotEmpty() },
+    "You can add the route again, but not those choices.".takeIf { chose > 0 || others.isNotEmpty() },
+).joinToString(" ")
+
+/** Asked before route removal from profile [draft], not in use, where [chose] apps chose it. */
+internal fun dropText(draft: String, chose: Int) =
+    (if (chose == 0) "No app in $draft chose it." else "In $draft, ${if (chose == 1) "1 app that chose it follows" else "$chose apps that chose it follow"} $draft's default route from now on.") +
+        " The route stays for other profiles."
+
 /** Asked before a new default ([to], null = Direct) moves [n] apps that follow the default. */
 internal fun moveText(n: Int, to: String?) =
     "${if (n == 1) "1 app that follows" else "$n apps that follow"} the default will " + if (to == null) "use Direct (no VPN)." else "move to $to."
@@ -203,6 +215,9 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     // A removal refused because the route carries a default: its sentence, and where that default lives ("" = in use).
     var refused by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
     val refuse = { r: app.unbraid.data.CarriesDefault -> refused = r.text to (if (r.live) "" else r.profiles.first()) }
+    // A removal asked for, waiting for the user's yes: the route's id.
+    var removing by rememberSaveable { mutableStateOf<String?>(null) }
+    var dropping by rememberSaveable { mutableStateOf<String?>(null) }
     val server = if (lit) vpn.servers[shown.defaultRoute] else null
     val exits by ui.exits.collectAsStateWithLifecycle()
     // A route's report holds only for the engine and server it was taken on.
@@ -431,7 +446,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     if (draft != null) {
                         if (id != shown.defaultRoute) {
                             SheetAction("Make default") { act { makeDefault(id) } }
-                            SheetAction("Remove from $draft", Ink.bad) { act { ui.dropRoute(id) } }
+                            SheetAction("Remove from $draft", Ink.bad) { act { dropping = id } }
                             SheetNote("Its apps in $draft will use its default route. The route stays for other profiles.")
                         }
                     } else {
@@ -443,7 +458,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     }
                     if (draft == null && id != setup.defaultRoute) {
                         SheetAction("Make default") { act { makeDefault(id) } }
-                        SheetAction("Remove route", Ink.bad) { act { ui.removeRouteRefused(id)?.let(refuse) ?: ui.removeRoute(id)?.let(refuse) } }
+                        SheetAction("Remove route", Ink.bad) { act { ui.removeRouteRefused(id)?.let(refuse) ?: run { removing = id } } }
                         val others = setup.saved.filter { p -> p.name != setup.profile && id in p.own }.map { it.name }
                         SheetNote("Its apps will use the default route." + if (others.isEmpty()) "" else " It also goes from ${others.joinToString()}.")
                     }
@@ -463,6 +478,19 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
             if (where.isNotEmpty()) ui.view(where)
             openPicker("default")
         }, { refused = null }) { Text(text, style = Type.sub) }
+    }
+    removing?.let { id ->
+        val others = setup.saved.filter { p -> p.name != setup.profile && id in p.own }.map { it.name }
+        Prompt("Remove ${setup.route(id)?.name ?: "this route"}?", "Remove", { removing = null; ui.removeRoute(id)?.let(refuse) }, { removing = null }, danger = true) {
+            Text(removeText(setup.apps.values.count { it == id }, others), style = Type.sub)
+        }
+    }
+    dropping?.let { id ->
+        val d = draft
+        // Only while that profile is still shown; the prompt goes with it otherwise.
+        if (d != null) Prompt("Remove ${setup.route(id)?.name ?: "this route"} from $d?", "Remove", { dropping = null; ui.dropRoute(id) }, { dropping = null }, danger = true) {
+            Text(dropText(d, shown.apps.values.count { it == id }), style = Type.sub)
+        }
     }
     confirmDefault?.let { id ->
         val name = if (id == DIRECT) null else shown.route(id)?.name ?: "this route"
