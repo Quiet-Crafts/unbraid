@@ -6,6 +6,7 @@ import app.unbraid.support.Tips
 import android.content.Context
 import android.app.Application
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.util.LruCache
 import androidx.compose.runtime.mutableStateMapOf
@@ -89,6 +90,13 @@ private fun Setup.without(gone: Set<String>) = copy(routes = routes.filter { it.
 /** [f]'s setup, unless removing routes [gone] of it (named [name]) is refused: then [refused] gets why and nothing changes. */
 private inline fun Setup.removing(gone: Set<String>, name: String, refused: (app.unbraid.data.CarriesDefault) -> Unit, f: Setup.() -> Setup) =
     refusesRemoving(gone, name)?.let { refused(it); this } ?: f()
+
+/**
+ * [s] without the choices of apps Android no longer knows ([known]: installed or archived), in the setup and every saved
+ * profile: an uninstalled app must not keep a route (and a tunnel) alive, nor bring it back with a profile used later.
+ */
+internal fun keepKnown(s: Setup, known: Set<String>) =
+    s.copy(apps = s.apps.filterKeys { it in known }, profiles = s.profiles.map { p -> p.copy(apps = p.apps.filterKeys { it in known }) })
 
 /** The single screen-facing model. Thin: state lives in [app.unbraid.data.Store] and [UnbraidVpn.state]. */
 class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : AndroidViewModel(app) {
@@ -498,24 +506,21 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     private fun loadApps() = (++appsAsked).let { n -> viewModelScope.launch {
         val self = getApplication<Application>().packageName
         // A failed read keeps the list as it was.
-        val (list, installed) = withContext(Dispatchers.IO) {
+        val (list, known) = withContext(Dispatchers.IO) {
             runCatching {
                 val all = pm.getInstalledApplications(0)
+                // Archived apps (Android 15+) are not installed but still known, and come back with a tap: they keep their route.
+                val archived = if (android.os.Build.VERSION.SDK_INT >= 35) pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(PackageManager.MATCH_ARCHIVED_PACKAGES)).map { it.packageName } else emptyList()
                 // One query for every app allowed online, not one permission check per app.
                 val online = pm.getPackagesHoldingPermissions(arrayOf(android.Manifest.permission.INTERNET), 0).mapTo(HashSet()) { it.packageName }
                 all.filter { it.packageName != self && it.packageName in online }
                     .map { AppInfo(it.packageName, it.loadLabel(pm).toString(), it.flags and ApplicationInfo.FLAG_SYSTEM != 0 && pm.getLaunchIntentForPackage(it.packageName) == null) }
-                    .sortedBy { it.label.lowercase() } to all.mapTo(HashSet()) { it.packageName }
+                    .sortedBy { it.label.lowercase() } to (all.map { it.packageName } + archived).toSet()
             }.getOrNull()
         } ?: return@launch
         if (n != appsAsked) return@launch // a newer read is under way (checked and applied here, on the main thread)
         _apps.value = list
-        // An uninstalled app must not keep its route (and a tunnel) alive.
-        // Saved profiles too: one used later must not bring an uninstalled app's exception back.
-        val gone = { s: Setup -> s.apps.keys.any { it !in installed } || s.profiles.any { p -> p.apps.keys.any { it !in installed } } }
-        if (gone(store.setup.value)) store.edit { s ->
-            s.copy(apps = s.apps.filterKeys { it in installed }, profiles = s.profiles.map { p -> p.copy(apps = p.apps.filterKeys { it in installed }) })
-        }
+        if (keepKnown(store.setup.value, known) != store.setup.value) store.edit { keepKnown(it, known) }
     } }
 
     /** A config file picked in a sign-in form, read here so a rotation during a slow read doesn't lose it. */
