@@ -138,6 +138,13 @@ internal fun filterSummary(f: app.unbraid.data.Filter, defaultRoute: String, app
         .ifEmpty { listOf(dns.name, "not applied") }.joinToString(" · ")
 }
 
+/** The Tailscale row of the overview: its real state, and when it runs only for an exit-node route, say so. */
+internal fun tailscaleHubSub(reach: Boolean, exitOnly: Boolean, state: String) = when {
+    reach -> state
+    exitOnly -> "Exit node only · $state"
+    else -> "Off"
+}
+
 /** What removing a saved server says: the refusal when it carries a default route, else what is removed with it. */
 internal fun removeServerText(used: Int, refused: app.unbraid.data.CarriesDefault?) = refused?.text
     ?: if (used == 0) "It isn't used by any route." else "The routes using it are removed too; their apps follow the default route."
@@ -222,7 +229,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     var dialog by rememberSaveable { mutableStateOf<String?>(null) }
     // Each page's Advanced settings start closed.
     var advOpen by rememberSaveable(page) { mutableStateOf(false) }
-    var wgError by remember { mutableStateOf<String?>(null) }
+    var wgError by rememberSaveable { mutableStateOf<String?>(null) }
+    var tsKeyOpened by remember { mutableStateOf(false) } // false again after a rotation, which closes the dialog holding the key
     BackHandler(page != null) { back() }
     // Tapping Settings again goes back to the hub, as Back does; on the hub, it scrolls to the top.
     OnReselect(Tab.Settings) { stack = emptyList(); settingsHub() }
@@ -309,7 +317,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                             (names.take(2).joinToString(", ") + if (names.size > 2) " +${names.size - 2}" else "").ifEmpty { "No provider yet" },
                             setup.servers.size.takeIf { it > 0 }?.let { "$it ${if (it == 1) "server" else "servers"}" },
                         ).joinToString(" · "), { go("providers") }, icon = Icons.vpnKey, anchor = TourStop.Connections) { Chevron() },
-                        Item("Tailscale", if (setup.tailscale) tsStatus else "Off", { go("tailscale") }, icon = Icons.hub) { Chevron() },
+                        Item("Tailscale", tailscaleHubSub(home.tailscale, setup.tsExit != null, if (home.tailscale) tsStatus else tailscaleSub(true, vpn.phase == Phase.On, vpn.tsState)), { go("tailscale") }, icon = Icons.hub) { Chevron() },
                         Item("Local & home access", "Local network ${onOff(prefs.lan)} · ${homeVia?.let { "home via $it" } ?: "no home access"}", { go("local") }, icon = Icons.home, anchor = TourStop.LocalHome) { Chevron() },
                     ))
                     group("Safety", rise = play to 3, items = listOf(
@@ -438,7 +446,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 // A Headscale server can name any domain: its devices' names answer apps only once the user allows that suffix.
                 val sfx = vpn.tsSuffix?.takeIf { home.tailscale && !app.unbraid.vpn.Compiler.officialTs(home) }
                 if (setup.tailscale) advanced(advOpen, { advOpen = !advOpen }, "Control server: ${home.tsControlUrl ?: "Tailscale"}", listOfNotNull(
-                    Item("Control server", home.tsControlUrl ?: "Tailscale (default)", { dialog = "tsserver" }, icon = Icons.dns) { Chevron() },
+                    Item("Control server", home.tsControlUrl ?: "Tailscale (default)", { tsKeyOpened = true; dialog = "tsserver" }, icon = Icons.dns) { Chevron() },
                     sfx?.let { d ->
                         val on = home.tsSuffixAllowed == d
                         Item("Device names under $d", if (on) "On · your server answers every lookup under $d" else "Off · allow to reach devices by name; your server then answers every lookup under $d",
@@ -467,7 +475,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 group("Home, from anywhere", listOf(
                     Item("Through Tailscale", if (home.tailscale) tsStatus else "Off", { go("tailscale") }, icon = Icons.hub) { Chevron() },
                     Item("Home WireGuard tunnel", home.wg?.let { "${it.name} · ${it.endpoint}" } ?: "Not set up · import your router's .conf", { pickConfig.launch(arrayOf("*/*")) }, icon = Icons.tunnel) {
-                        if (home.wg != null) Secondary("Remove", { wgError = null; ui.setHome { it.copy(wg = null) } }, color = Ink.bad) else Chevron()
+                        if (home.wg != null) Secondary("Remove", { dialog = "wgremove" }, color = Ink.bad) else Chevron()
                     },
                 ))
                 wgError?.let { e -> item { Text(e, style = Type.caption, color = Ink.bad, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 8.dp)) } }
@@ -631,10 +639,13 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 DialogField(text, { text = it.take(200) }, if (own) "Server" else "Profile ID", if (own) "https://dns.example.com/dns-query" else "abc123")
             }
         }
+        "wgremove" -> Prompt("Remove the home tunnel?", "Remove", { dialog = null; wgError = null; ui.setHome { it.copy(wg = null) } }, { dialog = null }, danger = true) {
+            Text("$APP forgets this tunnel's config and key. To use it again you need your router's .conf file.", style = Type.sub)
+        }
         "tsout" -> Prompt("Sign out of Tailscale?", "Sign out", { dialog = null; ui.signOutTailscale()?.let { ui.notice.value = it.text } }, { dialog = null }, danger = true) {
             Text("Tailscale exit routes are removed. Their apps follow the default route.", style = Type.sub)
         }
-        "tsserver" -> {
+        "tsserver" -> if (!tsKeyOpened) LaunchedEffect(Unit) { dialog = null } else {
             var url by rememberSaveable { mutableStateOf(home.tsControlUrl.orEmpty()) }
             var key by remember { mutableStateOf("") }
             val ok = url.isBlank() || httpsUrl.matches(url.trim())

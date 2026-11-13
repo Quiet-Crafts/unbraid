@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -341,7 +342,7 @@ fun LeakSheet(alwaysOn: Boolean, lockdown: Boolean, open: () -> Unit, later: () 
             Icon(Icons.block, null, Modifier.size(20.dp), tint = Ink.accent)
             Text("The catch: ${LEAK_TRADEOFF.replaceFirstChar { it.lowercase() }}", style = Type.sub, color = Ink.text)
         }
-        var asking by remember { mutableStateOf(false) }
+        var asking by rememberSaveable { mutableStateOf(false) }
         Secondary("Don't remind me again", { asking = true }, Modifier.padding(start = 0.dp), color = Ink.dim)
         if (asking) Prompt("Stop the reminders?", "Stop reminders", { asking = false; never() }, { asking = false }) {
             Text("Apps will keep using your normal connection whenever $APP is off. Settings, VPN behaviour keeps a warning and the way to turn blocking on.", style = Type.sub, color = Ink.dim)
