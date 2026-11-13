@@ -1,0 +1,7 @@
+• Apps can follow the default route; a route you pick for an app stays picked.
+• From the next update on, unbraid reconnects by itself after updating.
+• If settings can't be read or a route is missing, apps stay offline, not unprotected.
+• With Direct as default, traffic of no known app is refused while an app uses a VPN.
+• Clearer sign-in errors, safer imports, room for large text.
+• Fixes for profiles, filters, picker, speed test, stats.
+• Going back to an older version needs an uninstall.
