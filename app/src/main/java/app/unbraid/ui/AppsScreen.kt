@@ -290,7 +290,9 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
             // Wrapped onto as many lines as it takes, so no choice hides off-screen; each line is one connected group.
             BoxWithConstraints(Modifier.padding(start = 68.dp, end = 14.dp, bottom = 14.dp).fillMaxWidth()) {
               val gap = ButtonGroupDefaults.ConnectedSpaceBetween
-              val perLine = ((maxWidth + gap) / (TileWidth + gap)).toInt().coerceAtLeast(1)
+              // Wider with large text, so labels keep whole words; fewer tiles per line then, one when it must.
+              val tileWidth = tileWidth(androidx.compose.ui.platform.LocalDensity.current.fontScale, maxWidth)
+              val perLine = ((maxWidth + gap) / (tileWidth + gap)).toInt().coerceAtLeast(1)
               Column {
               Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { tiles.chunked(perLine).forEach { line -> Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
                 line.forEachIndexed { i, t ->
@@ -302,7 +304,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
                             when (t.id) { "" -> openPicker("app:${a.pkg}"); FOLLOW -> ui.followDefault(a.pkg); else -> ui.assign(a.pkg, t.id) }
                         },
                         // One width for every route, whatever its name; taller when the text is large.
-                        modifier = Modifier.width(TileWidth).heightIn(min = 72.dp),
+                        modifier = Modifier.width(tileWidth).heightIn(min = 72.dp),
                         // Selection changes the colour only; a press squishes and springs back.
                         shapes = when {
                             i == 0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
@@ -317,14 +319,17 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Icon(t.icon, null, Modifier.size(16.dp), tint = if (!on && t.tinted) t.color else LocalContentColor.current)
+                            // Centred, so a wrapped line keeps clear of the tile's rounded ends.
                             Text(
                                 t.label, style = Type.caption.copy(fontSize = 11.sp, lineHeight = 14.sp, fontWeight = FontWeight.Medium),
                                 color = if (!on && t.tinted) Ink.text else LocalContentColor.current, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                             )
                             t.sub?.let {
                                 Text(
                                     it, style = Type.caption.copy(fontSize = 10.sp, lineHeight = 12.sp),
                                     color = if (!on) Ink.dim else LocalContentColor.current, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                                 )
                             }
                         }
@@ -348,5 +353,8 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
 }
 
 private val TileWidth = 96.dp
+
+/** A route tile's width: [TileWidth] grown with the font scale (never shrunk), at most the line's [max]. */
+internal fun tileWidth(fontScale: Float, max: androidx.compose.ui.unit.Dp) = minOf(TileWidth * fontScale.coerceAtLeast(1f), max)
 
 private class Tile(val id: String, val label: String, val icon: ImageVector, val color: Color, val tinted: Boolean = true, val sub: String? = null)

@@ -87,6 +87,33 @@ import androidx.compose.ui.text.font.FontWeight
 val HeaderHeight = 128.dp
 val Gutter = 16.dp
 
+/**
+ * How much to shrink text whose widest word measures [widest] so that word fits [available] (same units): 1 when it
+ * already fits, never below [floor]. A little room is kept, as measured widths are rounded.
+ */
+internal fun wordScale(widest: Float, available: Float, floor: Float): Float =
+    if (widest <= 0f || available <= 0f || widest <= available) 1f else maxOf(floor, available * 0.98f / widest)
+
+/**
+ * [style] shrunk just enough that the widest word of [text] fits on one line of [maxWidth], down to [floor] of its size:
+ * large text or a narrow screen then wraps between words instead of splitting one. At normal size nothing changes.
+ */
+@Composable
+fun wholeWords(text: String, style: androidx.compose.ui.text.TextStyle, maxWidth: Dp, floor: Float = 0.5f): androidx.compose.ui.text.TextStyle {
+    val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+    val px = with(LocalDensity.current) { maxWidth.toPx() }
+    return remember(text, style, px, floor) {
+        val widest = text.split(' ', '\n').filter { it.isNotEmpty() }
+            .maxOfOrNull { measurer.measure(it, style, softWrap = false, maxLines = 1).size.width } ?: 0
+        val k = wordScale(widest.toFloat(), px, floor)
+        if (k >= 1f) style else style.copy(
+            fontSize = style.fontSize * k,
+            lineHeight = if (style.lineHeight.isSp) style.lineHeight * k else style.lineHeight,
+            letterSpacing = if (style.letterSpacing.isSp) style.letterSpacing * k else style.letterSpacing,
+        )
+    }
+}
+
 @Composable
 fun Screen(
     overline: String,
@@ -117,15 +144,20 @@ fun Screen(
     ) {
         Column(Modifier.weight(1f).then(onHeader?.let { Modifier.tap(it, headerLabel, Role.Button) } ?: Modifier), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             if (overlineContent != null) overlineContent()
-            else Text(wordmarked(overline.uppercase().replace(WORDMARK.uppercase(), WORDMARK)), style = Type.overline, color = overlineColor, maxLines = 1)
-            Text(
-                buildAnnotatedString {
-                    // Titles are set in capitals; the wordmark stays lowercase, its slash in the accent.
-                    (if (title == WORDMARK) title else title.uppercase()).split('/').forEachIndexed { i, part -> if (i > 0) withStyle(SpanStyle(color = Ink.accent)) { append('/') }; append(part) }
-                },
-                // Two lines before a cut: a long route name or large text on a small phone still reads.
-                style = Type.headline, color = titleColor, maxLines = 2, overflow = TextOverflow.Ellipsis,
-            )
+            // Two lines with large text: the version beside the wordmark in Settings stays whole.
+            else Text(wordmarked(overline.uppercase().replace(WORDMARK.uppercase(), WORDMARK)), style = Type.overline, color = overlineColor, maxLines = 2)
+            val shown = if (title == WORDMARK) title else title.uppercase()
+            androidx.compose.foundation.layout.BoxWithConstraints {
+                Text(
+                    buildAnnotatedString {
+                        // Titles are set in capitals; the wordmark stays lowercase, its slash in the accent.
+                        shown.split('/').forEachIndexed { i, part -> if (i > 0) withStyle(SpanStyle(color = Ink.accent)) { append('/') }; append(part) }
+                    },
+                    // Two lines before a cut: a long route name or large text on a small phone still reads. A word too
+                    // wide for a line ("PROTECTED" on a narrow phone) is set smaller rather than split.
+                    style = wholeWords(shown, Type.headline, maxWidth, floor = 0.6f), color = titleColor, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                )
+            }
             if (sub.isNotEmpty()) Text(sub, style = Type.sub, color = subColor, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
         action?.invoke()

@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -167,11 +169,13 @@ fun TourOverlay(step: Int, appsShown: Boolean, back: () -> Unit, next: () -> Uni
             else -> (target.center.x - noteW / 2).coerceIn(16f.px(), w - 16f.px() - noteW)
         }
         val gap = 22f.px()
+        // Never under the status bar: with large text a tall note placed above its anchor would reach the clock.
+        val safeTop = WindowInsets.statusBars.getTop(d) + 8f.px()
         val below = target != null && target.bottom + gap + noteH < h - 96f.px()
         val top = when {
-            target == null -> (h - noteH) / 2
+            target == null -> ((h - noteH) / 2).coerceAtLeast(safeTop)
             below -> target.bottom + 6f.px() + gap
-            else -> (target.top - 6f.px() - gap - noteH).coerceAtLeast(16f.px())
+            else -> (target.top - 6f.px() - gap - noteH).coerceAtLeast(safeTop)
         }
         val x by animateFloatAsState(left, motion.defaultSpatialSpec(), label = "noteX")
         val y by animateFloatAsState(top, motion.defaultSpatialSpec(), label = "noteY")
@@ -189,7 +193,7 @@ fun TourOverlay(step: Int, appsShown: Boolean, back: () -> Unit, next: () -> Uni
             drawCircle(Ink.accent, 4f.px(), Offset(leaderX, from))
         }
         Column(
-            Modifier.offset { IntOffset(x.roundToInt(), y.roundToInt()) }.width(with(d) { noteW.toDp() }).onSizeChanged { noteH = it.height }.heightIn(max = with(d) { (h - 32f.px()).toDp() })
+            Modifier.offset { IntOffset(x.roundToInt(), y.roundToInt()) }.width(with(d) { noteW.toDp() }).onSizeChanged { noteH = it.height }.heightIn(max = with(d) { (h - safeTop - 16f.px()).toDp() })
                 .clip(RoundedCornerShape(20.dp)).background(Ink.surfaceHigh).border(1.dp, Ink.surfaceTop, RoundedCornerShape(20.dp)).verticalScroll(rememberScrollState())
                 .padding(start = 16.dp, end = 12.dp, top = 6.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),

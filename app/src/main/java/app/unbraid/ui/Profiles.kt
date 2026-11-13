@@ -307,12 +307,13 @@ fun ProfileSheet(setup: Setup, editing: String?, startEmpty: Boolean, onSave: (S
                 listOf(false to (setup.profile?.let { "Copy of $it" } ?: "Current setup"), true to "Empty").forEachIndexed { i, (e, label) ->
                     val on = empty == e
                     Row(
-                        Modifier.weight(1f).height(48.dp).clip(segmentShape(i, 2))
-                            .background(if (on) Ink.accentContainer else Ink.surfaceHigh).selectable(on, role = Role.Tab) { empty = e }.padding(horizontal = 12.dp),
+                        // Taller rather than cut when the label needs a second line (large text, a narrow phone).
+                        Modifier.weight(1f).heightIn(min = 48.dp).clip(segmentShape(i, 2))
+                            .background(if (on) Ink.accentContainer else Ink.surfaceHigh).selectable(on, role = Role.Tab) { empty = e }.padding(horizontal = 12.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
                     ) {
                         if (on) Icon(Icons.check, null, Modifier.size(18.dp), tint = Ink.accent)
-                        Text(label, style = Label, color = if (on) Ink.accent else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(label, style = Label, color = if (on) Ink.accent else Ink.text, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                     }
                 }
             }

@@ -18,6 +18,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -271,6 +272,8 @@ private fun braid(): List<Triple<Path, Int, Boolean>> {
 @Composable
 private fun Places() {
     val what = listOf("Your routes and the power switch", "Which app goes where", "Data, flows and speed, if you want", "Providers, servers, home, protection")
+    // Four narrow columns: with large text a word too wide for one is set smaller rather than split.
+    BoxWithConstraints { val column = maxWidth / Tab.entries.size
     Column {
         Row(Modifier.fillMaxWidth().heightIn(min = 260.dp).height(IntrinsicSize.Min)) {
             Tab.entries.forEachIndexed { i, t ->
@@ -278,8 +281,8 @@ private fun Places() {
                     Spacer(Modifier.height((i * 36).dp))
                     Column(Modifier.padding(horizontal = 3.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text("0${i + 1}", style = Type.small.copy(fontSize = 11.sp), color = Ink.dim)
-                        Text(t.label, style = Type.title.copy(fontSize = 15.sp), color = Ink.text)
-                        Text(what[i], style = Type.caption.copy(fontSize = 12.sp, lineHeight = 16.sp), color = Ink.dim)
+                        Text(t.label, style = wholeWords(t.label, Type.title.copy(fontSize = 15.sp), column - 6.dp), color = Ink.text)
+                        Text(what[i], style = wholeWords(what[i], Type.caption.copy(fontSize = 12.sp, lineHeight = 16.sp), column - 6.dp), color = Ink.dim)
                     }
                     Gap(8.dp)
                     Box(Modifier.size(6.dp).clip(RoundedCornerShape(3.dp)).background(Ink.dim))
@@ -291,12 +294,13 @@ private fun Places() {
             Tab.entries.forEach { t ->
                 Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                     Box(Modifier.size(56.dp, 32.dp).clip(RoundedCornerShape(16.dp)).background(Ink.surfaceTop), Alignment.Center) { Icon(t.icon, null, Modifier.size(24.dp), tint = Ink.text) }
-                    Text(t.label, style = Type.caption.copy(fontSize = 12.sp), color = Ink.text)
+                    Text(t.label, style = wholeWords(t.label, Type.caption.copy(fontSize = 12.sp), column), color = Ink.text)
                 }
             }
         }
         Gap(16.dp)
         Text("Always at the bottom of the screen.", style = Type.caption, color = Ink.dim, modifier = Modifier.fillMaxWidth(), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+    }
     }
 }
 
@@ -330,7 +334,8 @@ private fun Terms(fresh: Boolean, agreed: Boolean, toggle: () -> Unit) {
         ) { if (agreed) Icon(Icons.check, null, Modifier.size(20.dp), tint = Ink.onAccent) }
         Text("I accept the Terms of use and have read the Privacy policy", style = Type.sub.copy(fontSize = 15.sp, lineHeight = 22.sp), color = Ink.text)
     }
-    Row(Modifier.padding(start = 38.dp, top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    // The second link goes under the first when both don't fit on one line.
+    FlowRow(Modifier.padding(start = 38.dp, top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         listOf("Terms of use" to TERMS_URL, "Privacy policy" to PRIVACY).forEach { (label, url) ->
             Row(
                 Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(20.dp)).border(1.dp, Ink.line, RoundedCornerShape(20.dp))
