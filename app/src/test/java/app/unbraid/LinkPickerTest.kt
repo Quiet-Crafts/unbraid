@@ -312,4 +312,30 @@ class LinkPickerTest {
         assertEquals(false, app.unbraid.data.Addr.usable(entry))
         assertEquals(true, app.unbraid.data.Addr.usable(link(a).copy(entries = listOf("203.0.113.5"))))
     }
+
+    /**
+     * A provider's OpenVPN profile comes apart from the server's listed address: one whose remote is a local address
+     * (the server's own address public) is refused like a WireGuard tunnel there, fresh or cached. Every remote counts.
+     */
+    @Test fun aProviderOpenVpnProfileAtALocalRemoteIsRefused() {
+        fun ovpn(vararg remotes: String) = app.unbraid.data.OvpnLink(a, app.unbraid.data.OvpnProfile("a",
+            "client\ndev tun\n" + remotes.joinToString("") { "remote $it 1194\n" } + "remote-cert-tls server\n", "u", "p"))
+        val local = ovpn("192.168.1.1")
+        val p = object : Provider by Fake(listOf(a)) { override fun connect(loc: Location, account: String): Link = local }
+        val r = Route("1", Location("fake", countryCode = "NL"))
+        val out = LinkPicker.pick(setup(r), emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), emptyMap()) { p }
+        assertTrue(out.links.isEmpty())
+        assertEquals("a has a saved address that can't be used. Pick the server again", out.blocked.getValue("1").message)
+        // The provider down, that profile cached: no fallback either.
+        assertEquals("a has a saved address that can't be used. Pick the server again",
+            pick(setup(r), Fake(listOf(a), online = false), mapOf(LinkPicker.cacheKey(r) to local)).blocked.getValue("1").message)
+        assertFalse(app.unbraid.data.Addr.usable(ovpn("203.0.113.1", "10.0.0.1")))
+        assertFalse(app.unbraid.data.Addr.usable(ovpn("vpn.example.com")))
+        assertTrue(app.unbraid.data.Addr.usable(ovpn("203.0.113.1", "198.51.100.7")))
+        val nord = javaClass.getResource("/ovpn/nord-double.tcp.ovpn")!!.readText()
+        assertTrue(app.unbraid.data.Addr.usable(app.unbraid.data.OvpnLink(server("n", "89.238.150.123"), app.unbraid.data.OvpnProfile("n", nord))))
+        // An imported OpenVPN server keeps its local address.
+        val own = Route("2", ovpn = app.unbraid.data.OvpnProfile("home", "client\ndev tun\nremote 192.168.1.1 1194\n"))
+        assertTrue("2" in LinkPicker.pick(setup(own), emptyMap(), null, emptyMap(), emptyMap(), emptyMap()) { null }.links)
+    }
 }

@@ -257,6 +257,9 @@ object Manual {
     /** A sing-box `openvpn-client` endpoint for [p]. */
     fun ovpnEndpoint(tag: String, p: OvpnProfile): JsonObject = build(tag, p)
 
+    /** The host of every `remote` line of [p], as the engine is given them; empty when it won't read. */
+    fun ovpnHosts(p: OvpnProfile): List<String> = runCatching { read(p.config).d["remote"].orEmpty().map { it.getOrNull(0).orEmpty() } }.getOrDefault(emptyList())
+
     /** Where a profile connects: its remotes plus the default port and protocol, as parsed (inline blocks never count). */
     fun ovpnServers(p: OvpnProfile): List<String> = runCatching {
         read(p.config).let { c -> c.d["remote"].orEmpty().map { it.joinToString(" ") } + listOfNotNull(c.last("port", "rport")?.second?.firstOrNull(), c.arg("proto")) }

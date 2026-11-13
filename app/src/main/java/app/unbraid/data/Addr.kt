@@ -38,8 +38,15 @@ object Addr {
 
     fun refused(name: String) = Refused("$name has a saved address that can't be used. Pick the server again")
 
-    /** A provider's tunnel [l] connects only to addresses a server on the internet can have, alternate entries too. */
-    fun usable(l: Link) = server(l.server.ip) && (l !is WgLink || (server(l.peer.endpoint.substringBeforeLast(':')) && l.entries.all(::server)))
+    /**
+     * A provider's tunnel [l] connects only to addresses a server on the internet can have: alternate entries too, and
+     * every remote of an OpenVPN profile, which the provider sends apart from the server's address.
+     */
+    fun usable(l: Link) = server(l.server.ip) && when (l) {
+        is WgLink -> server(l.peer.endpoint.substringBeforeLast(':')) && l.entries.all(::server)
+        is OvpnLink -> Manual.ovpnHosts(l.profile).let { it.isNotEmpty() && it.all(::server) }
+        else -> true
+    }
 
     /** The error for a provider reply that holds a malformed address or key. */
     fun unexpected(provider: String) = app.unbraid.vpn.Fail("Unexpected reply from $provider. Try again later")
