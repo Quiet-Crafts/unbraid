@@ -7,6 +7,9 @@ import app.unbraid.data.Setup
 import app.unbraid.ui.FOLLOW
 import app.unbraid.ui.defaultLabel
 import app.unbraid.ui.dropText
+import app.unbraid.ui.keepName
+import app.unbraid.data.PREVIOUS
+import app.unbraid.data.Profile
 import app.unbraid.ui.removeText
 import app.unbraid.ui.moveText
 import app.unbraid.ui.routeState
@@ -47,6 +50,19 @@ class ScreenTextTest {
         )
         assertEquals("No app in Work chose it. The route stays for other profiles.", dropText("Work", 0))
         assertEquals("In Work, 1 app that chose it follows Work's default route from now on. The route stays for other profiles.", dropText("Work", 1))
+    }
+
+    /** "Save your current setup first?": blank keeps it as Previous; a taken name or the target itself is refused with a reason. */
+    @Test fun setupKeptBeforeASwitch() {
+        val s = setup.copy(profiles = listOf(Profile("Work", "us"), Profile(PREVIOUS, "us")))
+        assertEquals(PREVIOUS to null, keepName(s, "  ", "Work"))
+        assertEquals("Home" to null, keepName(s, " Home ", "Work"))
+        assertEquals(null, keepName(s, "work", "Work").first)
+        assertEquals(null, keepName(s, "", PREVIOUS).first)
+        // What the switch then does with that name: the setup in use is kept and the target is in use.
+        val after = s.use("Work", keepName(s, "Home", "Work").first)
+        assertEquals("Work", after.profile)
+        assertEquals(setup.apps, after.profiles.first { it.name == "Home" }.apps)
     }
 
     @Test fun newDefaultSaysWhoMoves() {

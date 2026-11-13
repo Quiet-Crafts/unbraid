@@ -189,6 +189,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     var adding by rememberSaveable { mutableStateOf(false) }
     val switching by ui.switching.collectAsStateWithLifecycle()
     val failed by ui.switchFailed.collectAsStateWithLifecycle()
+    val switchTo = rememberProfileSwitch(ui)
     val addProfile = { empty: Boolean -> if (setup.profiles.size < MAX_PROFILES) { full = false; sheetEmpty = empty; profileSheet = "" } else full = true }
     var newName by rememberSaveable { mutableStateOf("") }
     val on = vpn.phase == Phase.On
@@ -337,7 +338,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                 // A switch the engine couldn't run: the last profile is back, said once, with Try again.
                 failed?.let { f ->
                     item(key = "switchFailed") {
-                        Notice(Icons.error, Ink.bad, "Couldn't switch to ${f.to}.${f.kept?.let { " $it is still in use." }.orEmpty()}", "Try again", dismiss = { ui.switchFailed.value = null }, live = true) { ui.useProfile(f.to) }
+                        Notice(Icons.error, Ink.bad, "Couldn't switch to ${f.to}.${f.kept?.let { " $it is still in use." }.orEmpty()}", "Try again", dismiss = { ui.switchFailed.value = null }, live = true) { switchTo(f.to) }
                     }
                 }
                 item(key = "profileLabel") {
@@ -355,7 +356,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                 // Shown, not in use: nothing reconnects until Use.
                 draft?.let { d ->
                     item(key = "useBar") {
-                        UseBar(d, setup.profile, setup.profiles.first { it.name == d }.ready, onBack = { ui.view(null) }) { ui.useProfile(d) }
+                        UseBar(d, setup.profile, setup.profiles.first { it.name == d }.ready, onBack = { ui.view(null) }) { switchTo(d) }
                     }
                 }
                 if (full && setup.profiles.size >= MAX_PROFILES) item(key = "full") {

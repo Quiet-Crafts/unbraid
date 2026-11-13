@@ -92,6 +92,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     val setup by ui.shown.collectAsStateWithLifecycle()
     val viewing by ui.viewing.collectAsStateWithLifecycle()
     val apps by ui.apps.collectAsStateWithLifecycle()
+    val switchTo = rememberProfileSwitch(ui)
     var q by rememberSaveable { mutableStateOf("") }
     // What points at one profile's exits starts over when another is viewed; the search stays.
     var filter by rememberSaveable(viewing) { mutableStateOf<String?>(null) }
@@ -141,7 +142,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                 if (setup.defaultRoute.isEmpty()) Text("Choose a default route on Routes", style = Type.caption, color = Ink.dim, modifier = Modifier.padding(top = 4.dp))
                 Row {
                     Secondary("Back to ${setup.profile ?: "current setup"}", { ui.view(null) })
-                    if (setup.defaultRoute.isNotEmpty()) Secondary("Use $viewing", { ui.useProfile(viewing.orEmpty()) })
+                    if (setup.defaultRoute.isNotEmpty()) Secondary("Use $viewing", { switchTo(viewing.orEmpty()) })
                 }
             }
             SearchField(q, { q = it }, "Search apps")

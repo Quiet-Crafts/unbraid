@@ -73,6 +73,8 @@ import androidx.compose.ui.unit.dp
 import app.unbraid.data.DIRECT
 import app.unbraid.data.MAX_PROFILES
 import app.unbraid.data.PROFILE_NAME
+import app.unbraid.data.PREVIOUS
+import androidx.compose.material3.AlertDialog
 import app.unbraid.data.Profile
 import app.unbraid.data.Setup
 import app.unbraid.data.graphemes
@@ -187,6 +189,61 @@ fun UseBar(name: String, inUse: String?, ready: Boolean, onBack: () -> Unit, onU
             .clickable(enabled = ready, role = Role.Button, onClickLabel = "Use $name", onClick = onUse).padding(horizontal = 16.dp),
         contentAlignment = Alignment.Center,
     ) { Text("Use", style = Label, color = if (ready) Ink.onAccent else Ink.faint) }
+}
+
+/**
+ * The name a setup in use that no profile holds is saved under before switching to [target]: [raw] if it can name a
+ * profile, "Previous" when left blank (an older Previous is replaced). Null with the sentence to show when it can't.
+ */
+internal fun keepName(s: Setup, raw: String, target: String): Pair<String?, String?> = when {
+    raw.isBlank() && target.equals(PREVIOUS, ignoreCase = true) -> null to "$PREVIOUS is the profile you're switching to. Give this one another name."
+    raw.isBlank() -> PREVIOUS to null
+    else -> s.profileName(raw)?.let { it to null } ?: (null to "You already have a profile with this name, or it can't be used as one.")
+}
+
+/** Said when the setup in use couldn't be kept because every profile place is taken. */
+internal const val NO_ROOM = "There's no room for another profile. Delete one first, or switch without saving."
+
+/**
+ * Switching to a profile from a screen. When no profile holds the setup in use, it first asks "Save your current setup
+ * first?" (Save, Don't save, Cancel). Returns the function that starts a switch.
+ */
+@Composable
+fun rememberProfileSwitch(ui: Ui): (String) -> Unit {
+    var asking by rememberSaveable { mutableStateOf<String?>(null) }
+    var name by rememberSaveable { mutableStateOf("") }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
+    asking?.let { target ->
+        val close = { asking = null; error = null }
+        AlertDialog(
+            onDismissRequest = close, containerColor = Ink.surface, titleContentColor = Ink.text, textContentColor = Ink.dim,
+            title = { Text("Save your current setup first?", style = Type.title) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("No profile holds the routes your apps use now. Without saving, $target replaces them.", style = Type.sub)
+                    DialogField(name, { name = it.takeGraphemes(PROFILE_NAME); error = null }, "Save as", PREVIOUS)
+                    if (name.isBlank() && ui.setup.value.profiles.any { it.name.equals(PREVIOUS, ignoreCase = true) })
+                        Text("Left blank, it replaces your older $PREVIOUS profile.", style = Type.caption, color = Ink.dim)
+                    error?.let { Text(it, style = Type.caption, color = Ink.bad) }
+                }
+            },
+            confirmButton = {
+                Row {
+                    Secondary("Don't save", { close(); ui.useProfile(target) }, color = Ink.dim)
+                    Secondary("Save", {
+                        val (keep, why) = keepName(ui.setup.value, name, target)
+                        when {
+                            keep == null -> error = why
+                            ui.useProfile(target, keepAs = keep) -> close()
+                            else -> error = NO_ROOM
+                        }
+                    })
+                }
+            },
+            dismissButton = { Secondary("Cancel", close, color = Ink.dim) },
+        )
+    }
+    return { target -> if (ui.switchLoses(target)) { name = ""; error = null; asking = target } else ui.useProfile(target) }
 }
 
 /** The default route of an empty profile: not chosen yet, so it can't be used. Choose opens the picker. */
