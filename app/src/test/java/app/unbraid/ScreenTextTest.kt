@@ -27,6 +27,9 @@ import app.unbraid.ui.removeText
 import app.unbraid.ui.moveText
 import app.unbraid.ui.routeState
 import app.unbraid.ui.tickedTile
+import app.unbraid.ui.followSub
+import app.unbraid.ui.outsideNote
+import app.unbraid.data.Filter
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -152,5 +155,19 @@ class ScreenTextTest {
     @Test fun newDefaultSaysWhoMoves() {
         assertEquals("12 apps that follow the default will use Direct (no VPN).", moveText(12, null))
         assertEquals("1 app that follows the default will move to Italy.", moveText(1, "Italy"))
+    }
+
+    /** A chosen Direct app is said to be outside the app (not under lockdown); a Direct default still runs through it. */
+    @Test fun directOutsideIsToldApart() {
+        val direct = setup.copy(defaultRoute = DIRECT)
+        assertEquals("Direct, through unbraid", followSub(direct))
+        assertEquals("Netherlands", followSub(setup))
+        val note = "Outside unbraid: no filter, no home network"
+        assertEquals(note, outsideNote(direct, "chose.direct", lockdown = false))
+        assertEquals(null, outsideNote(direct, "chose.direct", lockdown = true))
+        assertEquals(null, outsideNote(direct, "follows", lockdown = false))
+        // Passed through for the filter: in the app, so not outside.
+        val through = direct.copy(prefs = direct.prefs.copy(filter = Filter(id = "nextdns", value = "abc123", directApps = true)))
+        assertEquals(null, outsideNote(through, "chose.direct", lockdown = false))
     }
 }

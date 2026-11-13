@@ -84,6 +84,13 @@ internal const val FOLLOW = "follow"
 /** The tile ticked in app [pkg]'s menu: [FOLLOW] when it has no route of its own, else the route it chose (the default too). */
 internal fun tickedTile(s: Setup, pkg: String) = s.apps[pkg] ?: FOLLOW
 
+/** The line under "Follow default": where the default goes. A Direct default still runs through the app (filter, home). */
+internal fun followSub(s: Setup): String? = if (s.defaultRoute == DIRECT) "Direct, through $APP" else s.route(s.defaultRoute)?.name
+
+/** Said under app [pkg]'s routes when Android leaves it outside the app; never under lockdown, which keeps every app in. */
+internal fun outsideNote(s: Setup, pkg: String, lockdown: Boolean): String? =
+    "Outside $APP: no filter, no home network".takeIf { !lockdown && s.outside(pkg) }
+
 /** What TalkBack hears for app [pkg]'s route: where it goes, and whether it chose that or follows the default. */
 internal fun routeState(s: Setup, pkg: String): String {
     val id = s.routeOf(pkg)
@@ -103,6 +110,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     val setup by ui.shown.collectAsStateWithLifecycle()
     val viewing by ui.viewing.collectAsStateWithLifecycle()
     val apps by ui.apps.collectAsStateWithLifecycle()
+    val lockdown = ui.vpn.collectAsStateWithLifecycle().value.lockdown
     val switchTo = rememberProfileSwitch(ui)
     var q by rememberSaveable { mutableStateOf("") }
     // What points at one profile's exits starts over when another is viewed; the search stays.
@@ -205,7 +213,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                     AppRow(ui, a, setup, offered, expanded = open == a.pkg, onToggle = {
                         if (open == a.pkg) { if (openedAs != setup.routeOf(a.pkg)) land = a.pkg; open = null; openedAs = null }
                         else { open = a.pkg; openedAs = setup.routeOf(a.pkg) }
-                    }, openPicker, draft = viewing != null && viewing != setup.profile)
+                    }, openPicker, draft = viewing != null && viewing != setup.profile, lockdown = lockdown)
                 }
             }
         }
@@ -234,7 +242,7 @@ private fun FilterChip(label: String, dot: Color?, on: Boolean, direct: Boolean 
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.data.Route>, expanded: Boolean, onToggle: () -> Unit, openPicker: (String) -> Unit, draft: Boolean = false) {
+private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.data.Route>, expanded: Boolean, onToggle: () -> Unit, openPicker: (String) -> Unit, draft: Boolean = false, lockdown: Boolean = false) {
     val haptic = LocalHapticFeedback.current
     val explicit = setup.apps[a.pkg]
     val current = setup.routeOf(a.pkg)
@@ -267,7 +275,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
             val d = setup.route(setup.defaultRoute)
             val tiles = listOfNotNull(
                 Tile(FOLLOW, "Follow default", Icons.layers, d?.let { Ink.route(it.hue) } ?: Ink.direct, tinted = false,
-                    sub = if (setup.defaultRoute == DIRECT) "Direct" else d?.name).takeIf { setup.defaultRoute.isNotEmpty() },
+                    sub = followSub(setup)).takeIf { setup.defaultRoute.isNotEmpty() },
             ) + offered.sortedByDescending { it.id == setup.defaultRoute }.map {
                 Tile(it.id, if (it.imported) it.name else it.loc.city ?: it.name, if (it.tsExit != null) Icons.home else Icons.tunnel, Ink.route(it.hue), sub = it.source.takeIf { s -> s != it.name })
             } + Tile(DIRECT, "Direct", Icons.direct, Ink.direct, tinted = false) + Tile("", "More locations", Icons.more, Ink.dim, tinted = false)
@@ -276,6 +284,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
             BoxWithConstraints(Modifier.padding(start = 68.dp, end = 14.dp, bottom = 14.dp).fillMaxWidth()) {
               val gap = ButtonGroupDefaults.ConnectedSpaceBetween
               val perLine = ((maxWidth + gap) / (TileWidth + gap)).toInt().coerceAtLeast(1)
+              Column {
               Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { tiles.chunked(perLine).forEach { line -> Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
                 line.forEachIndexed { i, t ->
                     val on = t.id == ticked
@@ -308,13 +317,15 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
                             t.sub?.let {
                                 Text(
                                     it, style = Type.caption.copy(fontSize = 10.sp, lineHeight = 12.sp),
-                                    color = if (!on) Ink.dim else LocalContentColor.current, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    color = if (!on) Ink.dim else LocalContentColor.current, maxLines = 2, overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
                     }
                 }
               } } }
+              outsideNote(setup, a.pkg, lockdown)?.let { Text(it, style = Type.caption, color = Ink.dim, modifier = Modifier.padding(top = 8.dp)) }
+              }
             }
         }
         // A Direct app's lookups: outside unbraid (the phone's DNS) or through it, with unbraid's filter.
