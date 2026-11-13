@@ -83,20 +83,23 @@ index 3654fb6..8fc58c5 100644
  
 diff --git a/daemon/instance_race_test.go b/daemon/instance_race_test.go
 new file mode 100644
-index 0000000..bb407c1
+index 0000000..664f416
 --- /dev/null
 +++ b/daemon/instance_race_test.go
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,362 @@
 +package daemon
 +
 +import (
 +	"context"
++	"encoding/json"
 +	"io"
++	"path/filepath"
 +	"sync"
 +	"testing"
 +	"time"
 +
 +	box "github.com/sagernet/sing-box"
++	"github.com/sagernet/sing-box/adapter"
 +	"github.com/sagernet/sing-box/adapter/certificate"
 +	"github.com/sagernet/sing-box/adapter/endpoint"
 +	"github.com/sagernet/sing-box/adapter/inbound"
@@ -104,6 +107,7 @@ index 0000000..bb407c1
 +	"github.com/sagernet/sing-box/adapter/service"
 +	"github.com/sagernet/sing-box/dns"
 +	"github.com/sagernet/sing-box/dns/transport/local"
++	"github.com/sagernet/sing-box/log"
 +	"github.com/sagernet/sing-box/protocol/direct"
 +
 +	"google.golang.org/grpc"
@@ -111,7 +115,9 @@ index 0000000..bb407c1
 +	"google.golang.org/grpc/status"
 +)
 +
-+// Stand-in gRPC streams: the handlers under test return before they send or receive anything.
++const waitLimit = 10 * time.Second
++
++// Stand-in gRPC streams. Sends are dropped; a bidirectional stream hands out its first message once, then ends.
 +type testStream[Res any] struct {
 +	grpc.ServerStream
 +	ctx context.Context
@@ -120,437 +126,859 @@ index 0000000..bb407c1
 +func (s testStream[Res]) Context() context.Context { return s.ctx }
 +func (testStream[Res]) Send(*Res) error            { return nil }
 +
-+type testBidiStream[Req, Res any] struct{ testStream[Res] }
-+
-+func (testBidiStream[Req, Res]) Recv() (*Req, error) { return nil, io.EOF }
-+
-+func stream[Res any]() testStream[Res] { return testStream[Res]{ctx: context.Background()} }
-+
-+func bidi[Req, Res any]() testBidiStream[Req, Res] {
-+	return testBidiStream[Req, Res]{stream[Res]()}
++type testBidiStream[Req, Res any] struct {
++	testStream[Res]
++	first *Req
 +}
 +
-+const raceTestConfig = `{"log":{"disabled":true},"outbounds":[{"type":"direct","tag":"direct"}]}`
++func (s *testBidiStream[Req, Res]) Recv() (*Req, error) {
++	first := s.first
++	s.first = nil
++	if first == nil {
++		return nil, io.EOF
++	}
++	return first, nil
++}
 +
-+func startTestService(t *testing.T) *StartedService {
++func stream[Res any](ctx context.Context) testStream[Res] { return testStream[Res]{ctx: ctx} }
++
++func bidi[Req, Res any](ctx context.Context, first *Req) *testBidiStream[Req, Res] {
++	return &testBidiStream[Req, Res]{stream[Res](ctx), first}
++}
++
++// A service that, while a gate is set, holds the box's start until the test releases it: a reload then stays parked
++// with the next instance published and not started.
++type startGate struct {
++	entered, release chan struct{}
++	enterOnce        sync.Once
++}
++
++var (
++	gateAccess  sync.Mutex
++	currentGate *startGate
++)
++
++type gateService struct{ ctx context.Context }
++
++func (gateService) Type() string { return "test-gate" }
++func (gateService) Tag() string  { return "gate" }
++
++func (g gateService) Start(stage adapter.StartStage, _ *adapter.Scope) error {
++	gateAccess.Lock()
++	gate := currentGate
++	gateAccess.Unlock()
++	if stage != adapter.StartStateStart || gate == nil {
++		return nil
++	}
++	gate.enterOnce.Do(func() { close(gate.entered) })
++	select {
++	case <-gate.release:
++	case <-g.ctx.Done():
++	}
++	return nil
++}
++
++func testConfig(t *testing.T) string {
++	t.Helper()
++	config, err := json.Marshal(map[string]any{
++		"log":          map[string]any{"disabled": true},
++		"experimental": map[string]any{"cache_file": map[string]any{"path": filepath.Join(t.TempDir(), "cache.db")}},
++		"outbounds":    []any{map[string]any{"type": "direct", "tag": "direct"}},
++		"services":     []any{map[string]any{"type": "test-gate", "tag": "gate"}},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return string(config)
++}
++
++// startTestService starts a real service with a per-test cache file; config is what a reload uses again.
++func startTestService(t *testing.T) (s *StartedService, config string) {
 +	t.Helper()
 +	// The include package imports this one, so the test registers just what its configuration uses.
 +	outbounds := outbound.NewRegistry()
 +	direct.RegisterOutbound(outbounds)
 +	transports := dns.NewTransportRegistry()
 +	local.RegisterTransport(transports)
++	services := service.NewRegistry()
++	service.Register[struct{}](services, "test-gate", func(ctx context.Context, _ log.ContextLogger, _ string, _ struct{}) (adapter.Service, error) {
++		return gateService{ctx}, nil
++	})
 +	ctx := box.Context(context.Background(), inbound.NewRegistry(), outbounds, endpoint.NewRegistry(), transports,
-+		service.NewRegistry(), certificate.NewRegistry())
-+	s := NewStartedService(ServiceOptions{Context: ctx, LogMaxLines: 16})
-+	if err := s.StartOrReloadService(ctx, raceTestConfig, nil); err != nil {
++		services, certificate.NewRegistry())
++	s = NewStartedService(ServiceOptions{Context: ctx, LogMaxLines: 16})
++	config = testConfig(t)
++	if err := s.StartOrReloadService(ctx, config, nil); err != nil {
 +		t.Fatal(err)
 +	}
 +	t.Cleanup(func() {
 +		_ = s.CloseService()
 +		s.Close()
 +	})
-+	return s
++	return s, config
 +}
 +
-+// Every handler that reads the instance after waitForStarted, with a request that reaches that read.
++func hook(t *testing.T, target *func(), run func()) {
++	var once sync.Once
++	*target = func() { once.Do(run) }
++	t.Cleanup(func() { *target = func() {} })
++}
++
++// Every handler that uses the running instance, with a request that reaches that use.
 +var instanceReaders = []struct {
 +	name string
-+	call func(s *StartedService) error
++	call func(s *StartedService, ctx context.Context) error
 +}{
-+	{"SubscribeConnections", func(s *StartedService) error {
-+		return s.SubscribeConnections(&SubscribeConnectionsRequest{}, stream[ConnectionEvents]())
++	{"SubscribeConnections", func(s *StartedService, ctx context.Context) error {
++		return s.SubscribeConnections(&SubscribeConnectionsRequest{}, stream[ConnectionEvents](ctx))
 +	}},
-+	{"StartNetworkQualityTest", func(s *StartedService) error {
-+		return s.StartNetworkQualityTest(&NetworkQualityTestRequest{}, stream[NetworkQualityTestProgress]())
++	{"StartNetworkQualityTest", func(s *StartedService, ctx context.Context) error {
++		return s.StartNetworkQualityTest(&NetworkQualityTestRequest{ConfigURL: "http://127.0.0.1:1/config"}, stream[NetworkQualityTestProgress](ctx))
 +	}},
-+	{"StartSTUNTest", func(s *StartedService) error {
-+		return s.StartSTUNTest(&STUNTestRequest{Server: "127.0.0.1:3478"}, stream[STUNTestProgress]())
++	{"StartSTUNTest", func(s *StartedService, ctx context.Context) error {
++		return s.StartSTUNTest(&STUNTestRequest{Server: "127.0.0.1:3478"}, stream[STUNTestProgress](ctx))
 +	}},
-+	{"StartTailscalePing", func(s *StartedService) error {
-+		return s.StartTailscalePing(&TailscalePingRequest{}, stream[TailscalePingResponse]())
++	{"StartTailscalePing", func(s *StartedService, ctx context.Context) error {
++		return s.StartTailscalePing(&TailscalePingRequest{}, stream[TailscalePingResponse](ctx))
 +	}},
-+	{"SetTailscaleExitNode", func(s *StartedService) error {
-+		_, err := s.SetTailscaleExitNode(context.Background(), &SetTailscaleExitNodeRequest{EndpointTag: "ts"})
++	{"SetTailscaleExitNode", func(s *StartedService, ctx context.Context) error {
++		_, err := s.SetTailscaleExitNode(ctx, &SetTailscaleExitNodeRequest{EndpointTag: "ts"})
 +		return err
 +	}},
-+	{"TailscaleLogout", func(s *StartedService) error {
-+		_, err := s.TailscaleLogout(context.Background(), &TailscaleLogoutRequest{EndpointTag: "ts"})
++	{"TailscaleLogout", func(s *StartedService, ctx context.Context) error {
++		_, err := s.TailscaleLogout(ctx, &TailscaleLogoutRequest{EndpointTag: "ts"})
 +		return err
 +	}},
-+	{"GetTailscaleCertificate", func(s *StartedService) error {
-+		_, err := s.GetTailscaleCertificate(context.Background(), &TailscaleCertificateRequest{EndpointTag: "ts"})
++	{"GetTailscaleCertificate", func(s *StartedService, ctx context.Context) error {
++		_, err := s.GetTailscaleCertificate(ctx, &TailscaleCertificateRequest{EndpointTag: "ts"})
 +		return err
 +	}},
-+	{"StartTailscaleSSHSession", func(s *StartedService) error {
-+		return s.StartTailscaleSSHSession(bidi[TailscaleSSHClientMessage, TailscaleSSHServerMessage]())
++	{"StartTailscaleSSHSession", func(s *StartedService, ctx context.Context) error {
++		start := &TailscaleSSHClientMessage{Message: &TailscaleSSHClientMessage_Start{Start: &TailscaleSSHStart{EndpointTag: "ts"}}}
++		return s.StartTailscaleSSHSession(bidi[TailscaleSSHClientMessage, TailscaleSSHServerMessage](ctx, start))
 +	}},
-+	{"SubmitOpenConnectAuthResponse", func(s *StartedService) error {
-+		_, err := s.SubmitOpenConnectAuthResponse(context.Background(), &OpenConnectAuthResponseSubmission{EndpointTag: "oc"})
++	{"SubmitOpenConnectAuthResponse", func(s *StartedService, ctx context.Context) error {
++		_, err := s.SubmitOpenConnectAuthResponse(ctx, &OpenConnectAuthResponseSubmission{EndpointTag: "oc"})
 +		return err
 +	}},
-+	{"CancelOpenConnectAuthChallenge", func(s *StartedService) error {
-+		_, err := s.CancelOpenConnectAuthChallenge(context.Background(), &OpenConnectAuthChallengeCancel{EndpointTag: "oc"})
++	{"CancelOpenConnectAuthChallenge", func(s *StartedService, ctx context.Context) error {
++		_, err := s.CancelOpenConnectAuthChallenge(ctx, &OpenConnectAuthChallengeCancel{EndpointTag: "oc"})
 +		return err
 +	}},
-+	{"SubmitOpenVPNChallengeResponse", func(s *StartedService) error {
-+		_, err := s.SubmitOpenVPNChallengeResponse(context.Background(), &OpenVPNChallengeSubmission{EndpointTag: "ovpn"})
++	{"SubmitOpenVPNChallengeResponse", func(s *StartedService, ctx context.Context) error {
++		_, err := s.SubmitOpenVPNChallengeResponse(ctx, &OpenVPNChallengeSubmission{EndpointTag: "ovpn"})
 +		return err
 +	}},
-+	{"CancelOpenVPNChallenge", func(s *StartedService) error {
-+		_, err := s.CancelOpenVPNChallenge(context.Background(), &OpenVPNChallengeCancel{EndpointTag: "ovpn"})
++	{"CancelOpenVPNChallenge", func(s *StartedService, ctx context.Context) error {
++		_, err := s.CancelOpenVPNChallenge(ctx, &OpenVPNChallengeCancel{EndpointTag: "ovpn"})
 +		return err
 +	}},
-+	{"MarkTaildropInboxRead", func(s *StartedService) error {
-+		_, err := s.MarkTaildropInboxRead(context.Background(), &MarkTaildropInboxReadRequest{})
++	{"MarkTaildropInboxRead", func(s *StartedService, ctx context.Context) error {
++		_, err := s.MarkTaildropInboxRead(ctx, &MarkTaildropInboxReadRequest{})
 +		return err
 +	}},
-+	{"SendTaildropFiles", func(s *StartedService) error {
-+		return s.SendTaildropFiles(bidi[TaildropSendClientMessage, TaildropSendServerMessage]())
++	{"SendTaildropFiles", func(s *StartedService, ctx context.Context) error {
++		start := &TaildropSendClientMessage{Message: &TaildropSendClientMessage_Start{Start: &TaildropSendStart{
++			EndpointTag: "ts", Files: []*TaildropOutgoingFile{{Name: "a.txt", Size: 1}},
++		}}}
++		return s.SendTaildropFiles(bidi[TaildropSendClientMessage, TaildropSendServerMessage](ctx, start))
 +	}},
-+	{"DownloadTaildropFile", func(s *StartedService) error {
-+		return s.DownloadTaildropFile(&DownloadTaildropFileRequest{}, stream[DownloadTaildropFileChunk]())
++	{"DownloadTaildropFile", func(s *StartedService, ctx context.Context) error {
++		return s.DownloadTaildropFile(&DownloadTaildropFileRequest{}, stream[DownloadTaildropFileChunk](ctx))
 +	}},
-+	{"DeleteTaildropFile", func(s *StartedService) error {
-+		_, err := s.DeleteTaildropFile(context.Background(), &DeleteTaildropFileRequest{})
++	{"DeleteTaildropFile", func(s *StartedService, ctx context.Context) error {
++		_, err := s.DeleteTaildropFile(ctx, &DeleteTaildropFileRequest{})
 +		return err
 +	}},
-+	{"CancelTaildropReceiving", func(s *StartedService) error {
-+		_, err := s.CancelTaildropReceiving(context.Background(), &CancelTaildropReceivingRequest{})
++	{"CancelTaildropReceiving", func(s *StartedService, ctx context.Context) error {
++		_, err := s.CancelTaildropReceiving(ctx, &CancelTaildropReceivingRequest{})
 +		return err
 +	}},
 +}
 +
-+// pauseAfterWaitForStarted runs land once, in the window between waitForStarted and the instance read.
-+func pauseAfterWaitForStarted(t *testing.T, land func()) {
-+	var once sync.Once
-+	beforeInstanceRead = func() { once.Do(land) }
-+	t.Cleanup(func() { beforeInstanceRead = func() {} })
++// callWithin runs a handler and gives up waiting after waitLimit (a handler that went on to use the instance can
++// stream until its client leaves); the call's context ends with the test.
++func callWithin(t *testing.T, call func(s *StartedService, ctx context.Context) error, s *StartedService) error {
++	t.Helper()
++	ctx, cancel := context.WithCancel(context.Background())
++	t.Cleanup(cancel)
++	done := make(chan error, 1)
++	go func() { done <- call(s, ctx) }()
++	select {
++	case err := <-done:
++		return err
++	case <-time.After(waitLimit):
++		t.Fatal("the handler did not return: it went on to use the instance")
++		return nil
++	}
 +}
 +
-+// A stop that lands after the handler saw the service started: the handler must refuse, not panic.
++// A stop that lands after the handler saw the service started, before it reads the instance: refuse, not panic.
 +func TestInstanceReadAfterStopIsRefused(t *testing.T) {
 +	for _, reader := range instanceReaders {
 +		t.Run(reader.name, func(t *testing.T) {
-+			s := startTestService(t)
-+			pauseAfterWaitForStarted(t, func() { _ = s.CloseService() })
-+			if err := reader.call(s); status.Code(err) != codes.Unavailable {
++			s, _ := startTestService(t)
++			hook(t, &beforeInstanceRead, func() { _ = s.CloseService() })
++			if err := callWithin(t, reader.call, s); status.Code(err) != codes.Unavailable {
 +				t.Fatalf("want Unavailable, got %v", err)
 +			}
 +		})
 +	}
 +}
 +
-+// A reload that lands in the same window: the old instance is gone and the next one is not started yet.
++// A reload parked with the next instance published but not started, when the handler reads it: refuse.
 +func TestInstanceReadDuringReloadIsRefused(t *testing.T) {
 +	for _, reader := range instanceReaders {
 +		t.Run(reader.name, func(t *testing.T) {
-+			s := startTestService(t)
++			s, config := startTestService(t)
++			gate := &startGate{entered: make(chan struct{}), release: make(chan struct{})}
++			gateAccess.Lock()
++			currentGate = gate
++			gateAccess.Unlock()
 +			reloaded := make(chan error, 1)
-+			pauseAfterWaitForStarted(t, func() {
-+				go func() { reloaded <- s.StartOrReloadService(s.ctx, raceTestConfig, nil) }()
-+				for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
-+					s.serviceAccess.RLock()
-+					moved := s.serviceStatus.Status != ServiceStatus_STARTED
-+					s.serviceAccess.RUnlock()
-+					if moved {
-+						return
-+					}
-+				}
-+				t.Error("reload never began")
++			var releaseOnce sync.Once
++			release := func() { releaseOnce.Do(func() { close(gate.release) }) }
++			t.Cleanup(func() {
++				gateAccess.Lock()
++				currentGate = nil
++				gateAccess.Unlock()
++				release()
 +			})
-+			if err := reader.call(s); status.Code(err) != codes.Unavailable {
-+				t.Fatalf("want Unavailable, got %v", err)
++			hook(t, &beforeInstanceRead, func() {
++				go func() { reloaded <- s.StartOrReloadService(s.ctx, config, nil) }()
++				select {
++				case <-gate.entered:
++				case err := <-reloaded:
++					t.Errorf("reload finished without starting the next instance: %v", err)
++				case <-time.After(waitLimit):
++					t.Error("reload never reached the next instance's start")
++				}
++			})
++			err := callWithin(t, reader.call, s)
++			release()
++			if status.Code(err) != codes.Unavailable {
++				t.Errorf("want Unavailable, got %v", err)
 +			}
-+			if err := <-reloaded; err != nil {
-+				t.Fatal(err)
++			select {
++			case err := <-reloaded:
++				if err != nil {
++					t.Fatal(err)
++				}
++			case <-time.After(waitLimit):
++				t.Fatal("reload did not finish")
 +			}
 +		})
++	}
++}
++
++// A stop or reload that begins while a handler uses the instance waits for the handler to finish with it, and the
++// handler's long work (a test, a ping) is cut short so the wait stays short.
++func TestInstanceInUseIsNotClosed(t *testing.T) {
++	closers := []struct {
++		name string
++		run  func(s *StartedService, config string) error
++	}{
++		{"Stop", func(s *StartedService, _ string) error { return s.CloseService() }},
++		{"Reload", func(s *StartedService, config string) error { return s.StartOrReloadService(s.ctx, config, nil) }},
++	}
++	for _, closer := range closers {
++		for _, reader := range instanceReaders {
++			t.Run(closer.name+"/"+reader.name, func(t *testing.T) {
++				s, config := startTestService(t)
++				callCtx, cancelCall := context.WithCancel(context.Background())
++				defer cancelCall()
++				busy := make(chan struct{})
++				hook(t, &instanceUseBusy, func() { close(busy) })
++				var closeErr error
++				closerDone := make(chan struct{})
++				leased := false
++				hook(t, &instanceLeased, func() {
++					leased = true
++					go func() {
++						closeErr = closer.run(s, config)
++						close(closerDone)
++						// A stream that outlives its lease (the connections stream) ends with its client.
++						cancelCall()
++					}()
++					select {
++					case <-busy:
++					case <-closerDone:
++						t.Error("the instance was closed while a handler held it")
++					case <-time.After(waitLimit):
++						t.Error("the stop or reload neither waited nor finished")
++					}
++				})
++				callDone := make(chan error, 1)
++				go func() { callDone <- reader.call(s, callCtx) }()
++				select {
++				case <-callDone:
++				case <-time.After(waitLimit):
++					t.Fatal("the handler did not return after the stop or reload began")
++				}
++				if !leased {
++					t.Fatal("the handler never took the instance")
++				}
++				select {
++				case <-closerDone:
++				case <-time.After(waitLimit):
++					t.Fatal("the stop or reload did not finish after the handler returned")
++				}
++				if closeErr != nil {
++					t.Fatal(closeErr)
++				}
++			})
++		}
 +	}
 +}
 +
 +// With nothing landing in between, the handlers get past the check and fail on their own terms.
 +func TestInstanceReadWhenStartedProceeds(t *testing.T) {
-+	s := startTestService(t)
-+	if err := s.StartSTUNTest(&STUNTestRequest{OutboundTag: "missing"}, stream[STUNTestProgress]()); status.Code(err) != codes.NotFound {
++	s, _ := startTestService(t)
++	if err := s.StartSTUNTest(&STUNTestRequest{OutboundTag: "missing"}, stream[STUNTestProgress](context.Background())); status.Code(err) != codes.NotFound {
 +		t.Fatalf("STUN: want NotFound for an unknown outbound, got %v", err)
 +	}
 +	if _, err := s.TailscaleLogout(context.Background(), &TailscaleLogoutRequest{EndpointTag: "ts"}); status.Code(err) != codes.NotFound {
 +		t.Fatalf("logout: want NotFound for an unknown endpoint, got %v", err)
 +	}
++	// Every lease ended with its call: a stop does not wait.
++	stopped := make(chan struct{})
++	go func() { _ = s.CloseService(); close(stopped) }()
++	select {
++	case <-stopped:
++	case <-time.After(waitLimit):
++		t.Fatal("stop waited for a lease no handler holds")
++	}
 +}
 diff --git a/daemon/started_service.go b/daemon/started_service.go
-index 2a9983c..f0d5b0a 100644
+index 2a9983c..3e4c155 100644
 --- a/daemon/started_service.go
 +++ b/daemon/started_service.go
-@@ -206,6 +206,22 @@ func (s *StartedService) waitForStarted(ctx context.Context) error {
+@@ -75,6 +75,11 @@ type StartedService struct {
+ 	clashModeObserver       *observable.Observer[struct{}]
+ 	notificationSubscriber  *observable.Subscriber[*NotificationEvent]
+ 	notificationObserver    *observable.Observer[*NotificationEvent]
++
++	// Unbraid: handlers hold instanceUse for reading while they use the instance (see leaseInstance).
++	instanceUse       sync.RWMutex
++	instanceUseCtx    context.Context
++	instanceUseCancel context.CancelFunc
+ }
+ 
+ type ServiceOptions struct {
+@@ -206,6 +211,66 @@ func (s *StartedService) waitForStarted(ctx context.Context) error {
  	}
  }
  
 +// Unbraid: waitForStarted reports that the service started, but a reload or a stop can land before the handler reads
-+// the instance, leaving it nil (or the next one, not started yet). Read it under the lock and refuse the call then,
-+// instead of dereferencing nil: a panic in a handler ends the whole process, and the VPN with it.
-+func (s *StartedService) startedInstance() (*Instance, error) {
++// the instance, leaving it nil (or the next one, not started yet), and it can close the instance while the handler
++// still uses it. A panic in a handler ends the whole process, and the VPN with it. So a handler takes a lease: the
++// instance is read under the lock and refused unless it is started, and a reload or stop waits for every lease to
++// end before it closes the instance. The lease's context ends as soon as the reload or stop begins, so a long call
++// (a test, a ping, a request to a server) returns early instead of holding the stop up. Call release once the
++// handler no longer uses the instance; calling it again does nothing.
++func (s *StartedService) leaseInstance(ctx context.Context) (instance *Instance, leaseCtx context.Context, release func(), err error) {
 +	beforeInstanceRead()
 +	s.serviceAccess.RLock()
-+	defer s.serviceAccess.RUnlock()
-+	if s.instance == nil || s.serviceStatus == nil || s.serviceStatus.Status != ServiceStatus_STARTED {
-+		return nil, status.Error(codes.Unavailable, "service not started")
++	if s.instance == nil || s.serviceStatus == nil || s.serviceStatus.Status != ServiceStatus_STARTED || s.instanceUseCtx == nil {
++		s.serviceAccess.RUnlock()
++		return nil, nil, nil, status.Error(codes.Unavailable, "service not started")
 +	}
-+	return s.instance, nil
++	// This never waits: a reload or stop waits for leases only after it took the instance away under the write lock.
++	s.instanceUse.RLock()
++	instance = s.instance
++	leaseCtx, cancel := context.WithCancel(ctx)
++	stop := context.AfterFunc(s.instanceUseCtx, cancel)
++	s.serviceAccess.RUnlock()
++	var once sync.Once
++	release = func() {
++		once.Do(func() {
++			stop()
++			cancel()
++			s.instanceUse.RUnlock()
++		})
++	}
++	instanceLeased()
++	return instance, leaseCtx, release, nil
 +}
 +
-+// Unbraid: tests replace this to land a reload or a stop exactly in that window.
-+var beforeInstanceRead = func() {}
++// takeInstanceUse detaches the lease context of the instance being taken away. Call with serviceAccess held.
++func (s *StartedService) takeInstanceUse() context.CancelFunc {
++	cancel := s.instanceUseCancel
++	s.instanceUseCtx, s.instanceUseCancel = nil, nil
++	return cancel
++}
++
++// endInstanceUse ends the leases on an instance that was just taken away and waits for them, before it is closed.
++// Call without serviceAccess held.
++func (s *StartedService) endInstanceUse(cancel context.CancelFunc) {
++	if cancel != nil {
++		cancel()
++	}
++	if !s.instanceUse.TryLock() {
++		instanceUseBusy()
++		s.instanceUse.Lock()
++	}
++	s.instanceUse.Unlock()
++}
++
++// Unbraid: no-ops in the build. Tests replace them to land a reload or a stop exactly before the instance is read,
++// while a lease is held, and to see a reload or stop wait for a lease.
++var (
++	beforeInstanceRead = func() {}
++	instanceLeased     = func() {}
++	instanceUseBusy    = func() {}
++)
 +
  func (s *StartedService) followInstance(ctx context.Context, run func(ctx context.Context, instance *Instance) error) error {
  	statusSubscription, statusDone, err := s.serviceStatusObserver.Subscribe()
  	if err != nil {
-@@ -796,9 +812,10 @@ func (s *StartedService) SubscribeConnections(request *SubscribeConnectionsReque
+@@ -260,7 +325,9 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+ 	if oldInstance != nil {
+ 		s.instance = nil
+ 		s.updateStatus(ServiceStatus_STOPPING)
++		endUse := s.takeInstanceUse()
+ 		s.serviceAccess.Unlock()
++		s.endInstanceUse(endUse)
+ 		oomRecorder := service.FromContext[*oomkiller.Recorder](s.ctx)
+ 		if oomRecorder != nil {
+ 			oomRecorder.BeginReload()
+@@ -309,6 +376,7 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+ 		return err
+ 	}
+ 	s.startedAt = time.Now()
++	s.instanceUseCtx, s.instanceUseCancel = context.WithCancel(context.Background())
+ 	s.updateStatus(ServiceStatus_STARTED)
+ 	s.serviceAccess.Unlock()
+ 	runtimeDebug.FreeOSMemory()
+@@ -338,7 +406,9 @@ func (s *StartedService) CloseService() error {
+ 	}
+ 	s.instance = nil
+ 	s.updateStatus(ServiceStatus_STOPPING)
++	endUse := s.takeInstanceUse()
+ 	s.serviceAccess.Unlock()
++	s.endInstanceUse(endUse)
+ 	if instance != nil {
+ 		_ = instance.Close()
+ 	}
+@@ -796,11 +866,14 @@ func (s *StartedService) SubscribeConnections(request *SubscribeConnectionsReque
  	if err != nil {
  		return err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
+-
++	boxService, _, release, err := s.leaseInstance(server.Context())
 +	if err != nil {
 +		return err
 +	}
- 
++	// Unbraid: the lease covers reading the instance. The stream then reads only the traffic manager's in-memory
++	// tables, which closing the instance does not free, so it does not hold the lease (and a reload) for its life.
  	trafficManager := boxService.trafficManager
++	release()
  	if trafficManager == nil {
-@@ -1493,9 +1510,10 @@ func (s *StartedService) StartNetworkQualityTest(
+ 		return status.Error(codes.Unimplemented, "connection tracking not available")
+ 	}
+@@ -1493,9 +1566,11 @@ func (s *StartedService) StartNetworkQualityTest(
  	if err != nil {
  		return err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(server.Context())
 +	if err != nil {
 +		return err
 +	}
++	defer release()
  
  	outbound, err := resolveOutbound(boxService, request.OutboundTag)
  	if err != nil {
-@@ -1539,9 +1557,10 @@ func (s *StartedService) StartSTUNTest(
+@@ -1517,11 +1592,13 @@ func (s *StartedService) StartNetworkQualityTest(
+ 		NewMeasurementClient: measurementClientFactory,
+ 		Serial:               request.Serial,
+ 		MaxRuntime:           time.Duration(request.MaxRuntimeSeconds) * time.Second,
+-		Context:              server.Context(),
++		Context:              ctx,
+ 		OnProgress: func(p networkquality.Progress) {
+ 			_ = server.Send(NewNetworkQualityTestProgress(p))
+ 		},
+ 	})
++	httpClient.CloseIdleConnections()
++	release()
+ 	if nqErr != nil {
+ 		return server.Send(&NetworkQualityTestProgress{
+ 			IsFinal: true,
+@@ -1539,9 +1616,11 @@ func (s *StartedService) StartSTUNTest(
  	if err != nil {
  		return err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(server.Context())
 +	if err != nil {
 +		return err
 +	}
++	defer release()
  
  	outbound, err := resolveOutbound(boxService, request.OutboundTag)
  	if err != nil {
-@@ -1691,9 +1710,10 @@ func (s *StartedService) StartTailscalePing(
+@@ -1554,11 +1633,12 @@ func (s *StartedService) StartSTUNTest(
+ 	result, stunErr := stun.Run(stun.Options{
+ 		Server:  stunServer,
+ 		Dialer:  resolvedDialer,
+-		Context: server.Context(),
++		Context: ctx,
+ 		OnProgress: func(p stun.Progress) {
+ 			_ = server.Send(NewSTUNTestProgress(p))
+ 		},
+ 	})
++	release()
+ 	if stunErr != nil {
+ 		return server.Send(&STUNTestProgress{
+ 			IsFinal: true,
+@@ -1691,16 +1771,18 @@ func (s *StartedService) StartTailscalePing(
  	if err != nil {
  		return err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(server.Context())
 +	if err != nil {
 +		return err
 +	}
++	defer release()
  
  	provider, _, err := resolveTailscaleProvider(boxService, request.EndpointTag)
  	if err != nil {
-@@ -1718,9 +1738,10 @@ func (s *StartedService) SetTailscaleExitNode(ctx context.Context, request *SetT
+ 		return err
+ 	}
+ 
+-	return provider.StartTailscalePing(server.Context(), request.PeerIP, func(result *adapter.TailscalePingResult) {
++	return provider.StartTailscalePing(ctx, request.PeerIP, func(result *adapter.TailscalePingResult) {
+ 		_ = server.Send(&TailscalePingResponse{
+ 			LatencyMs:      result.LatencyMs,
+ 			IsDirect:       result.IsDirect,
+@@ -1718,9 +1800,11 @@ func (s *StartedService) SetTailscaleExitNode(ctx context.Context, request *SetT
  	if err != nil {
  		return nil, err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(ctx)
 +	if err != nil {
 +		return nil, err
 +	}
++	defer release()
  
  	endpoint, err := resolveTailscaleEndpoint(boxService, request.EndpointTag)
  	if err != nil {
-@@ -1742,9 +1763,10 @@ func (s *StartedService) TailscaleLogout(ctx context.Context, request *Tailscale
+@@ -1742,9 +1826,11 @@ func (s *StartedService) TailscaleLogout(ctx context.Context, request *Tailscale
  	if err != nil {
  		return nil, err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(ctx)
 +	if err != nil {
 +		return nil, err
 +	}
++	defer release()
  
  	endpoint, err := resolveTailscaleEndpoint(boxService, request.EndpointTag)
  	if err != nil {
-@@ -1766,9 +1788,10 @@ func (s *StartedService) GetTailscaleCertificate(ctx context.Context, request *T
+@@ -1766,9 +1852,11 @@ func (s *StartedService) GetTailscaleCertificate(ctx context.Context, request *T
  	if err != nil {
  		return nil, err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(ctx)
 +	if err != nil {
 +		return nil, err
 +	}
++	defer release()
  
  	endpoint, err := resolveTailscaleEndpoint(boxService, request.EndpointTag)
  	if err != nil {
-@@ -1861,9 +1884,10 @@ func (s *StartedService) SubmitOpenConnectAuthResponse(ctx context.Context, requ
+@@ -1861,9 +1949,11 @@ func (s *StartedService) SubmitOpenConnectAuthResponse(ctx context.Context, requ
  	if err != nil {
  		return nil, err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(ctx)
 +	if err != nil {
 +		return nil, err
 +	}
++	defer release()
  
  	endpoint, err := resolveEndpoint[adapter.OpenConnectEndpoint](boxService, request.EndpointTag, C.TypeOpenConnect, "OpenConnect client")
  	if err != nil {
-@@ -1898,9 +1922,10 @@ func (s *StartedService) CancelOpenConnectAuthChallenge(ctx context.Context, req
+@@ -1898,9 +1988,11 @@ func (s *StartedService) CancelOpenConnectAuthChallenge(ctx context.Context, req
  	if err != nil {
  		return nil, err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(ctx)
 +	if err != nil {
 +		return nil, err
 +	}
++	defer release()
  
  	endpoint, err := resolveEndpoint[adapter.OpenConnectEndpoint](boxService, request.EndpointTag, C.TypeOpenConnect, "OpenConnect client")
  	if err != nil {
-@@ -2001,9 +2026,10 @@ func (s *StartedService) SubmitOpenVPNChallengeResponse(ctx context.Context, req
+@@ -2001,9 +2093,11 @@ func (s *StartedService) SubmitOpenVPNChallengeResponse(ctx context.Context, req
  	if err != nil {
  		return nil, err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(ctx)
 +	if err != nil {
 +		return nil, err
 +	}
++	defer release()
  
  	endpoint, err := resolveEndpoint[adapter.OpenVPNEndpoint](boxService, request.EndpointTag, C.TypeOpenVPNClient, "OpenVPN client")
  	if err != nil {
-@@ -2025,9 +2051,10 @@ func (s *StartedService) CancelOpenVPNChallenge(ctx context.Context, request *Op
+@@ -2025,9 +2119,11 @@ func (s *StartedService) CancelOpenVPNChallenge(ctx context.Context, request *Op
  	if err != nil {
  		return nil, err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(ctx)
 +	if err != nil {
 +		return nil, err
 +	}
++	defer release()
  
  	endpoint, err := resolveEndpoint[adapter.OpenVPNEndpoint](boxService, request.EndpointTag, C.TypeOpenVPNClient, "OpenVPN client")
  	if err != nil {
 diff --git a/daemon/started_service_taildrop.go b/daemon/started_service_taildrop.go
-index 66db972..7df8f1f 100644
+index 66db972..8f1223e 100644
 --- a/daemon/started_service_taildrop.go
 +++ b/daemon/started_service_taildrop.go
-@@ -151,9 +151,10 @@ func (s *StartedService) MarkTaildropInboxRead(ctx context.Context, request *Mar
+@@ -151,9 +151,11 @@ func (s *StartedService) MarkTaildropInboxRead(ctx context.Context, request *Mar
  	if err != nil {
  		return nil, err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(ctx)
 +	if err != nil {
 +		return nil, err
 +	}
++	defer release()
  
  	provider, _, err := resolveTailscaleProvider(boxService, request.EndpointTag)
  	if err != nil {
-@@ -174,9 +175,10 @@ func (s *StartedService) SendTaildropFiles(
+@@ -174,10 +176,8 @@ func (s *StartedService) SendTaildropFiles(
  	if err != nil {
  		return err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
-+	if err != nil {
-+		return err
-+	}
  
++	// Unbraid: the first message waits for the client, so the lease is taken after it (see leaseInstance).
  	firstMessage, err := server.Recv()
  	if err != nil {
-@@ -318,9 +320,10 @@ func (s *StartedService) DownloadTaildropFile(
+ 		return err
+@@ -189,6 +189,11 @@ func (s *StartedService) SendTaildropFiles(
+ 	if len(start.Files) == 0 {
+ 		return status.Error(codes.InvalidArgument, "no files to send")
+ 	}
++	boxService, leaseCtx, release, err := s.leaseInstance(streamCtx)
++	if err != nil {
++		return err
++	}
++	defer release()
+ 	provider, _, err := resolveTailscaleProvider(boxService, start.EndpointTag)
+ 	if err != nil {
+ 		return err
+@@ -201,7 +206,7 @@ func (s *StartedService) SendTaildropFiles(
+ 		_ = server.Send(message)
+ 	}
+ 
+-	chunkSource := &taildropChunkReader{server: server}
++	chunkSource := &taildropChunkReader{server: server, ctx: leaseCtx}
+ 	chunkSource.reportReceived = func(receivedBytes int64) {
+ 		sendMessage(&TaildropSendServerMessage{
+ 			Message: &TaildropSendServerMessage_ReceivedBytes{ReceivedBytes: receivedBytes},
+@@ -211,7 +216,7 @@ func (s *StartedService) SendTaildropFiles(
+ 		fileIndex := int32(index)
+ 		chunkSource.beginFile()
+ 		var lastProgress time.Time
+-		err = provider.SendTaildropFile(streamCtx, start.PeerStableID, file.Name, file.Size, chunkSource, func(sentBytes int64) {
++		err = provider.SendTaildropFile(leaseCtx, start.PeerStableID, file.Name, file.Size, chunkSource, func(sentBytes int64) {
+ 			now := time.Now()
+ 			if now.Sub(lastProgress) < TaildropProgressMinInterval {
+ 				return
+@@ -241,6 +246,8 @@ func (s *StartedService) SendTaildropFiles(
+ 
+ type taildropChunkReader struct {
+ 	server         grpc.BidiStreamingServer[TaildropSendClientMessage, TaildropSendServerMessage]
++	ctx            context.Context
++	pending        chan taildropReceived
+ 	buffer         []byte
+ 	fileDone       bool
+ 	fileReceived   int64
+@@ -249,6 +256,31 @@ type taildropChunkReader struct {
+ 	acknowledged   int64
+ }
+ 
++type taildropReceived struct {
++	message *TaildropSendClientMessage
++	err     error
++}
++
++// Unbraid: a receive waits for the client, which a reload or a stop cannot interrupt. Give up when the lease ends,
++// so the transfer stops and the instance can close; a receive still in flight is collected by the next call (one at
++// a time on the stream) or ends when the handler returns.
++func (r *taildropChunkReader) recv() (*TaildropSendClientMessage, error) {
++	if r.pending == nil {
++		r.pending = make(chan taildropReceived, 1)
++		go func(pending chan<- taildropReceived) {
++			message, err := r.server.Recv()
++			pending <- taildropReceived{message, err}
++		}(r.pending)
++	}
++	select {
++	case received := <-r.pending:
++		r.pending = nil
++		return received.message, received.err
++	case <-r.ctx.Done():
++		return nil, r.ctx.Err()
++	}
++}
++
+ func (r *taildropChunkReader) beginFile() {
+ 	r.fileDone = false
+ 	r.fileReceived = 0
+@@ -259,7 +291,7 @@ func (r *taildropChunkReader) Read(destination []byte) (int, error) {
+ 		if r.fileDone {
+ 			return 0, io.EOF
+ 		}
+-		message, err := r.server.Recv()
++		message, err := r.recv()
+ 		if err != nil {
+ 			return 0, err
+ 		}
+@@ -288,7 +320,7 @@ func (r *taildropChunkReader) finishFile(declaredSize int64) error {
+ 		if len(r.buffer) > 0 {
+ 			return status.Error(codes.InvalidArgument, "file changed while sending")
+ 		}
+-		message, err := r.server.Recv()
++		message, err := r.recv()
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -318,9 +350,11 @@ func (s *StartedService) DownloadTaildropFile(
  	if err != nil {
  		return err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, _, release, err := s.leaseInstance(server.Context())
 +	if err != nil {
 +		return err
 +	}
++	defer release()
  
  	provider, _, err := resolveTailscaleProvider(boxService, request.EndpointTag)
  	if err != nil {
-@@ -358,9 +361,10 @@ func (s *StartedService) DeleteTaildropFile(ctx context.Context, request *Delete
+@@ -330,6 +364,8 @@ func (s *StartedService) DownloadTaildropFile(
+ 	if err != nil {
+ 		return taildropError(err)
+ 	}
++	// Unbraid: the rest only reads the opened file, which stays valid after the instance closes.
++	release()
+ 	defer file.Close()
+ 	err = server.Send(&DownloadTaildropFileChunk{Size: size})
+ 	if err != nil {
+@@ -358,9 +394,11 @@ func (s *StartedService) DeleteTaildropFile(ctx context.Context, request *Delete
  	if err != nil {
  		return nil, err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(ctx)
 +	if err != nil {
 +		return nil, err
 +	}
++	defer release()
  
  	provider, _, err := resolveTailscaleProvider(boxService, request.EndpointTag)
  	if err != nil {
-@@ -378,9 +382,10 @@ func (s *StartedService) CancelTaildropReceiving(ctx context.Context, request *C
+@@ -378,9 +416,11 @@ func (s *StartedService) CancelTaildropReceiving(ctx context.Context, request *C
  	if err != nil {
  		return nil, err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
++	boxService, ctx, release, err := s.leaseInstance(ctx)
 +	if err != nil {
 +		return nil, err
 +	}
++	defer release()
  
  	provider, _, err := resolveTailscaleProvider(boxService, request.EndpointTag)
  	if err != nil {
 diff --git a/daemon/started_service_tailscale_ssh.go b/daemon/started_service_tailscale_ssh.go
-index bc8b372..1db041c 100644
+index bc8b372..930e3df 100644
 --- a/daemon/started_service_tailscale_ssh.go
 +++ b/daemon/started_service_tailscale_ssh.go
-@@ -36,9 +36,10 @@ func (s *StartedService) StartTailscaleSSHSession(
+@@ -36,10 +36,8 @@ func (s *StartedService) StartTailscaleSSHSession(
  	if err != nil {
  		return err
  	}
 -	s.serviceAccess.RLock()
 -	boxService := s.instance
 -	s.serviceAccess.RUnlock()
-+	boxService, err := s.startedInstance()
+ 
++	// Unbraid: the first message waits for the client, so the lease is taken after it (see leaseInstance).
+ 	firstMessage, err := server.Recv()
+ 	if err != nil {
+ 		return err
+@@ -55,6 +53,11 @@ func (s *StartedService) StartTailscaleSSHSession(
+ 		hostKeys = append(hostKeys, key)
+ 	}
+ 
++	boxService, leaseCtx, release, err := s.leaseInstance(ctx)
 +	if err != nil {
 +		return err
 +	}
- 
- 	firstMessage, err := server.Recv()
++	defer release()
+ 	endpoint, err := resolveTailscaleEndpoint(boxService, start.EndpointTag)
  	if err != nil {
+ 		return err
+@@ -82,7 +85,9 @@ func (s *StartedService) StartTailscaleSSHSession(
+ 		return nil
+ 	}
+ 
+-	peerConn, err := endpoint.DialContext(ctx, N.NetworkTCP, peerAddr)
++	peerConn, err := endpoint.DialContext(leaseCtx, N.NetworkTCP, peerAddr)
++	// Unbraid: the session then only uses this connection; once the instance closes, it fails like a dropped one.
++	release()
+ 	if err != nil {
+ 		return finishWithError(E.Cause(err, "dial peer").Error())
+ 	}
 diff --git a/experimental/libbox/endpoint_cleanup_test.go b/experimental/libbox/endpoint_cleanup_test.go
 new file mode 100644
 index 0000000..17100a1
