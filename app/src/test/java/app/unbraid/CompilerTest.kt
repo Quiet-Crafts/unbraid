@@ -410,6 +410,34 @@ class CompilerTest {
         assertEquals(emptyList<JsonObject>(), icmp(directDefault.copy(apps = mapOf("com.x" to DIRECT))))
     }
 
+    /** A connection with no known app could be a VPN app's: with Direct as the default it is refused, never sent direct. */
+    @Test fun unknownOwnerIsRefusedWhenDirectDefaultAndAnAppUsesAVpn() {
+        val unknown = """{"package_name_regex":["."],"invert":true,"action":"reject"}"""
+        fun rules(s: Setup) = compile(s).rules()
+        fun has(s: Setup) = rules(s).count { it.toString() == unknown }
+        val directDefault = example.copy(defaultRoute = DIRECT)
+        assertEquals(1, has(directDefault))
+        // After every app rule and the LAN and home rules, before the default's own lookup.
+        val r = rules(directDefault)
+        val at = r.indexOfFirst { it.toString() == unknown }
+        assertTrue(at > r.indexOfLast { it["package_name"] != null })
+        assertTrue(at > r.indexOfFirst { it["ip_cidr"]?.toString()?.contains("192.168.0.0/16") == true })
+        assertEquals("""{"action":"resolve","server":"local"}""", r[at + 1].toString())
+        // Lookups and the app's own probes come first and are left alone.
+        assertTrue(r.indexOfFirst { it["action"]?.jsonPrimitive?.content == "hijack-dns" } < at)
+        assertTrue(compile(directDefault)["dns"].toString().let { "package_name_regex" !in it })
+        // An app on a route that is blocked or missing still counts (its apps are refused).
+        assertEquals(1, compile(directDefault, blocked = setOf("us")).rules().count { it.toString() == unknown })
+        assertEquals(1, has(directDefault.copy(apps = mapOf("com.a" to "gone", "com.x" to DIRECT))))
+        // Nothing changes when the default is a VPN route, or no app leaves Direct (Direct apps, filtered or not).
+        assertEquals(0, has(example))
+        assertEquals(0, has(directDefault.copy(apps = mapOf("com.x" to DIRECT))))
+        assertEquals(0, has(directDefault.copy(apps = mapOf("com.x" to DIRECT), prefs = Prefs(filter = Filter("quad9", directApps = true)))))
+        // Under Block connections without VPN, Direct apps pass through unbraid: still no VPN app.
+        assertEquals(0, compile(directDefault.copy(apps = mapOf("com.x" to DIRECT)), true).rules().count { it.toString() == unknown })
+        assertEquals(0, has(directDefault.copy(apps = emptyMap())))
+    }
+
     /** Over plain HTTP the Headscale key exchange could be faked, so such a control URL is refused, not used. */
     @Test fun headscaleNeedsHttps() {
         fun with(url: String) = example.copy(home = example.home.copy(tailscale = true, tsControlUrl = url))

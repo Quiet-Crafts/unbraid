@@ -312,6 +312,11 @@ object Compiler {
                     // Everything left follows the default: refused while it has no tunnel, after the LAN and home rules above.
                     if (defaultBlocked) { add(obj("action" to "reject", "no_drop" to true)); return@putJsonArray }
                     if (onTs(s.defaultRoute)) tsLogin.forEach { add(obj(it, "outbound" to "direct")) }
+                    // A connection Android can't name the app of matches no app rule. With Direct as the default it may
+                    // be one of an app kept on a VPN, so it is refused rather than sent out on the phone's own connection.
+                    // After the LAN and home rules for addresses, before the default's lookup, so its name isn't asked
+                    // on the normal connection. Lookups were answered above, as for every app.
+                    if (s.defaultRoute == DIRECT && perApp.keys.any { it != DIRECT && it != FILTERED }) add(obj("package_name_regex" to arr("."), "invert" to true, "action" to "reject"))
                     add(obj("action" to "resolve", "server" to defaultDns))
                     network.forEach { add(it) }
                     // Ping has no owner the engine can look up, so it never matches an app's rule and lands here: with
