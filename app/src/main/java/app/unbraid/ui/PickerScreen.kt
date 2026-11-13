@@ -644,7 +644,7 @@ private fun PickRow(onClick: () -> Unit, selected: Boolean, tint: Color, modifie
 
 @Composable
 private fun RowScope.Title(title: String, sub: String? = null) = Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-    Text(title, style = Type.body, color = Ink.text, maxLines = 1)
+    Text(title, style = Type.body, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
     sub?.let { Text(it, style = Type.caption, color = Ink.dim) }
 }
 

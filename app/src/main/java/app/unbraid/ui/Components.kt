@@ -123,7 +123,8 @@ fun Screen(
                     // Titles are set in capitals; the wordmark stays lowercase, its slash in the accent.
                     (if (title == WORDMARK) title else title.uppercase()).split('/').forEachIndexed { i, part -> if (i > 0) withStyle(SpanStyle(color = Ink.accent)) { append('/') }; append(part) }
                 },
-                style = Type.headline, color = titleColor, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                // Two lines before a cut: a long route name or large text on a small phone still reads.
+                style = Type.headline, color = titleColor, maxLines = 2, overflow = TextOverflow.Ellipsis,
             )
             if (sub.isNotEmpty()) Text(sub, style = Type.sub, color = subColor, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
@@ -137,7 +138,7 @@ fun Screen(
 
 @Composable
 fun SearchField(value: String, onChange: (String) -> Unit, placeholder: String) = Row(
-    Modifier.padding(horizontal = Gutter).fillMaxWidth().height(56.dp).clip(RoundedCornerShape(28.dp)).background(Ink.surfaceHigh).padding(horizontal = 20.dp),
+    Modifier.padding(horizontal = Gutter).fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(28.dp)).background(Ink.surfaceHigh).padding(horizontal = 20.dp),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(12.dp),
 ) {
@@ -313,13 +314,13 @@ fun AppIcon(ui: Ui, pkg: String, label: String, size: Dp = 40.dp) {
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun Primary(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true, busy: Boolean = false) = Box(
-    modifier.fillMaxWidth().height(56.dp).clip(RoundedCornerShape(28.dp)).background(if (enabled) Ink.accent else Ink.surfaceTop)
+    modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(28.dp)).background(if (enabled) Ink.accent else Ink.surfaceTop)
         .clickable(enabled = enabled && !busy, role = Role.Button, onClick = onClick)
         .semantics { if (busy) stateDescription = "Working" },
     contentAlignment = Alignment.Center,
 ) {
     if (busy) LoadingIndicator(Modifier.size(40.dp), color = Ink.onAccent)
-    else Text(text, style = Type.title, color = if (enabled) Ink.onAccent else Ink.faint)
+    else Text(text, style = Type.title, color = if (enabled) Ink.onAccent else Ink.faint, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
 }
 
 @Composable

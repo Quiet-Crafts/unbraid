@@ -214,7 +214,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
 @Composable
 private fun FilterChip(label: String, dot: Color?, on: Boolean, direct: Boolean = false, independent: Boolean = false, onClick: () -> Unit) = Box(
     // Exit filters are one choice among many; "System" is an independent on/off filter.
-    Modifier.height(48.dp).then(if (independent) Modifier.toggleable(on, role = Role.Checkbox) { onClick() } else Modifier.selectable(on, role = Role.RadioButton, onClick = onClick)),
+    Modifier.heightIn(min = 48.dp).then(if (independent) Modifier.toggleable(on, role = Role.Checkbox) { onClick() } else Modifier.selectable(on, role = Role.RadioButton, onClick = onClick)),
     contentAlignment = Alignment.Center,
 ) {
     val shape = RoundedCornerShape(12.dp)
@@ -222,7 +222,7 @@ private fun FilterChip(label: String, dot: Color?, on: Boolean, direct: Boolean 
     val bg by animateColorAsState(if (on) Ink.surfaceTop else Color.Transparent, MaterialTheme.motionScheme.fastEffectsSpec(), label = "chip")
     val edge by animateColorAsState(if (on) Ink.surfaceTop else Ink.line, MaterialTheme.motionScheme.fastEffectsSpec(), label = "chipEdge")
     Row(
-        Modifier.height(36.dp).clip(shape).background(bg).border(1.dp, edge, shape).padding(horizontal = 12.dp),
+        Modifier.heightIn(min = 36.dp).clip(shape).background(bg).border(1.dp, edge, shape).padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         if (direct) Icon(Icons.direct, null, Modifier.size(14.dp), tint = Ink.direct)

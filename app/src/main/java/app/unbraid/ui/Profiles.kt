@@ -335,7 +335,7 @@ fun ProfileSheet(setup: Setup, editing: String?, startEmpty: Boolean, onSave: (S
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                 if (editing != null) { Secondary("Delete", { deleting = true }, color = Ink.bad); Box(Modifier.weight(1f)) }
                 Secondary("Cancel", onDismiss, color = Ink.dim)
-                Primary(if (editing == null) "Save profile" else "Save", { ok?.let { onSave(it, empty) } }, Modifier.width(150.dp), enabled = ok != null)
+                Primary(if (editing == null) "Save profile" else "Save", { ok?.let { onSave(it, empty) } }, Modifier.widthIn(min = 150.dp).width(androidx.compose.foundation.layout.IntrinsicSize.Max), enabled = ok != null)
             }
         }
     }
