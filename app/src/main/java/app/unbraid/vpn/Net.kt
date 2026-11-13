@@ -47,16 +47,21 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
         listener = l
         push(force = true) // a new engine has no interface yet
         // The engine's thread runs this while network callbacks push on the net thread: one of them may have delivered a
-        // newer network before this delivery. Checked again on the net thread, after any such callback, so the engine
-        // ends on the current network. Nothing is held across the engine call, so the two threads can't wait on each other.
-        if (l != null) handler.post { push(retry = false) }
+        // newer network before this delivery, and noted it as sent. Sent again on the net thread, after any such
+        // callback and whatever was noted, so the engine ends on the current network (it ignores a repeat of the one it
+        // has). Nothing is held across the engine call, so the two threads can't wait on each other.
+        if (l != null) handler.post { push(force = true) }
     }
 
     // Every update the engine sees as a new interface closes all connections, so only real changes go through:
     // a loss waits briefly for the network to come back, and link changes on the same interface are ignored.
     @Volatile private var lost: Network? = null
     private val lose = Runnable { if (network == lost) { network = null; push() } }
-    @Volatile private var pushed: Pair<String, Int>? = null
+    private val pusher = InterfacePush {
+        val name = network?.let { cm.getLinkProperties(it)?.interfaceName }
+        val index = name?.let { runCatching { NetworkInterface.getByName(it)?.index }.getOrNull() }
+        if (name == null || index == null) "" to -1 else name to index
+    }
 
     override fun onAvailable(n: Network) { handler.removeCallbacks(lose); network = n; push() }
     override fun onLinkPropertiesChanged(n: Network, lp: LinkProperties) { if (n == network) push() }
@@ -64,16 +69,28 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     // The VPN itself is never metered (Android would warn about every app); a combined speed test asks first on a metered one.
     override fun onCapabilitiesChanged(n: Network, caps: NetworkCapabilities) { if (n == network) UnbraidVpn.metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) }
 
-    /** [retry]: a real move to another network, which may fix blocked routes ([onChange]). */
-    private fun push(force: Boolean = false, retry: Boolean = true) {
+    /** Not [force]d: a real move to another network, which may fix blocked routes ([onChange]). */
+    private fun push(force: Boolean = false) {
         val l = listener ?: return
-        val name = network?.let { cm.getLinkProperties(it)?.interfaceName }
-        val index = name?.let { runCatching { NetworkInterface.getByName(it)?.index }.getOrNull() }
-        val now = if (name == null || index == null) "" to -1 else name to index
-        if (!force && now == pushed) return
+        val now = pusher.push(force) { l.updateDefaultInterface(it.first, it.second, false, false) } ?: return
+        if (!force && now.second >= 0) onChange?.invoke()
+    }
+}
+
+/**
+ * Hands the engine the current default interface ([current]: name and index, "" and -1 for none): only a change, unless
+ * [push] is forced. Nothing is held across the delivery, so it never waits on the engine.
+ */
+internal class InterfacePush(private val current: () -> Pair<String, Int>) {
+    @Volatile private var pushed: Pair<String, Int>? = null
+
+    /** What it delivered, or null when it was what was sent last. */
+    fun push(force: Boolean, deliver: (Pair<String, Int>) -> Unit): Pair<String, Int>? {
+        val now = current()
+        if (!force && now == pushed) return null
         pushed = now
-        l.updateDefaultInterface(now.first, now.second, false, false)
-        if (!force && retry && now.second >= 0) onChange?.invoke()
+        deliver(now)
+        return now
     }
 }
 
