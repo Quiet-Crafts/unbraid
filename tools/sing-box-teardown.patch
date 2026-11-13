@@ -81,12 +81,521 @@ index 3654fb6..8fc58c5 100644
  	}, nil
  }
  
+diff --git a/common/stun/stun.go b/common/stun/stun.go
+index a4bb9d5..c54a5b3 100644
+--- a/common/stun/stun.go
++++ b/common/stun/stun.go
+@@ -433,6 +433,13 @@ func Run(options Options) (*Result, error) {
+ 	defer func() {
+ 		_ = packetConn.Close()
+ 	}()
++	// Unbraid: when the context ends, close the socket at once: a read or write waiting on the network returns
++	// instead of running through its retries, and nothing more is sent.
++	socket := packetConn
++	stopClose := context.AfterFunc(ctx, func() {
++		_ = socket.Close()
++	})
++	defer stopClose()
+ 	if deadline.NeedAdditionalReadDeadline(packetConn) {
+ 		packetConn = deadline.NewPacketConn(bufio.NewPacketConn(packetConn))
+ 	}
+@@ -451,6 +458,9 @@ func Run(options Options) (*Result, error) {
+ 	txID := newTransactionID()
+ 	resp, latency, err := roundTrip(packetConn, serverAddr, txID, nil, rto)
+ 	if err != nil {
++		if ctx.Err() != nil {
++			return nil, ctx.Err()
++		}
+ 		return nil, E.Cause(err, "binding request")
+ 	}
+ 
+@@ -497,9 +507,14 @@ func Run(options Options) (*Result, error) {
+ 		LatencyMs:    result.LatencyMs,
+ 	})
+ 
+-	result.NATMapping = detectNATMapping(
++	natMapping := detectNATMapping(
+ 		packetConn, serverSocksaddr.Port, externalAddr, otherAddr, rto,
+ 	)
++	// Unbraid: a test cut short by its context returns what it measured before, not a reading of the closed socket.
++	if ctx.Err() != nil {
++		return result, nil
++	}
++	result.NATMapping = natMapping
+ 
+ 	reportProgress(Progress{
+ 		Phase:        PhaseNATMapping,
+@@ -522,7 +537,11 @@ func Run(options Options) (*Result, error) {
+ 		NATMapping:   result.NATMapping,
+ 	})
+ 
+-	result.NATFiltering = detectNATFiltering(packetConn, serverAddr, rto)
++	natFiltering := detectNATFiltering(packetConn, serverAddr, rto)
++	if ctx.Err() != nil {
++		return result, nil
++	}
++	result.NATFiltering = natFiltering
+ 
+ 	reportProgress(Progress{
+ 		Phase:        PhaseDone,
+diff --git a/common/stun/stun_cancel_test.go b/common/stun/stun_cancel_test.go
+new file mode 100644
+index 0000000..80ba9cf
+--- /dev/null
++++ b/common/stun/stun_cancel_test.go
+@@ -0,0 +1,96 @@
++package stun
++
++import (
++	"context"
++	"net"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++// A server that takes every request and never answers; it counts what it got.
++func silentServer(t *testing.T) (addr string, requests *atomic.Int32, first <-chan struct{}) {
++	t.Helper()
++	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = conn.Close() })
++	requests = new(atomic.Int32)
++	got := make(chan struct{})
++	go func() {
++		buf := make([]byte, 1500)
++		for {
++			if _, _, err := conn.ReadFrom(buf); err != nil {
++				return
++			}
++			if requests.Add(1) == 1 {
++				close(got)
++			}
++		}
++	}()
++	return conn.LocalAddr().String(), requests, got
++}
++
++type plainDialer struct{}
++
++func (plainDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
++	var d net.Dialer
++	return d.DialContext(ctx, network, destination.String())
++}
++
++func (plainDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		return nil, err
++	}
++	return udpConn{conn}, nil
++}
++
++// Run addresses the server with the engine's own address type; a plain socket wants a UDP address.
++type udpConn struct{ net.PacketConn }
++
++func (c udpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
++	if socksaddr, ok := addr.(M.Socksaddr); ok {
++		addr = socksaddr.UDPAddr()
++	}
++	return c.PacketConn.WriteTo(b, addr)
++}
++
++// A test waiting for an answer that never comes returns as soon as its context ends, not after its retries
++// (0.5 + 1 + 2 seconds), and sends nothing after that.
++func TestRunReturnsWhenCancelledMidExchange(t *testing.T) {
++	addr, requests, first := silentServer(t)
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan error, 1)
++	go func() {
++		_, err := Run(Options{Server: addr, Dialer: plainDialer{}, Context: ctx})
++		done <- err
++	}()
++	select {
++	case <-first:
++	case <-time.After(5 * time.Second):
++		t.Fatal("the request never reached the server")
++	}
++	start := time.Now()
++	cancel()
++	select {
++	case err := <-done:
++		if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
++			t.Fatalf("returned %v after the cancel", elapsed)
++		}
++		if err != context.Canceled {
++			t.Fatalf("want context.Canceled, got %v", err)
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("did not return after the cancel")
++	}
++	sent := requests.Load()
++	time.Sleep(1200 * time.Millisecond) // past the first two retransmit times
++	if later := requests.Load(); later != sent {
++		t.Fatalf("%d more requests after the test returned", later-sent)
++	}
++}
+diff --git a/daemon/instance_inflight_test.go b/daemon/instance_inflight_test.go
+new file mode 100644
+index 0000000..91ec5c9
+--- /dev/null
++++ b/daemon/instance_inflight_test.go
+@@ -0,0 +1,344 @@
++package daemon
++
++import (
++	"context"
++	"net"
++	"os"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/adapter/outbound"
++	"github.com/sagernet/sing-box/log"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++
++	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/status"
++)
++
++// A test outbound: its UDP sockets are real, and it records when a socket is opened, when a read is waiting, when
++// that read has finished unwinding, and when its instance closes it, so a test can check the order of the last two.
++type probeOptions struct {
++	Network string `json:"network,omitempty"`
++}
++
++type probeEvent struct {
++	probe int32
++	what  string
++}
++
++// How long a read keeps running after its socket was closed: the call is still inside the engine for that long.
++const probeUnwind = 100 * time.Millisecond
++
++var (
++	probeCount   atomic.Int32
++	probeAccess  sync.Mutex
++	probeEvents  []probeEvent
++	probeReading chan struct{}
++)
++
++func resetProbes(t *testing.T) {
++	probeAccess.Lock()
++	probeEvents = nil
++	probeReading = make(chan struct{})
++	probeAccess.Unlock()
++	probeCount.Store(0)
++}
++
++func probeRecord(probe int32, what string) {
++	probeAccess.Lock()
++	defer probeAccess.Unlock()
++	probeEvents = append(probeEvents, probeEvent{probe, what})
++	if what == "reading" {
++		select {
++		case <-probeReading:
++		default:
++			close(probeReading)
++		}
++	}
++}
++
++// probeSaw reports the position of the first event, or -1.
++func probeSaw(probe int32, what string) int {
++	probeAccess.Lock()
++	defer probeAccess.Unlock()
++	for i, event := range probeEvents {
++		if event == (probeEvent{probe, what}) {
++			return i
++		}
++	}
++	return -1
++}
++
++type probe struct {
++	outbound.Adapter
++	id int32
++}
++
++func newProbe(_ context.Context, _ adapter.Router, _ log.ContextLogger, tag string, options probeOptions) (adapter.Outbound, error) {
++	network := []string{N.NetworkTCP, N.NetworkUDP}
++	if options.Network != "" {
++		network = []string{options.Network}
++	}
++	return &probe{outbound.NewAdapter("test-probe", tag, network, nil), probeCount.Add(1)}, nil
++}
++
++func (p *probe) Start(stage adapter.StartStage, scope *adapter.Scope) error {
++	if stage == adapter.StartStateStart {
++		scope.Add(func() error {
++			probeRecord(p.id, "engine closed")
++			return nil
++		})
++	}
++	return nil
++}
++
++func (*probe) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
++	return nil, os.ErrInvalid
++}
++
++func (p *probe) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
++	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		return nil, err
++	}
++	probeRecord(p.id, "listen")
++	return &probeConn{conn, p.id}, nil
++}
++
++type probeConn struct {
++	net.PacketConn
++	probe int32
++}
++
++// The engine addresses packets with its own address type; a plain socket wants a UDP address.
++func (c *probeConn) WriteTo(b []byte, addr net.Addr) (int, error) {
++	if socksaddr, ok := addr.(M.Socksaddr); ok {
++		addr = socksaddr.UDPAddr()
++	}
++	return c.PacketConn.WriteTo(b, addr)
++}
++
++func (c *probeConn) ReadFrom(b []byte) (int, net.Addr, error) {
++	probeRecord(c.probe, "reading")
++	n, addr, err := c.PacketConn.ReadFrom(b)
++	if err != nil && !os.IsTimeout(err) {
++		time.Sleep(probeUnwind)
++		probeRecord(c.probe, "read returned")
++	}
++	return n, addr, err
++}
++
++// A UDP server that never answers; it counts the requests it got.
++func silentSTUNServer(t *testing.T) (addr string, requests *atomic.Int32) {
++	t.Helper()
++	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = conn.Close() })
++	requests = new(atomic.Int32)
++	go func() {
++		buf := make([]byte, 1500)
++		for {
++			if _, _, err := conn.ReadFrom(buf); err != nil {
++				return
++			}
++			requests.Add(1)
++		}
++	}()
++	return conn.LocalAddr().String(), requests
++}
++
++// A stream whose client does not read: Send waits until the client leaves, as gRPC's does once its window is full.
++type stuckStream[Res any] struct {
++	testStream[Res]
++	entered chan struct{}
++	once    sync.Once
++}
++
++func (s *stuckStream[Res]) Send(*Res) error {
++	s.once.Do(func() { close(s.entered) })
++	<-s.ctx.Done()
++	return s.ctx.Err()
++}
++
++var closers = []struct {
++	name string
++	run  func(s *StartedService, config string) error
++}{
++	{"Stop", func(s *StartedService, _ string) error { return s.CloseService() }},
++	{"Reload", func(s *StartedService, config string) error { return s.StartOrReloadService(s.ctx, config, nil) }},
++}
++
++func waitFor(t *testing.T, ch <-chan struct{}, what string) {
++	t.Helper()
++	select {
++	case <-ch:
++	case <-time.After(waitLimit):
++		t.Fatal(what)
++	}
++}
++
++// A stop or reload arriving while a STUN test waits for an answer that never comes: the test is cut short at once
++// (not after its retries), the stop or reload takes well under the limit, the instance is closed only after the
++// call's read has returned, and the cancelled call sends nothing more.
++func TestSTUNInFlightIsCutShort(t *testing.T) {
++	for _, closer := range closers {
++		t.Run(closer.name, func(t *testing.T) {
++			resetProbes(t)
++			s, config := startTestService(t)
++			server, requests := silentSTUNServer(t)
++			callCtx, cancelCall := context.WithCancel(context.Background())
++			defer cancelCall()
++			callDone := make(chan error, 1)
++			go func() {
++				callDone <- s.StartSTUNTest(&STUNTestRequest{OutboundTag: "probe", Server: server}, stream[STUNTestProgress](callCtx))
++			}()
++			waitFor(t, probeReading, "the STUN test never started reading")
++			deadline := time.Now().Add(waitLimit)
++			for requests.Load() == 0 && time.Now().Before(deadline) {
++				time.Sleep(time.Millisecond)
++			}
++			if requests.Load() == 0 {
++				t.Fatal("the request never reached the server")
++			}
++
++			start := time.Now()
++			if err := closer.run(s, config); err != nil {
++				t.Fatal(err)
++			}
++			elapsed := time.Since(start)
++			t.Logf("%s took %v with a STUN test in flight", closer.name, elapsed)
++			if elapsed >= instanceUseLimit {
++				t.Fatalf("%s took %v, the limit is %v", closer.name, elapsed, instanceUseLimit)
++			}
++			select {
++			case <-callDone:
++			case <-time.After(time.Second):
++				t.Fatal("the STUN test did not return")
++			}
++			returned, closed := probeSaw(1, "read returned"), probeSaw(1, "engine closed")
++			if returned < 0 || closed < 0 {
++				t.Fatalf("read returned at %d, engine closed at %d: want both", returned, closed)
++			}
++			if closed < returned {
++				t.Fatal("the instance was closed while the call was still reading")
++			}
++			sent := requests.Load()
++			time.Sleep(1200 * time.Millisecond) // past the next two retransmit times
++			if later := requests.Load(); later != sent {
++				t.Fatalf("%d more requests after the call was cut short", later-sent)
++			}
++		})
++	}
++}
++
++// A call held past the limit by a client that does not read: the stop goes on at the limit, and the instance stays
++// open until that call ends, then closes. A reload cannot start the next instance before that (it needs the cache
++// file the old one holds), and finishes once the call ended.
++func TestCallPastTheLimitClosesLate(t *testing.T) {
++	saved := instanceUseLimit
++	instanceUseLimit = 300 * time.Millisecond
++	t.Cleanup(func() { instanceUseLimit = saved })
++	for _, closer := range closers {
++		t.Run(closer.name, func(t *testing.T) {
++			resetProbes(t)
++			s, config := startTestService(t)
++			server, requests := silentSTUNServer(t)
++			callCtx, cancelCall := context.WithCancel(context.Background())
++			defer cancelCall()
++			client := &stuckStream[STUNTestProgress]{testStream: stream[STUNTestProgress](callCtx), entered: make(chan struct{})}
++			callDone := make(chan error, 1)
++			go func() {
++				callDone <- s.StartSTUNTest(&STUNTestRequest{OutboundTag: "probe", Server: server}, client)
++			}()
++			waitFor(t, client.entered, "the STUN test never reported progress")
++
++			start := time.Now()
++			closerDone := make(chan error, 1)
++			go func() { closerDone <- closer.run(s, config) }()
++			if closer.name == "Stop" {
++				select {
++				case err := <-closerDone:
++					if err != nil {
++						t.Fatal(err)
++					}
++				case <-time.After(waitLimit):
++					t.Fatal("the stop did not go on at the limit")
++				}
++				elapsed := time.Since(start)
++				t.Logf("stop took %v with a limit of %v", elapsed, instanceUseLimit)
++				if elapsed < instanceUseLimit || elapsed > instanceUseLimit+time.Second {
++					t.Fatalf("stop took %v, want the limit %v", elapsed, instanceUseLimit)
++				}
++			} else {
++				time.Sleep(instanceUseLimit + 500*time.Millisecond)
++			}
++			if probeSaw(1, "engine closed") >= 0 {
++				t.Fatal("the instance was closed while a call still held it")
++			}
++
++			cancelCall()
++			select {
++			case <-callDone:
++			case <-time.After(waitLimit):
++				t.Fatal("the call did not return after its client left")
++			}
++			deadline := time.Now().Add(waitLimit)
++			for probeSaw(1, "engine closed") < 0 && time.Now().Before(deadline) {
++				time.Sleep(10 * time.Millisecond)
++			}
++			if probeSaw(1, "engine closed") < 0 {
++				t.Fatal("the instance was never closed after the call ended")
++			}
++			if closer.name == "Reload" {
++				select {
++				case err := <-closerDone:
++					if err != nil {
++						t.Fatal(err)
++					}
++				case <-time.After(waitLimit):
++					t.Fatal("the reload did not finish")
++				}
++			}
++			if n := requests.Load(); n != 0 {
++				t.Fatalf("%d requests sent by a call whose instance was stopping", n)
++			}
++		})
++	}
++}
++
++// A STUN test on an outbound that carries TCP only is refused before anything is sent.
++func TestSTUNRefusesOutboundWithoutUDP(t *testing.T) {
++	resetProbes(t)
++	s, _ := startTestService(t)
++	server, requests := silentSTUNServer(t)
++	err := s.StartSTUNTest(&STUNTestRequest{OutboundTag: "tcp-only", Server: server}, stream[STUNTestProgress](context.Background()))
++	if status.Code(err) != codes.FailedPrecondition {
++		t.Fatalf("want FailedPrecondition, got %v", err)
++	}
++	if probeSaw(2, "listen") >= 0 || requests.Load() != 0 {
++		t.Fatal("a socket was opened or a request sent")
++	}
++}
++
++// A call whose client already left gets no lease: no socket is opened, nothing is sent.
++func TestCallFromGoneClientDoesNothing(t *testing.T) {
++	resetProbes(t)
++	s, _ := startTestService(t)
++	server, requests := silentSTUNServer(t)
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	// waitForStarted returns at once for a started service, whatever the context.
++	err := s.StartSTUNTest(&STUNTestRequest{OutboundTag: "probe", Server: server}, stream[STUNTestProgress](ctx))
++	if status.Code(err) != codes.Canceled {
++		t.Fatalf("want Canceled, got %v", err)
++	}
++	if probeSaw(1, "listen") >= 0 || requests.Load() != 0 {
++		t.Fatal("a socket was opened or a request sent")
++	}
++}
 diff --git a/daemon/instance_race_test.go b/daemon/instance_race_test.go
 new file mode 100644
-index 0000000..664f416
+index 0000000..894eb38
 --- /dev/null
 +++ b/daemon/instance_race_test.go
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,367 @@
 +package daemon
 +
 +import (
@@ -183,8 +692,12 @@ index 0000000..664f416
 +	config, err := json.Marshal(map[string]any{
 +		"log":          map[string]any{"disabled": true},
 +		"experimental": map[string]any{"cache_file": map[string]any{"path": filepath.Join(t.TempDir(), "cache.db")}},
-+		"outbounds":    []any{map[string]any{"type": "direct", "tag": "direct"}},
-+		"services":     []any{map[string]any{"type": "test-gate", "tag": "gate"}},
++		"outbounds": []any{
++			map[string]any{"type": "direct", "tag": "direct"},
++			map[string]any{"type": "test-probe", "tag": "probe"},
++			map[string]any{"type": "test-probe", "tag": "tcp-only", "network": "tcp"},
++		},
++		"services": []any{map[string]any{"type": "test-gate", "tag": "gate"}},
 +	})
 +	if err != nil {
 +		t.Fatal(err)
@@ -198,6 +711,7 @@ index 0000000..664f416
 +	// The include package imports this one, so the test registers just what its configuration uses.
 +	outbounds := outbound.NewRegistry()
 +	direct.RegisterOutbound(outbounds)
++	outbound.Register[probeOptions](outbounds, "test-probe", newProbe)
 +	transports := dns.NewTransportRegistry()
 +	local.RegisterTransport(transports)
 +	services := service.NewRegistry()
@@ -450,75 +964,140 @@ index 0000000..664f416
 +	}
 +}
 diff --git a/daemon/started_service.go b/daemon/started_service.go
-index 2a9983c..3e4c155 100644
+index 2a9983c..ad503d3 100644
 --- a/daemon/started_service.go
 +++ b/daemon/started_service.go
-@@ -75,6 +75,11 @@ type StartedService struct {
+@@ -75,6 +75,9 @@ type StartedService struct {
  	clashModeObserver       *observable.Observer[struct{}]
  	notificationSubscriber  *observable.Subscriber[*NotificationEvent]
  	notificationObserver    *observable.Observer[*NotificationEvent]
 +
-+	// Unbraid: handlers hold instanceUse for reading while they use the instance (see leaseInstance).
-+	instanceUse       sync.RWMutex
-+	instanceUseCtx    context.Context
-+	instanceUseCancel context.CancelFunc
++	// Unbraid: the calls using the running instance (see leaseInstance); nil unless it is started.
++	instanceLeases *instanceLeases
  }
  
  type ServiceOptions struct {
-@@ -206,6 +211,66 @@ func (s *StartedService) waitForStarted(ctx context.Context) error {
+@@ -206,6 +209,133 @@ func (s *StartedService) waitForStarted(ctx context.Context) error {
  	}
  }
  
 +// Unbraid: waitForStarted reports that the service started, but a reload or a stop can land before the handler reads
 +// the instance, leaving it nil (or the next one, not started yet), and it can close the instance while the handler
 +// still uses it. A panic in a handler ends the whole process, and the VPN with it. So a handler takes a lease: the
-+// instance is read under the lock and refused unless it is started, and a reload or stop waits for every lease to
-+// end before it closes the instance. The lease's context ends as soon as the reload or stop begins, so a long call
-+// (a test, a ping, a request to a server) returns early instead of holding the stop up. Call release once the
-+// handler no longer uses the instance; calling it again does nothing.
++// instance is read under the lock and refused unless it is started, and the instance is closed only after every
++// lease on it has ended. The lease's context ends as soon as a reload or stop begins (or the client leaves), and the
++// work done under a lease waits on the network only through that context (a STUN test closes its socket when it
++// ends), so the call returns at once instead of holding the stop up. A call whose client has already left gets no
++// lease, so it never starts its work. Call release once the handler no longer uses the instance; calling it again
++// does nothing.
 +func (s *StartedService) leaseInstance(ctx context.Context) (instance *Instance, leaseCtx context.Context, release func(), err error) {
 +	beforeInstanceRead()
++	if ctx.Err() != nil {
++		return nil, nil, nil, status.FromContextError(ctx.Err()).Err()
++	}
 +	s.serviceAccess.RLock()
-+	if s.instance == nil || s.serviceStatus == nil || s.serviceStatus.Status != ServiceStatus_STARTED || s.instanceUseCtx == nil {
++	leases := s.instanceLeases
++	if s.instance == nil || s.serviceStatus == nil || s.serviceStatus.Status != ServiceStatus_STARTED || leases == nil {
 +		s.serviceAccess.RUnlock()
 +		return nil, nil, nil, status.Error(codes.Unavailable, "service not started")
 +	}
-+	// This never waits: a reload or stop waits for leases only after it took the instance away under the write lock.
-+	s.instanceUse.RLock()
++	// A reload or stop ends the leases only after it took them away under the write lock, so this one counts.
++	leases.take()
 +	instance = s.instance
 +	leaseCtx, cancel := context.WithCancel(ctx)
-+	stop := context.AfterFunc(s.instanceUseCtx, cancel)
++	stop := context.AfterFunc(leases.ctx, cancel)
 +	s.serviceAccess.RUnlock()
 +	var once sync.Once
 +	release = func() {
 +		once.Do(func() {
 +			stop()
 +			cancel()
-+			s.instanceUse.RUnlock()
++			leases.give()
 +		})
 +	}
 +	instanceLeased()
 +	return instance, leaseCtx, release, nil
 +}
 +
-+// takeInstanceUse detaches the lease context of the instance being taken away. Call with serviceAccess held.
-+func (s *StartedService) takeInstanceUse() context.CancelFunc {
-+	cancel := s.instanceUseCancel
-+	s.instanceUseCtx, s.instanceUseCancel = nil, nil
-+	return cancel
++// Unbraid: how long a reload or stop waits for the calls still using the instance it takes away. Their contexts end
++// first and everything they wait on ends with them, so they return within milliseconds. Past this limit (only a
++// client that stops reading its stream can hold a call that long) the reload or stop goes on, and the instance is
++// closed by the last of those calls when it ends: never while one still uses it.
++var instanceUseLimit = 2 * time.Second
++
++// instanceLeases counts the calls using one started instance.
++type instanceLeases struct {
++	ctx    context.Context
++	cancel context.CancelFunc
++	access sync.Mutex
++	held   int
++	taken  bool
++	idle   chan struct{} // closed once the instance was taken away and no call holds it
 +}
 +
-+// endInstanceUse ends the leases on an instance that was just taken away and waits for them, before it is closed.
-+// Call without serviceAccess held.
-+func (s *StartedService) endInstanceUse(cancel context.CancelFunc) {
-+	if cancel != nil {
-+		cancel()
++func newInstanceLeases() *instanceLeases {
++	ctx, cancel := context.WithCancel(context.Background())
++	return &instanceLeases{ctx: ctx, cancel: cancel, idle: make(chan struct{})}
++}
++
++func (l *instanceLeases) take() {
++	l.access.Lock()
++	l.held++
++	l.access.Unlock()
++}
++
++func (l *instanceLeases) give() {
++	l.access.Lock()
++	l.held--
++	if l.taken && l.held == 0 {
++		close(l.idle)
 +	}
-+	if !s.instanceUse.TryLock() {
++	l.access.Unlock()
++}
++
++// end cancels every lease and reports whether a call still holds one.
++func (l *instanceLeases) end() (busy bool) {
++	l.cancel()
++	l.access.Lock()
++	defer l.access.Unlock()
++	l.taken = true
++	if l.held == 0 {
++		close(l.idle)
++		return false
++	}
++	return true
++}
++
++// takeInstanceLeases detaches the leases of the instance being taken away. Call with serviceAccess held.
++func (s *StartedService) takeInstanceLeases() *instanceLeases {
++	leases := s.instanceLeases
++	s.instanceLeases = nil
++	return leases
++}
++
++// retireInstance closes an instance that was just taken away, after its leases ended: it waits for them up to
++// instanceUseLimit, and past that leaves the close to the last of them. Call without serviceAccess held.
++func (s *StartedService) retireInstance(instance *Instance, leases *instanceLeases) {
++	if leases != nil && leases.end() {
 +		instanceUseBusy()
-+		s.instanceUse.Lock()
++		timer := time.NewTimer(instanceUseLimit)
++		defer timer.Stop()
++		select {
++		case <-leases.idle:
++		case <-timer.C:
++			s.WriteMessage(log.LevelWarn, "a call still uses the stopped instance: it is closed when that call ends")
++			go func() {
++				<-leases.idle
++				if instance != nil {
++					_ = instance.Close()
++				}
++			}()
++			return
++		}
 +	}
-+	s.instanceUse.Unlock()
++	if instance != nil {
++		_ = instance.Close()
++	}
 +}
 +
 +// Unbraid: no-ops in the build. Tests replace them to land a reload or a stop exactly before the instance is read,
@@ -532,35 +1111,44 @@ index 2a9983c..3e4c155 100644
  func (s *StartedService) followInstance(ctx context.Context, run func(ctx context.Context, instance *Instance) error) error {
  	statusSubscription, statusDone, err := s.serviceStatusObserver.Subscribe()
  	if err != nil {
-@@ -260,7 +325,9 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+@@ -260,13 +390,14 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
  	if oldInstance != nil {
  		s.instance = nil
  		s.updateStatus(ServiceStatus_STOPPING)
-+		endUse := s.takeInstanceUse()
++		leases := s.takeInstanceLeases()
  		s.serviceAccess.Unlock()
-+		s.endInstanceUse(endUse)
  		oomRecorder := service.FromContext[*oomkiller.Recorder](s.ctx)
  		if oomRecorder != nil {
  			oomRecorder.BeginReload()
-@@ -309,6 +376,7 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
+ 			defer oomRecorder.EndReload()
+ 		}
+-		_ = oldInstance.Close()
++		s.retireInstance(oldInstance, leases)
+ 		runtimeDebug.FreeOSMemory()
+ 		s.serviceAccess.Lock()
+ 	}
+@@ -309,6 +440,7 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
  		return err
  	}
  	s.startedAt = time.Now()
-+	s.instanceUseCtx, s.instanceUseCancel = context.WithCancel(context.Background())
++	s.instanceLeases = newInstanceLeases()
  	s.updateStatus(ServiceStatus_STARTED)
  	s.serviceAccess.Unlock()
  	runtimeDebug.FreeOSMemory()
-@@ -338,7 +406,9 @@ func (s *StartedService) CloseService() error {
+@@ -338,10 +470,9 @@ func (s *StartedService) CloseService() error {
  	}
  	s.instance = nil
  	s.updateStatus(ServiceStatus_STOPPING)
-+	endUse := s.takeInstanceUse()
++	leases := s.takeInstanceLeases()
  	s.serviceAccess.Unlock()
-+	s.endInstanceUse(endUse)
- 	if instance != nil {
- 		_ = instance.Close()
- 	}
-@@ -796,11 +866,14 @@ func (s *StartedService) SubscribeConnections(request *SubscribeConnectionsReque
+-	if instance != nil {
+-		_ = instance.Close()
+-	}
++	s.retireInstance(instance, leases)
+ 	s.serviceAccess.Lock()
+ 	s.startedAt = time.Time{}
+ 	s.updateStatus(ServiceStatus_IDLE)
+@@ -796,11 +927,14 @@ func (s *StartedService) SubscribeConnections(request *SubscribeConnectionsReque
  	if err != nil {
  		return err
  	}
@@ -579,7 +1167,7 @@ index 2a9983c..3e4c155 100644
  	if trafficManager == nil {
  		return status.Error(codes.Unimplemented, "connection tracking not available")
  	}
-@@ -1493,9 +1566,11 @@ func (s *StartedService) StartNetworkQualityTest(
+@@ -1493,9 +1627,11 @@ func (s *StartedService) StartNetworkQualityTest(
  	if err != nil {
  		return err
  	}
@@ -594,7 +1182,7 @@ index 2a9983c..3e4c155 100644
  
  	outbound, err := resolveOutbound(boxService, request.OutboundTag)
  	if err != nil {
-@@ -1517,11 +1592,13 @@ func (s *StartedService) StartNetworkQualityTest(
+@@ -1517,11 +1653,13 @@ func (s *StartedService) StartNetworkQualityTest(
  		NewMeasurementClient: measurementClientFactory,
  		Serial:               request.Serial,
  		MaxRuntime:           time.Duration(request.MaxRuntimeSeconds) * time.Second,
@@ -609,7 +1197,7 @@ index 2a9983c..3e4c155 100644
  	if nqErr != nil {
  		return server.Send(&NetworkQualityTestProgress{
  			IsFinal: true,
-@@ -1539,9 +1616,11 @@ func (s *StartedService) StartSTUNTest(
+@@ -1539,14 +1677,22 @@ func (s *StartedService) StartSTUNTest(
  	if err != nil {
  		return err
  	}
@@ -624,7 +1212,18 @@ index 2a9983c..3e4c155 100644
  
  	outbound, err := resolveOutbound(boxService, request.OutboundTag)
  	if err != nil {
-@@ -1554,11 +1633,12 @@ func (s *StartedService) StartSTUNTest(
+ 		return err
+ 	}
++	// Unbraid: the test sends UDP through the outbound, so refuse one that carries TCP only (a Shadowsocks route
++	// with a plugin): its UDP would go to the server past the plugin. This reads the instance the call holds, so a
++	// test that outlived a reload still sees the outbound as the new configuration defines it.
++	if !common.Contains(outbound.Network(), N.NetworkUDP) {
++		return status.Error(codes.FailedPrecondition, "outbound carries no UDP: "+outbound.Tag())
++	}
+ 
+ 	dnsServer, stunServer := splitSTUNServer(request.Server)
+ 	resolvedDialer := dialer.NewResolveDialer(boxService.ctx, outbound, true, dnsServer, adapter.DNSQueryOptions{}, 0)
+@@ -1554,11 +1700,12 @@ func (s *StartedService) StartSTUNTest(
  	result, stunErr := stun.Run(stun.Options{
  		Server:  stunServer,
  		Dialer:  resolvedDialer,
@@ -638,7 +1237,7 @@ index 2a9983c..3e4c155 100644
  	if stunErr != nil {
  		return server.Send(&STUNTestProgress{
  			IsFinal: true,
-@@ -1691,16 +1771,18 @@ func (s *StartedService) StartTailscalePing(
+@@ -1691,16 +1838,18 @@ func (s *StartedService) StartTailscalePing(
  	if err != nil {
  		return err
  	}
@@ -661,7 +1260,7 @@ index 2a9983c..3e4c155 100644
  		_ = server.Send(&TailscalePingResponse{
  			LatencyMs:      result.LatencyMs,
  			IsDirect:       result.IsDirect,
-@@ -1718,9 +1800,11 @@ func (s *StartedService) SetTailscaleExitNode(ctx context.Context, request *SetT
+@@ -1718,9 +1867,11 @@ func (s *StartedService) SetTailscaleExitNode(ctx context.Context, request *SetT
  	if err != nil {
  		return nil, err
  	}
@@ -676,7 +1275,7 @@ index 2a9983c..3e4c155 100644
  
  	endpoint, err := resolveTailscaleEndpoint(boxService, request.EndpointTag)
  	if err != nil {
-@@ -1742,9 +1826,11 @@ func (s *StartedService) TailscaleLogout(ctx context.Context, request *Tailscale
+@@ -1742,9 +1893,11 @@ func (s *StartedService) TailscaleLogout(ctx context.Context, request *Tailscale
  	if err != nil {
  		return nil, err
  	}
@@ -691,7 +1290,7 @@ index 2a9983c..3e4c155 100644
  
  	endpoint, err := resolveTailscaleEndpoint(boxService, request.EndpointTag)
  	if err != nil {
-@@ -1766,9 +1852,11 @@ func (s *StartedService) GetTailscaleCertificate(ctx context.Context, request *T
+@@ -1766,9 +1919,11 @@ func (s *StartedService) GetTailscaleCertificate(ctx context.Context, request *T
  	if err != nil {
  		return nil, err
  	}
@@ -706,7 +1305,7 @@ index 2a9983c..3e4c155 100644
  
  	endpoint, err := resolveTailscaleEndpoint(boxService, request.EndpointTag)
  	if err != nil {
-@@ -1861,9 +1949,11 @@ func (s *StartedService) SubmitOpenConnectAuthResponse(ctx context.Context, requ
+@@ -1861,9 +2016,11 @@ func (s *StartedService) SubmitOpenConnectAuthResponse(ctx context.Context, requ
  	if err != nil {
  		return nil, err
  	}
@@ -721,7 +1320,7 @@ index 2a9983c..3e4c155 100644
  
  	endpoint, err := resolveEndpoint[adapter.OpenConnectEndpoint](boxService, request.EndpointTag, C.TypeOpenConnect, "OpenConnect client")
  	if err != nil {
-@@ -1898,9 +1988,11 @@ func (s *StartedService) CancelOpenConnectAuthChallenge(ctx context.Context, req
+@@ -1898,9 +2055,11 @@ func (s *StartedService) CancelOpenConnectAuthChallenge(ctx context.Context, req
  	if err != nil {
  		return nil, err
  	}
@@ -736,7 +1335,7 @@ index 2a9983c..3e4c155 100644
  
  	endpoint, err := resolveEndpoint[adapter.OpenConnectEndpoint](boxService, request.EndpointTag, C.TypeOpenConnect, "OpenConnect client")
  	if err != nil {
-@@ -2001,9 +2093,11 @@ func (s *StartedService) SubmitOpenVPNChallengeResponse(ctx context.Context, req
+@@ -2001,9 +2160,11 @@ func (s *StartedService) SubmitOpenVPNChallengeResponse(ctx context.Context, req
  	if err != nil {
  		return nil, err
  	}
@@ -751,7 +1350,7 @@ index 2a9983c..3e4c155 100644
  
  	endpoint, err := resolveEndpoint[adapter.OpenVPNEndpoint](boxService, request.EndpointTag, C.TypeOpenVPNClient, "OpenVPN client")
  	if err != nil {
-@@ -2025,9 +2119,11 @@ func (s *StartedService) CancelOpenVPNChallenge(ctx context.Context, request *Op
+@@ -2025,9 +2186,11 @@ func (s *StartedService) CancelOpenVPNChallenge(ctx context.Context, request *Op
  	if err != nil {
  		return nil, err
  	}
