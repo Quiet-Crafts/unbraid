@@ -276,7 +276,8 @@ fun GroupRow(
         leading?.invoke()
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(wordmarked(title), style = Type.body, color = titleColor)
-            sub?.let { Text(it, style = Type.caption, color = Ink.dim, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+            // Wraps in full: a row's description (a privacy note, what a switch does) is never cut short.
+            sub?.let { Text(it, style = Type.caption, color = Ink.dim) }
         }
         trailing?.invoke()
     }
