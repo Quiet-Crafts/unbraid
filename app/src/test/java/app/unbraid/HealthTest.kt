@@ -106,9 +106,9 @@ class HealthTest {
             clock += 10_000
         }
         // The first move after a minute of failures, then never sooner than each wait after the one before.
-        assertEquals(6, m.count)
+        assertTrue(m.count >= 6)
         assertTrue(Health.doesntWork(m))
-        assertEquals(Long.MAX_VALUE, m.hold)
+        assertTrue(m.hold < 7 * 60 * min) // still handled now and then, to check for a removed device
         assertEquals(5, movedAt.size)
         listOf(2 * min, 5 * min, 15 * min, 30 * min).forEachIndexed { i, wait -> assertTrue(movedAt[i + 1] - movedAt[i] >= wait) }
         assertTrue(movedAt.last() < 60 * min)
@@ -159,6 +159,33 @@ class HealthTest {
         assertTrue(Health.ends(Health.Moves(3, 0), listOf(true, true, true)))
         assertTrue(Health.ends(null, listOf(true, true, true)))
         assertFalse(Health.ends(Health.Moves(3, 0), listOf(true, false, true)))
+    }
+
+    /**
+     * Given up on and still failing, on the same network: never moved again, but its provider is still asked whether it
+     * removed this phone, at most once every [Health.COOLDOWN] while it stays dead.
+     */
+    @Test fun givenUpIsStillCheckedForARemovedDevice() {
+        val min = 60_000L
+        var clock = 0L
+        var m = Health.Moves()
+        var s = Health.Streak()
+        var moves = 0
+        val asked = mutableListOf<Long>() // the rounds whose move would ask the provider about this phone
+        while (clock < 6 * 60 * min) {
+            s = Health.next(s, ok = false, now = clock)
+            if (Health.dead(s, clock, m.hold)) {
+                val given = Health.doesntWork(m)
+                m = Health.moved(m, clock)
+                if (given || Health.doesntWork(m)) asked += clock else moves++
+                if (!Health.doesntWork(m)) s = Health.Streak() // only a real move restarts the engine and its checks
+            }
+            clock += 10_000
+        }
+        assertEquals(5, moves)
+        assertTrue(asked.size > 100)
+        asked.zipWithNext().forEach { (a, b) -> assertTrue(b - a >= Health.COOLDOWN) }
+        assertTrue(asked.zipWithNext().all { (a, b) -> b - a <= Health.COOLDOWN + 10_000 })
     }
 
     @Test fun routeEligibilityAndMovement() {

@@ -753,7 +753,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 val dead = byTag.filterKeys { it in deadTags }.values.flatten().filter { current.route(it)?.imported == false }
                 if (dead.isEmpty()) return@withLock null
                 val s = running ?: return@withLock null
-                // Given up on: still checked for a removed device, but neither moved nor port-stepped (each restarts every tunnel).
+                // Given up on: still checked for a removed device (each time its hold ends while dead), but neither moved nor
+                // port-stepped (each restarts every tunnel).
                 val moving = byTag.filterKeys { it in deadTags && it !in given }.values.flatten().filter { it in dead }
                 // A dead tunnel on Automatic also tries its provider's next port: a failed check can't tell a blocked port from a dead server.
                 val stepped = moving.mapNotNull { id -> s.route(id)?.loc?.provider?.takeIf { p -> (links[id] as? app.unbraid.data.WgLink)?.ports.orEmpty().size > 1 && s.opt(p, app.unbraid.data.PORT_OPT) == app.unbraid.data.AUTO } }.toSet()

@@ -99,11 +99,12 @@ object Health {
 
     /**
      * A dead tunnel handled at [now]. Each move waits the next of [BACKOFF] before another; the move after the last wait
-     * is judged as soon as it is dead again; dead after that too, it is never handled again on this network.
+     * is judged as soon as it is dead again; dead after that too, it is never moved again on this network ([doesntWork]),
+     * but still handled every [COOLDOWN] while dead, which only checks whether its provider removed this phone.
      */
     fun moved(m: Moves, now: Long): Moves {
         val count = m.count + 1
-        return Moves(count, when { count <= BACKOFF.size -> now + BACKOFF[count - 1]; count == BACKOFF.size + 1 -> now; else -> Long.MAX_VALUE })
+        return Moves(count, when { count <= BACKOFF.size -> now + BACKOFF[count - 1]; count == BACKOFF.size + 1 -> now; else -> now + COOLDOWN })
     }
 
     /** Moved after every wait and still dead: it doesn't work on this network, so it stays where it is. */
