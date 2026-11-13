@@ -188,6 +188,9 @@ data class Setup(
      * import replace its placeholder route. A file without it (older versions) reads as false: set up by its user.
      */
     val pristine: Boolean = false,
+    /** Apps a restore brought that weren't on this phone yet: they keep their route until [waitingUntil] (epoch ms), to be installed. */
+    val waiting: Set<String> = emptySet(),
+    val waitingUntil: Long = 0,
     /** Routes without apps connected only for a combined speed test; never saved. */
     @kotlinx.serialization.Transient val testing: Set<String> = emptySet(),
 ) {

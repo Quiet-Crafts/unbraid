@@ -95,8 +95,13 @@ private inline fun Setup.removing(gone: Set<String>, name: String, refused: (app
  * [s] without the choices of apps Android no longer knows ([known]: installed or archived), in the setup and every saved
  * profile: an uninstalled app must not keep a route (and a tunnel) alive, nor bring it back with a profile used later.
  */
-internal fun keepKnown(s: Setup, known: Set<String>) =
-    s.copy(apps = s.apps.filterKeys { it in known }, profiles = s.profiles.map { p -> p.copy(apps = p.apps.filterKeys { it in known }) })
+internal fun keepKnown(s: Setup, known: Set<String>, now: Long = System.currentTimeMillis()): Setup {
+    // Restored apps not installed yet keep their choice for a while; an installed one no longer waits.
+    val wait = if (now < s.waitingUntil) s.waiting - known else emptySet()
+    val keep = { p: String -> p in known || p in wait }
+    return s.copy(apps = s.apps.filterKeys(keep), profiles = s.profiles.map { p -> p.copy(apps = p.apps.filterKeys(keep)) },
+        waiting = wait, waitingUntil = if (wait.isEmpty()) 0 else s.waitingUntil)
+}
 
 /**
  * The apps Android still knows: [installed], plus those of [withArchived] (name to archived) that are archived. That

@@ -531,6 +531,14 @@ object Manual {
         return SsProfile(label, host, port, method, password, pluginName, opts)
     }
 
+    /** [p] as an ss:// link that [parseSs] reads back to [p] (given its name). Every byte but letters and digits is escaped. */
+    fun ssLink(p: SsProfile): String {
+        fun esc(v: String) = v.toByteArray().joinToString("") { b -> val c = b.toInt() and 0xff; if (c < 128 && c.toChar().isLetterOrDigit()) "${c.toChar()}" else "%%%02X".format(c) }
+        val host = if (':' in p.server) "[${p.server}]" else p.server
+        val plugin = p.plugin?.let { "/?plugin=" + esc(it + (p.pluginOpts?.let { o -> ";$o" } ?: "")) }.orEmpty()
+        return "ss://${esc("${p.method}:${p.password}")}@$host:${p.port}$plugin"
+    }
+
     /** A sing-box `shadowsocks` outbound for [p]. */
     fun ssOutbound(tag: String, p: SsProfile): JsonObject = buildJsonObject {
         put("type", "shadowsocks")

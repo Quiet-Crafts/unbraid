@@ -95,6 +95,16 @@ object WgConf {
         )
     }
 
+    /** [p] as a wg-quick config that [parse] reads back to [p] (its name aside). */
+    fun text(p: WgPeer) = buildString {
+        append("[Interface]\nPrivateKey = ${p.privateKey}\nAddress = ${p.address.joinToString(", ")}\n")
+        if (p.dns.isNotEmpty()) append("DNS = ${p.dns.joinToString(", ")}\n")
+        append("MTU = ${p.mtu}\n[Peer]\nPublicKey = ${p.publicKey}\n")
+        p.presharedKey?.let { append("PresharedKey = $it\n") }
+        append("Endpoint = ${p.endpoint}\nAllowedIPs = ${p.allowedIps.joinToString(", ")}\n")
+        p.keepalive?.let { append("PersistentKeepalive = $it\n") }
+    }
+
     /**
      * Throws unless [p] sends all IPv4 traffic through its peer, as a route (an app's exit) must: 0.0.0.0/0, or ranges
      * that together cover every address (0.0.0.0/1 and 128.0.0.0/1). Subnet-only profiles belong under Home.
