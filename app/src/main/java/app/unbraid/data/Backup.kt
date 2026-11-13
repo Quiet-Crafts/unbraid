@@ -139,7 +139,11 @@ object Backup {
 
     /** The plaintext: a format of its own, so the setup inside can change format with the app ([Setup.version]). */
     @Serializable
-    data class Contents(val format: Int = CONTENTS, val app: String = "", val created: Long = 0, val setup: Setup)
+    data class Contents(
+        val format: Int = CONTENTS, val app: String = "", val created: Long = 0, val setup: Setup,
+        /** False: saved without own servers' keys and passwords and without the home WireGuard peer ([contents]). */
+        val keys: Boolean = true,
+    )
 
     const val CONTENTS = 1
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -147,12 +151,35 @@ object Backup {
     /**
      * What a backup of [s] holds: routes, app choices, favourites, profiles, own servers, the home WireGuard peer,
      * preferences and provider page settings. Never sign-ins (they live outside [Setup]), nor anything of Tailscale
-     * (its auth key, server and subnets belong to this phone's sign-in), nor the statistics consent.
+     * (its auth key, server and subnets belong to this phone's sign-in), nor the statistics consent. Without [keys], own
+     * servers and the routes through them keep only what isn't secret ([withoutSecrets]), and the home peer is left out.
      */
-    fun contents(s: Setup) = s.copy(home = Home(wg = s.home.wg), prefs = s.prefs.copy(stats = false), pristine = false,
-        waiting = emptySet(), waitingUntil = 0, version = VERSION, testing = emptySet())
+    fun contents(s: Setup, keys: Boolean = true): Setup {
+        val c = s.copy(home = Home(wg = s.home.wg), prefs = s.prefs.copy(stats = false), pristine = false,
+            waiting = emptySet(), waitingUntil = 0, version = VERSION, testing = emptySet())
+        if (keys) return c
+        val linked = linked(c)
+        return linked.copy(home = Home(), servers = linked.servers.map { it.withoutSecrets() }, routes = linked.routes.map { it.withoutSecrets() })
+    }
 
-    fun export(s: Setup, app: String, now: Long) = json.encodeToString(Contents.serializer(), Contents(CONTENTS, app, now, contents(s))).toByteArray()
+    /** [s] with every imported route tied to an own server, so a route saved without keys has one to get them back through. */
+    private fun linked(s: Setup): Setup {
+        var servers = s.servers
+        val routes = s.routes.map { r ->
+            if (!r.imported || r.tsExit != null || servers.any { it.id == r.own }) return@map r
+            val o = servers.firstOrNull { it.wg == r.wg && it.ovpn == r.ovpn && it.ss == r.ss }
+                ?: OwnServer(generateSequence { "s" + java.util.UUID.randomUUID().toString().take(8) }.first { id -> servers.none { it.id == id } }, r.wg, r.ovpn, r.ss)
+                    .also { servers = servers + it }
+            r.copy(own = o.id)
+        }
+        return s.copy(routes = routes, servers = servers)
+    }
+
+    /** Whether [s] holds anything [contents] leaves out without keys: own servers, imported routes or a home peer. */
+    fun hasSecrets(s: Setup) = s.servers.isNotEmpty() || s.home.wg != null || s.routes.any { it.imported && it.tsExit == null }
+
+    fun export(s: Setup, app: String, now: Long, keys: Boolean = true) =
+        json.encodeToString(Contents.serializer(), Contents(CONTENTS, app, now, contents(s, keys), keys)).toByteArray()
 
     /** [plain] read and checked whole ([valid]); throws [Failed] (Newer, Invalid) and changes nothing. */
     fun read(plain: ByteArray): Contents {
@@ -180,14 +207,17 @@ object Backup {
         need(s.servers.all { ID.matches(it.id) } && s.servers.map { it.id }.toSet().size == s.servers.size, "an own server has a missing or repeated name")
         s.servers.forEach { sv ->
             need(listOfNotNull(sv.wg, sv.ovpn, sv.ss).size == 1, "an own server has no configuration")
-            server(sv.name, sv.wg, sv.ovpn, sv.ss)
+            if (sv.keyless) keyless(sv.name, sv.wg, sv.ovpn, sv.ss) else server(sv.name, sv.wg, sv.ovpn, sv.ss)
         }
         s.routes.forEach { r ->
             val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.tsExit).size
             need(n <= 1, "a route has more than one exit")
             if (n == 0) need(Providers.get(r.loc.provider) != null, "a route uses a provider this unbraid doesn't know")
             r.tsExit?.let { need(it.length <= 253 && it.none(Char::isISOControl), "a Tailscale route is damaged") }
-            server(r.name, r.wg, r.ovpn, r.ss)
+            // A route saved without keys gets them back only through its own server, which must be saved without them too.
+            val own = s.servers.firstOrNull { it.id == r.own }
+            need(r.keyless == (own?.keyless == true) && (!r.keyless || (n == 1 && r.tsExit == null)), "a route and its own server don't match")
+            if (r.keyless) keyless(r.name, r.wg, r.ovpn, r.ss) else server(r.name, r.wg, r.ovpn, r.ss)
         }
         s.home.wg?.let { server(it.name, it, null, null) }
         val ok = { id: String -> id == DIRECT || s.route(id) != null }
@@ -210,6 +240,19 @@ object Backup {
         return s.copy(routes = s.routes.map { r -> if (r.own != null && s.servers.none { it.id == r.own }) r.copy(own = null) else r })
     }
 
+    /** A server saved without keys holds nothing secret, and the rest of it is as an import would leave it. */
+    private fun keyless(name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?) {
+        val ok = plainName(name) && when {
+            wg != null -> wg.privateKey.isEmpty() && wg.presharedKey == null && wg.endpoint.length <= 300 && wg.publicKey.length <= 64 &&
+                wg.address.size <= 16 && wg.allowedIps.size <= 256 && wg.dns.size <= 16 && (wg.address + wg.allowedIps + wg.dns).all { it.length <= 64 && it.none(Char::isISOControl) }
+            ovpn != null -> ovpn == OvpnProfile(ovpn.name, "")
+            ss != null -> ss.password.isEmpty() && ss.pluginOpts == null && ss.server.length <= 253 && ss.method.length <= 64 && ss.port in 1..65535 &&
+                (ss.plugin?.length ?: 0) <= 64 && (ss.server + ss.method + ss.plugin.orEmpty()).none(Char::isISOControl)
+            else -> false
+        }
+        need(ok, "own server ${name.take(40)} is damaged")
+    }
+
     /** Checks an own server's config as an import would; its reason names the server, never a key or a password. */
     private fun server(name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?) {
         val why = runCatching {
@@ -221,6 +264,14 @@ object Backup {
     }
 }
 
+/** Own server [id], restored without keys, with [server]'s config and name, and every route through it unblocked. */
+fun Setup.refilled(id: String, server: OwnServer): Setup? {
+    if (servers.none { it.id == id && it.keyless }) return null
+    val sv = server.copy(id = id, keyless = false)
+    return copy(servers = servers.map { if (it.id == id) sv else it },
+        routes = routes.map { r -> if (r.own != id) r else r.copy(wg = sv.wg, ovpn = sv.ovpn, ss = sv.ss, keyless = false) })
+}
+
 /** Apps restored but not on this phone keep their route this long, to be installed meanwhile. */
 const val WAIT_MS = 30 * 86_400_000L
 
@@ -230,9 +281,15 @@ const val WAIT_MS = 30 * 86_400_000L
  * kept as a profile of that name (or that name and a number), with its routes and own servers: a route or server
  * whose name the backup uses for something else gets a new one. Null when there is no room for that profile.
  */
-fun Setup.restoredFrom(b: Setup, keepAs: String?, now: Long): Setup? {
+fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true): Setup? {
+    // Saved without keys: an own server this phone still has gets its config back here, and the home peer stays as it is.
+    val full = backup.servers.filter { it.keyless }.mapNotNull { k -> servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) }?.let { k.id to it } }.toMap()
+    val b = if (full.isEmpty()) backup else backup.copy(
+        servers = backup.servers.map { full[it.id] ?: it },
+        routes = backup.routes.map { x -> full[x.own]?.takeIf { x.keyless }?.let { x.copy(wg = it.wg, ovpn = it.ovpn, ss = it.ss, keyless = false) } ?: x },
+    )
     val pkgs = b.apps.keys + b.profiles.flatMap { it.apps.keys }
-    var r = b.copy(home = home.copy(wg = b.home.wg), prefs = b.prefs.copy(stats = prefs.stats), pristine = false, version = VERSION,
+    var r = b.copy(home = home.copy(wg = if (keys) b.home.wg else home.wg), prefs = b.prefs.copy(stats = prefs.stats), pristine = false, version = VERSION,
         waiting = pkgs, waitingUntil = if (pkgs.isEmpty()) 0 else now + WAIT_MS, testing = emptySet())
     if (keepAs == null || untouched) return r
     if (r.profiles.size >= MAX_PROFILES) return null

@@ -47,10 +47,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private const val KEYS_OFF = "Off: own servers are saved without keys or passwords, and home WireGuard is left out. On another phone, add each server's config again; until then its apps stay offline."
+private const val KEYS_ON = "The file holds your own servers' keys and passwords, so it needs a strong passphrase."
 private const val KEEP_NO_ROOM = "There's no room for another profile. Turn off keeping your current setup, or cancel."
 
 /** What a backup file holds, for the captions. */
-const val BACKUP_HOLDS = "Your routes, app choices, favourites, profiles, own servers with their keys and passwords, and your settings."
+const val BACKUP_HOLDS = "Your routes, app choices, favourites, profiles, own servers and your settings. Server keys and passwords only if you choose."
 const val BACKUP_LEAVES = "Provider sign-ins and Tailscale are left out: sign in again after restoring. Statistics stay on this phone."
 
 /**
@@ -65,6 +67,8 @@ class BackupFlow(private val ui: Ui) {
     var pass by mutableStateOf("")
     var pass2 by mutableStateOf("")
     var keep by mutableStateOf(true)
+    /** Save own servers' keys and passwords too; off unless the user turns it on. */
+    var keys by mutableStateOf(false)
     var busy by mutableStateOf(false)
         private set
     /** Why the last try failed (the sheet stays open), or what happened ([step] "done"). */
@@ -80,7 +84,7 @@ class BackupFlow(private val ui: Ui) {
     internal var pickOpen: () -> Unit = {}
     private val app get() = ui.getApplication<android.app.Application>()
 
-    fun close() { if (!busy) { step = null; pass = ""; pass2 = ""; file = null; opened = null; message = null; keep = true } }
+    fun close() { if (!busy) { step = null; pass = ""; pass2 = ""; file = null; opened = null; message = null; keep = true; keys = false } }
 
     fun startSave() { close(); step = "save" }
 
@@ -100,18 +104,21 @@ class BackupFlow(private val ui: Ui) {
             return
         }
         val p = pass
+        val setup = Unbraid.store.setup.value
+        val withKeys = keys
+        val left = !withKeys && Backup.hasSecrets(setup)
         busy = true
         ui.viewModelScope.launch {
             val r = withContext(Dispatchers.Default) {
                 runCatching {
-                    val plain = Backup.export(Unbraid.store.setup.value, BuildConfig.VERSION_NAME, System.currentTimeMillis())
+                    val plain = Backup.export(setup, BuildConfig.VERSION_NAME, System.currentTimeMillis(), withKeys)
                     try { Backup.seal(plain, p) } finally { plain.fill(0) }
                 }
             }
             val wrote = r.getOrNull()?.let { b -> withContext(Dispatchers.IO) { runCatching { app.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(b) } }.isSuccess } } == true
             if (!wrote) withContext(Dispatchers.IO) { runCatching { DocumentsContract.deleteDocument(app.contentResolver, uri) } }
             busy = false
-            finish(wrote, if (wrote) "Backup saved. Keep the file and your passphrase: without the passphrase nobody can open it, not even you."
+            finish(wrote, if (wrote) "Backup saved${if (left) " without server keys and passwords" else ""}. Keep the file and your passphrase: without the passphrase nobody can open it, not even you."
                 else (r.exceptionOrNull() as? Backup.Failed)?.message ?: "Couldn't save the backup there. Try another place.")
         }
     }
@@ -145,17 +152,20 @@ class BackupFlow(private val ui: Ui) {
     }
 
     /** Whether the setup here can be kept as a profile beside [opened]'s. */
-    fun canKeep(here: Setup) = opened?.let { !here.untouched && here.restoredFrom(it.setup, PREVIOUS, 0) != null } == true
+    fun canKeep(here: Setup) = opened?.let { !here.untouched && here.restoredFrom(it.setup, PREVIOUS, 0, it.keys) != null } == true
+
+    /** Own servers [opened] leaves without their config here: the ones this phone doesn't already have. */
+    fun needKeys(here: Setup) = opened?.let { c -> here.restoredFrom(c.setup, null, 0, c.keys)?.servers?.count { it.keyless } } ?: 0
 
     /** Replaces the setup with [opened]'s, all at once; the VPN, if on, reconnects with it. */
     fun apply() {
         val c = opened ?: return
         var target: Setup? = null
         val keepAs = PREVIOUS.takeIf { keep }
-        if (Unbraid.store.setup.value.restoredFrom(c.setup, keepAs, 0) == null) { finish(false, KEEP_NO_ROOM); return }
+        if (Unbraid.store.setup.value.restoredFrom(c.setup, keepAs, 0, c.keys) == null) { finish(false, KEEP_NO_ROOM); return }
         // Counted first: the running engine's setup is gone once the store changes, so a refused reload must stop the VPN.
         UnbraidVpn.restores.incrementAndGet()
-        val saved = Unbraid.store.update { s -> s.restoredFrom(c.setup, keepAs, System.currentTimeMillis())?.also { target = it } ?: s }
+        val saved = Unbraid.store.update { s -> s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)?.also { target = it } ?: s }
         val t = target
         if (t == null || Unbraid.store.setup.value != t) {
             finish(false, if (t == null) KEEP_NO_ROOM else "Couldn't restore: your settings are busy. Try again.")
@@ -167,6 +177,7 @@ class BackupFlow(private val ui: Ui) {
         finish(true, listOfNotNull(
             if (saved) "Settings restored." else "Settings restored, but they couldn't be saved yet. Keep unbraid open and try again from the notice.",
             if (kept) "Your current setup is kept as the profile ${t.profiles.last().name}." else null,
+            t.servers.filter { it.keyless }.takeIf { it.isNotEmpty() }?.let { "Add the config again for ${it.joinToString { s -> s.name }} in Settings, Providers & servers. Until then, ${if (it.size == 1) "its" else "their"} apps stay offline." },
             signIns(t)?.let { "Sign in to $it to use their routes." },
             "unbraid is reconnecting with them.".takeIf { UnbraidVpn.state.value.phase == VpnState.Phase.On },
         ).joinToString(" "))
@@ -206,15 +217,21 @@ private fun BackupSheet(ui: Ui, flow: BackupFlow) {
                     Text("Back up settings", style = Type.title)
                     Text(BACKUP_HOLDS, style = Type.sub)
                     Text(BACKUP_LEAVES, style = Type.caption, color = Ink.dim)
+                    val here by ui.setup.collectAsStateWithLifecycle()
+                    val secrets = Backup.hasSecrets(here)
+                    if (secrets) Switch("Include server keys and passwords", if (flow.keys) KEYS_ON else KEYS_OFF, flow.keys) { flow.keys = it }
                     DialogField(flow.pass, { flow.pass = it }, "Passphrase", secret = true)
                     DialogField(flow.pass2, { flow.pass2 = it }, "Passphrase again", secret = true)
+                    val weak = flow.pass.isNotEmpty() && Backup.strength(flow.pass).first == 0
                     if (flow.pass.isNotEmpty()) Backup.strength(flow.pass).let { (n, text) -> Text(text, style = Type.caption, color = if (n == 0) Ink.bad else Ink.dim) }
+                    val tooWeak = weak && flow.keys && secrets
+                    if (tooWeak) Text("With keys and passwords included, choose a stronger passphrase.", style = Type.caption, color = Ink.bad)
                     val differ = flow.pass2.isNotEmpty() && flow.pass != flow.pass2
                     if (differ) Text("The two passphrases are different.", style = Type.caption, color = Ink.bad)
                     Text("You need this passphrase to restore. unbraid can't recover it.", style = Type.caption, color = Ink.dim)
                     if (flow.busy) Text("Saving the backup. This takes a few seconds.", style = Type.caption, color = Ink.dim)
                     flow.message?.let { Text(it, style = Type.caption, color = Ink.bad) }
-                    Buttons(flow, "Save backup", enabled = flow.pass.isNotEmpty() && flow.pass == flow.pass2) { flow.chooseFile() }
+                    Buttons(flow, "Save backup", enabled = flow.pass.isNotEmpty() && flow.pass == flow.pass2 && !tooWeak) { flow.chooseFile() }
                 }
                 "open" -> {
                     Text("Restore settings", style = Type.title)
@@ -250,18 +267,25 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
     if (!here.untouched) Text("It replaces what is on this phone now: ${count(here.routes.size, "route")}, ${count(here.apps.size, "app choice")}, " +
         "${count(here.profiles.size, "profile")}, ${count(here.servers.size, "own server")}, your favourites and settings.", style = Type.sub)
     Text("Your provider sign-ins and Tailscale stay as they are." + (flow.signIns(b)?.let { " Routes on $it stay blocked until you sign in." } ?: ""), style = Type.caption, color = Ink.dim)
+    val missing = flow.needKeys(here)
+    if (missing > 0) Text("Saved without server keys: ${count(missing, "own server")} will need ${if (missing == 1) "its" else "their"} config added again. Until then, ${if (missing == 1) "its" else "their"} apps stay offline.", style = Type.caption, color = Ink.bad)
+    if (!c.keys && here.home.wg != null) Text("Your home WireGuard stays as it is on this phone.", style = Type.caption, color = Ink.dim)
     if (vpn.phase == VpnState.Phase.On) Text("unbraid is connected. It reconnects with the restored setup, and apps may be offline for a few seconds.", style = Type.caption, color = Ink.dim)
-    if (canKeep) Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Ink.surfaceHigh).toggleable(flow.keep, role = Role.Switch) { flow.keep = it }.padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text("Keep my current setup", style = Type.body)
-            Text("Saved as the profile $PREVIOUS, to switch back later. Your other profiles here are replaced.", style = Type.caption, color = Ink.dim)
-        }
-        Toggle(flow.keep)
-    }
+    if (canKeep) Switch("Keep my current setup", "Saved as the profile $PREVIOUS, to switch back later. Your other profiles here are replaced.", flow.keep) { flow.keep = it }
     Buttons(flow, "Restore") { flow.apply() }
+}
+
+/** A switch row with what it means underneath, as on the confirm sheet. */
+@Composable
+private fun Switch(title: String, sub: String, on: Boolean, set: (Boolean) -> Unit) = Row(
+    Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Ink.surfaceHigh).toggleable(on, role = Role.Switch, onValueChange = set).padding(16.dp),
+    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+) {
+    Column(Modifier.weight(1f)) {
+        Text(title, style = Type.body)
+        Text(sub, style = Type.caption, color = Ink.dim)
+    }
+    Toggle(on)
 }
 
 private fun count(n: Int, what: String) = "$n ${if (n == 1) what else what + "s"}"

@@ -25,6 +25,7 @@ import app.unbraid.data.Http
 import app.unbraid.data.Location
 import app.unbraid.data.Manual
 import app.unbraid.data.OwnServer
+import app.unbraid.data.refilled
 import app.unbraid.data.favKey
 import app.unbraid.data.ident
 import app.unbraid.data.Nord
@@ -620,7 +621,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun setLocation(id: String, loc: Location, blocking: Boolean? = null) = guarded { s ->
         // A route's blocking choice belongs to its provider: another provider starts from its own page.
-        s.copy(routes = s.routes.map { if (it.id == id) it.copy(loc = loc, wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null, filter = it.filter.takeIf { _ -> it.loc.provider == loc.provider && !it.imported }) else it })
+        s.copy(routes = s.routes.map { if (it.id == id) it.copy(loc = loc, wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null, keyless = false, filter = it.filter.takeIf { _ -> it.loc.provider == loc.provider && !it.imported }) else it })
             .let { n -> if (blocking == null) n else n.blocking(id, blocking) }
     }
 
@@ -703,9 +704,20 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun useServer(target: String, s: OwnServer): String {
         val reuse = setup.value.takeIf { it.route(target) == null }?.serverRoute(s, draft)
-            ?: return addImported(target) { it.copy(wg = s.wg, ovpn = s.ovpn, ss = s.ss, own = s.id) }
+            ?: return addImported(target) { it.copy(wg = s.wg, ovpn = s.ovpn, ss = s.ss, own = s.id, keyless = s.keyless) }
         if (target.startsWith("app:")) assign(target.removePrefix("app:"), reuse) else if (target.isEmpty()) keep(reuse)
         return reuse
+    }
+
+    /**
+     * Gives saved server [id], restored without keys, the config [server] the user imported again (named as the prompt left it), and
+     * unblocks every route through it. False if it is gone, already has its config, or the write failed.
+     */
+    fun refillServer(id: String, server: OwnServer): Boolean {
+        var done = false
+        val saved = store.update { s -> s.refilled(id, server)?.also { done = true } ?: s }
+        if (!done) throw IllegalStateException("That server already has its config, or was removed.")
+        return saved
     }
 
     /** Renames a saved server and every route using it. */
@@ -741,7 +753,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun addImported(target: String, source: (Route) -> Route): String {
         val id = target.takeIf { setup.value.route(it) != null } ?: newId()
         store.edit { s ->
-            val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null) ?: Route(id, hue = nextHue(s))
+            val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null, keyless = false) ?: Route(id, hue = nextHue(s))
             s.imported(id, source(blank), alone = store.accounts.value.isEmpty() && draft == null)
         }
         if (target.startsWith("app:")) assign(target.removePrefix("app:"), id)

@@ -18,6 +18,9 @@ object LinkPicker {
     /** An offline pick's route that needs its provider for a tunnel. */
     class Waiting : Fail("waiting for a server")
 
+    /** A route restored without its keys: blocked, never retried, until its own server gets its config again. */
+    class KeyLeftOut(name: String) : AuthException("Add the config for $name again in Settings, Providers & servers")
+
     /** [blocked]: routes that got no tunnel, with why; their apps are blocked until one is found ([Compiler.Input.blocked]). */
     class Result(val links: Map<String, Link>, val remember: Map<String, Link>, val blocked: Map<String, Exception> = emptyMap())
 
@@ -55,6 +58,8 @@ object LinkPicker {
         val blocked = linkedMapOf<String, Exception>()
         for (r in setup.activeRoutes) {
             refused[r.id]?.let { blocked[r.id] = it; continue }
+            // Also a route given a server still waiting for its config, however it got there.
+            if (r.keyless || setup.servers.any { it.id == r.own && it.keyless }) { blocked[r.id] = KeyLeftOut(r.name); continue }
             val link = try { when {
                 r.wg != null -> WgLink(Server(r.wg.name, r.wg.endpoint.substringBeforeLast(':'), "", r.wg.publicKey, 0), r.wg)
                 r.ovpn != null -> OvpnLink(Server(r.ovpn.name, r.ovpn.name, "", "", 0), r.ovpn)

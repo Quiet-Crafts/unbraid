@@ -75,6 +75,8 @@ data class Route(
     val own: String? = null,
     /** Whether unbraid checks that this own server still reaches the internet; null follows the config. */
     val checkInternet: Boolean? = null,
+    /** Restored from a backup saved without keys: blocked until its own server gets its config again ([OwnServer.keyless]). */
+    val keyless: Boolean = false,
 ) {
     val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: tsName ?: tsExit ?: loc.country ?: "Fastest"
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OV"; ss != null -> "SS"; tsExit != null -> "TS"; else -> loc.code }
@@ -116,11 +118,26 @@ data class Prefs(
 
 /** One of the user's own servers, added in Settings and picked for any route (which keeps a copy of the config). */
 @Serializable
-data class OwnServer(val id: String, val wg: WgPeer? = null, val ovpn: OvpnProfile? = null, val ss: SsProfile? = null) {
+data class OwnServer(
+    val id: String, val wg: WgPeer? = null, val ovpn: OvpnProfile? = null, val ss: SsProfile? = null,
+    /** Restored from a backup saved without keys ([withoutSecrets]): its routes are blocked until the config is added again. */
+    val keyless: Boolean = false,
+) {
     val name get() = wg?.name ?: ovpn?.name ?: ss?.name.orEmpty()
     val kind get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; else -> "Shadowsocks" }
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OVPN"; else -> "SS" }
+    /** The same server as [o] by what can be told without keys: kind, name and, where known, address and peer key. */
+    fun sameAs(o: OwnServer) = kind == o.kind && name == o.name && (wg == null || (wg.endpoint == o.wg?.endpoint && wg.publicKey == o.wg.publicKey)) &&
+        (ss == null || (ss.server == o.ss?.server && ss.port == o.ss.port && ss.method == o.ss.method))
 }
+
+/** [wg]'s private and preshared keys left out. */
+fun WgPeer.withoutSecrets() = copy(privateKey = "", presharedKey = null)
+/** An OpenVPN profile holds its keys inside the config: only the name stays. */
+fun OvpnProfile.withoutSecrets() = OvpnProfile(name, "")
+fun SsProfile.withoutSecrets() = copy(password = "", pluginOpts = null)
+fun OwnServer.withoutSecrets() = copy(wg = wg?.withoutSecrets(), ovpn = ovpn?.withoutSecrets(), ss = ss?.withoutSecrets(), keyless = true)
+fun Route.withoutSecrets() = if (!imported || tsExit != null) this else copy(wg = wg?.withoutSecrets(), ovpn = ovpn?.withoutSecrets(), ss = ss?.withoutSecrets(), keyless = true)
 
 /**
  * A saved setup: a default exit and the apps' chosen routes. An app with an entry in [apps] chose that route, also when it

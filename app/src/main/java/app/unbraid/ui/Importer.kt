@@ -52,6 +52,8 @@ class ImportDraft {
     /** What the file picker was opened for, so a result that arrives after rotation is read the same way. */
     var kind = "any"
     var prefix: String? = null
+    /** The own server, restored without keys, that this import gives its config back to; null = a new server. */
+    var refill: String? = null
     /** Counts [clear]s: a parse started before the prompt was closed or replaced finds it changed and is dropped. */
     var generation = 0
         private set
@@ -86,19 +88,26 @@ class Importer(
     private var pending: Job? = null
 
     /** Opens the file picker. [kind] is "wg", "ovpn" or "any"; [prefix] names the route "<prefix> · <file>". */
-    fun file(kind: String = "any", prefix: String? = null) {
-        error = null; draft.kind = kind; draft.prefix = prefix
+    fun file(kind: String = "any", prefix: String? = null, refill: String? = null) {
+        error = null; draft.kind = kind; draft.prefix = prefix; draft.refill = refill
         launcher()
     }
 
-    fun shadowsocks() { error = null; draft.clear(); draft.link = "" }
+    fun shadowsocks(refill: String? = null) {
+        error = null; draft.clear(); draft.refill = refill
+        draft.name = refill?.let { id -> ui.setup.value.servers.firstOrNull { it.id == id }?.name }.orEmpty()
+        draft.link = ""
+    }
+
+    /** Saves [server]: as the config of the server being given its keys back ([ImportDraft.refill]), else as a new one. */
+    private fun save(server: OwnServer) = draft.refill?.let { ui.refillServer(it, server) } ?: ui.importServer(target, server)
 
     /** The name typed in the open prompt, or [fallback] when it was left empty. */
     private fun named(fallback: String) = Manual.cleanName(draft.name, 40).ifEmpty { fallback }
 
     internal fun picked(uri: Uri?) {
         if (uri == null) return
-        val kind = draft.kind; val prefix = draft.prefix // as the picker was opened, whatever is opened meanwhile
+        val kind = draft.kind; val prefix = draft.prefix; val refill = draft.refill // as the picker was opened, whatever is opened meanwhile
         scope.launch {
             // A backup picked here is restored, not imported.
             if (withContext(Dispatchers.IO) { runCatching { context.contentResolver.openInputStream(uri)?.use { app.unbraid.data.Backup.looksLike(it.readNBytes(32)) } }.getOrNull() } == true) {
@@ -106,8 +115,9 @@ class Importer(
             }
             val (text, file) = withContext(Dispatchers.IO) { read(uri) }
             if (text == null) { error = "Couldn't read that file. Config files must be under 64 KB."; return@launch }
-            val name = prefix?.let { "$it · $file" } ?: file
-            draft.clear(); draft.name = name
+            // Giving a restored server its config back keeps the name it has.
+            val name = refill?.let { id -> ui.setup.value.servers.firstOrNull { it.id == id }?.name } ?: prefix?.let { "$it · $file" } ?: file
+            draft.clear(); draft.name = name; draft.refill = refill
             // A broken config fails here, before the user is asked to name it. Parsing runs off the main thread; a later
             // pick or prompt opened meanwhile wins.
             if (kind == "wg" || (kind == "any" && text.contains("[Interface]", ignoreCase = true))) {
@@ -162,20 +172,20 @@ class Importer(
     // The prompt's fields are read here, on the main thread, before the parse runs elsewhere.
     private fun wg(text: String) {
         val n = named("WireGuard")
-        attempt(listOf(text), { WgConf.parse(text, n) }) { p -> ui.importServer(target, OwnServer("", wg = p)) }
+        attempt(listOf(text), { WgConf.parse(text, n) }) { p -> save(OwnServer("", wg = p)) }
     }
 
     private fun importOvpn(text: String, name: String) {
         val n = named(name); val user = draft.user.trim(); val pass = draft.pass
         attempt(listOf(text, pass), { Manual.parseOvpn(text, n, user, pass) }) { p ->
-            if (accepted(Manual.weakness(p))) ui.importServer(target, OwnServer("", ovpn = p)) else null
+            if (accepted(Manual.weakness(p))) save(OwnServer("", ovpn = p)) else null
         }
     }
 
     private fun importSs(link: String) {
         val typed = Manual.cleanName(draft.name, 40)
         attempt(listOf(link), { Manual.parseSs(link.trim()).let { it.copy(name = typed.ifEmpty { it.name.ifBlank { it.server } }) } }) { p ->
-            if (accepted(Manual.weakness(p))) ui.importServer(target, OwnServer("", ss = p)) else null
+            if (accepted(Manual.weakness(p))) save(OwnServer("", ss = p)) else null
         }
     }
 

@@ -19,7 +19,10 @@ import app.unbraid.data.VERSION
 import app.unbraid.data.WAIT_MS
 import app.unbraid.data.WgConf
 import app.unbraid.data.newSetup
+import app.unbraid.data.Providers
+import app.unbraid.data.refilled
 import app.unbraid.data.restoredFrom
+import app.unbraid.vpn.LinkPicker
 import app.unbraid.ui.keepKnown
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -286,5 +289,65 @@ class BackupTest {
             val p = ss.copy(password = pw, pluginOpts = "obfs=tls;obfs-host=$it.example")
             assertEquals(pw, p, Manual.parseSs(Manual.ssLink(p), p.name))
         }
+    }
+
+    @Test fun withoutKeysNoSecretIsInTheFile() {
+        val loose = full().let { it.copy(routes = it.routes + Route("w2", wg = wg.copy(name = "Loose"))) }
+        val plain = Backup.export(loose, "", 0, keys = false)
+        val text = plain.toString(Charsets.UTF_8)
+        listOf(key, "user-secret", "pass-secret", "p@ss+w rd", "example.com", "BEGIN CERTIFICATE", "tskey-auth-SECRET").forEach { assertFalse(it, text.contains(it)) }
+        val c = Backup.read(plain)
+        assertFalse(c.keys)
+        assertTrue(c.setup.servers.all { it.keyless })
+        assertEquals(listOf("w1", "o1", "x1", "w2"), c.setup.routes.filter { it.keyless }.map { it.id })
+        assertNull(c.setup.home.wg)
+        // A route that had no own server gets one, to be given its config back through.
+        assertTrue(c.setup.servers.single { it.id == c.setup.route("w2")!!.own }.keyless)
+        // Their routes are blocked, never retried or run on the normal connection.
+        val used = c.setup.copy(apps = c.setup.apps + mapOf("org.example.d" to "o1", "org.example.e" to "x1", "org.example.f" to "w2"))
+        val p = LinkPicker.pick(used, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { Providers.get(it) }
+        listOf("w1", "o1", "x1", "w2").forEach { assertTrue(it, p.blocked[it] is LinkPicker.KeyLeftOut) }
+        // A route through a server still waiting for its config is blocked even if the route itself isn't marked.
+        val unmarked = used.copy(routes = used.routes.map { if (it.id == "w1") it.copy(keyless = false) else it })
+        assertTrue(LinkPicker.pick(unmarked, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { Providers.get(it) }.blocked["w1"] is LinkPicker.KeyLeftOut)
+        assertTrue(Backup.hasSecrets(full())); assertFalse(Backup.hasSecrets(newSetup()))
+        assertTrue(Backup.read(Backup.export(full(), "", 0)).keys)
+    }
+
+    @Test fun aServerSavedWithoutKeysWaitsForItsConfig() {
+        val b = Backup.read(Backup.export(full(), "", 0, keys = false))
+        val r = newSetup().restoredFrom(b.setup, null, 0, b.keys)!!
+        Backup.valid(r)
+        assertEquals(3, r.servers.count { it.keyless })
+        val back = r.refilled("s1", OwnServer("", wg = wg.copy(name = "Renamed")))!!
+        Backup.valid(back)
+        assertEquals(wg.copy(name = "Renamed"), back.servers.single { it.id == "s1" }.wg)
+        assertEquals(wg.copy(name = "Renamed"), back.route("w1")!!.wg)
+        assertFalse(back.route("w1")!!.keyless)
+        assertTrue(back.route("o1")!!.keyless)
+        assertNull(back.refilled("s1", OwnServer("", wg = wg)))
+        assertNull(back.refilled("gone", OwnServer("", wg = wg)))
+    }
+
+    @Test fun restoringWithoutKeysOnTheSamePhoneKeepsItsKeys() {
+        val here = full()
+        val b = Backup.read(Backup.export(here, "", 0, keys = false))
+        val r = here.restoredFrom(b.setup, null, 0, b.keys)!!
+        assertTrue(r.servers.none { it.keyless } && r.routes.none { it.keyless })
+        assertEquals(here.servers, r.servers)
+        assertEquals(here.route("w1"), r.route("w1"))
+        assertEquals(here.home.wg, r.home.wg)
+        Backup.valid(r)
+        // A server that changed since is not taken for the same one.
+        val moved = here.copy(servers = here.servers.map { if (it.id == "s1") it.copy(wg = wg.copy(endpoint = "203.0.113.9:51820")) else it })
+        assertEquals(listOf("s1"), moved.restoredFrom(b.setup, null, 0, b.keys)!!.servers.filter { it.keyless }.map { it.id })
+    }
+
+    @Test fun aFileSavedWithoutKeysMustHoldNone() {
+        val s = Backup.read(Backup.export(full(), "", 0, keys = false)).setup
+        assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(servers = s.servers.map { if (it.id == "s1") it.copy(wg = it.wg!!.copy(privateKey = key)) else it })) })
+        assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(servers = s.servers.map { if (it.id == "s2") it.copy(ovpn = ovpn) else it })) })
+        assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(routes = s.routes.map { if (it.id == "w1") it.copy(keyless = false) else it })) })
+        assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(routes = s.routes.map { if (it.id == "nl") it.copy(keyless = true) else it })) })
     }
 }

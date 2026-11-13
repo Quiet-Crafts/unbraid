@@ -369,7 +369,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 }.ifEmpty { listOf(Item("No provider yet", "Sign in to one with Add connection", null)) })
                 if (setup.servers.isNotEmpty()) group("Own servers", setup.servers.map { sv ->
                     val n = setup.routes.count { it.own == sv.id }
-                    Item(sv.name, "${sv.kind} · ${if (n == 0) "not used" else "used by $n ${if (n == 1) "route" else "routes"}"}", { dialog = "server:${sv.id}" }) { Chevron() }
+                    Item(sv.name, if (sv.keyless) "${sv.kind} · needs its config again" else "${sv.kind} · ${if (n == 0) "not used" else "used by $n ${if (n == 1) "route" else "routes"}"}", { dialog = "server:${sv.id}" }) { Chevron() }
                 })
                 item { Box(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Tonal("Add connection", Icons.add) { importer.error = null; dialog = "add" } } }
                 importer.error?.let { e -> item { Text(e, style = Type.caption, color = Ink.bad, modifier = Modifier.padding(start = 24.dp, end = Gutter)) } }
@@ -738,6 +738,10 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                     Prompt(s.name, "Save", { ui.renameServer(s.id, name); dialog = null }, { dialog = null }, enabled = name.isNotBlank()) {
                         Text("${s.kind}${if (used > 0) " · used by ${if (used == 1) "1 route" else "$used routes"}" else ""}", style = Type.sub)
                         DialogField(name, { name = it.take(40) }, "Name", "e.g. Home VPS")
+                        if (s.keyless) {
+                            Text("Restored from a backup saved without keys. Its apps stay offline until you add its config file or link again.", style = Type.caption, color = Ink.bad)
+                            Secondary("Add its config again", { dialog = null; if (s.ss != null) importer.shadowsocks(refill = s.id) else importer.file(if (s.wg != null) "wg" else "ovpn", refill = s.id) })
+                        }
                         ui.removeServerRefused(s.id).let { no ->
                             if (no == null) Secondary("Remove server", { dialog = "remove:${s.id}" }, color = Ink.bad)
                             else {
