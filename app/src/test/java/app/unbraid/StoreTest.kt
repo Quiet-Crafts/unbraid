@@ -630,6 +630,35 @@ class StoreTest {
         assertFalse(Store(dir) { key }.setup.value.pristine)
     }
 
+    /**
+     * The first import on a new install, in the order the import screen saves it (the server, then its route), makes the
+     * imported route the default and drops the placeholder. After Start fresh too. A setup read from a file keeps its own.
+     */
+    @Test fun firstImportBecomesTheDefault() {
+        val server = OwnServer("s1", WgPeer("VPS", "k", listOf("10.0.0.2/32"), "p", endpoint = "192.0.2.1:51820", allowedIps = listOf("0.0.0.0/0")))
+        val route = Route("r1", wg = server.wg, own = "s1")
+        fun Store.importFirst() {
+            assertTrue(update { it.copy(servers = it.servers + server) })
+            edit { it.imported("r1", route, alone = true) }
+        }
+        val fresh = Store(tmp.newFolder()) { key }.apply { importFirst() }.setup.value
+        assertEquals(listOf(route), fresh.routes)
+        assertEquals("r1", fresh.defaultRoute)
+        assertFalse(fresh.pristine)
+        // Start fresh begins like a new install.
+        val dir = tmp.newFolder().also(::saved)
+        File(dir, "setup.bin").writeText("garbage")
+        val reset = Store(dir) { key }.apply { assertTrue(startFresh()); importFirst() }.setup.value
+        assertEquals("r1", reset.defaultRoute)
+        assertEquals(listOf(route), reset.routes)
+        // An established setup (its file has no pristine flag) keeps its routes and its default.
+        val old = tmp.newFolder()
+        Store(old) { key }.update { it.copy(pristine = false) }
+        val kept = Store(old) { key }.apply { importFirst() }.setup.value
+        assertEquals(listOf("nl", "r1"), kept.routes.map { it.id })
+        assertEquals("nl", kept.defaultRoute)
+    }
+
     /** A catalogue counts as fresh for a day; one dated in the future (the clock was ahead) is refreshed. */
     @Test fun catalogueFromTheFutureIsNotFresh() {
         val dir = tmp.newFolder()

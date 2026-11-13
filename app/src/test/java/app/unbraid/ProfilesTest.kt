@@ -127,7 +127,8 @@ class ProfilesTest {
         assertEquals(true, n.copy(prefs = n.prefs.copy(stats = true)).after(n).pristine)
         assertEquals(true, n.copy(testing = setOf("nl")).after(n).pristine)
         assertEquals(false, n.copy(home = n.home.copy(tailscale = true)).after(n).pristine)
-        assertEquals(false, n.copy(servers = listOf(app.unbraid.data.OwnServer("s1"))).after(n).pristine)
+        // A saved server alone routes nothing: an import saves it before its route replaces the placeholder.
+        assertEquals(true, n.copy(servers = listOf(app.unbraid.data.OwnServer("s1"))).after(n).pristine)
         assertEquals(false, n.copy(defaultRoute = DIRECT).after(n).pristine)
     }
 

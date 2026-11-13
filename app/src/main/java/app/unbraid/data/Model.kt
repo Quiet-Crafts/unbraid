@@ -339,9 +339,12 @@ data class Setup(
     /** A new install's setup as it started ([pristine]): only the placeholder route, as the default, nothing chosen or saved. */
     val untouched get() = pristine && Setup().let { routes == it.routes && defaultRoute == it.defaultRoute } && apps.isEmpty() && profiles.isEmpty() && added.isEmpty()
 
-    /** This setup after a change from [old]: one that changes what the user sets up is no longer [pristine]. */
+    /**
+     * This setup after a change from [old]: one that changes what the user sets up is no longer [pristine]. A saved
+     * server alone routes nothing: an import saves it first, then gives it the route that replaces the placeholder.
+     */
     fun after(old: Setup) = if (!pristine || (routes == old.routes && defaultRoute == old.defaultRoute && apps == old.apps && profiles == old.profiles &&
-        added == old.added && profile == old.profile && servers == old.servers && home == old.home)) this else copy(pristine = false)
+        added == old.added && profile == old.profile && home == old.home)) this else copy(pristine = false)
 
     /**
      * Route [r] (id [id], new or replacing one) given an imported source. With no provider signed in ([alone]) a new
