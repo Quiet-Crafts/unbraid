@@ -140,6 +140,9 @@ class RedactTest {
             "PKCS#12 bundles aren't supported; use a .ovpn with inline <ca>, <cert> and <key> blocks",
             "The <key> block is empty or malformed",
             "The <tls-crypt-v2> block is empty or malformed",
+            "The <auth-user-pass> block is empty or malformed",
+            "tls-crypt-v2 must be inline (<tls-crypt-v2> block), not a file path",
+            "<connection> blocks aren't supported",
             "<extra-certs> needs a <cert> block",
             "That username or password has characters ExpressVPN's manual-configuration login doesn't use",
             "NordVPN didn't accept this token. Create a new one in your Nord Account under NordVPN, manual setup, and paste it here.",
@@ -148,7 +151,12 @@ class RedactTest {
         assertEquals("<key>[hidden] tail", Redact.clean("<key>\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n</key> tail"))
         assertEquals("<tls-auth>[hidden]", Redact.clean("<tls-auth> 6acef03f62675b4b1bbd03e53b187727"))
         assertEquals("<key>[hidden]", Redact.clean("<key>\nabc"))
-        assertEquals("both <key>, or neither; <key>[hidden]", Redact.clean("both <key>, or neither; <key> -----BEGIN PRIVATE KEY----- abc"))
+        // Only a whole message of the app's own keeps its tags: the words of one followed by anything else are no exemption.
+        assertEquals("both <key>[hidden]", Redact.clean("both <key>, or neither; <key> -----BEGIN PRIVATE KEY----- abc"))
+        assertEquals("<key>[hidden]", Redact.clean("<key> blocks\nrosebud"))
+        assertEquals("The <key>[hidden]", Redact.clean("The <key> block is empty or malformed\nrosebud"))
+        assertEquals("x <key>[hidden]", Redact.clean("x <key> block), not a file path rosebud"))
+        assertEquals("tls-auth must be inline (<key>[hidden]", Redact.clean("tls-auth must be inline (<key> block), not a file path"))
         // Unclosed blocks fail closed whatever follows: a CRLF line break, or a one-line login or static key.
         assertEquals("<key>[hidden]", Redact.clean("<key>\r\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC"))
         assertEquals("<tls-crypt>[hidden]", Redact.clean("<tls-crypt>\r\n6acef03f"))

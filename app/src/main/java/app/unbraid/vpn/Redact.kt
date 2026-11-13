@@ -24,10 +24,15 @@ object Redact {
     private val PEM_END = Regex("""-----END [^\n-]{1,60}-----""")
 
     /**
-     * The app's own messages name tags ("both <cert> and <key>, or neither", "the <key> block is empty"); these are
-     * the exact words that follow a tag there. After anything else an unclosed tag hides the rest of the text.
+     * The app's own messages that name OpenVPN blocks, each whole and exact: only a text that is one of them in full keeps
+     * its tags. Anywhere else an unclosed tag hides the rest of the text.
      */
-    private val PROSE = Regex("""(?:, or neither| block\), not a file path| blocks| block is empty or malformed)(?![A-Za-z0-9])""").toPattern()
+    private const val TAGS = "ca|cert|key|tls-auth|tls-crypt|tls-crypt-v2|dh|extra-certs|auth-user-pass|peer-fingerprint"
+    private val OWN = Regex(
+        """The profile needs both <cert> and <key>, or neither|PKCS#12 bundles aren't supported; use a \.ovpn with inline <ca>, <cert> and <key> blocks|""" +
+            """<connection> blocks aren't supported|<extra-certs> needs a <cert> block|The <(?:$TAGS)> block is empty or malformed|""" +
+            """The CA must be inline \(<ca> block\), not a file path|($TAGS) must be inline \(<\1> block\), not a file path""",
+    )
 
     /** The login part of a URL (`scheme://user:password@`), up to the last `@` of the address. */
     private val SCHEME = Regex("""(?i)(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,15}://""")
@@ -83,6 +88,7 @@ object Redact {
      * one pass.
      */
     private fun blocks(s: String): String {
+        if (s.length <= MAX && OWN.matches(s)) return s // one of the app's own messages, whole
         val out = StringBuilder()
         val found = HashMap<String, IntArray>() // closing tag -> [searched from, starts at (-1 none), ends at]
         fun close(name: String, from: Int): IntArray {
@@ -98,12 +104,6 @@ object Redact {
             val tag = m.groupValues[1]
             val body = m.range.last + 1
             val end = close(tag.lowercase(), body)[2]
-            val loginOrSecret = tag.equals("auth-user-pass", true) || tag.equals("secret", true)
-            if (end < 0 && tag.isNotEmpty() && !loginOrSecret && PROSE.matcher(s).region(body, s.length).lookingAt()) {
-                out.append(s, i, body) // a tag named in one of the app's own messages
-                i = body
-                continue
-            }
             out.append(s, i, m.range.first).append("<${tag.ifEmpty { "pem" }}>").append(HIDDEN)
             i = if (end < 0) s.length else end
         }
