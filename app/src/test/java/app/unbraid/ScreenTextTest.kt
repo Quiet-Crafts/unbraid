@@ -13,6 +13,9 @@ import app.unbraid.ui.pendingNote
 import app.unbraid.ui.importTarget
 import app.unbraid.ui.emptyApps
 import app.unbraid.ui.noLocations
+import app.unbraid.ui.routeWarning
+import app.unbraid.ui.missingAppsText
+import app.unbraid.ui.summary
 import app.unbraid.ui.Fetch
 import app.unbraid.data.PREVIOUS
 import app.unbraid.data.Profile
@@ -109,6 +112,22 @@ class ScreenTextTest {
         assertEquals("Loading locations…" to false, noLocations(false, Fetch.Loading, "Standard"))
         assertEquals("NordVPN didn't answer." to true, noLocations(false, Fetch.Failed("NordVPN didn't answer."), "Standard"))
         assertEquals("No country offers P2P right now. Choose another server type in Route options." to false, noLocations(true, null, "P2P"))
+    }
+
+    @Test fun routeCardWarnings() {
+        assertEquals("Doesn't work on this network", routeWarning(stalled = true, notAnswering = true))
+        assertEquals("Not answering", routeWarning(stalled = false, notAnswering = true))
+        assertEquals(null, routeWarning(stalled = false, notAnswering = false))
+        assertEquals("1 app uses a route that no longer exists, so it's offline. Choose a route for it.", missingAppsText(1))
+        assertEquals("3 apps use a route that no longer exists, so they're offline. Choose a route for them.", missingAppsText(3))
+    }
+
+    /** A profile's summary counts apps on other routes, not routes, and names a default that is gone. */
+    @Test fun profileSummaryCountsApps() {
+        assertEquals("Netherlands · 2 apps elsewhere", summary(setup, Profile("Work", "nl", setup.apps)))
+        assertEquals("United States · 1 app elsewhere", summary(setup, Profile("Work", "us", mapOf("a" to "us", "b" to "nl"))))
+        assertEquals("Direct · no apps elsewhere", summary(setup, Profile("Work", DIRECT)))
+        assertEquals("Default route no longer exists · no apps elsewhere", summary(setup, Profile("Work", "gone")))
     }
 
     @Test fun newDefaultSaysWhoMoves() {

@@ -69,6 +69,7 @@ private fun Choose(ui: Ui, importFor: String, onImported: (() -> Unit)?, onClose
     val importer = rememberImporter(ui, importFor) { onImported?.invoke() }
     val accounts by ui.accounts.collectAsStateWithLifecycle()
     val notice by ui.notice.collectAsStateWithLifecycle()
+    val setup by ui.setup.collectAsStateWithLifecycle()
     val providers = Providers.all.filter { it.id !in accounts }
     Screen(
         // First run greets with the logo; adding one later is an ordinary page with Close top-leading.
@@ -86,6 +87,10 @@ private fun Choose(ui: Ui, importFor: String, onImported: (() -> Unit)?, onClose
             Other("Tailscale only", "No VPN provider, just your tailnet") { ui.useTailscaleOnly() }.takeIf { onClose == null },
         )
         itemsIndexed(other) { i, o -> GroupRow(i, other.size, o.title, o.sub, onClick = o.go, trailing = { Chevron() }) }
+        // Signed out of every provider: routes set up before stay (their apps wait offline), nothing moves them by itself.
+        if (onClose == null && !setup.untouched && setup.routes.any { !it.imported }) item {
+            Caption("Your earlier routes stay. Apps on them are offline until you sign in again or choose other routes for them.")
+        }
         importer.error?.let { e -> item { Caption(e, color = Ink.bad) } }
         // For people without an account: the website lists providers (its links are marked when they may earn a commission).
         if (BuildConfig.SUPPORT_ASKS) {
