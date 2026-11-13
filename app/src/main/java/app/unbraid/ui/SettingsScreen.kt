@@ -483,8 +483,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                             Text(if (!running) "CONNECT TO CHECK" else "$done OF 2", style = Type.code, color = if (!running) Ink.dim else if (done == 2) Ink.good else Ink.accent)
                         }
                         Text("Two switches in Android keep apps offline whenever $APP isn't running. Android decides both; $APP can only open its page.", style = Type.body.copy(fontWeight = FontWeight.Normal), color = Ink.text)
-                        FlagRow(Icons.power, "Always-on VPN", "Starts $APP at boot and brings it back", vpn.alwaysOn.takeIf { running })
-                        FlagRow(Icons.block, "Block connections without VPN", "No internet without $APP", vpn.lockdown.takeIf { running })
+                        FlagRow(Icons.power, "Always-on VPN", "Starts $APP when the phone starts", vpn.alwaysOn.takeIf { running })
+                        FlagRow(Icons.block, "Block connections without VPN", "Apps can't go online without $APP", vpn.lockdown.takeIf { running })
                         Primary("Open Android VPN settings", vpnSettings)
                     }
                 }
@@ -588,7 +588,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     group(null, listOfNotNull(
                         Item("Updates", line, newer?.let { { context.openUrl(app.unbraid.data.Updates.DOWNLOAD) } },
                             trailing = newer?.let { { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } }).takeIf { updates.enabled },
-                        Item("Check for updates", "Once a day, asks unbraid.app for the newest version number. The site sees your IP address, like any visit.",
+                        Item("Check for updates", "Once a day, asks unbraid.app for the newest version number, over your normal connection: the site sees your own IP address, not your VPN's.",
                             { ui.setUpdateCheck(!updates.enabled) }, checked = updates.enabled) { Toggle(updates.enabled) },
                     ))
                 }
@@ -600,7 +600,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         jar == null || tips.isEmpty() -> Item("Free and open source", "Made by one person in spare time.")
                         else -> Item("Support $APP", if (thanked) "Thank you for the tip!" else "Free and made by one person. A tip keeps it going.")
                     },
-                    Item("Copy a report", "For bug reports. Leaves out keys, accounts, server addresses and app names.", { ui.copyReport() }),
+                    Item("Copy a report", "For bug reports: phone model, Android version, which providers and countries you use, app counts. No keys, accounts, addresses or app names.", { ui.copyReport() }),
                 ))
                 if (jar != null && tips.isNotEmpty()) item {
                     Row(Modifier.padding(horizontal = Gutter, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

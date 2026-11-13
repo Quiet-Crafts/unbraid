@@ -295,6 +295,7 @@ fun VpnDisclosure(agree: () -> Unit, dismiss: () -> Unit) = InfoSheet(
     SheetLine(Icons.dns, "Traffic goes to the exits you chose: VPN providers, your own servers or Tailscale.")
     SheetLine(Icons.direct, "Apps set to Direct and your local network use your normal connection.")
     SheetLine(Icons.block, "$APP has no servers and collects nothing.")
+    SheetLine(Icons.eyeOff, "$APP's own sign-ins, server lists and update check use your normal connection.")
     SheetLine(Icons.shield, "Until blocking is on in Android, apps use your normal connection whenever $APP is off.")
 }
 
@@ -324,9 +325,9 @@ fun LeakSheet(alwaysOn: Boolean, lockdown: Boolean, open: () -> Unit, later: () 
     if (alwaysOn && lockdown) return InfoSheet(
         Icons.checkCircle, "All set", "Leak-proof", "Done", done, done, good = true, later = null,
     ) {
-        Text("Nothing goes online without $APP now. To use the internet without it, turn blocking off in Android.", style = Type.sub.copy(fontSize = 15.sp, lineHeight = 22.sp), color = Ink.dim)
-        FlagRow(Icons.power, "Always-on VPN", "Starts $APP at boot and brings it back", true)
-        FlagRow(Icons.block, "Block connections without VPN", "No internet without $APP", true)
+        Text("Apps can't go online without $APP now. $APP's own sign-ins and server lists still use your normal connection. To go online without $APP, turn blocking off in Android.", style = Type.sub.copy(fontSize = 15.sp, lineHeight = 22.sp), color = Ink.dim)
+        FlagRow(Icons.power, "Always-on VPN", "Starts $APP when the phone starts", true)
+        FlagRow(Icons.block, "Block connections without VPN", "Apps can't go online without $APP", true)
     }
     InfoSheet(Icons.shield, "One more step", "Stay protected when $APP is off", "Open Android settings", open, later, actionIcon = Icons.external) {
         Text("Right now apps use your normal connection before $APP connects, while it's paused and if it stops. Android can block that.", style = Type.sub.copy(fontSize = 15.sp, lineHeight = 22.sp), color = Ink.dim)

@@ -154,7 +154,7 @@ private fun IconRows(rows: List<Pair<androidx.compose.ui.graphics.vector.ImageVe
 @Composable
 private fun UpdateFacts() = IconRows(listOf(
     Icons.clock to "When on, $APP checks unbraid.app for the newest version, about once a day.",
-    Icons.eyeOff to "No settings or browsing activity are sent. The site sees the IP address the request comes from.",
+    Icons.eyeOff to "No settings or browsing activity are sent. It uses your normal connection, so the site sees your own IP address.",
     Icons.sliders to "Change this any time in Settings, About & support.",
 ))
 
