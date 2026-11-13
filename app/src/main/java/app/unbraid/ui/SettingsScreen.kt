@@ -600,9 +600,10 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     group(null, listOfNotNull(
                         Item("Updates", line, newer?.let { { context.openUrl(app.unbraid.data.Updates.DOWNLOAD) } },
                             trailing = newer?.let { { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } }).takeIf { updates.enabled },
-                        Item("Check for updates", "Once a day, asks unbraid.app for the newest version number, over your normal connection: the site sees your own IP address, not your VPN's.",
+                        Item("Check for updates", "Once a day, asks unbraid.app for the newest version number",
                             { ui.setUpdateCheck(!updates.enabled) }, checked = updates.enabled) { Toggle(updates.enabled) },
                     ))
+                    caption("The check uses your normal connection, not your VPN, so the site sees your own IP address.")
                 }
                 group("Support", listOf(
                     when {
@@ -612,7 +613,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         jar == null || tips.isEmpty() -> Item("Free and open source", "Made by one person in spare time.")
                         else -> Item("Support $APP", if (thanked) "Thank you for the tip!" else "Free and made by one person. A tip keeps it going.")
                     },
-                    Item("Copy a report", "For bug reports: phone model, Android version, which providers and countries you use, app counts. No keys, accounts, addresses or app names.", { ui.copyReport() }),
+                    Item("Copy a report", "For bug reports. No keys, accounts, addresses or app names.", { ui.copyReport() }),
                 ))
                 if (jar != null && tips.isNotEmpty()) item {
                     Row(Modifier.padding(horizontal = Gutter, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -625,6 +626,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         }
                     }
                 }
+                caption("A report lists your phone model, Android version, the providers and countries you use, and app counts.")
             }
         }
     }

@@ -151,7 +151,7 @@ fun DialogField(value: String, onChange: (String) -> Unit, label: String, placeh
         placeholder = { Text(placeholder, style = Type.body.copy(fontFamily = Mono, fontWeight = FontWeight.Normal, fontSize = 13.sp)) },
         visualTransformation = if (secret && !visible) PasswordVisualTransformation() else VisualTransformation.None,
         trailingIcon = if (secret) {
-            { IconTap(if (visible) Icons.eyeOff else Icons.eye, if (visible) "Hide $label" else "Show $label", { visible = !visible }, size = 40.dp, tint = Ink.dim) }
+            { IconTap(if (visible) Icons.eyeOff else Icons.eye, if (visible) "Hide $label" else "Show $label", { visible = !visible }, size = 48.dp, tint = Ink.dim) }
         } else null,
         keyboardOptions = KeyboardOptions(keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text, autoCorrectEnabled = false),
         colors = inkFieldColors(),

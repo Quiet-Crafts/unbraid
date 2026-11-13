@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -188,14 +189,14 @@ fun TourOverlay(step: Int, appsShown: Boolean, back: () -> Unit, next: () -> Uni
             drawCircle(Ink.accent, 4f.px(), Offset(leaderX, from))
         }
         Column(
-            Modifier.offset { IntOffset(x.roundToInt(), y.roundToInt()) }.width(with(d) { noteW.toDp() }).onSizeChanged { noteH = it.height }
-                .clip(RoundedCornerShape(20.dp)).background(Ink.surfaceHigh).border(1.dp, Ink.surfaceTop, RoundedCornerShape(20.dp))
+            Modifier.offset { IntOffset(x.roundToInt(), y.roundToInt()) }.width(with(d) { noteW.toDp() }).onSizeChanged { noteH = it.height }.heightIn(max = with(d) { (h - 32f.px()).toDp() })
+                .clip(RoundedCornerShape(20.dp)).background(Ink.surfaceHigh).border(1.dp, Ink.surfaceTop, RoundedCornerShape(20.dp)).verticalScroll(rememberScrollState())
                 .padding(start = 16.dp, end = 12.dp, top = 6.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("${stop.tab.label.uppercase()} · ${step + 1} / ${TourStop.entries.size}", style = Type.overline.copy(fontSize = 11.sp), color = Ink.dim, modifier = Modifier.weight(1f))
-                IconTap(Icons.close, "Close the tour", close, size = 44.dp, tint = Ink.dim)
+                IconTap(Icons.close, "Close the tour", close, size = 48.dp, tint = Ink.dim)
             }
             Text(stop.title, style = Type.title, color = Ink.text)
             Text(
@@ -204,7 +205,7 @@ fun TourOverlay(step: Int, appsShown: Boolean, back: () -> Unit, next: () -> Uni
             )
             Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Progress(TourStop.entries.size, step, Modifier.weight(1f))
-                if (step > 0) IconTap(Icons.back, "Back", back, size = 44.dp, background = Ink.surfaceTop)
+                if (step > 0) IconTap(Icons.back, "Back", back, size = 48.dp, background = Ink.surfaceTop)
                 NextPill(if (last) "Done" else "Next", next)
             }
         }
@@ -228,7 +229,7 @@ fun Progress(n: Int, at: Int, modifier: Modifier = Modifier) = Row(
 
 @Composable
 fun NextPill(text: String, onClick: () -> Unit, enabled: Boolean = true) = Row(
-    Modifier.height(44.dp).clip(RoundedCornerShape(16.dp)).background(if (enabled) Ink.accent else Ink.surfaceTop)
+    Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(16.dp)).background(if (enabled) Ink.accent else Ink.surfaceTop)
         .clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(start = 18.dp, end = 12.dp),
     verticalAlignment = Alignment.CenterVertically,
 ) {
@@ -271,7 +272,7 @@ fun InfoSheet(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
             later?.let { Secondary(it, onDismiss, color = Ink.text) }
             Row(
-                Modifier.height(48.dp).clip(RoundedCornerShape(24.dp)).background(Ink.accent).clickable(role = Role.Button, onClick = onAction).padding(horizontal = 22.dp),
+                Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(24.dp)).background(Ink.accent).clickable(role = Role.Button, onClick = onAction).padding(horizontal = 22.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Text(action, style = Type.title, color = Ink.onAccent)

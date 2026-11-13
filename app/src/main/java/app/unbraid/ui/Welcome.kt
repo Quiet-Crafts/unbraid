@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -189,7 +190,7 @@ fun UpdateAsk(answer: (Boolean) -> Unit) {
         Column(Modifier.padding(vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Primary("Check for updates", { answer(true) })
             Box(
-                Modifier.fillMaxWidth().height(56.dp).clip(RoundedCornerShape(28.dp)).border(1.dp, Ink.line, RoundedCornerShape(28.dp)).tap({ answer(false) }, role = Role.Button),
+                Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(28.dp)).border(1.dp, Ink.line, RoundedCornerShape(28.dp)).tap({ answer(false) }, role = Role.Button),
                 Alignment.Center,
             ) { Text("Don\u2019t check", style = Type.title, color = Ink.text) }
         }
@@ -271,7 +272,7 @@ private fun braid(): List<Triple<Path, Int, Boolean>> {
 private fun Places() {
     val what = listOf("Your exits and the power switch", "Which app goes where", "Data, flows and speed, if you want", "Providers, servers, home, protection")
     Column {
-        Row(Modifier.fillMaxWidth().height(260.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 260.dp).height(IntrinsicSize.Min)) {
             Tab.entries.forEachIndexed { i, t ->
                 Column(Modifier.weight(1f).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally) {
                     Spacer(Modifier.height((i * 36).dp))
@@ -286,7 +287,7 @@ private fun Places() {
                 }
             }
         }
-        Row(Modifier.fillMaxWidth().height(72.dp).clip(RoundedCornerShape(24.dp)).background(Ink.bar).border(1.dp, Ink.line, RoundedCornerShape(24.dp))) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 72.dp).height(IntrinsicSize.Min).clip(RoundedCornerShape(24.dp)).background(Ink.bar).border(1.dp, Ink.line, RoundedCornerShape(24.dp))) {
             Tab.entries.forEach { t ->
                 Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                     Box(Modifier.size(56.dp, 32.dp).clip(RoundedCornerShape(16.dp)).background(Ink.surfaceTop), Alignment.Center) { Icon(t.icon, null, Modifier.size(24.dp), tint = Ink.text) }
@@ -332,7 +333,7 @@ private fun Terms(fresh: Boolean, agreed: Boolean, toggle: () -> Unit) {
     Row(Modifier.padding(start = 38.dp, top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         listOf("Terms of use" to TERMS_URL, "Privacy policy" to PRIVACY).forEach { (label, url) ->
             Row(
-                Modifier.height(40.dp).clip(RoundedCornerShape(20.dp)).border(1.dp, Ink.line, RoundedCornerShape(20.dp))
+                Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(20.dp)).border(1.dp, Ink.line, RoundedCornerShape(20.dp))
                     .tap({ context.openUrl(url) }, label, Role.Button).padding(start = 14.dp, end = 12.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) { Text(label, style = Type.sub, color = Ink.text); Icon(Icons.external, null, Modifier.size(16.dp), tint = Ink.dim) }
