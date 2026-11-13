@@ -22,6 +22,7 @@ import app.unbraid.stats.Stats
 import app.unbraid.data.Home
 import app.unbraid.data.Http
 import app.unbraid.data.Location
+import app.unbraid.data.Manual
 import app.unbraid.data.OwnServer
 import app.unbraid.data.favKey
 import app.unbraid.data.ident
@@ -628,7 +629,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     }
 
     /** Renames a saved server and every route using it. */
-    fun renameServer(id: String, name: String) = name.trim().take(40).takeIf { it.isNotEmpty() }?.let { n ->
+    fun renameServer(id: String, name: String) = Manual.cleanName(name, 40).takeIf { it.isNotEmpty() }?.let { n ->
         fun OwnServer.named() = copy(wg = wg?.copy(name = n), ovpn = ovpn?.copy(name = n), ss = ss?.copy(name = n))
         store.edit { s ->
             s.copy(
@@ -704,7 +705,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** Renames one of the user's own servers (WireGuard, OpenVPN, Shadowsocks, Tailscale exit); a saved one everywhere. */
     fun renameRoute(id: String, name: String) {
         setup.value.route(id)?.own?.let { renameServer(it, name); return }
-        val n = name.trim().take(40).ifEmpty { return }
+        val n = Manual.cleanName(name, 40).ifEmpty { return }
         store.edit { s ->
             s.copy(routes = s.routes.map { r ->
                 if (r.id != id) r else r.copy(wg = r.wg?.copy(name = n), ovpn = r.ovpn?.copy(name = n), ss = r.ss?.copy(name = n), tsName = r.tsExit?.let { n })
