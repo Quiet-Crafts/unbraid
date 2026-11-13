@@ -9,6 +9,7 @@ import app.unbraid.data.Profile
 import app.unbraid.data.Route
 import app.unbraid.data.Setup
 import app.unbraid.data.graphemes
+import app.unbraid.data.newSetup
 import app.unbraid.data.takeGraphemes
 import app.unbraid.vpn.switchDone
 import app.unbraid.vpn.VpnState
@@ -87,12 +88,20 @@ class ProfilesTest {
         assertNull(s.copy(defaultRoute = "it").refusesRemoving(setOf("nl"), "Netherlands"))
     }
 
-    /** Only a setup as a new install has it is untouched (a sign-in or an import may replace its placeholder). */
+    /** Only a new install's setup is untouched (a sign-in or an import may replace its placeholder), never one read from a file. */
     @Test fun untouchedSetup() {
-        assertEquals(true, Setup().untouched)
-        assertEquals(false, Setup().copy(apps = mapOf("a" to "nl")).untouched)
-        assertEquals(false, Setup().copy(routes = Setup().routes.map { r -> r.copy(loc = r.loc.copy(provider = "mullvad")) }).untouched)
-        assertEquals(false, base.untouched)
+        assertEquals(true, newSetup().untouched)
+        assertEquals(false, Setup().untouched) // the same shape read from an older file: set up by its user
+        assertEquals(false, newSetup().copy(apps = mapOf("a" to "nl")).untouched)
+        assertEquals(false, newSetup().copy(routes = Setup().routes.map { r -> r.copy(loc = r.loc.copy(provider = "mullvad")) }).untouched)
+        assertEquals(false, base.copy(pristine = true).untouched)
+        // Any change to what the user sets up ends it; a preference or a speed test's routes don't.
+        val n = newSetup()
+        assertEquals(true, n.copy(prefs = n.prefs.copy(stats = true)).after(n).pristine)
+        assertEquals(true, n.copy(testing = setOf("nl")).after(n).pristine)
+        assertEquals(false, n.copy(home = n.home.copy(tailscale = true)).after(n).pristine)
+        assertEquals(false, n.copy(servers = listOf(app.unbraid.data.OwnServer("s1"))).after(n).pristine)
+        assertEquals(false, n.copy(defaultRoute = DIRECT).after(n).pristine)
     }
 
     /** A switch is done once the engine runs that exact setup in full, undone once it refused it, and waits otherwise. */
@@ -366,13 +375,43 @@ class ProfilesTest {
         val mullvad = Setup(routes = listOf(Route("nl", Location("mullvad", countryCode = "NL", country = "Netherlands", region = "nl-ams"))), defaultRoute = "nl")
         assertEquals(mullvad, mullvad.signedIn("proton", emptySet())) // signed out of Mullvad, then into Proton
         assertEquals(base, base.signedIn("proton", setOf("nord")))
-        val fresh = Setup().signedIn("proton", emptySet())
+        val fresh = newSetup().signedIn("proton", emptySet())
         assertEquals(listOf(Route("nl", Location("proton"))), fresh.routes)
         assertEquals("nl", fresh.defaultRoute)
-        assertEquals(Setup(), Setup().signedIn("nord", emptySet())) // its own provider carries the placeholder: it keeps its country
-        assertEquals(Setup(), Setup().signedIn("proton", setOf("nord")))
-        val none = Setup(routes = emptyList(), defaultRoute = DIRECT).signedIn("ivpn", emptySet())
-        assertEquals(listOf(Route("main", Location("ivpn"))), none.routes)
+        assertEquals(fresh, fresh.signedIn("mullvad", emptySet())) // signed out of Proton, then into Mullvad: it stays
+        // The starting Netherlands route used with NordVPN, signed out of, then another provider: it stays where it was.
+        val used = newSetup().signedIn("nord", emptySet())
+        assertEquals(newSetup().copy(pristine = false), used)
+        assertEquals(used, used.signedIn("proton", emptySet()))
+        assertEquals(newSetup().copy(pristine = false), newSetup().signedIn("proton", setOf("nord")))
+        assertEquals(Setup(), Setup().signedIn("proton", emptySet())) // the same shape from an older file: set up by its user
+        // Tailscale only (no route, Direct the default), then a provider: Direct stays the default, no route appears.
+        val none = Setup(routes = emptyList(), defaultRoute = DIRECT)
+        assertEquals(none, none.signedIn("ivpn", emptySet()))
+    }
+
+    /** An import with no provider signed in replaces only a new install's placeholder, and never deletes the route it made. */
+    @Test fun importKeepsTheRouteItMade() {
+        val own = { id: String -> Route(id, wg = app.unbraid.data.WgPeer("VPS", "k", listOf("10.0.0.2/32"), "p", endpoint = "192.0.2.1:51820", allowedIps = listOf("0.0.0.0/0")), own = "s1") }
+        // Over the placeholder itself: it becomes the own server, and stays the default.
+        val over = newSetup().imported("nl", own("nl"), alone = true)
+        assertEquals(listOf(own("nl")), over.routes)
+        assertEquals("nl", over.defaultRoute)
+        assertEquals(false, over.pristine)
+        // A new route: the placeholder goes and the new one is the default.
+        val added = newSetup().imported("r1", own("r1"), alone = true)
+        assertEquals(listOf(own("r1")), added.routes)
+        assertEquals("r1", added.defaultRoute)
+        // Signed in to Nord once, an own server saved, signed out: replacing "nl" keeps it, and the default with it.
+        val used = newSetup().signedIn("nord", emptySet()).copy(servers = listOf(app.unbraid.data.OwnServer("s1")))
+        val replaced = used.imported("nl", own("nl"), alone = true)
+        assertEquals(listOf(own("nl")), replaced.routes)
+        assertEquals("nl", replaced.defaultRoute)
+        val beside = used.imported("r1", own("r1"), alone = true)
+        assertEquals(listOf("nl", "r1"), beside.routes.map { r -> r.id })
+        assertEquals("nl", beside.defaultRoute)
+        // A provider signed in: never.
+        assertEquals(listOf("nl", "r1"), newSetup().imported("r1", own("r1"), alone = false).routes.map { r -> r.id })
     }
 
     /** With no profile in use, a switch can keep the setup in use as a profile first; "Previous" is replaced, never the target. */

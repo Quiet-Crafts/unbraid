@@ -62,7 +62,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     }
 
     // Sealed: it can hold imported WireGuard private keys and a Tailscale auth key.
-    private val _setup = MutableStateFlow(readSetup() ?: Setup(version = VERSION))
+    private val _setup = MutableStateFlow(readSetup() ?: newSetup())
     val setup: StateFlow<Setup> = _setup.asStateFlow()
     private fun readSetup() = marked(SETUP) { explicit.decodeFromString(Setup.serializer(), it).migrated() }
 
@@ -89,10 +89,29 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
 
     // Wherever a route is removed, what used it is mended here: only the routes this change removed, so a setup read with a
     // missing route keeps naming it (the screens say so; the engine refuses or blocks it).
-    // False while [unreadable]: nothing changes then.
+    // False while [unreadable]: nothing changes then. A change that makes a [reserve]d route a default is dropped.
     private fun change(f: (Setup) -> Setup) = synchronized(changing) {
-        if (_unreadable.value) false else { _setup.update { old -> f(old).let { new -> new.tidy(old.routes.map { it.id }.toSet() - new.routes.map { it.id }.toSet()) } }; true }
+        if (_unreadable.value) false else {
+            _setup.update { old ->
+                f(old).let { new -> new.tidy(old.routes.map { it.id }.toSet() - new.routes.map { it.id }.toSet()).after(old) }
+                    .takeIf { new -> reserved.none { g -> new.refusesRemoving(g(new), "") != null } } ?: old
+            }
+            true
+        }
     }
+
+    /** Routes about to be removed, each set as [reserve] named it: no change makes one of them a default meanwhile. */
+    private val reserved = java.util.concurrent.CopyOnWriteArrayList<(Setup) -> Set<String>>()
+
+    /**
+     * Holds the routes [gone] picks (named [name]) for a removal with steps that can't be undone (a log-out): refused, and
+     * nothing held, while one is a default ([Setup.refusesRemoving]); else no change can make one a default until [unreserve].
+     */
+    fun reserve(gone: (Setup) -> Set<String>, name: String): CarriesDefault? = synchronized(changing) {
+        _setup.value.let { it.refusesRemoving(gone(it), name) } ?: run { reserved += gone; null }
+    }
+
+    fun unreserve(gone: (Setup) -> Set<String>) { synchronized(changing) { reserved -= gone } }
 
     // A Keystore hiccup must not crash a tap: the change stays in memory, the banner says so, and a retry writes it.
     private fun saveSetup() = safely { seal("setup.bin", explicit.encodeToString(Setup.serializer(), _setup.value)) }

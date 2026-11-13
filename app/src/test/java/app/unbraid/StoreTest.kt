@@ -426,6 +426,40 @@ class StoreTest {
         assertEquals(2, s.pendingReleases.size)
     }
 
+    /** While a removal is under way (Tailscale's log-out), no edit can make one of its routes a default. */
+    @Test fun aReservedRouteCantBecomeADefault() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        val ts = Route("t", tsExit = "100.64.0.1")
+        assertTrue(s.update { Setup(routes = listOf(ts, Route("nl")), defaultRoute = "nl", apps = mapOf("app" to "t")) })
+        val gone = { x: Setup -> x.routes.filter { it.tsExit != null }.map { it.id }.toSet() }
+        assertEquals(null, s.reserve(gone, "Tailscale")) // only an app's route: may go
+        s.update { it.copy(defaultRoute = "t") } // e.g. a tile or Make default, meanwhile
+        s.update { it.add("Trip", false).editing("Trip") { p -> p.copy(defaultRoute = "t") } }
+        assertEquals("nl", s.setup.value.defaultRoute)
+        assertEquals(emptyList<Any>(), s.setup.value.profiles)
+        s.update { it.copy(apps = it.apps + ("other" to "t")) } // anything else still applies
+        assertEquals("t", s.setup.value.apps["other"])
+        s.unreserve(gone)
+        s.update { it.copy(defaultRoute = "t") }
+        assertEquals("t", s.setup.value.defaultRoute)
+        assertEquals("Tailscale", s.reserve(gone, "Tailscale")!!.name) // now a default: refused, nothing held
+        s.update { it.copy(defaultRoute = "nl") }
+        s.update { it.copy(defaultRoute = "t") }
+        assertEquals("t", s.setup.value.defaultRoute)
+    }
+
+    /** A new install's setup is pristine until its user changes it; an older file's never is. */
+    @Test fun aNewSetupIsPristineUntilChanged() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        assertTrue(s.setup.value.pristine)
+        assertTrue(s.update { it.copy(prefs = it.prefs.copy(stats = true)) })
+        assertTrue(Store(dir) { key }.setup.value.pristine)
+        assertTrue(s.update { it.copy(home = it.home.copy(tailscale = true)) })
+        assertFalse(Store(dir) { key }.setup.value.pristine)
+    }
+
     /** A catalogue counts as fresh for a day; one dated in the future (the clock was ahead) is refreshed. */
     @Test fun catalogueFromTheFutureIsNotFresh() {
         val dir = tmp.newFolder()

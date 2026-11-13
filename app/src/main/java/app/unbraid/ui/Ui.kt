@@ -400,25 +400,23 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      * Refused, changing nothing, while one of those routes is a default ([signOutTailscaleRefused]).
      */
     fun signOutTailscale(): app.unbraid.data.CarriesDefault? {
-        signOutTailscaleRefused()?.let { return it }
+        // Checked before anything that can't be undone (the log-out, the stop), and held: until the routes are gone, no
+        // edit can make one of them a default.
+        val gone = { s: Setup -> s.tsRoutes }
+        store.reserve(gone, "Tailscale")?.let { return it }
         val had = setup.value.tailscale
         viewModelScope.launch(Dispatchers.IO) {
             val loggedOut = stopVpn(had)
-            var refused: app.unbraid.data.CarriesDefault? = null
             if (!whileStopped("turn Tailscale off") {
-                // Checked again: a default moved onto a Tailscale route meanwhile keeps Tailscale as it is.
-                store.update { s -> s.removing(s.tsRoutes, "Tailscale", { refused = it }) { without(s.tsRoutes).copy(home = home.copy(tailscale = false, tsAuthKey = null)) } }
-                if (refused == null) {
-                    File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
-                    store.tsSuffix = null
-                }
+                store.update { s -> s.without(s.tsRoutes).copy(home = s.home.copy(tailscale = false, tsAuthKey = null)) }
+                File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
+                store.tsSuffix = null
             }) return@launch
-            refused?.let { notice.value = it.text; return@launch }
             // Off already (only a node left behind): the engine isn't running, so the tailnet still lists this phone.
             tailscaleLeft(if (had) loggedOut else false)
             checkTailscale()
             resetIfEmpty()
-        }
+        }.invokeOnCompletion { store.unreserve(gone) } // also when cancelled before it started
         return null
     }
 
@@ -662,12 +660,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val id = target.takeIf { setup.value.route(it) != null } ?: newId()
         store.edit { s ->
             val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null) ?: Route(id, hue = nextHue(s))
-            val r = source(blank)
-            var next = s.copy(routes = if (s.route(id) != null) s.routes.map { if (it.id == id) r else it } else s.routes + r)
-            // A new install's placeholder route goes, as no provider carries it, and the new route is the default. Anything
-            // set up before stays as it was: its default never moves by itself.
-            if (store.accounts.value.isEmpty() && draft == null && s.untouched) next = next.without(s.routes.map { it.id }.toSet()).copy(defaultRoute = id)
-            next
+            s.imported(id, source(blank), alone = store.accounts.value.isEmpty() && draft == null)
         }
         if (target.startsWith("app:")) assign(target.removePrefix("app:"), id)
         if (target.isEmpty()) keep(id) // a new route, added to the profile shown

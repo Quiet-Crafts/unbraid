@@ -183,6 +183,11 @@ data class Setup(
     val added: List<String> = emptyList(),
     /** The profile in use; its saved copy follows every edit, as [defaultRoute] and [apps] hold it ([saved]). Null = none. */
     val profile: String? = null,
+    /**
+     * A new install's setup that no sign-in, import or edit has changed yet ([newSetup]): only then may a sign-in or an
+     * import replace its placeholder route. A file without it (older versions) reads as false: set up by its user.
+     */
+    val pristine: Boolean = false,
     /** Routes without apps connected only for a combined speed test; never saved. */
     @kotlinx.serialization.Transient val testing: Set<String> = emptySet(),
 ) {
@@ -316,13 +321,28 @@ data class Setup(
      * stays as it is: a sign-in never rewrites a route the user set up, nor the default.
      */
     fun signedIn(provider: String, before: Set<String>): Setup = when {
-        routes.isEmpty() -> copy(routes = listOf(Route("main", Location(provider))), defaultRoute = "main")
-        untouched && routes.single().loc.provider !in before + provider -> copy(routes = routes.map { it.copy(loc = Location(provider)) })
-        else -> this
+        !untouched -> this
+        routes.single().loc.provider !in before + provider -> copy(routes = routes.map { it.copy(loc = Location(provider)) }, pristine = false)
+        else -> copy(pristine = false) // in use from now on: a later sign-in elsewhere leaves it where it is
     }
 
-    /** As a new install starts: only the placeholder route, as the default, and nothing chosen or saved yet. */
-    val untouched get() = Setup().let { routes == it.routes && defaultRoute == it.defaultRoute } && apps.isEmpty() && profiles.isEmpty() && added.isEmpty()
+    /** A new install's setup as it started ([pristine]): only the placeholder route, as the default, nothing chosen or saved. */
+    val untouched get() = pristine && Setup().let { routes == it.routes && defaultRoute == it.defaultRoute } && apps.isEmpty() && profiles.isEmpty() && added.isEmpty()
+
+    /** This setup after a change from [old]: one that changes what the user sets up is no longer [pristine]. */
+    fun after(old: Setup) = if (!pristine || (routes == old.routes && defaultRoute == old.defaultRoute && apps == old.apps && profiles == old.profiles &&
+        added == old.added && profile == old.profile && servers == old.servers && home == old.home)) this else copy(pristine = false)
+
+    /**
+     * Route [r] (id [id], new or replacing one) given an imported source. With no provider signed in ([alone]) a new
+     * install's placeholder goes and [r] is the default; anything set up before stays, its default too.
+     */
+    fun imported(id: String, r: Route, alone: Boolean): Setup {
+        val next = copy(routes = if (route(id) != null) routes.map { if (it.id == id) r else it } else routes + r)
+        if (!alone || !untouched) return next
+        val gone = routes.map { it.id }.toSet() - id
+        return next.copy(routes = next.routes.filter { it.id !in gone }, apps = next.apps.filterValues { it !in gone }, defaultRoute = id, pristine = false)
+    }
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute
     /** App [pkg] has no route of its own: it goes where the default goes. */
     fun follows(pkg: String) = pkg !in apps
@@ -367,6 +387,9 @@ data class Setup(
         return s
     }
 }
+
+/** The setup of a new install (or of a reset): the current format, and [Setup.pristine]. */
+fun newSetup() = Setup(version = VERSION, pristine = true)
 
 /** A removal refused: [name] carries the default route of the setup in use ([live]) or of the saved [profiles]. */
 data class CarriesDefault(val name: String, val live: Boolean, val profiles: List<String>) {
