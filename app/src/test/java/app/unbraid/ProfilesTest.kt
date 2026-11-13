@@ -351,12 +351,13 @@ class ProfilesTest {
     }
 
     /** Data from before choices stuck starts clean: nothing is pinned, and every app goes where it went. */
-    @Test fun olderDataStartsClean() {
-        val old = base.copy(version = 1, apps = mapOf("netflix" to "us", "odd" to "nl"), profiles = listOf(Profile("Trip", "us", mapOf("netflix" to "us", "rai" to "it"))))
+    /** An older file keeps every app entry as stored, those equal to their default too: only apps without one follow it. */
+    @Test fun olderDataKeepsEveryEntry() {
+        val old = base.copy(version = 1, apps = mapOf("netflix" to "us", "odd" to "nl", "bank" to DIRECT), profiles = listOf(Profile("Trip", "us", mapOf("netflix" to "us", "rai" to "it"))))
         val now = old.migrated()
-        assertEquals(mapOf("netflix" to "us"), now.apps)
-        assertEquals(mapOf("rai" to "it"), now.profiles[0].apps)
-        for (pkg in listOf("netflix", "odd", "rai", "other")) assertEquals(old.routeOf(pkg), now.routeOf(pkg))
+        assertEquals(old.copy(version = app.unbraid.data.VERSION), now)
+        assertEquals(false, now.follows("odd"))
+        assertEquals(true, now.follows("other"))
         assertEquals(now, now.migrated())
     }
 

@@ -326,6 +326,11 @@ data class Setup(
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute
     /** App [pkg] has no route of its own: it goes where the default goes. */
     fun follows(pkg: String) = pkg !in apps
+    /**
+     * App [pkg] chose Direct itself and doesn't pass through for the filter: Android leaves it outside unbraid (no filter,
+     * no home network), unless lockdown keeps every app in. An app that only follows a Direct default passes through.
+     */
+    fun outside(pkg: String) = apps[pkg] == DIRECT && !prefs.filter.through(pkg)
     /** How many of [installed] follow the default: the apps a new default would move. */
     fun followers(installed: Collection<String>) = installed.count(::follows)
     /** Routes that carry traffic right now: the default plus any with apps (and those up for a speed test). */
@@ -356,10 +361,9 @@ data class Setup(
             if (!prefs.threatProtection) s = s.copy(opts = opts + ("nord" to (opts["nord"].orEmpty() + (PROTECT to "off"))), prefs = s.prefs.copy(threatProtection = true))
             prefs.customDns.firstOrNull()?.let { s = s.copy(prefs = s.prefs.copy(customDns = emptyList(), filter = s.prefs.filter.takeIf { it.id != null } ?: Filter(Filters.OWN, it, routes = true))) }
         }
-        // 1 to 2: a value missing from an older file reads as the default it had then, and is written from now on. An app's
-        // entry equal to its default now means it chose that route; older versions never kept one, so any such entry is
-        // dropped and every app without a choice starts by following the default, as it did (nothing moves).
-        if (version < 2) s = s.copy(apps = s.apps.filterValues { it != s.defaultRoute }, profiles = s.profiles.map { p -> p.copy(apps = p.apps.filterValues { it != p.defaultRoute }) })
+        // 1 to 2: a value missing from an older file reads as the default it had then, and is written from now on. Every
+        // stored app entry stays as it is, also one equal to its default (it is a choice now); an app without one follows
+        // the default, as before. So no app's routing, DNS or home network changes with the update.
         return s
     }
 }
