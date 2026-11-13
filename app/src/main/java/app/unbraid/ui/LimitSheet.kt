@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
@@ -24,7 +23,7 @@ fun LimitSheet(ui: Ui) {
     val a = ask ?: return
     val done = { ui.limitAsk.value = null }
     // Open in full, scrolling when taller than the screen: its buttons are never below the edge.
-    ModalBottomSheet(done, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = Ink.surface, contentColor = Ink.text) {
+    ModalBottomSheet(done, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 24.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Over your plan's limit", style = Type.title)
             Text(a.text, style = Type.sub, color = Ink.text)

@@ -64,7 +64,6 @@ import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.getValue
@@ -456,7 +455,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
 
     sheet?.let { id ->
         // Open in full, scrolling when taller than the screen: its actions are never below the edge.
-        val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val state = fullSheet()
         val scope = rememberCoroutineScope()
         var closing by remember(id) { mutableStateOf(false) } // taps while the sheet slides away are ignored
         fun act(f: () -> Unit = {}) { if (closing) return; closing = true; f(); scope.launch { state.hide() }.invokeOnCompletion { sheet = null } }
