@@ -148,7 +148,14 @@ class RedactTest {
         assertEquals("<key>[hidden] tail", Redact.clean("<key>\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n</key> tail"))
         assertEquals("<tls-auth>[hidden]", Redact.clean("<tls-auth> 6acef03f62675b4b1bbd03e53b187727"))
         assertEquals("<key>[hidden]", Redact.clean("<key>\nabc"))
-        assertEquals("both <key>, then <key>[hidden]", Redact.clean("both <key>, then <key> -----BEGIN PRIVATE KEY----- abc"))
+        assertEquals("both <key>, or neither; <key>[hidden]", Redact.clean("both <key>, or neither; <key> -----BEGIN PRIVATE KEY----- abc"))
+        // Unclosed blocks fail closed whatever follows: a CRLF line break, or a one-line login or static key.
+        assertEquals("<key>[hidden]", Redact.clean("<key>\r\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC"))
+        assertEquals("<tls-crypt>[hidden]", Redact.clean("<tls-crypt>\r\n6acef03f"))
+        assertEquals("<auth-user-pass>[hidden]", Redact.clean("<auth-user-pass> bob rosebud"))
+        assertEquals("<auth-user-pass>[hidden]", Redact.clean("<auth-user-pass> blocks"))
+        assertEquals("<secret>[hidden]", Redact.clean("<secret> ab12"))
+        assertEquals("x <key>[hidden]", Redact.clean("x <key>, rosebud violet"))
     }
 
     /** URL logins and tokens are still found after the scans were made linear. */

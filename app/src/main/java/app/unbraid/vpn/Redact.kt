@@ -24,11 +24,10 @@ object Redact {
     private val PEM_END = Regex("""-----END [^\n-]{1,60}-----""")
 
     /**
-     * What follows an inline tag that has no closing tag when key material, not prose, comes after it: a line break, a
-     * PEM header, a comment or a run of key characters. The app's own messages name tags ("both <cert> and <key>, or
-     * neither") and must come out whole.
+     * The app's own messages name tags ("both <cert> and <key>, or neither", "the <key> block is empty"); these are
+     * the exact words that follow a tag there. After anything else an unclosed tag hides the rest of the text.
      */
-    private val KEYLIKE = Regex("""[ \t]*(?:\n|-----BEGIN|#|[A-Za-z0-9+/=]{16})""").toPattern()
+    private val PROSE = Regex("""(?:, or neither| block\), not a file path| blocks| block is empty or malformed)(?![A-Za-z0-9])""").toPattern()
 
     /** The login part of a URL (`scheme://user:password@`), up to the last `@` of the address. */
     private val SCHEME = Regex("""(?i)(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,15}://""")
@@ -99,8 +98,9 @@ object Redact {
             val tag = m.groupValues[1]
             val body = m.range.last + 1
             val end = close(tag.lowercase(), body)[2]
-            if (end < 0 && tag.isNotEmpty() && !KEYLIKE.matcher(s).region(body, s.length).lookingAt()) {
-                out.append(s, i, body) // a tag named in prose
+            val loginOrSecret = tag.equals("auth-user-pass", true) || tag.equals("secret", true)
+            if (end < 0 && tag.isNotEmpty() && !loginOrSecret && PROSE.matcher(s).region(body, s.length).lookingAt()) {
+                out.append(s, i, body) // a tag named in one of the app's own messages
                 i = body
                 continue
             }
