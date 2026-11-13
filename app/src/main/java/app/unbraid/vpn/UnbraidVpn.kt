@@ -403,7 +403,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (setup.tailscale) watchTailscale()
             // Anything edited while connecting is picked up here: only the applied setup is skipped.
             // Setup edits and sign-ins/outs both change what the engine must run.
-            health = scope.launch { watchHealth() }
+            // From the Block setting the tunnel was built with, not Android's now: one turned on or off during the start
+            // is a change the watcher still has to apply.
+            val built = startingLockdown(lastInput, isLockdownEnabled)
+            health = scope.launch { watchHealth(built) }
             watch = combine(store.setup, store.accounts) { s, a -> s to a }.debounce(400).onEach { (s, a) ->
                 val allowed = s.activeRoutes.filter { it.imported && Health.eligible(it) }.map { it.id }.toSet()
                 state.update { it.copy(notAnswering = it.notAnswering intersect allowed) }
@@ -652,7 +655,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * down (up to every ~8 min) until one works again. Nothing is judged for a while after a new network, an engine
      * start or a sleep.
      */
-    private suspend fun watchHealth() {
+    private suspend fun watchHealth(built: Boolean) {
         val streaks = HashMap<String, Health.Streak>() // tag → its failed checks; tags that answered have none
         val history = HashMap<String, List<Boolean>>() // tag → its latest regular checks, for routes that keep dropping
         val holds = HashMap<String, Long>() // tag → when a dead tunnel there may be handled again; survives engine restarts
@@ -662,7 +665,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         var grace = SystemClock.elapsedRealtime() + Health.GRACE // no check before this
         var round = SystemClock.elapsedRealtime() + jitter() // the next regular round
         var basis: Pair<Int, android.net.Network?>? = null // the engine start and network the streaks are about
-        var lockdown = isLockdownEnabled // Android's Block setting as last seen here
+        var lockdown = built // Android's Block setting as last seen here: at first, the one the tunnel was built with
         fun restart(now: Long, keep: Boolean = false) {
             streaks.clear(); if (!keep) { history.clear(); undrop() }; failing = emptySet(); state.update { it.copy(notAnswering = emptySet()) }; grace = now + Health.GRACE; round = grace
         }
@@ -1180,6 +1183,9 @@ internal fun blockedText(setup: Setup, blocked: Map<String, Exception>): String?
     blocked.entries.firstOrNull()?.let { (_, e) -> "Apps on ${blocked.keys.joinToString { setup.route(it)?.name ?: it }} are blocked: ${Redact.message(e, "no connection")}" },
     "Apps on a route that no longer exists are blocked. Choose a route for them in $APP.".takeIf { Compiler.missing(setup).isNotEmpty() },
 ).joinToString(" ").ifEmpty { null }
+
+/** The Block setting the health watcher starts from: the one compiled into the running tunnel ([built]), else Android's. */
+internal fun startingLockdown(built: Compiler.Input?, android: Boolean) = built?.lockdown ?: android
 
 /** A start ([on]) or a stop or pause, numbered [n] in the order asked. */
 class Ask(val n: Int, val on: Boolean)

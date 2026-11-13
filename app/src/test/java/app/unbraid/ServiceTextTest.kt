@@ -6,6 +6,7 @@ import app.unbraid.data.Location
 import app.unbraid.data.Route
 import app.unbraid.data.Setup
 import app.unbraid.vpn.blockedText
+import app.unbraid.vpn.startingLockdown
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -43,5 +44,17 @@ class ServiceTextTest {
         assertFalse(app.unbraid.vpn.logText("parse $key", debug = false).contains(key))
         assertEquals("Fail: The connection engine couldn't start.", app.unbraid.vpn.logLine(app.unbraid.vpn.Fail("The connection engine couldn't start."), debug = false))
         assertTrue(app.unbraid.vpn.logLine(foreign, debug = true).startsWith("IllegalStateException: bad value"))
+    }
+
+    /**
+     * Block connections without VPN turned on while the connection was starting: the tunnel was built without it, so the
+     * watcher starts from that and sees the change Android now reports (and the converse).
+     */
+    @Test fun lockdownWatchStartsFromTheBuiltTunnel() {
+        val setup = Setup()
+        fun built(lockdown: Boolean) = app.unbraid.vpn.Compiler.Input(setup, emptyMap(), "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db")
+        assertFalse(startingLockdown(built(false), android = true))
+        assertTrue(startingLockdown(built(true), android = false))
+        assertTrue(startingLockdown(null, android = true))
     }
 }
