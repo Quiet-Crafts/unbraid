@@ -67,5 +67,7 @@ object WgConf {
     }
 }
 
-/** A WireGuard key: 32 bytes in Base64. */
-internal fun validWgKey(k: String) = runCatching { java.util.Base64.getDecoder().decode(k).size == 32 }.getOrDefault(false)
+private val WG_KEY = Regex("[A-Za-z0-9+/]{43}=")
+
+/** A WireGuard key as the engine reads it: 32 bytes in padded standard Base64 (it refuses one without the final `=`). */
+internal fun validWgKey(k: String) = WG_KEY.matches(k) && runCatching { java.util.Base64.getDecoder().decode(k).size == 32 }.getOrDefault(false)

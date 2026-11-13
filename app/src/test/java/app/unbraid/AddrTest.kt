@@ -81,6 +81,9 @@ class AddrTest {
             assertEquals(key, NordApi.credentials("t").first)
             reply("short")
             failsAsUnexpected { NordApi.credentials("t") }
+            // 32 bytes without the final "=": Java decodes it, the engine refuses it.
+            reply("A".repeat(43))
+            failsAsUnexpected { NordApi.credentials("t") }
         } finally { Http.open = original }
     }
 
@@ -93,5 +96,13 @@ class AddrTest {
         assertEquals("10.1.2.3", ok.peerIp)
         failsAsUnexpected { Pia.parseAddKey("""{"status":"OK","server_key":"not-a-key","server_port":1337,"peer_ip":"10.1.2.3"}""") }
         failsAsUnexpected { Pia.parseAddKey("""{"status":"OK","server_key":"$key","server_port":1337,"peer_ip":"10.1.2.3.4"}""") }
+        failsAsUnexpected { Pia.parseAddKey("""{"status":"OK","server_key":"${"A".repeat(43)}","server_port":1337,"peer_ip":"10.1.2.3"}""") }
+    }
+
+    /** A key passes only in the form the engine decodes: 43 standard Base64 characters and "=", 32 bytes. */
+    @Test fun keysMustBeInTheEnginesForm() {
+        assertTrue(app.unbraid.data.validWgKey("A".repeat(43) + "="))
+        for (bad in listOf("A".repeat(43), "A".repeat(42) + "==", "-_" + "A".repeat(41) + "=", "A".repeat(44) + "=", " " + "A".repeat(43) + "=", ""))
+            assertFalse(bad, app.unbraid.data.validWgKey(bad))
     }
 }
