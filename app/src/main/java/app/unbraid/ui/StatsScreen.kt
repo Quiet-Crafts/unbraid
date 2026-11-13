@@ -1246,7 +1246,7 @@ private fun BeforeTogether(a: SpeedTest.All, ex: (String) -> Ex?, setup: app.unb
     val nearest = a.legs.filter { it.missing && it.usable && it.exit !in leaveOut }.map { it.exit }.toSet()
     val going = a.legs.filter { it.usable && (!it.missing || it.exit in nearest) }.map { it.exit }
     val country = { id: String -> setup.route(id)?.loc?.country ?: ex(id)?.name ?: "its country" }
-    ModalBottomSheet({ SpeedTest.cancel() }, containerColor = Ink.surface, contentColor = Ink.text) {
+    ModalBottomSheet({ SpeedTest.cancel() }, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
         Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 24.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             a.legs.filter { it.missing || !it.usable }.forEach { l ->
                 val name = ex(l.exit)?.name ?: l.exit
@@ -1324,8 +1324,8 @@ private fun TestServerCard(s: app.unbraid.stats.Ndt7.Server?, ex: Ex?, vpnServer
 @Composable
 private fun MlabConsent(dismiss: () -> Unit, accept: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    ModalBottomSheet(dismiss, containerColor = Ink.surface, contentColor = Ink.text) {
-        Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    ModalBottomSheet(dismiss, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
+        Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 24.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("Speed tests use M-Lab", style = Type.title.copy(fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.Medium))
             listOf(
                 Icons.speed to "Measurement Lab (M-Lab) is an open platform run by researchers. A test asks for one of its servers in the exit's country; for your own servers and Tailscale nodes M-Lab picks a nearby one. Ten seconds each way.",
@@ -1464,8 +1464,8 @@ private fun StatsOff(hasData: Boolean, turnOn: () -> Unit, view: () -> Unit) = S
 /** What turning stats on means, before anything is recorded. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StatsConsent(dismiss: () -> Unit, accept: () -> Unit) = ModalBottomSheet(dismiss, containerColor = Ink.surface, contentColor = Ink.text) {
-    Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+fun StatsConsent(dismiss: () -> Unit, accept: () -> Unit) = ModalBottomSheet(dismiss, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
+    Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 24.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Keep statistics?", style = Type.title.copy(fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.Medium))
         listOf(
             Icons.phone to "Statistics stay on this phone. They are never uploaded.",

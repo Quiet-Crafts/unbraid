@@ -239,6 +239,11 @@ fun NextPill(text: String, onClick: () -> Unit, enabled: Boolean = true) = Row(
 // Sheets: each disclosure on its own, right before what it covers, and the leak-proof setup.
 // ---------------------------------------------------------------------------------------------
 
+/** Bottom sheets open fully expanded: at half height their buttons would sit below the screen. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun fullSheet() = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
 /** A sheet in the app's style: icon, overline and title, then [content], then Not now / the action. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -246,7 +251,7 @@ fun InfoSheet(
     icon: ImageVector, over: String, title: String, action: String, onAction: () -> Unit, onDismiss: () -> Unit,
     good: Boolean = false, later: String? = "Not now", foot: String? = null, actionIcon: ImageVector? = null,
     content: @Composable ColumnScope.() -> Unit,
-) = ModalBottomSheet(onDismiss, containerColor = Ink.surface, contentColor = Ink.text) {
+) = ModalBottomSheet(onDismiss, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
     // The text scrolls on a short window or with large type; the buttons stay in reach below it.
     Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
       Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(18.dp)) {

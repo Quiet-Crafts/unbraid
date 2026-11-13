@@ -634,7 +634,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
         "statsDelete" -> Prompt("Delete statistics?", "Delete statistics", { dialog = null; ui.deleteStats() }, { dialog = null }, danger = true) {
             Text("All recorded data, sessions and speed tests are erased from this phone. This can't be undone." + if (prefs.stats) " Recording stays on." else "", style = Type.sub)
         }
-        "add" -> ModalBottomSheet({ dialog = null }, containerColor = Ink.surface, contentColor = Ink.text) {
+        "add" -> ModalBottomSheet({ dialog = null }, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
             Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
                 Text("Add connection", style = Type.title, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
                 val opts = listOf(
@@ -646,8 +646,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 opts.forEachIndexed { i, (t, sub, go) -> GroupRow(i, opts.size, t, sub, onClick = go, trailing = { Chevron() }) }
             }
         }
-        "guides" -> ModalBottomSheet({ dialog = null }, containerColor = Ink.surface, contentColor = Ink.text) {
-            Column(Modifier.padding(bottom = 16.dp)) {
+        "guides" -> ModalBottomSheet({ dialog = null }, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
                 Text("From another provider", style = Type.title, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
                 Providers.imports.forEachIndexed { i, g -> GroupRow(i, Providers.imports.size, g.name, g.where, onClick = { dialog = "guide:${g.id}" }, trailing = { Chevron() }) }
             }
@@ -657,7 +657,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             val arg = d.substringAfter(':')
             when {
                 d.startsWith("opt:") -> opts.firstOrNull { "opt:${shown?.id}:${it.key}" == d }?.let { o ->
-                    ModalBottomSheet({ dialog = null }, containerColor = Ink.surface, contentColor = Ink.text) {
+                    ModalBottomSheet({ dialog = null }, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
                         Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
                             Text(o.label, style = Type.title, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
                             Text(o.sub, style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 8.dp))
@@ -681,8 +681,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     Text("Routes and app choices stay on this phone. While connected, apps on its routes are blocked until you sign in again or move them to another route.", style = Type.sub)
                 }
                 d.startsWith("guide:") -> Providers.imports.firstOrNull { it.id == arg }?.let { g ->
-                    ModalBottomSheet({ dialog = null }, containerColor = Ink.surface, contentColor = Ink.text) {
-                        Column(Modifier.padding(horizontal = Gutter).padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ModalBottomSheet({ dialog = null }, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
+                        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = Gutter).padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(g.name, style = Type.title, modifier = Modifier.padding(horizontal = 8.dp))
                             Text(g.where, style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 8.dp))
                             Primary("Download the config from ${g.name}", { context.openUrl(g.url) })
