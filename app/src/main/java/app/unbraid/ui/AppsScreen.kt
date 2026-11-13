@@ -119,6 +119,8 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     OnReselect(Tab.Apps) { if (open != null || filter != null) { open = null; openedAs = null; filter = null } else list.animateScrollToItem(0) }
 
     val query = q.trim()
+    // The viewed profile's routes only: never another profile's, nor one no profile uses any more.
+    val offered = remember(setup, viewing) { setup.offered(viewing) }
     val motion = MaterialTheme.motionScheme
     // Grouped by exit: the other exits A to Z by name (Albania, Bulgaria, United States), then Direct, then the default.
     val rank = remember(setup) {
@@ -162,8 +164,8 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
             Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip("All", Ink.text, filter == null) { filter = null }
                 // Two routes with one country code (NordVPN NL, Mullvad NL) are told apart by provider.
-                setup.routes.forEach { r ->
-                    val label = if (setup.routes.count { it.code == r.code } > 1) "${r.code} · ${r.source}" else r.code
+                offered.forEach { r ->
+                    val label = if (offered.count { it.code == r.code } > 1) "${r.code} · ${r.source}" else r.code
                     FilterChip(label, Ink.route(r.hue), filter == r.id) { filter = r.id }
                 }
                 if (setup.defaultRoute.isEmpty()) FilterChip("Not set", null, filter == "") { filter = "" }
@@ -194,7 +196,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
             // Regrouping slides rows to their new place instead of jumping.
             Box(Modifier.animateItem(fadeInSpec = null, placementSpec = motion.defaultSpatialSpec(), fadeOutSpec = null).then(if (i == 0) tourAnchor(TourStop.AppsList) else Modifier)) {
                 Rise("apps", i, reveal) {
-                    AppRow(ui, a, setup, expanded = open == a.pkg, onToggle = {
+                    AppRow(ui, a, setup, offered, expanded = open == a.pkg, onToggle = {
                         if (open == a.pkg) { if (openedAs != setup.routeOf(a.pkg)) land = a.pkg; open = null; openedAs = null }
                         else { open = a.pkg; openedAs = setup.routeOf(a.pkg) }
                     }, openPicker, draft = viewing != null && viewing != setup.profile)
@@ -226,7 +228,7 @@ private fun FilterChip(label: String, dot: Color?, on: Boolean, direct: Boolean 
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle: () -> Unit, openPicker: (String) -> Unit, draft: Boolean = false) {
+private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.data.Route>, expanded: Boolean, onToggle: () -> Unit, openPicker: (String) -> Unit, draft: Boolean = false) {
     val haptic = LocalHapticFeedback.current
     val explicit = setup.apps[a.pkg]
     val current = setup.routeOf(a.pkg)
@@ -260,7 +262,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle
             val tiles = listOfNotNull(
                 Tile(FOLLOW, "Follow default", Icons.layers, d?.let { Ink.route(it.hue) } ?: Ink.direct, tinted = false,
                     sub = if (setup.defaultRoute == DIRECT) "Direct" else d?.name).takeIf { setup.defaultRoute.isNotEmpty() },
-            ) + setup.routes.sortedByDescending { it.id == setup.defaultRoute }.map {
+            ) + offered.sortedByDescending { it.id == setup.defaultRoute }.map {
                 Tile(it.id, if (it.imported) it.name else it.loc.city ?: it.name, if (it.tsExit != null) Icons.home else Icons.tunnel, Ink.route(it.hue), sub = it.source.takeIf { s -> s != it.name })
             } + Tile(DIRECT, "Direct", Icons.direct, Ink.direct, tinted = false) + Tile("", "More locations", Icons.more, Ink.dim, tinted = false)
             val ticked = tickedTile(setup, a.pkg)

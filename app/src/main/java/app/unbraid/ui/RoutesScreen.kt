@@ -136,10 +136,10 @@ internal fun removeText(chose: Int, others: List<String>) = listOfNotNull(
     "You can add the route again, but not those choices.".takeIf { chose > 0 || others.isNotEmpty() },
 ).joinToString(" ")
 
-/** Asked before route removal from profile [draft], not in use, where [chose] apps chose it. */
-internal fun dropText(draft: String, chose: Int) =
+/** Asked before route removal from profile [draft], not in use, where [chose] apps chose it; [elsewhere]: another profile or the setup in use lists it. */
+internal fun dropText(draft: String, chose: Int, elsewhere: Boolean = true) =
     (if (chose == 0) "No app in $draft chose it." else "In $draft, ${if (chose == 1) "1 app that chose it follows" else "$chose apps that chose it follow"} $draft's default route from now on.") +
-        " The route stays for other profiles."
+        if (elsewhere) " The route stays for other profiles." else " No other profile uses it."
 
 /** Asked before a new default ([to], null = Direct) moves [n] apps that follow the default. */
 internal fun moveText(n: Int, to: String?) =
@@ -448,7 +448,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         if (id != shown.defaultRoute) {
                             SheetAction("Make default") { act { makeDefault(id) } }
                             SheetAction("Remove from $draft", Ink.bad) { act { dropping = id } }
-                            SheetNote("Its apps in $draft will use its default route. The route stays for other profiles.")
+                            SheetNote("Its apps in $draft will use its default route.")
                         }
                     } else {
                         setup.route(id)?.takeIf { it.imported }?.let { r -> SheetAction("Rename") { act { newName = r.name; renaming = id } } }
@@ -490,7 +490,9 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
         val d = draft
         // Only while that profile is still shown; the prompt goes with it otherwise.
         if (d != null) Prompt("Remove ${setup.route(id)?.name ?: "this route"} from $d?", "Remove", { dropping = null; ui.dropRoute(id) }, { dropping = null }, danger = true) {
-            Text(dropText(d, shown.apps.values.count { it == id }), style = Type.sub)
+            val elsewhere = setup.saved.any { p -> p.name != d && id in p.own } ||
+                (setup.profile == null && (setup.defaultRoute == id || id in setup.apps.values || id in setup.added))
+            Text(dropText(d, shown.apps.values.count { it == id }, elsewhere), style = Type.sub)
         }
     }
     confirmDefault?.let { id ->
