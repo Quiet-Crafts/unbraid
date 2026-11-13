@@ -203,6 +203,8 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     val releasesUnreadable: Boolean
         @Synchronized get() = journal() == null || File(dir, RELEASES_BAD).exists()
 
+    private fun signIns() = runCatching { read(SIGN_INS)?.let { json.decodeFromString(datesSer, it) } }.getOrNull().orEmpty()
+
     private fun decodeJournal(name: String) = runCatching { load(name) { explicit.decodeFromString(releasesSer, it) }.orEmpty() }.getOrNull()
 
     /**
@@ -219,7 +221,11 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         if (!bad.exists() || asideTried) return now
         asideTried = true // once per start: it waits on every try
         val back = decodeJournal(RELEASES_BAD) ?: return now
-        val all = now + back.filter { b -> now.none { it.same(b) } }
+        // Not one its provider was signed in to again since: its release could remove the device that sign-in uses.
+        val signIns = signIns()
+        val all = now + back.filter { b ->
+            now.none { it.same(b) } && (signIns[b.provider]?.let { b.since >= it } ?: true) && _accounts.value[b.provider].let { it == null || it == b.blob }
+        }
         return if (pending(all)) all.also { bad.delete() } else now
     }
 
@@ -320,7 +326,11 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         if (_unreadable.value) return false
         // Signed in again: an earlier sign-out's release could remove the device this one uses (one adopted by name, say),
         // and the provider can't tell them apart, so it is no longer tried.
-        if (blob != null) journal { l -> l.filterNot { it.provider == provider } }
+        // The time is noted for a list kept aside ([journal]), which can't be changed now: its releases from before stay out.
+        if (blob != null) {
+            journal { l -> l.filterNot { it.provider == provider } }
+            if (!safely { write(SIGN_INS, json.encodeToString(datesSer, signIns() + (provider to System.currentTimeMillis()))) }) Log.w("Unbraid", "store: sign-in time not saved")
+        }
         _accounts.update { if (blob == null) it - provider else it + (provider to blob) }
         val ok = saveAccounts()
         if (blob == null) rememberLinks(emptyMap())
@@ -469,6 +479,8 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         const val ACCOUNTS = "accounts.bin"
         const val RELEASES = "releases.bin"
         const val RELEASES_BAD = "releases.bin.bad"
+        /** When each provider was last signed in to (epoch ms): no provider data, only for [journal]. */
+        const val SIGN_INS = "signins.json"
         const val TS_UNREADABLE = "Couldn't open the saved Tailscale sign-in. Try again. If it keeps failing, sign out of Tailscale in Settings and sign in again."
         const val TS_STATE = "tailscale/state.bin"
         const val TS_PLAIN = "tailscale/tailscaled.state"

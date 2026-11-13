@@ -501,6 +501,28 @@ class StoreTest {
         assertEquals(listOf("ivpn"), Store(dir) { key }.pendingReleases.map { it.provider })
     }
 
+    /**
+     * Signed out with the release pending, the list then kept aside as unreadable, signed in again: once the list opens
+     * again, that earlier release doesn't come back (it could remove the new sign-in's device). Others do.
+     */
+    @Test fun aListKeptAsideDoesntBringBackAReleaseFromBeforeASignIn() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        assertTrue(s.account("airvpn", "blob-old")); assertTrue(s.account("ivpn", "blob-i"))
+        s.signOut("airvpn"); s.signOut("ivpn")
+        val real = File(dir, "releases.bin").readBytes()
+        File(dir, "releases.bin").delete()
+        File(dir, "releases.bin.bad").writeBytes(byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)) // won't open now
+        val later = Store(dir) { key }
+        assertTrue(later.releasesUnreadable)
+        assertTrue(later.account("airvpn", "blob-adopted"))
+        File(dir, "releases.bin.bad").writeBytes(real) // opens again
+        val back = Store(dir) { key }
+        assertEquals(listOf("ivpn"), back.pendingReleases.map { it.provider })
+        assertFalse(File(dir, "releases.bin.bad").exists())
+        assertEquals("blob-adopted", back.accounts.value["airvpn"])
+    }
+
     /** A failing release waits longer each time and is given up after a bounded number of tries or time: its account erased. */
     @Test fun failingReleasesBackOffAndStop() {
         val dir = tmp.newFolder()
