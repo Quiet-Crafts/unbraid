@@ -1,0 +1,43 @@
+package app.unbraid
+
+import app.unbraid.data.DIRECT
+import app.unbraid.data.Location
+import app.unbraid.data.Route
+import app.unbraid.data.Setup
+import app.unbraid.ui.FOLLOW
+import app.unbraid.ui.defaultLabel
+import app.unbraid.ui.moveText
+import app.unbraid.ui.routeState
+import app.unbraid.ui.tickedTile
+import org.junit.Assert.assertEquals
+import org.junit.Test
+
+/** What the main screens say and tick, from the setup alone. */
+class ScreenTextTest {
+    private val nl = Route("nl", Location("nord", 153, "NL", "Netherlands"))
+    private val us = Route("us", Location("nord", 228, "US", "United States"))
+    private val setup = Setup(routes = listOf(nl, us), defaultRoute = "nl", apps = mapOf("chose.nl" to "nl", "chose.us" to "us", "chose.direct" to DIRECT))
+
+    /** An app that chose the default is told apart from one that follows it, in the menu and for TalkBack. */
+    @Test fun chosenAndFollowingAppsAreToldApart() {
+        assertEquals(FOLLOW, tickedTile(setup, "follows"))
+        assertEquals("nl", tickedTile(setup, "chose.nl"))
+        assertEquals("us", tickedTile(setup, "chose.us"))
+        assertEquals("Netherlands, follows default", routeState(setup, "follows"))
+        assertEquals("Netherlands, chosen", routeState(setup, "chose.nl"))
+        assertEquals("Direct, chosen", routeState(setup, "chose.direct"))
+        assertEquals("A route that no longer exists, chosen", routeState(setup.copy(apps = mapOf("x" to "gone")), "x"))
+    }
+
+    @Test fun defaultCardCountsChosenApart() {
+        assertEquals("All other apps", defaultLabel(null, 0)) // the app list isn't read yet: no made-up 0
+        assertEquals("All other apps · 12", defaultLabel(12, 0))
+        assertEquals("12 apps · 2 chosen", defaultLabel(12, 2))
+        assertEquals("1 app · 1 chosen", defaultLabel(1, 1))
+    }
+
+    @Test fun newDefaultSaysWhoMoves() {
+        assertEquals("12 apps that follow the default will use Direct (no VPN).", moveText(12, null))
+        assertEquals("1 app that follows the default will move to Italy.", moveText(1, "Italy"))
+    }
+}

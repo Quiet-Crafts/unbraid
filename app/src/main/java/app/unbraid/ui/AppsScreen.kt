@@ -14,6 +14,10 @@ import androidx.compose.foundation.horizontalScroll
 import app.unbraid.APP
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Column
@@ -62,6 +66,23 @@ import app.unbraid.data.Setup
 
 private fun Setup.codeOf(id: String) = route(id)?.code ?: "··"
 private fun Setup.colorOf(id: String) = route(id)?.let { Ink.route(it.hue) } ?: Ink.direct
+
+/** The "Follow default" tile in an app's menu. */
+internal const val FOLLOW = "follow"
+
+/** The tile ticked in app [pkg]'s menu: [FOLLOW] when it has no route of its own, else the route it chose (the default too). */
+internal fun tickedTile(s: Setup, pkg: String) = s.apps[pkg] ?: FOLLOW
+
+/** What TalkBack hears for app [pkg]'s route: where it goes, and whether it chose that or follows the default. */
+internal fun routeState(s: Setup, pkg: String): String {
+    val id = s.routeOf(pkg)
+    val where = when {
+        id.isEmpty() -> "Not set"
+        id == DIRECT -> "Direct"
+        else -> s.route(id)?.name ?: "A route that no longer exists"
+    }
+    return "$where, " + if (s.follows(pkg)) "follows default" else "chosen"
+}
 
 @Composable
 fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
@@ -189,9 +210,11 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle
     val current = setup.routeOf(a.pkg)
     val motion = MaterialTheme.motionScheme
     val ground by animateColorAsState(if (expanded) Ink.surface else Color.Transparent, motion.fastEffectsSpec(), label = "row")
+    val state = routeState(setup, a.pkg)
     Column(Modifier.padding(horizontal = 8.dp).fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(ground)) {
         Row(
-            Modifier.fillMaxWidth().heightIn(min = 60.dp).tap(onToggle).padding(horizontal = 14.dp, vertical = 10.dp),
+            Modifier.fillMaxWidth().heightIn(min = 60.dp).tap(onToggle, if (expanded) "Close" else "Choose a route")
+                .semantics { stateDescription = state + if (expanded) ", open" else "" }.padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             AppIcon(ui, a.pkg, a.label)
@@ -200,8 +223,9 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle
                 Text(a.pkg, style = Type.small, color = Ink.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             // An empty profile has no default route yet: its unassigned apps have no exit.
+            // Filled: the app chose this route (the default too); outlined: it follows the default.
             if (current.isEmpty()) Text("Not set", style = Type.caption, color = Ink.dim)
-            else RouteMark(setup.codeOf(current), setup.colorOf(current), filled = explicit != null, direct = current == DIRECT)
+            else RouteMark(setup.codeOf(current), setup.colorOf(current), Modifier.clearAndSetSemantics {}, filled = !setup.follows(a.pkg), direct = current == DIRECT)
         }
         // The exits spring open under the row and fade in; closing reverses it.
         AnimatedVisibility(
@@ -209,26 +233,34 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle
             enter = expandVertically(motion.defaultSpatialSpec()) + fadeIn(motion.fastEffectsSpec()),
             exit = shrinkVertically(motion.fastSpatialSpec()) + fadeOut(motion.fastEffectsSpec()),
         ) {
-            val tiles = setup.routes.sortedByDescending { it.id == setup.defaultRoute }.map {
+            // Follow default first: the app then goes wherever the default goes. The default's own tile is a choice that stays.
+            val d = setup.route(setup.defaultRoute)
+            val tiles = listOfNotNull(
+                Tile(FOLLOW, "Follow default", Icons.layers, d?.let { Ink.route(it.hue) } ?: Ink.direct, tinted = false,
+                    sub = if (setup.defaultRoute == DIRECT) "Direct" else d?.name).takeIf { setup.defaultRoute.isNotEmpty() },
+            ) + setup.routes.sortedByDescending { it.id == setup.defaultRoute }.map {
                 Tile(it.id, if (it.imported) it.name else it.loc.city ?: it.name, if (it.tsExit != null) Icons.home else Icons.tunnel, Ink.route(it.hue), sub = it.source.takeIf { s -> s != it.name })
-            } + Tile(DIRECT, "Direct", Icons.direct, Ink.direct, tinted = false) + Tile("", "More", Icons.more, Ink.dim, tinted = false)
-            Row(
-                Modifier.padding(start = 68.dp, end = 14.dp, bottom = 14.dp).horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween),
-            ) {
-                tiles.forEachIndexed { i, t ->
-                    val on = t.id.isNotEmpty() && t.id == current
+            } + Tile(DIRECT, "Direct", Icons.direct, Ink.direct, tinted = false) + Tile("", "More locations", Icons.more, Ink.dim, tinted = false)
+            val ticked = tickedTile(setup, a.pkg)
+            // Wrapped onto as many lines as it takes, so no choice hides off-screen; each line is one connected group.
+            BoxWithConstraints(Modifier.padding(start = 68.dp, end = 14.dp, bottom = 14.dp).fillMaxWidth()) {
+              val gap = ButtonGroupDefaults.ConnectedSpaceBetween
+              val perLine = ((maxWidth + gap) / (TileWidth + gap)).toInt().coerceAtLeast(1)
+              Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { tiles.chunked(perLine).forEach { line -> Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                line.forEachIndexed { i, t ->
+                    val on = t.id == ticked
                     ToggleButton(
                         checked = on,
                         onCheckedChange = {
                             haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
-                            if (t.id.isEmpty()) openPicker("app:${a.pkg}") else ui.assign(a.pkg, t.id)
+                            when (t.id) { "" -> openPicker("app:${a.pkg}"); FOLLOW -> ui.followDefault(a.pkg); else -> ui.assign(a.pkg, t.id) }
                         },
-                        modifier = Modifier.width(96.dp).height(72.dp), // one size for every route, whatever its name
+                        // One width for every route, whatever its name; taller when the text is large.
+                        modifier = Modifier.width(TileWidth).heightIn(min = 72.dp),
                         // Selection changes the colour only; a press squishes and springs back.
-                        shapes = when (i) {
-                            0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
-                            tiles.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
+                        shapes = when {
+                            i == 0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
+                            i == line.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
                             else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
                         }.let { ToggleButtonShapes(it.shape, it.pressedShape, it.shape) },
                         colors = ToggleButtonDefaults.colors(
@@ -252,6 +284,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle
                         }
                     }
                 }
+              } } }
             }
         }
         // A Direct app's lookups: outside unbraid (the phone's DNS) or through it, with unbraid's filter.
@@ -265,5 +298,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, expanded: Boolean, onToggle
         }
     }
 }
+
+private val TileWidth = 96.dp
 
 private class Tile(val id: String, val label: String, val icon: ImageVector, val color: Color, val tinted: Boolean = true, val sub: String? = null)

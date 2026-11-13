@@ -119,6 +119,20 @@ import kotlinx.coroutines.launch
 
 private fun count(n: Int) = if (n == 1) "1 app" else "$n apps"
 
+/**
+ * The default card's overline: how many apps use the default route ([total], null before the app list may be read) and
+ * how many of them chose it ([chosen]); the rest follow the default and move with it.
+ */
+internal fun defaultLabel(total: Int?, chosen: Int) = when {
+    total == null -> "All other apps"
+    chosen == 0 -> "All other apps · $total"
+    else -> "${count(total)} · $chosen chosen"
+}
+
+/** Asked before a new default ([to], null = Direct) moves [n] apps that follow the default. */
+internal fun moveText(n: Int, to: String?) =
+    "${if (n == 1) "1 app that follows" else "$n apps that follow"} the default will " + if (to == null) "use Direct (no VPN)." else "move to $to."
+
 /** Server name and, where the provider publishes it, its load: "nl1256 · 9% load". */
 private fun serverId(r: Route, s: Server): String = listOfNotNull(
     if (r.loc.provider == "nord") s.host.substringBefore('.') else s.name,
@@ -180,6 +194,12 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     val labels = remember(apps) { apps.associate { it.pkg to it.label } }
     // The default carries every app not sent elsewhere; its preview shows user apps, not system ones.
     val defaultPkgs = remember(apps, shown) { apps.filter { shown.routeOf(it.pkg) == shown.defaultRoute }.sortedBy { it.system }.map { it.pkg } }
+    // Of those, the apps that chose the default: they stay when the default changes.
+    val chosenDefault = defaultPkgs.count { !shown.follows(it) }
+    val disclosed by ui.disclosed.collectAsStateWithLifecycle()
+    // A new default moves the apps that follow the default: asked first when there are any.
+    var confirmDefault by rememberSaveable { mutableStateOf<String?>(null) }
+    fun makeDefault(id: String) { if (ui.moving(id) > 0) confirmDefault = id else ui.setDefault(id) }
     val server = if (lit) vpn.servers[shown.defaultRoute] else null
     val exits by ui.exits.collectAsStateWithLifecycle()
     // A route's report holds only for the engine and server it was taken on.
@@ -332,7 +352,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     if (shown.defaultRoute.isEmpty()) NotSet { openPicker("default") }
                     else Rise("routes", 0, reveal) { DefaultTile(
                         key = shown.defaultRoute,
-                        apps = defaultPkgs.size, code = route?.code, chip = if (lit && route != null) Ink.route(route.hue) else Ink.faint, direct = route == null,
+                        apps = defaultLabel(defaultPkgs.size.takeIf { disclosed }, chosenDefault), code = route?.code, chip = if (lit && route != null) Ink.route(route.hue) else Ink.faint, direct = route == null,
                         title = route?.name ?: "Direct", meta = route?.let { place(it, live) } ?: "No VPN for these apps",
                         extra = if (route != null && server != null) serverId(route, server) else null,
                         border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
@@ -358,7 +378,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     ) { sheet = id } }
                 }
                 // Nothing set apart yet: say what that means instead of leaving the page empty.
-                if (shown.apps.isEmpty() && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
+                if (shown.apps.values.all { it == shown.defaultRoute } && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
                     Text("All apps use the default route. Tap + to send some apps through another exit.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp))
                 }
                 if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {
@@ -399,15 +419,15 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     } else SheetAction("Disconnect", Ink.bad) { act { ui.disconnect() } }
                 } else if (id == DIRECT) {
                     SheetNote("Apps here skip the VPN. Assign them in Apps.", sub = true)
-                    if (shown.defaultRoute != DIRECT) SheetAction("Make default") { act { ui.setDefault(DIRECT) } }
+                    if (shown.defaultRoute != DIRECT) SheetAction("Make default") { act { makeDefault(DIRECT) } }
                 } else {
                     // In a profile not in use, a route the live setup uses too is copied first: nothing live changes.
                     SheetAction("Change location") { act { openPicker(ui.ownRoute(id)) } }
-                    if (id == shown.defaultRoute) SheetAction("Make Direct the default") { act { ui.setDefault(DIRECT) } }
+                    if (id == shown.defaultRoute) SheetAction("Make Direct the default") { act { makeDefault(DIRECT) } }
                     // Editing a profile not in use never reaches what is shared: no rename, no removal of the route itself.
                     if (draft != null) {
                         if (id != shown.defaultRoute) {
-                            SheetAction("Make default") { act { ui.setDefault(id) } }
+                            SheetAction("Make default") { act { makeDefault(id) } }
                             SheetAction("Remove from $draft", Ink.bad) { act { ui.dropRoute(id) } }
                             SheetNote("Its apps in $draft will use its default route. The route stays for other profiles.")
                         }
@@ -419,7 +439,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         SheetSwitch("Check internet access", "Shows Not answering when this server stops reaching the internet. Turn off for a server that only reaches a private network.", r.checksInternet) { ui.setCheckInternet(id, it) }
                     }
                     if (draft == null && id != setup.defaultRoute) {
-                        SheetAction("Make default") { act { ui.setDefault(id) } }
+                        SheetAction("Make default") { act { makeDefault(id) } }
                         SheetAction("Remove route", Ink.bad) { act { ui.removeRoute(id) } }
                         val others = setup.saved.filter { p -> p.name != setup.profile && id in p.own }.map { it.name }
                         SheetNote("Its apps will use the default route." + if (others.isEmpty()) "" else " It also goes from ${others.joinToString()}.")
@@ -432,6 +452,13 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
         ProfileSheet(setup, editing.ifEmpty { null }, sheetEmpty,
             onSave = { n, empty -> if (editing.isEmpty()) ui.newProfile(n, empty) else ui.renameProfile(editing, n); profileSheet = null },
             onDelete = { ui.forgetProfile(editing); profileSheet = null }, onDismiss = { profileSheet = null })
+    }
+    confirmDefault?.let { id ->
+        val name = if (id == DIRECT) null else shown.route(id)?.name ?: "this route"
+        Prompt("Make ${name ?: "Direct"} the default?", "Make default", { ui.setDefault(id); confirmDefault = null }, { confirmDefault = null }) {
+            Text(moveText(ui.moving(id), name), style = Type.sub)
+            Text("Apps that chose a route keep it.", style = Type.sub)
+        }
     }
     renaming?.let { id ->
         Prompt("Rename", "Save", { ui.renameRoute(id, newName); renaming = null }, { renaming = null }, enabled = newName.isNotBlank()) {
@@ -629,7 +656,7 @@ private fun appsLabel(pkgs: List<String>, labels: Map<String, String>) = when {
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun DefaultTile(
-    key: String, apps: Int, code: String?, chip: Color, direct: Boolean, title: String, meta: String, extra: String?, border: Color,
+    key: String, apps: String, code: String?, chip: Color, direct: Boolean, title: String, meta: String, extra: String?, border: Color,
     exit: Pair<ExitReport, Boolean>? = null, notAnswering: Boolean = false, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
@@ -645,7 +672,7 @@ private fun DefaultTile(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("All other apps · $apps".uppercase(), style = Type.overline, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text(apps.uppercase(), style = Type.overline, color = Ink.dim, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             Icon(Icons.chevron, null, Modifier.size(20.dp), tint = Ink.dim)
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
