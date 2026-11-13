@@ -228,14 +228,6 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** Something sign-out couldn't finish and the user must do by hand; shown in Settings, cleared by setting null. */
     val notice = MutableStateFlow<String?>(null)
 
-    init {
-        // Catalogs are multi-MB: refreshed once a day, not on every launch (the picker refreshes an empty one itself).
-        store.accounts.value.keys.filterNot(store::countriesFresh).forEach(::refreshCountries)
-        saveImportedServers()
-        // Device slots a sign-out couldn't release, maybe because the app closed first: tried again on every start.
-        releasePending()
-    }
-
     /** Sign-in form text, "provider:field" → value. In memory only (it holds secrets), so it survives rotation but not the process. */
     val form = mutableStateMapOf<String, String>()
     /** Last sign-in error per provider id. */
@@ -925,4 +917,13 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         if (setHome { it.copy(wg = p) }) clearClipboardIf(text)
         null
     }.getOrElse { it.message ?: "Not a WireGuard config" }
+
+    // Last in the class: the work started here runs on other threads and uses properties above, which must be set first.
+    init {
+        // Catalogs are multi-MB: refreshed once a day, not on every launch (the picker refreshes an empty one itself).
+        store.accounts.value.keys.filterNot(store::countriesFresh).forEach(::refreshCountries)
+        saveImportedServers()
+        // Device slots a sign-out couldn't release, maybe because the app closed first: tried again when due.
+        releasePending()
+    }
 }
