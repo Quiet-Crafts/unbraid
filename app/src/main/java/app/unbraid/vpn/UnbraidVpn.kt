@@ -130,12 +130,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
          * run). Each new table hands out fake IPs afresh, from the next block of the pool ([Compiler.FAKE_RANGES]).
          * Never deleted under a running engine: its next reload would start an empty table in the same block.
          */
-        fun forgetLookups(ctx: Context) = synchronized(this) { !tableOpen && File(ctx.filesDir, "cache.db").delete() }
-        /** An engine has cache.db open (see [forgetLookups]); set before it starts, cleared once it has stopped. */
-        private var tableOpen = false
+        fun forgetLookups(ctx: Context) = LookupTable.forget(ctx.filesDir)
         /** The fake-IP block of the open or last table; the store only carries it across process restarts. */
         private var lastBlock: Int? = null
-        private fun openTable(open: Boolean) = synchronized(this) { tableOpen = open }
+        private fun openTable(open: Boolean) = LookupTable.open(open)
         private const val ACTION_STOP = "app.unbraid.STOP"
         private const val ACTION_PAUSE = "app.unbraid.PAUSE"
         private const val ACTION_FLAGS = "app.unbraid.FLAGS"
@@ -448,9 +446,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             store.unreadable.first { !it }
             lock.withLock {
                 if (session != mine || !holding || destroyed) return@withLock
-                // Connect replaces the refusing engine with the real setup; its tunnel stays until the new one is up.
+                // The refusing engine stops first and its table goes, so the real setup starts a new one in the next block:
+                // an address an app kept from the hold never names another site. Its tunnel stays open meanwhile (the
+                // engine had its own copy), so apps stay offline until the new engine replaces it.
                 holding = false
                 watch = null
+                runCatching { server?.closeService() }
+                openTable(false)
+                forgetLookups(this@UnbraidVpn)
                 net.stop()
                 state.value = VpnState(VpnState.Phase.Connecting)
                 connect()
@@ -834,7 +837,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending)
 
     /** The open table's fake-IP block for a reload; a new table takes the next one, refusing the rest. */
-    private fun fakeBlock() = Compiler.nextBlock(lastBlock ?: store.fakeBlock, synchronized(Companion) { tableOpen })
+    private fun fakeBlock() = Compiler.nextBlock(lastBlock ?: store.fakeBlock, LookupTable.isOpen())
 
 
     /** The app's own way into each exit ([Compiler.PROBE]): a free loopback port and a 24-byte random password. */
@@ -1144,6 +1147,19 @@ private inline fun io.nekohasekai.libbox.RoutePrefixIterator.forEach(f: (RoutePr
 private fun io.nekohasekai.libbox.RoutePrefixIterator.toList(): List<RoutePrefix> = buildList { this@toList.forEach { add(it) } }
 private inline fun StringIterator.forEachString(f: (String) -> Unit) { while (hasNext()) f(next()) }
 private fun RoutePrefix.ipPrefix() = IpPrefix(InetAddress.getByName(address()), prefix())
+
+/**
+ * The engine's domain table on disk (fake IP → domain, cache.db) and whether a running engine has it open; see
+ * [UnbraidVpn.forgetLookups].
+ */
+internal object LookupTable {
+    private var open = false
+    /** Set before an engine starts with the table, cleared once it has stopped. */
+    @Synchronized fun open(v: Boolean) { open = v }
+    @Synchronized fun isOpen() = open
+    /** Deletes the table in [dir] unless an engine has it open; true if it was deleted. */
+    @Synchronized fun forget(dir: File) = !open && File(dir, "cache.db").delete()
+}
 
 /** One line for Routes: which routes' apps are blocked and why, and that apps on a route that is gone are blocked too. */
 internal fun blockedText(setup: Setup, blocked: Map<String, Exception>): String? = listOfNotNull(

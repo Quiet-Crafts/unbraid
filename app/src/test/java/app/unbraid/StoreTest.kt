@@ -165,6 +165,36 @@ class StoreTest {
         assertEquals("x", Store(dir) { key }.setup.value.defaultRoute)
     }
 
+    /**
+     * Start fresh while an engine keeps apps offline over unreadable settings: that engine's domain table stays until it
+     * has stopped, which then deletes it, and the next table takes the next block of fake addresses.
+     */
+    @Test fun startFreshLeavesARunningEnginesTable() {
+        val dir = tmp.newFolder().also(::saved)
+        File(dir, "setup.bin").writeText("garbage")
+        val table = File(dir, "cache.db").apply { writeText("lookups") }
+        val s = Store(dir) { key }
+        assertTrue(s.unreadable.value)
+        val block = 3
+        app.unbraid.vpn.LookupTable.open(true) // the engine holding apps offline runs with the table in block 3
+        try {
+            assertTrue(s.startFresh())
+            assertTrue(table.exists())
+            assertFalse(app.unbraid.vpn.LookupTable.forget(dir))
+            // Leaving the hold: the engine stops first, then its table goes.
+            app.unbraid.vpn.LookupTable.open(false)
+            assertTrue(app.unbraid.vpn.LookupTable.forget(dir))
+            assertFalse(table.exists())
+            assertEquals(4, app.unbraid.vpn.Compiler.nextBlock(block, app.unbraid.vpn.LookupTable.isOpen()))
+        } finally { app.unbraid.vpn.LookupTable.open(false) }
+        // With no engine running, Start fresh deletes the table itself.
+        val off = tmp.newFolder().also(::saved)
+        File(off, "setup.bin").writeText("garbage")
+        File(off, "cache.db").writeText("lookups")
+        assertTrue(Store(off) { key }.startFresh())
+        assertFalse(File(off, "cache.db").exists())
+    }
+
     /** Start fresh removes settings, sign-ins and old copies; saving works again. */
     @Test fun startFreshThenSavingWorks() {
         val dir = tmp.newFolder().also(::saved)

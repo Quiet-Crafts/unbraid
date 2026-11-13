@@ -196,8 +196,11 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         if (!_unreadable.value) return true // they opened meanwhile (a VPN start reopens them): nothing to reset
         // The old Tailscale sign-in first: if it stays, nothing else goes and the mark stays.
         if (!File(dir, "tailscale").deleteRecursively()) return false
-        listOf(SETUP, ACCOUNTS, RELEASES, "links.bin", "token.bin", "nlk.bin", "servers.json", "tssuffix", "cache.db", "expiry",
+        listOf(SETUP, ACCOUNTS, RELEASES, "links.bin", "token.bin", "nlk.bin", "servers.json", "tssuffix", "expiry",
             "setup.bin.bad", "accounts.bin.bad", "links.bin.bad").forEach { File(dir, it).delete() }
+        // The domain table only when no engine has it open (one keeping apps offline meanwhile): that engine deletes it
+        // once it has stopped, so a new table never starts in the same block.
+        app.unbraid.vpn.LookupTable.forget(dir)
         _setup.value = Setup(version = VERSION); _accounts.value = emptyMap(); failed(false, false, false)
         bad.removeAll { !File(dir, it).exists() }
         _unreadable.value = bad.isNotEmpty()
