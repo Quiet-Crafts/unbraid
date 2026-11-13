@@ -170,6 +170,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             nm.notify(2, Notification.Builder(ctx, "alerts").setSmallIcon(R.drawable.ic_tile).setContentTitle("$APP is off")
                 .setContentText(text).setContentIntent(open).setAutoCancel(true).build())
         }
+        /** The start after the app was replaced ([AfterUpdate]): if it fails, the notice says so and offers a reconnect. */
+        fun startAfterUpdate(ctx: Context) = ask(true) { ctx.startForegroundService(Intent(ctx, UnbraidVpn::class.java).putExtra(EXTRA_ASK, it).putExtra(EXTRA_UPDATED, true)) }
+        private const val EXTRA_UPDATED = "updated"
         fun stop(ctx: Context) = ask(false) { ctx.startService(Intent(ctx, UnbraidVpn::class.java).setAction(ACTION_STOP).putExtra(EXTRA_ASK, it)) }
         /** Drops the tunnel for [minutes] (0 = until resumed); a start while paused resumes. */
         /** Reads Android's Always-on and Block-connections settings again (they can change while connected). Only while running. */
@@ -311,6 +314,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (!allowed && (state.value.phase == VpnState.Phase.Off || state.value.phase == VpnState.Phase.Paused)) {
                 cancelResume()
                 state.value = VpnState(error = "Open $APP to allow it as your VPN")
+                if (intent?.getBooleanExtra(EXTRA_UPDATED, false) == true) AfterUpdate.tell(this)
                 handled(intent)
                 stopWanted = true
                 stopIfIdle()
@@ -350,7 +354,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     if (state.value.phase == VpnState.Phase.On) { if (holding) notice(UNREADABLE) else notify(store.setup.value) } else stopWanted = state.value.phase == VpnState.Phase.Off
                     return
                 }
-                connect()
+                connect(intent?.getBooleanExtra(EXTRA_UPDATED, false) == true)
             }
         }
     }
@@ -370,7 +374,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     @Volatile private var lastInput: Compiler.Input? = null
 
     @OptIn(FlowPreview::class)
-    private fun connect() {
+    private fun connect(updated: Boolean = false) {
         if (state.value.phase == VpnState.Phase.On) { // a repeated start (Always-on, tile)
             readFlags()
             if (state.value.phase == VpnState.Phase.On) if (holding) notice(UNREADABLE) else notify(store.setup.value) // a failed reload may have ended it
@@ -399,6 +403,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, stuck = stuck(setup, picked.blocked), engine = starts,
                 applied = if (picked.blocked.values.none { it is LinkPicker.Waiting }) setup.hashCode() else 0)
             stopWanted = false
+            AfterUpdate.on(this)
             notify(setup)
             if (setup.tailscale) watchTailscale()
             // Anything edited while connecting is picked up here: only the applied setup is skipped.
@@ -419,7 +424,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             }.launchIn(scope)
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${logLine(e)}")
-            teardown(Redact.message(e, "Could not connect"))
+            // After an update the notice offers the reconnect; a tap shows what fails, in the app.
+            if (updated) { teardown(null); AfterUpdate.tell(this) } else teardown(Redact.message(e, "Could not connect"))
         }
     }
 
@@ -445,6 +451,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         holding = true
         state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
         stopWanted = false
+        AfterUpdate.on(this)
         notice(UNREADABLE)
         val mine = session
         watch = scope.launch {
@@ -931,6 +938,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** Caller holds [lock]. */
     private fun teardown(error: String?) {
+        AfterUpdate.off(this)
         cancelResume()
         stopEngine()
         state.value = VpnState(error = error)
@@ -951,6 +959,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** Traffic leaves without the VPN until resumed, by hand or after [minutes]. Caller holds [lock]. */
     private fun pause(minutes: Int) {
         if (state.value.phase != VpnState.Phase.On) return
+        AfterUpdate.off(this) // paused by the user: an update never turns it back on
         // Read now: what the pause notice promises (apps offline or not) depends on them.
         val lockdown = isLockdownEnabled
         val alwaysOn = isAlwaysOn
@@ -1007,6 +1016,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 failing = emptySet()
                 probe = null; links = emptyMap(); running = null; tags = emptyMap(); tunnelDns = emptyMap(); tcpOnly = emptySet()
                 cancelResume() // again: a pause that was still running when the service went may have set an alarm
+                AfterUpdate.off(this@UnbraidVpn)
                 if (state.value.phase != VpnState.Phase.Off) state.value = VpnState()
             }
         }

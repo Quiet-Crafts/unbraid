@@ -74,6 +74,14 @@
         <receiver
             android:name=".vpn.StatusWidget$Action"
             android:exported="false" />
+        <!-- Not exported: only Android's own "this app was replaced" broadcast reaches it. -->
+        <receiver
+            android:name=".vpn.AfterUpdate$Receiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <service
             android:name=".vpn.Tile"
             android:exported="true"

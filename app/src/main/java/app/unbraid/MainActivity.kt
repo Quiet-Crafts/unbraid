@@ -158,7 +158,14 @@ class MainActivity : ComponentActivity() {
         ui.routesWanted.value = true
     }
 
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); showProfile(intent) }
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); showProfile(intent); reconnectAfterUpdate(intent) }
+
+    /** The tap on "off after the update": connect, through the usual questions and Android's consent. */
+    private fun reconnectAfterUpdate(intent: Intent) {
+        if (!app.unbraid.vpn.AfterUpdate.claim(this, intent)) return
+        // Settings that won't open: the service keeps apps offline, which needs no question from here.
+        if (!Unbraid.store.unreadable.value) connect() else if (VpnService.prepare(this) == null) UnbraidVpn.start(this)
+    }
 
     /** The saved settings won't open: try again, or (confirmed) start fresh. */
     @Composable
@@ -191,7 +198,7 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         Onboarding.init(this)
-        if (savedInstanceState == null) showProfile(intent)
+        if (savedInstanceState == null) { showProfile(intent); reconnectAfterUpdate(intent) }
         // Started on unreadable settings: what onResume and the shortcut skipped runs once they open.
         if (Unbraid.store.unreadable.value) lifecycleScope.launch {
             Unbraid.store.unreadable.first { !it }
