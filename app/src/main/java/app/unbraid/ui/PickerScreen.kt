@@ -117,6 +117,17 @@ private class Pick(
  */
 internal fun blockingToApply(pending: Boolean?, now: Boolean) = pending?.takeIf { it != now }
 
+/**
+ * What the picker says while a provider lists no location: loading ([fetch] under way or not started), why the last
+ * fetch failed, or (with a list that [narrowed] to nothing by server type [group]) that no country offers it. True
+ * with a Retry.
+ */
+internal fun noLocations(narrowed: Boolean, fetch: Fetch?, group: String): Pair<String, Boolean> = when {
+    narrowed -> "No country offers $group right now. Choose another server type in Route options." to false
+    fetch is Fetch.Failed -> fetch.reason to true
+    else -> "Loading locations…" to false
+}
+
 /** The line under the picker while choices wait for a location tap ([protocol] and [blocking], null = unchanged). */
 internal fun pendingNote(protocol: String?, blocking: Pair<String, Boolean>?): String? {
     val parts = listOfNotNull(protocol, blocking?.let { (name, on) -> "$name blocking ${if (on) "on" else "off"}" })
@@ -151,6 +162,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     val setup by ui.setup.collectAsStateWithLifecycle()
     val catalogs by ui.countries.collectAsStateWithLifecycle()
     val catalogsRead by ui.catalogsRead.collectAsStateWithLifecycle()
+    val fetches by ui.fetches.collectAsStateWithLifecycle()
     val accounts by ui.accounts.collectAsStateWithLifecycle()
     val vpn by ui.vpn.collectAsStateWithLifecycle()
     val route = setup.route(target)
@@ -275,9 +287,10 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         if (countries.isEmpty()) {
             if (!catalogsRead) return // the saved list is still being read: nothing to say yet
             item(key = "empty") {
-                Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp)) {
-                    Text("Server list unavailable. Check the connection.", style = Type.sub, color = Ink.dim)
-                    Secondary("Retry", { ui.refreshCountries(provider) }, Modifier.padding(top = 8.dp))
+                val (text, retry) = noLocations(catalog.isNotEmpty(), fetches[provider], groupLabel)
+                Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp).semantics { liveRegion = LiveRegionMode.Polite }) {
+                    Text(text, style = Type.sub, color = Ink.dim)
+                    if (retry) Secondary("Retry", { ui.refreshCountries(provider) }, Modifier.padding(top = 8.dp))
                 }
             }
             return

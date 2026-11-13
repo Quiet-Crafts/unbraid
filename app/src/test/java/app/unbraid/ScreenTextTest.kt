@@ -12,6 +12,8 @@ import app.unbraid.ui.blockingToApply
 import app.unbraid.ui.pendingNote
 import app.unbraid.ui.importTarget
 import app.unbraid.ui.emptyApps
+import app.unbraid.ui.noLocations
+import app.unbraid.ui.Fetch
 import app.unbraid.data.PREVIOUS
 import app.unbraid.data.Profile
 import app.unbraid.ui.removeText
@@ -53,6 +55,7 @@ class ScreenTextTest {
             removeText(2, listOf("Work", "Trip")),
         )
         assertEquals("No app in Work chose it. The route stays for other profiles.", dropText("Work", 0))
+        assertEquals("No app in Work chose it. No other profile uses it.", dropText("Work", 0, elsewhere = false))
         assertEquals("In Work, 1 app that chose it follows Work's default route from now on. The route stays for other profiles.", dropText("Work", 1))
     }
 
@@ -98,6 +101,14 @@ class ScreenTextTest {
         assertEquals("No apps use Direct." to "Show all", emptyApps("", "Direct", 0))
         assertEquals("No apps on Direct match \"chr\"." to "Show all", emptyApps("chr", "Direct", 0))
         assertEquals("No apps match \"chr\"." to null, emptyApps("chr", null, 0))
+    }
+
+    /** The picker says it is loading, or why the list failed (with Retry), or that a server type narrowed it to nothing. */
+    @Test fun emptyPickerSaysWhy() {
+        assertEquals("Loading locations…" to false, noLocations(false, null, "Standard"))
+        assertEquals("Loading locations…" to false, noLocations(false, Fetch.Loading, "Standard"))
+        assertEquals("NordVPN didn't answer." to true, noLocations(false, Fetch.Failed("NordVPN didn't answer."), "Standard"))
+        assertEquals("No country offers P2P right now. Choose another server type in Route options." to false, noLocations(true, null, "P2P"))
     }
 
     @Test fun newDefaultSaysWhoMoves() {
