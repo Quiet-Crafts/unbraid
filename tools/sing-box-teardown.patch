@@ -1,0 +1,811 @@
+diff --git a/adapter/endpoint/manager.go b/adapter/endpoint/manager.go
+index c4abc31..aba3fcc 100644
+--- a/adapter/endpoint/manager.go
++++ b/adapter/endpoint/manager.go
+@@ -71,9 +71,33 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logger log.
+ 	defer m.access.Unlock()
+ 	_, loaded := m.endpointByTag[tag]
+ 	if loaded {
++		closeConstructed(endpoint)
+ 		return E.New("duplicate endpoint tag: ", tag)
+ 	}
+ 	m.endpoints = append(m.endpoints, endpoint)
+ 	m.endpointByTag[tag] = endpoint
+ 	return nil
+ }
++
++// Unbraid: some endpoints build their network stack or device in the constructor but registered its cleanup only in
++// their initialize stage, so a box closed before that stage (a configuration check, a start that failed earlier, a
++// constructor error further on) left them running. Such endpoints implement CloseConstructed, which releases what
++// the constructor built and runs at most once, so calling it after the endpoint's own cleanup is harmless.
++type constructedCloser interface {
++	CloseConstructed() error
++}
++
++func closeConstructed(endpoint adapter.Endpoint) {
++	if closer, isCloser := endpoint.(constructedCloser); isCloser {
++		_ = closer.CloseConstructed()
++	}
++}
++
++// CloseConstructed releases what the constructors of all created endpoints built. The box calls it last when it
++// closes, and when it fails to build.
++func (m *Manager) CloseConstructed() error {
++	for _, endpoint := range m.Endpoints() {
++		closeConstructed(endpoint)
++	}
++	return nil
++}
+diff --git a/box.go b/box.go
+index 3654fb6..8fc58c5 100644
+--- a/box.go
++++ b/box.go
+@@ -107,7 +107,7 @@ func Context(
+ 	return ctx
+ }
+ 
+-func New(options Options) (*Box, error) {
++func New(options Options) (_ *Box, resultErr error) {
+ 	createdAt := time.Now()
+ 	ctx := options.Context
+ 	if ctx == nil {
+@@ -206,6 +206,12 @@ func New(options Options) (*Box, error) {
+ 	internalServices = append(internalServices, netnsManager)
+ 	dnsOptions := common.PtrValueOrDefault(options.DNS)
+ 	endpointManager := endpoint.NewManager(endpointRegistry)
++	// Unbraid: endpoints built before a later step fails are released here; see Manager.CloseConstructed.
++	defer func() {
++		if resultErr != nil {
++			_ = endpointManager.CloseConstructed()
++		}
++	}()
+ 	inboundManager := inbound.NewManager(inboundRegistry, endpointManager)
+ 	outboundManager := outbound.NewManager(outboundRegistry, endpointManager, routeOptions.Final)
+ 	dnsTransportManager := dns.NewTransportManager(dnsTransportRegistry, outboundManager, dnsOptions.Final)
+@@ -465,6 +471,9 @@ func New(options Options) (*Box, error) {
+ 		})
+ 		timeService.TimeService = ntpService
+ 	}
++	scope := adapter.NewScope(ctx, logFactory.Logger())
++	// Unbraid: added first, so it runs last on Close, after the endpoints' own cleanup (then a no-op).
++	scope.Add(endpointManager.CloseConstructed)
+ 	return &Box{
+ 		network:             networkManager,
+ 		endpoint:            endpointManager,
+@@ -484,7 +493,7 @@ func New(options Options) (*Box, error) {
+ 		logger:              logFactory.Logger(),
+ 		internalService:     internalServices,
+ 		ntpService:          ntpService,
+-		scope:               adapter.NewScope(ctx, logFactory.Logger()),
++		scope:               scope,
+ 	}, nil
+ }
+ 
+diff --git a/daemon/instance_race_test.go b/daemon/instance_race_test.go
+new file mode 100644
+index 0000000..bb407c1
+--- /dev/null
++++ b/daemon/instance_race_test.go
+@@ -0,0 +1,191 @@
++package daemon
++
++import (
++	"context"
++	"io"
++	"sync"
++	"testing"
++	"time"
++
++	box "github.com/sagernet/sing-box"
++	"github.com/sagernet/sing-box/adapter/certificate"
++	"github.com/sagernet/sing-box/adapter/endpoint"
++	"github.com/sagernet/sing-box/adapter/inbound"
++	"github.com/sagernet/sing-box/adapter/outbound"
++	"github.com/sagernet/sing-box/adapter/service"
++	"github.com/sagernet/sing-box/dns"
++	"github.com/sagernet/sing-box/dns/transport/local"
++	"github.com/sagernet/sing-box/protocol/direct"
++
++	"google.golang.org/grpc"
++	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/status"
++)
++
++// Stand-in gRPC streams: the handlers under test return before they send or receive anything.
++type testStream[Res any] struct {
++	grpc.ServerStream
++	ctx context.Context
++}
++
++func (s testStream[Res]) Context() context.Context { return s.ctx }
++func (testStream[Res]) Send(*Res) error            { return nil }
++
++type testBidiStream[Req, Res any] struct{ testStream[Res] }
++
++func (testBidiStream[Req, Res]) Recv() (*Req, error) { return nil, io.EOF }
++
++func stream[Res any]() testStream[Res] { return testStream[Res]{ctx: context.Background()} }
++
++func bidi[Req, Res any]() testBidiStream[Req, Res] {
++	return testBidiStream[Req, Res]{stream[Res]()}
++}
++
++const raceTestConfig = `{"log":{"disabled":true},"outbounds":[{"type":"direct","tag":"direct"}]}`
++
++func startTestService(t *testing.T) *StartedService {
++	t.Helper()
++	// The include package imports this one, so the test registers just what its configuration uses.
++	outbounds := outbound.NewRegistry()
++	direct.RegisterOutbound(outbounds)
++	transports := dns.NewTransportRegistry()
++	local.RegisterTransport(transports)
++	ctx := box.Context(context.Background(), inbound.NewRegistry(), outbounds, endpoint.NewRegistry(), transports,
++		service.NewRegistry(), certificate.NewRegistry())
++	s := NewStartedService(ServiceOptions{Context: ctx, LogMaxLines: 16})
++	if err := s.StartOrReloadService(ctx, raceTestConfig, nil); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		_ = s.CloseService()
++		s.Close()
++	})
++	return s
++}
++
++// Every handler that reads the instance after waitForStarted, with a request that reaches that read.
++var instanceReaders = []struct {
++	name string
++	call func(s *StartedService) error
++}{
++	{"SubscribeConnections", func(s *StartedService) error {
++		return s.SubscribeConnections(&SubscribeConnectionsRequest{}, stream[ConnectionEvents]())
++	}},
++	{"StartNetworkQualityTest", func(s *StartedService) error {
++		return s.StartNetworkQualityTest(&NetworkQualityTestRequest{}, stream[NetworkQualityTestProgress]())
++	}},
++	{"StartSTUNTest", func(s *StartedService) error {
++		return s.StartSTUNTest(&STUNTestRequest{Server: "127.0.0.1:3478"}, stream[STUNTestProgress]())
++	}},
++	{"StartTailscalePing", func(s *StartedService) error {
++		return s.StartTailscalePing(&TailscalePingRequest{}, stream[TailscalePingResponse]())
++	}},
++	{"SetTailscaleExitNode", func(s *StartedService) error {
++		_, err := s.SetTailscaleExitNode(context.Background(), &SetTailscaleExitNodeRequest{EndpointTag: "ts"})
++		return err
++	}},
++	{"TailscaleLogout", func(s *StartedService) error {
++		_, err := s.TailscaleLogout(context.Background(), &TailscaleLogoutRequest{EndpointTag: "ts"})
++		return err
++	}},
++	{"GetTailscaleCertificate", func(s *StartedService) error {
++		_, err := s.GetTailscaleCertificate(context.Background(), &TailscaleCertificateRequest{EndpointTag: "ts"})
++		return err
++	}},
++	{"StartTailscaleSSHSession", func(s *StartedService) error {
++		return s.StartTailscaleSSHSession(bidi[TailscaleSSHClientMessage, TailscaleSSHServerMessage]())
++	}},
++	{"SubmitOpenConnectAuthResponse", func(s *StartedService) error {
++		_, err := s.SubmitOpenConnectAuthResponse(context.Background(), &OpenConnectAuthResponseSubmission{EndpointTag: "oc"})
++		return err
++	}},
++	{"CancelOpenConnectAuthChallenge", func(s *StartedService) error {
++		_, err := s.CancelOpenConnectAuthChallenge(context.Background(), &OpenConnectAuthChallengeCancel{EndpointTag: "oc"})
++		return err
++	}},
++	{"SubmitOpenVPNChallengeResponse", func(s *StartedService) error {
++		_, err := s.SubmitOpenVPNChallengeResponse(context.Background(), &OpenVPNChallengeSubmission{EndpointTag: "ovpn"})
++		return err
++	}},
++	{"CancelOpenVPNChallenge", func(s *StartedService) error {
++		_, err := s.CancelOpenVPNChallenge(context.Background(), &OpenVPNChallengeCancel{EndpointTag: "ovpn"})
++		return err
++	}},
++	{"MarkTaildropInboxRead", func(s *StartedService) error {
++		_, err := s.MarkTaildropInboxRead(context.Background(), &MarkTaildropInboxReadRequest{})
++		return err
++	}},
++	{"SendTaildropFiles", func(s *StartedService) error {
++		return s.SendTaildropFiles(bidi[TaildropSendClientMessage, TaildropSendServerMessage]())
++	}},
++	{"DownloadTaildropFile", func(s *StartedService) error {
++		return s.DownloadTaildropFile(&DownloadTaildropFileRequest{}, stream[DownloadTaildropFileChunk]())
++	}},
++	{"DeleteTaildropFile", func(s *StartedService) error {
++		_, err := s.DeleteTaildropFile(context.Background(), &DeleteTaildropFileRequest{})
++		return err
++	}},
++	{"CancelTaildropReceiving", func(s *StartedService) error {
++		_, err := s.CancelTaildropReceiving(context.Background(), &CancelTaildropReceivingRequest{})
++		return err
++	}},
++}
++
++// pauseAfterWaitForStarted runs land once, in the window between waitForStarted and the instance read.
++func pauseAfterWaitForStarted(t *testing.T, land func()) {
++	var once sync.Once
++	beforeInstanceRead = func() { once.Do(land) }
++	t.Cleanup(func() { beforeInstanceRead = func() {} })
++}
++
++// A stop that lands after the handler saw the service started: the handler must refuse, not panic.
++func TestInstanceReadAfterStopIsRefused(t *testing.T) {
++	for _, reader := range instanceReaders {
++		t.Run(reader.name, func(t *testing.T) {
++			s := startTestService(t)
++			pauseAfterWaitForStarted(t, func() { _ = s.CloseService() })
++			if err := reader.call(s); status.Code(err) != codes.Unavailable {
++				t.Fatalf("want Unavailable, got %v", err)
++			}
++		})
++	}
++}
++
++// A reload that lands in the same window: the old instance is gone and the next one is not started yet.
++func TestInstanceReadDuringReloadIsRefused(t *testing.T) {
++	for _, reader := range instanceReaders {
++		t.Run(reader.name, func(t *testing.T) {
++			s := startTestService(t)
++			reloaded := make(chan error, 1)
++			pauseAfterWaitForStarted(t, func() {
++				go func() { reloaded <- s.StartOrReloadService(s.ctx, raceTestConfig, nil) }()
++				for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
++					s.serviceAccess.RLock()
++					moved := s.serviceStatus.Status != ServiceStatus_STARTED
++					s.serviceAccess.RUnlock()
++					if moved {
++						return
++					}
++				}
++				t.Error("reload never began")
++			})
++			if err := reader.call(s); status.Code(err) != codes.Unavailable {
++				t.Fatalf("want Unavailable, got %v", err)
++			}
++			if err := <-reloaded; err != nil {
++				t.Fatal(err)
++			}
++		})
++	}
++}
++
++// With nothing landing in between, the handlers get past the check and fail on their own terms.
++func TestInstanceReadWhenStartedProceeds(t *testing.T) {
++	s := startTestService(t)
++	if err := s.StartSTUNTest(&STUNTestRequest{OutboundTag: "missing"}, stream[STUNTestProgress]()); status.Code(err) != codes.NotFound {
++		t.Fatalf("STUN: want NotFound for an unknown outbound, got %v", err)
++	}
++	if _, err := s.TailscaleLogout(context.Background(), &TailscaleLogoutRequest{EndpointTag: "ts"}); status.Code(err) != codes.NotFound {
++		t.Fatalf("logout: want NotFound for an unknown endpoint, got %v", err)
++	}
++}
+diff --git a/daemon/started_service.go b/daemon/started_service.go
+index 2a9983c..f0d5b0a 100644
+--- a/daemon/started_service.go
++++ b/daemon/started_service.go
+@@ -206,6 +206,22 @@ func (s *StartedService) waitForStarted(ctx context.Context) error {
+ 	}
+ }
+ 
++// Unbraid: waitForStarted reports that the service started, but a reload or a stop can land before the handler reads
++// the instance, leaving it nil (or the next one, not started yet). Read it under the lock and refuse the call then,
++// instead of dereferencing nil: a panic in a handler ends the whole process, and the VPN with it.
++func (s *StartedService) startedInstance() (*Instance, error) {
++	beforeInstanceRead()
++	s.serviceAccess.RLock()
++	defer s.serviceAccess.RUnlock()
++	if s.instance == nil || s.serviceStatus == nil || s.serviceStatus.Status != ServiceStatus_STARTED {
++		return nil, status.Error(codes.Unavailable, "service not started")
++	}
++	return s.instance, nil
++}
++
++// Unbraid: tests replace this to land a reload or a stop exactly in that window.
++var beforeInstanceRead = func() {}
++
+ func (s *StartedService) followInstance(ctx context.Context, run func(ctx context.Context, instance *Instance) error) error {
+ 	statusSubscription, statusDone, err := s.serviceStatusObserver.Subscribe()
+ 	if err != nil {
+@@ -796,9 +812,10 @@ func (s *StartedService) SubscribeConnections(request *SubscribeConnectionsReque
+ 	if err != nil {
+ 		return err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return err
++	}
+ 
+ 	trafficManager := boxService.trafficManager
+ 	if trafficManager == nil {
+@@ -1493,9 +1510,10 @@ func (s *StartedService) StartNetworkQualityTest(
+ 	if err != nil {
+ 		return err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return err
++	}
+ 
+ 	outbound, err := resolveOutbound(boxService, request.OutboundTag)
+ 	if err != nil {
+@@ -1539,9 +1557,10 @@ func (s *StartedService) StartSTUNTest(
+ 	if err != nil {
+ 		return err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return err
++	}
+ 
+ 	outbound, err := resolveOutbound(boxService, request.OutboundTag)
+ 	if err != nil {
+@@ -1691,9 +1710,10 @@ func (s *StartedService) StartTailscalePing(
+ 	if err != nil {
+ 		return err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return err
++	}
+ 
+ 	provider, _, err := resolveTailscaleProvider(boxService, request.EndpointTag)
+ 	if err != nil {
+@@ -1718,9 +1738,10 @@ func (s *StartedService) SetTailscaleExitNode(ctx context.Context, request *SetT
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	endpoint, err := resolveTailscaleEndpoint(boxService, request.EndpointTag)
+ 	if err != nil {
+@@ -1742,9 +1763,10 @@ func (s *StartedService) TailscaleLogout(ctx context.Context, request *Tailscale
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	endpoint, err := resolveTailscaleEndpoint(boxService, request.EndpointTag)
+ 	if err != nil {
+@@ -1766,9 +1788,10 @@ func (s *StartedService) GetTailscaleCertificate(ctx context.Context, request *T
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	endpoint, err := resolveTailscaleEndpoint(boxService, request.EndpointTag)
+ 	if err != nil {
+@@ -1861,9 +1884,10 @@ func (s *StartedService) SubmitOpenConnectAuthResponse(ctx context.Context, requ
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	endpoint, err := resolveEndpoint[adapter.OpenConnectEndpoint](boxService, request.EndpointTag, C.TypeOpenConnect, "OpenConnect client")
+ 	if err != nil {
+@@ -1898,9 +1922,10 @@ func (s *StartedService) CancelOpenConnectAuthChallenge(ctx context.Context, req
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	endpoint, err := resolveEndpoint[adapter.OpenConnectEndpoint](boxService, request.EndpointTag, C.TypeOpenConnect, "OpenConnect client")
+ 	if err != nil {
+@@ -2001,9 +2026,10 @@ func (s *StartedService) SubmitOpenVPNChallengeResponse(ctx context.Context, req
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	endpoint, err := resolveEndpoint[adapter.OpenVPNEndpoint](boxService, request.EndpointTag, C.TypeOpenVPNClient, "OpenVPN client")
+ 	if err != nil {
+@@ -2025,9 +2051,10 @@ func (s *StartedService) CancelOpenVPNChallenge(ctx context.Context, request *Op
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	endpoint, err := resolveEndpoint[adapter.OpenVPNEndpoint](boxService, request.EndpointTag, C.TypeOpenVPNClient, "OpenVPN client")
+ 	if err != nil {
+diff --git a/daemon/started_service_taildrop.go b/daemon/started_service_taildrop.go
+index 66db972..7df8f1f 100644
+--- a/daemon/started_service_taildrop.go
++++ b/daemon/started_service_taildrop.go
+@@ -151,9 +151,10 @@ func (s *StartedService) MarkTaildropInboxRead(ctx context.Context, request *Mar
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	provider, _, err := resolveTailscaleProvider(boxService, request.EndpointTag)
+ 	if err != nil {
+@@ -174,9 +175,10 @@ func (s *StartedService) SendTaildropFiles(
+ 	if err != nil {
+ 		return err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return err
++	}
+ 
+ 	firstMessage, err := server.Recv()
+ 	if err != nil {
+@@ -318,9 +320,10 @@ func (s *StartedService) DownloadTaildropFile(
+ 	if err != nil {
+ 		return err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return err
++	}
+ 
+ 	provider, _, err := resolveTailscaleProvider(boxService, request.EndpointTag)
+ 	if err != nil {
+@@ -358,9 +361,10 @@ func (s *StartedService) DeleteTaildropFile(ctx context.Context, request *Delete
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	provider, _, err := resolveTailscaleProvider(boxService, request.EndpointTag)
+ 	if err != nil {
+@@ -378,9 +382,10 @@ func (s *StartedService) CancelTaildropReceiving(ctx context.Context, request *C
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return nil, err
++	}
+ 
+ 	provider, _, err := resolveTailscaleProvider(boxService, request.EndpointTag)
+ 	if err != nil {
+diff --git a/daemon/started_service_tailscale_ssh.go b/daemon/started_service_tailscale_ssh.go
+index bc8b372..1db041c 100644
+--- a/daemon/started_service_tailscale_ssh.go
++++ b/daemon/started_service_tailscale_ssh.go
+@@ -36,9 +36,10 @@ func (s *StartedService) StartTailscaleSSHSession(
+ 	if err != nil {
+ 		return err
+ 	}
+-	s.serviceAccess.RLock()
+-	boxService := s.instance
+-	s.serviceAccess.RUnlock()
++	boxService, err := s.startedInstance()
++	if err != nil {
++		return err
++	}
+ 
+ 	firstMessage, err := server.Recv()
+ 	if err != nil {
+diff --git a/experimental/libbox/endpoint_cleanup_test.go b/experimental/libbox/endpoint_cleanup_test.go
+new file mode 100644
+index 0000000..17100a1
+--- /dev/null
++++ b/experimental/libbox/endpoint_cleanup_test.go
+@@ -0,0 +1,159 @@
++//go:build with_gvisor && with_wireguard && with_openvpn
++
++package libbox
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"runtime"
++	"runtime/pprof"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++
++	box "github.com/sagernet/sing-box"
++)
++
++// A placeholder WireGuard peer: an all-zero key and a local address, never contacted (the endpoint is not started).
++const cleanupTestEndpoint = `{"type":"wireguard","tag":"wg","address":["10.0.0.2/32"],"private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","peers":[{"address":"127.0.0.1","port":51820,"public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","allowed_ips":["0.0.0.0/0"]}]}`
++
++// liveGoroutines returns all live goroutines and those running inside a userspace network stack.
++func liveGoroutines() (all int, stacks int) {
++	var dump strings.Builder
++	_ = pprof.Lookup("goroutine").WriteTo(&dump, 2)
++	for _, goroutine := range strings.Split(dump.String(), "\n\n") {
++		if strings.TrimSpace(goroutine) == "" {
++			continue
++		}
++		all++
++		if strings.Contains(goroutine, "/gvisor/pkg/") {
++			stacks++
++		}
++	}
++	return
++}
++
++// assertNoGrowth runs round 40 times and fails when goroutines, or network-stack goroutines, keep growing.
++func assertNoGrowth(t *testing.T, round func(t *testing.T)) {
++	round(t) // warm up lazily started globals
++	runtime.GC()
++	beforeAll, beforeStacks := liveGoroutines()
++	const rounds = 40
++	for i := 0; i < rounds; i++ {
++		round(t)
++	}
++	var afterAll, afterStacks int
++	for deadline := time.Now().Add(5 * time.Second); ; {
++		runtime.GC()
++		afterAll, afterStacks = liveGoroutines()
++		if (afterAll <= beforeAll+4 && afterStacks <= beforeStacks) || time.Now().After(deadline) {
++			break
++		}
++		time.Sleep(50 * time.Millisecond)
++	}
++	t.Logf("%d rounds: goroutines %d -> %d, network-stack goroutines %d -> %d", rounds, beforeAll, afterAll, beforeStacks, afterStacks)
++	if afterAll > beforeAll+4 || afterStacks > beforeStacks {
++		t.Fatalf("goroutines grew from %d to %d (network stack %d to %d)", beforeAll, afterAll, beforeStacks, afterStacks)
++	}
++}
++
++func TestCheckConfigReleasesWireGuardStack(t *testing.T) {
++	config := `{"log":{"disabled":true},"endpoints":[` + cleanupTestEndpoint + `]}`
++	assertNoGrowth(t, func(t *testing.T) {
++		if err := CheckConfig(config); err != nil {
++			t.Fatal(err)
++		}
++	})
++}
++
++// The OpenVPN client builds its device and network stack the same way. Static-key mode, placeholder key material.
++func TestCheckConfigReleasesOpenVPNStack(t *testing.T) {
++	lines := []string{"-----BEGIN OpenVPN Static key V1-----"}
++	for i := 0; i < 16; i++ {
++		lines = append(lines, strings.Repeat("0", 32))
++	}
++	lines = append(lines, "-----END OpenVPN Static key V1-----")
++	key, _ := json.Marshal(lines)
++	config := `{"log":{"disabled":true},"endpoints":[{"type":"openvpn-client","tag":"ovpn","server":"127.0.0.1","server_port":1194,` +
++		`"mode":"static_key","network":"udp","address":["10.8.0.2/30"],"peer_address":"10.8.0.1","topology":"p2p",` +
++		`"static_key":` + string(key) + `,"key_direction":"client","cipher":"AES-256-CBC","auth":"SHA256"}]}`
++	assertNoGrowth(t, func(t *testing.T) {
++		if err := CheckConfig(config); err != nil {
++			t.Fatal(err)
++		}
++	})
++}
++
++// A configuration that fails after an endpoint was built (here: a second endpoint without a key) releases it.
++func TestFailedCheckConfigReleasesWireGuardStack(t *testing.T) {
++	broken := `{"type":"wireguard","tag":"broken","address":["10.0.0.3/32"],"peers":[{"address":"127.0.0.1","port":51820,"public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","allowed_ips":["0.0.0.0/0"]}]}`
++	config := `{"log":{"disabled":true},"endpoints":[` + cleanupTestEndpoint + `,` + broken + `]}`
++	assertNoGrowth(t, func(t *testing.T) {
++		if err := CheckConfig(config); err == nil || !strings.Contains(err.Error(), "private key") {
++			t.Fatalf("want a missing key error, got %v", err)
++		}
++	})
++}
++
++// A WireGuard stack whose constructor fails part way (here: the same address twice) is released too.
++func TestFailedStackConstructorReleasesStack(t *testing.T) {
++	endpoint := strings.Replace(cleanupTestEndpoint, `"address":["10.0.0.2/32"]`, `"address":["10.0.0.2/32","10.0.0.2/32"]`, 1)
++	config := `{"log":{"disabled":true},"endpoints":[` + endpoint + `]}`
++	assertNoGrowth(t, func(t *testing.T) {
++		if err := CheckConfig(config); err == nil {
++			t.Fatal("duplicate local address accepted")
++		}
++	})
++}
++
++// A start that fails before the endpoints' initialize stage (the cache file cannot be opened) releases them.
++func TestStartFailingAtCacheFileReleasesWireGuardStack(t *testing.T) {
++	// The cache file's folder is a regular file, so opening the database fails.
++	blocker := filepath.Join(t.TempDir(), "not-a-folder")
++	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	cachePath := strconv.Quote(filepath.Join(blocker, "cache.db"))
++	config := `{"log":{"disabled":true},"experimental":{"cache_file":{"enabled":true,"path":` + cachePath + `}},"endpoints":[` + cleanupTestEndpoint + `]}`
++	assertNoGrowth(t, func(t *testing.T) {
++		ctx := baseContext(nil)
++		options, err := parseConfig(ctx, config)
++		if err != nil {
++			t.Fatal(err)
++		}
++		instance, err := box.New(box.Options{Context: ctx, Options: options})
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err = instance.Start(); err == nil || !strings.Contains(err.Error(), "cache") {
++			t.Fatalf("start: want a cache file error, got %v", err)
++		}
++		// The caller closes again after a failed start, as the service does: that must stay harmless.
++		_ = instance.Close()
++	})
++}
++
++// A successful start and stop closes the stack once, through the endpoint's own cleanup and the box's.
++func TestStartedBoxReleasesWireGuardStackOnce(t *testing.T) {
++	config := `{"log":{"disabled":true},"endpoints":[` + cleanupTestEndpoint + `]}`
++	assertNoGrowth(t, func(t *testing.T) {
++		ctx := baseContext(nil)
++		options, err := parseConfig(ctx, config)
++		if err != nil {
++			t.Fatal(err)
++		}
++		instance, err := box.New(box.Options{Context: ctx, Options: options})
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err = instance.Start(); err != nil {
++			t.Fatal(err)
++		}
++		if err = instance.Close(); err != nil {
++			t.Fatal(err)
++		}
++		_ = instance.Close()
++	})
++}
+diff --git a/protocol/openvpn/client.go b/protocol/openvpn/client.go
+index a0e585e..7c5880e 100644
+--- a/protocol/openvpn/client.go
++++ b/protocol/openvpn/client.go
+@@ -57,6 +57,8 @@ type ClientEndpoint struct {
+ 	statusAccess   sync.Mutex
+ 	statusUpdated  chan struct{}
+ 	terminalError  string
++	closeOnce      sync.Once
++	closeErr       error
+ }
+ 
+ type clientState struct {
+@@ -601,11 +603,7 @@ func (c *ClientEndpoint) Start(stage adapter.StartStage, scope *adapter.Scope) e
+ 			c.notifyStatusUpdated()
+ 			return nil
+ 		})
+-		scope.Add(c.device.Close)
+-		scope.Add(func() error {
+-			c.cancelLoop()
+-			return nil
+-		})
++		scope.Add(c.CloseConstructed)
+ 	case adapter.StartStatePostStart:
+ 		var loopGroup sync.WaitGroup
+ 		scope.Add(func() error {
+@@ -855,3 +853,14 @@ func openVPNDomainMatches(suffix string, domain string) bool {
+ 	}
+ 	return normalizedDomain == normalizedSuffix || strings.HasSuffix(normalizedDomain, "."+normalizedSuffix)
+ }
++
++// Unbraid: NewClientEndpoint builds the device and its network stack, so the box closes them even when this endpoint
++// was never initialized; once only, whichever of the two cleanups runs first. Same order as before: the loop context
++// is cancelled, then the device closed.
++func (c *ClientEndpoint) CloseConstructed() error {
++	c.closeOnce.Do(func() {
++		c.cancelLoop()
++		c.closeErr = c.device.Close()
++	})
++	return c.closeErr
++}
+diff --git a/protocol/wireguard/endpoint.go b/protocol/wireguard/endpoint.go
+index 4d51968..6d31495 100644
+--- a/protocol/wireguard/endpoint.go
++++ b/protocol/wireguard/endpoint.go
+@@ -47,6 +47,8 @@ type Endpoint struct {
+ 	endpoint       *wireguard.Endpoint
+ 	bindAccess     sync.Mutex
+ 	started        atomic.Bool
++	closeOnce      sync.Once
++	closeErr       error
+ }
+ 
+ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.WireGuardEndpointOptions) (adapter.Endpoint, error) {
+@@ -138,7 +140,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ func (w *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 	switch stage {
+ 	case adapter.StartStateInitialize:
+-		scope.Add(w.endpoint.Close)
++		scope.Add(w.CloseConstructed)
+ 	case adapter.StartStateStart:
+ 		return w.endpoint.Start(false)
+ 	case adapter.StartStatePostStart:
+@@ -157,6 +159,15 @@ func (w *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+ 	return nil
+ }
+ 
++// Unbraid: NewEndpoint builds the network stack, so the box closes it even when this endpoint was never
++// initialized; once only, whichever of the two cleanups runs first.
++func (w *Endpoint) CloseConstructed() error {
++	w.closeOnce.Do(func() {
++		w.closeErr = w.endpoint.Close()
++	})
++	return w.closeErr
++}
++
+ func (w *Endpoint) MultiplexEnabled() bool {
+ 	return true
+ }
+diff --git a/transport/wireguard/device_stack.go b/transport/wireguard/device_stack.go
+index 3321ef8..cd2f19f 100644
+--- a/transport/wireguard/device_stack.go
++++ b/transport/wireguard/device_stack.go
+@@ -74,6 +74,9 @@ func newStackDevice(options DeviceOptions) (*stackDevice, error) {
+ 		}
+ 		gErr := ipStack.AddProtocolAddress(tun.DefaultNIC, protoAddr, stack.AddressProperties{})
+ 		if gErr != nil {
++			// Unbraid: the stack already runs its goroutines; stop them, nobody else holds it.
++			ipStack.Close()
++			ipStack.Wait()
+ 			return nil, E.New("parse local address ", protoAddr.AddressWithPrefix, ": ", gErr.String())
+ 		}
+ 	}
