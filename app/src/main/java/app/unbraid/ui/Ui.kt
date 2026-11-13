@@ -569,10 +569,14 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     private fun newId() = generateSequence { "r" + java.util.UUID.randomUUID().toString().take(8) }.first { id -> setup.value.routes.none { it.id == id } }
     private fun nextHue(s: Setup) = (0..6).firstOrNull { h -> s.routes.none { it.hue == h } } ?: s.routes.size
 
-    /** Points route [id] at a provider location, dropping any imported source it had. */
-    fun setLocation(id: String, loc: Location) = guarded { s ->
+    /**
+     * Points route [id] at a provider location, dropping any imported source it had. [blocking], when set, is the
+     * provider's own blocking chosen with it: one change, so a connection-limit question answered No leaves both as they were.
+     */
+    fun setLocation(id: String, loc: Location, blocking: Boolean? = null) = guarded { s ->
         // A route's blocking choice belongs to its provider: another provider starts from its own page.
         s.copy(routes = s.routes.map { if (it.id == id) it.copy(loc = loc, wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null, filter = it.filter.takeIf { _ -> it.loc.provider == loc.provider && !it.imported }) else it })
+            .let { n -> if (blocking == null) n else n.blocking(id, blocking) }
     }
 
     /** A new route for [loc] (or the one already exiting there) for app [pkg], as one change; in the profile being viewed. */
@@ -892,9 +896,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun followDefault(pkg: String) = assign(pkg, null)
 
     /** Route [id]'s own blocking choice; one equal to its provider page's is dropped, so the route follows the page again. */
-    fun setFilter(id: String, on: Boolean) = store.update { s ->
-        s.copy(routes = s.routes.map { r -> if (r.id != id) r else r.copy(filter = on.takeIf { it != (s.opt(r.loc.provider, app.unbraid.data.PROTECT) == "on") }) })
-    }
+    fun setFilter(id: String, on: Boolean) = store.update { it.blocking(id, on) }
 
     /** One setting on [provider]'s page. */
     /** A page setting can change which servers a provider lists (Mullvad-owned only), so its countries are read again. */

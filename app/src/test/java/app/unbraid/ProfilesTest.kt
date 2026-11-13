@@ -56,6 +56,14 @@ class ProfilesTest {
         assertEquals(emptySet<String>(), base.unlisted(setOf("it")))
     }
 
+    /** A route's blocking chosen with its location is part of that one change; one equal to the provider page's follows the page. */
+    @Test fun blockingFollowsThePageWhenEqual() {
+        val on = base.blocking("us", true)
+        assertEquals(null, on.route("us")!!.filter) // Nord's page has it on by default
+        assertEquals(false, base.blocking("us", false).route("us")!!.filter)
+        assertEquals(true, base.copy(opts = mapOf("nord" to mapOf(app.unbraid.data.PROTECT to "off"))).blocking("us", true).route("us")!!.filter)
+    }
+
     /** Deleting the profile in use leaves the routes as they are; renaming it keeps it in use. */
     @Test fun forgetAndRename() {
         val s = base.saveAs("Home").saveAs("Travel")

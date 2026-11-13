@@ -378,6 +378,9 @@ data class Setup(
     /** Whether route [r] uses its provider's own blocking: its own choice, else the provider page's. */
     fun protects(r: Route) = !r.imported && (r.filter ?: (opt(r.loc.provider, PROTECT) == "on"))
 
+    /** Route [id] uses its provider's own blocking ([on]) or not; a choice equal to its provider page's is dropped, so it follows the page. */
+    fun blocking(id: String, on: Boolean) = copy(routes = routes.map { r -> if (r.id != id) r else r.copy(filter = on.takeIf { it != (opt(r.loc.provider, PROTECT) == "on") }) })
+
     /**
      * Older saves kept Threat Protection Lite in [Prefs] (it now lives on NordVPN's page) and a custom DNS server for every
      * route (now unbraid's filter set to that server, on VPN routes).
