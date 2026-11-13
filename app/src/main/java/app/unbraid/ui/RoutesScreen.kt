@@ -180,7 +180,7 @@ private fun place(r: Route, live: Map<String, Server>) = when {
     r.wg != null -> "WireGuard"
     r.ovpn != null -> "OpenVPN"
     r.ss != null -> "Shadowsocks"
-    r.tsExit != null -> "Tailscale exit"
+    r.tsExit != null -> "Tailscale exit node"
     else -> listOfNotNull(
         r.source,
         NordGroups.firstOrNull { it.first != null && it.first == r.loc.group }?.second.takeIf { r.loc.provider == "nord" },
@@ -433,7 +433,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                 }
                 // Nothing set apart yet: say what that means instead of leaving the page empty.
                 if (shown.apps.values.all { it == shown.defaultRoute } && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
-                    Text("All apps use the default route. Tap + to send some apps through another exit.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp))
+                    Text("All apps use the default route. Tap + to send some apps through another route.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp))
                 }
                 if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {
                     HomeRow(setup.home, lit = on, loginUrl = vpn.tsLoginUrl.takeIf { setup.home.tailscale }) { tsLogin(it) }

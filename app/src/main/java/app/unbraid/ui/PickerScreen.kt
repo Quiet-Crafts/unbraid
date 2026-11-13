@@ -153,7 +153,7 @@ private suspend fun serverList(ui: Ui, loc: Location): Result<List<Server>> = wi
 }
 
 /**
- * Location picker. Two tabs: Providers (provider and protocol dropdowns, then their locations) and My servers (Tailscale
+ * Location picker. Two tabs: Providers (provider and protocol dropdowns, then their locations) and Own servers (Tailscale
  * devices and the servers saved in Settings). The country list starts collapsed; route options sit within thumb reach.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -184,7 +184,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     // Double VPN and Onion only run over OpenVPN: UDP unless TCP was chosen.
     val protocol = protocolChoice.takeIf { provider == "nord" }?.takeIf { group !in Nord.openVpnOnly || it?.startsWith("openvpn") == true }
         ?: "openvpn_udp".takeIf { provider == "nord" && group in Nord.openVpnOnly }
-    // A route that already uses a Tailscale exit or a saved server opens on "My servers".
+    // A route that already uses a Tailscale exit node or a saved server opens on "Own servers".
     var mine by rememberSaveable { mutableStateOf(route?.imported == true || provider == null && (setup.tailscale || setup.servers.isNotEmpty())) }
     var allOpen by rememberSaveable { mutableStateOf(false) }
     var sheet by rememberSaveable { mutableStateOf<String?>(null) } // "options" or "c:<country id>"
@@ -222,7 +222,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     val exitNode = exitRoute?.let { it.tsName ?: it.tsExit }
     fun exit(ip: String, name: String) {
         ui.tsLock(ip)?.let { r ->
-            tsNote = "${setup.profile ?: "The setup in use"} uses the Tailscale exit ${r.tsName ?: r.tsExit}. Tailscale uses one exit node at a time: pick that one here, or this one once this profile is in use."
+            tsNote = "${setup.profile ?: "The setup in use"} uses the Tailscale exit node ${r.tsName ?: r.tsExit}. Tailscale uses one exit node at a time: pick that one here, or this one once this profile is in use."
             return
         }
         once {
@@ -258,7 +258,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
 
     fun LazyListScope.favorites(list: List<Location>) {
         if (list.isEmpty()) return
-        item(key = "favorites") { SectionLabel("Favorites") }
+        item(key = "favorites") { SectionLabel("Favourites") }
         items(list, key = { "f:${it.favKey().hashCode()}" }) { f ->
             val l = f.copy(group = group, protocol = protocol)
             PickRow({ pick.choose(l) }, pick.on(l), tint, Modifier.padding(horizontal = 8.dp)) {
@@ -423,7 +423,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         navigation = { IconTap(Icons.close, "Close", close) },
         // Tabs, then for providers the two dropdowns, then search: each tab searches only itself.
         search = {
-            Tabs(listOf("Providers", "My servers"), if (mine) 1 else 0, tint) { mine = it == 1; q = "" }
+            Tabs(listOf("Providers", "Own servers"), if (mine) 1 else 0, tint) { mine = it == 1; q = "" }
             if (!mine && provider != null) Row(Modifier.padding(horizontal = Gutter, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Dropdown("Provider", Providers.get(provider)?.name.orEmpty()) { done ->
                     signed.forEach { p -> MenuRow(p.name, selected = p.id == provider, tint = tint) { chosen = p.id; allOpen = false; done() } }
@@ -669,7 +669,7 @@ private fun Star(on: Boolean, onClick: () -> Unit) {
     }
     Box(Modifier.graphicsLayer { scaleX = pop.value; scaleY = pop.value }) {
         IconTap(
-            if (on) Icons.starFilled else Icons.star, if (on) "Remove from favorites" else "Add to favorites",
+            if (on) Icons.starFilled else Icons.star, if (on) "Remove from favourites" else "Add to favourites",
             { haptic.performHapticFeedback(if (on) HapticFeedbackType.ToggleOff else HapticFeedbackType.ToggleOn); onClick() },
             tint = if (on) Ink.accent else Ink.faint,
         )

@@ -165,7 +165,12 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                 FilterChip("All", Ink.text, filter == null) { filter = null }
                 // Two routes with one country code (NordVPN NL, Mullvad NL) are told apart by provider.
                 offered.forEach { r ->
-                    val label = if (offered.count { it.code == r.code } > 1) "${r.code} · ${r.source}" else r.code
+                    // Same code and source too (two WireGuard servers): the route's own name.
+                    val label = when {
+                        offered.count { it.code == r.code } == 1 -> r.code
+                        offered.count { it.code == r.code && it.source == r.source } == 1 -> "${r.code} · ${r.source}"
+                        else -> "${r.code} · ${r.name}"
+                    }
                     FilterChip(label, Ink.route(r.hue), filter == r.id) { filter = r.id }
                 }
                 if (setup.defaultRoute.isEmpty()) FilterChip("Not set", null, filter == "") { filter = "" }
