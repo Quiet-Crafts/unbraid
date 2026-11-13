@@ -200,6 +200,9 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     // A new default moves the apps that follow the default: asked first when there are any.
     var confirmDefault by rememberSaveable { mutableStateOf<String?>(null) }
     fun makeDefault(id: String) { if (ui.moving(id) > 0) confirmDefault = id else ui.setDefault(id) }
+    // A removal refused because the route carries a default: its sentence, and where that default lives ("" = in use).
+    var refused by rememberSaveable { mutableStateOf<Pair<String, String>?>(null) }
+    val refuse = { r: app.unbraid.data.CarriesDefault -> refused = r.text to (if (r.live) "" else r.profiles.first()) }
     val server = if (lit) vpn.servers[shown.defaultRoute] else null
     val exits by ui.exits.collectAsStateWithLifecycle()
     // A route's report holds only for the engine and server it was taken on.
@@ -440,7 +443,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     }
                     if (draft == null && id != setup.defaultRoute) {
                         SheetAction("Make default") { act { makeDefault(id) } }
-                        SheetAction("Remove route", Ink.bad) { act { ui.removeRoute(id) } }
+                        SheetAction("Remove route", Ink.bad) { act { ui.removeRouteRefused(id)?.let(refuse) ?: ui.removeRoute(id)?.let(refuse) } }
                         val others = setup.saved.filter { p -> p.name != setup.profile && id in p.own }.map { it.name }
                         SheetNote("Its apps will use the default route." + if (others.isEmpty()) "" else " It also goes from ${others.joinToString()}.")
                     }
@@ -452,6 +455,14 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
         ProfileSheet(setup, editing.ifEmpty { null }, sheetEmpty,
             onSave = { n, empty -> if (editing.isEmpty()) ui.newProfile(n, empty) else ui.renameProfile(editing, n); profileSheet = null },
             onDelete = { ui.forgetProfile(editing); profileSheet = null }, onDismiss = { profileSheet = null })
+    }
+    refused?.let { (text, where) ->
+        // Nothing picks another default by itself: the user chooses one, here or in the profile that has it.
+        Prompt("Choose another default first", "Choose default", {
+            refused = null
+            if (where.isNotEmpty()) ui.view(where)
+            openPicker("default")
+        }, { refused = null }) { Text(text, style = Type.sub) }
     }
     confirmDefault?.let { id ->
         val name = if (id == DIRECT) null else shown.route(id)?.name ?: "this route"

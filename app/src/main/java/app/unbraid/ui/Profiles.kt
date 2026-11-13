@@ -362,6 +362,6 @@ fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: (empty: Boolea
                 IconTap(Icons.edit, "Edit ${p.name}", { onEdit(p.name) }, tint = Ink.dim)
             }
         }
-        item(key = "note") { Caption("The first three are also Quick Settings tiles and launcher shortcuts. Removing a route moves its apps to each profile's default route.") }
+        item(key = "note") { Caption("The first three are also Quick Settings tiles and launcher shortcuts. Removing a route moves its apps to each profile's default route. A profile whose default it is needs a new default first.") }
     }
 }

@@ -139,6 +139,9 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     val route = setup.route(target)
     val current = route?.takeIf { !it.imported }?.loc
     val signed = Providers.all.filter { it.id in accounts }
+    val viewing by ui.viewing.collectAsStateWithLifecycle()
+    // A profile shown but not in use: its default is saved only. Otherwise the default in use changes.
+    val draft = viewing?.takeIf { n -> n != setup.profile && setup.profiles.any { it.name == n } }
     var chosen by rememberSaveable { mutableStateOf<String?>(null) }
     val provider = chosen?.takeIf { c -> signed.any { it.id == c } } ?: current?.provider?.takeIf { c -> signed.any { it.id == c } } ?: signed.firstOrNull()?.id
     val catalog = provider?.let { catalogs[it] }.orEmpty()
@@ -168,7 +171,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         val loc = picked.copy(pinned = picked.pinned?.takeIf { picked.provider != "nord" || picked.protocol != null || it.publicKey.isNotEmpty() })
         when {
             target.isEmpty() -> ui.addRoute(loc)
-            target == "default" -> ui.chooseDefault(loc)
+            target == "default" -> if (draft != null) ui.chooseDefault(loc) else ui.setDefault(ui.addRoute(loc))
             target.startsWith("app:") -> ui.addRouteFor(target.removePrefix("app:"), loc)
             else -> ui.setLocation(target, loc)
         }
@@ -186,7 +189,12 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             tsNote = "${setup.profile ?: "The setup in use"} uses the Tailscale exit ${r.tsName ?: r.tsExit}. Tailscale uses one exit node at a time: pick that one here, or this one once this profile is in use."
             return
         }
-        once { ui.addTsExit(target, ip, name); close() }
+        once {
+            ui.addTsExit(target, ip, name)
+            // The setup in use: the exit route through that node becomes its default (a profile not in use does that itself).
+            if (target == "default" && draft == null) ui.setup.value.routes.firstOrNull { it.tsExit == ip }?.let { ui.setDefault(it.id) }
+            close()
+        }
     }
     // Protocol applies to this route at once, keeping its location; a server type narrows the list for the next pick.
     fun setProtocol(p: String?) {
@@ -370,6 +378,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         sub = when {
             route?.tsExit != null -> "Tailscale exit node"
             route?.imported == true -> "Your own server"
+            target == "default" -> "Apps that follow the default go where you pick"
             current == null -> "Pick where this route exits"
             else -> listOfNotNull(route?.source, current.pinned?.name ?: current.city, (if (hasLoad) "fastest server" else "automatic server").takeIf { current.pinned == null }).joinToString(" · ")
         },
