@@ -403,7 +403,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     else if (shown.defaultMissing) Notice(Icons.error, Ink.bad, "Your default route no longer exists. Choose one.", "Choose", live = true) { openPicker("default") }
                     else Rise("routes", 0, reveal) { DefaultTile(
                         key = shown.defaultRoute,
-                        apps = defaultLabel(defaultPkgs.size.takeIf { disclosed }, chosenDefault), code = route?.code, chip = if (lit && route != null) Ink.route(route.hue) else Ink.faint, direct = route == null,
+                        apps = defaultLabel(defaultPkgs.size.takeIf { disclosed }, chosenDefault), code = route?.code, chip = if (lit && route != null) Ink.route(route.hue) else Ink.dim, direct = route == null,
                         title = route?.name ?: "Direct", meta = route?.let { place(it, live) } ?: "No VPN for these apps",
                         extra = if (route != null && server != null) serverId(route, server) else null,
                         border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
@@ -441,7 +441,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                 if (setup.activeRoutes.count { !it.imported && it.loc.provider == "nord" } > 6) item(key = "note") {
                     Text(
                         "Nord allows 10 connections per account; each active location uses one.",
-                        style = Type.caption, color = Ink.faint, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp),
+                        style = Type.caption, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp),
                     )
                 }
                 item(key = "fabSpace") { Spacer(Modifier.height(88.dp)) }
@@ -566,7 +566,7 @@ private fun Notice(
         if (large) Secondary(action, onAction)
     }
     if (!large) Secondary(action, onAction)
-    dismiss?.let { IconTap(Icons.close, dismissLabel, it, size = 40.dp, tint = Ink.dim) }
+    dismiss?.let { IconTap(Icons.close, dismissLabel, it, tint = Ink.dim) }
 }
 
 /** A card on Routes that asks or tells one thing: [buttons] under the text, [onClose] puts it away. */
@@ -584,7 +584,7 @@ private fun AskCard(overline: String, title: String, text: String, onClose: () -
         Text(title, style = Type.title, color = Ink.text)
         Text(text, style = Type.sub, color = Ink.dim)
         buttons()
-        footer?.let { Text(it, style = Type.caption, color = Ink.faint) }
+        footer?.let { Text(it, style = Type.caption, color = Ink.dim) }
     }
 }
 
@@ -783,7 +783,7 @@ private fun RouteRow(
     val press = squish(source)
     val direct = route == null
     val fill = if (direct) Color.Transparent else Ink.surface
-    val chip = if (direct) Ink.direct else if (lit) Ink.route(route!!.hue) else Ink.faint
+    val chip = if (direct) Ink.direct else if (lit) Ink.route(route!!.hue) else Ink.dim // ground text on faint would be about 3:1
     // Everything about the exit reads together on the right, its address under its server. A long (IPv6) address takes
     // a line of its own under the row; at large text the row stacks, apps above the exit, so nothing is cut away.
     val wide = exit?.first?.ip?.contains(':') == true
@@ -871,7 +871,7 @@ private fun HomeRow(home: Home, lit: Boolean, loginUrl: String?, signIn: (String
                 Text("Home network", style = Type.title, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(listOfNotNull(via, home.subnets.joinToString(", ").ifBlank { null }).joinToString(" · "), style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Slot { RouteMark("HM", if (lit) Ink.route(3) else Ink.faint, Modifier.clearAndSetSemantics {}, hops = 0) }
+            Slot { RouteMark("HM", if (lit) Ink.route(3) else Ink.dim, Modifier.clearAndSetSemantics {}, hops = 0) }
         }
         loginUrl?.let { Secondary("Sign in to Tailscale", { signIn(it) }, Modifier.offset(x = (-16).dp)) }
     }

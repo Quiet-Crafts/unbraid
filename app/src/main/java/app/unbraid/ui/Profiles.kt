@@ -185,7 +185,7 @@ fun UseBar(name: String, inUse: String?, ready: Boolean, onBack: () -> Unit, onU
     }
     Secondary(inUse?.let { "Back" } ?: "Close", onBack, color = Ink.dim)
     Box(
-        Modifier.heightIn(min = 40.dp).clip(RoundedCornerShape(20.dp)).background(if (ready) Ink.accent else Ink.surfaceHigh)
+        Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(24.dp)).background(if (ready) Ink.accent else Ink.surfaceHigh)
             .clickable(enabled = ready, role = Role.Button, onClickLabel = "Use $name", onClick = onUse).padding(horizontal = 16.dp),
         contentAlignment = Alignment.Center,
     ) { Text("Use", style = Label, color = if (ready) Ink.onAccent else Ink.faint) }
@@ -392,7 +392,7 @@ fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: (empty: Boolea
             ) {
                 // The handle: dragging past half a row moves the profile one place, and the drag carries on from there.
                 Box(
-                    Modifier.size(44.dp, 48.dp).pointerInput(p.name) {
+                    Modifier.size(48.dp).pointerInput(p.name) {
                         detectDragGestures(
                             onDragStart = { dragging = p.name; drift = 0f },
                             onDragEnd = { dragging = null; drift = 0f }, onDragCancel = { dragging = null; drift = 0f },

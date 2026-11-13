@@ -244,7 +244,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
             AppIcon(ui, a.pkg, a.label)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(a.label, style = Type.body, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(a.pkg, style = Type.small, color = Ink.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(a.pkg, style = Type.small, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             // An empty profile has no default route yet: its unassigned apps have no exit.
             // Filled: the app chose this route (the default too); outlined: it follows the default.

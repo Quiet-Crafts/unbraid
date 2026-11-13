@@ -149,7 +149,7 @@ fun SearchField(value: String, onChange: (String) -> Unit, placeholder: String) 
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), modifier = Modifier.fillMaxWidth(),
         )
     }
-    if (value.isNotEmpty()) IconTap(Icons.close, "Clear search", { onChange("") }, size = 40.dp)
+    if (value.isNotEmpty()) IconTap(Icons.close, "Clear search", { onChange("") })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -183,7 +183,7 @@ fun NavBar(tab: Tab, onTab: (Tab) -> Unit) = ShortNavigationBar(containerColor =
 /** Route code chip: "NL", "US", "··". Filled for an explicit choice, outlined when inherited. */
 @Composable
 fun Code(code: String, color: Color, modifier: Modifier = Modifier, filled: Boolean = true) = Text(
-    code, style = Type.code, color = if (filled) Ink.ground else Ink.faint, maxLines = 1,
+    code, style = Type.code, color = if (filled) Ink.ground else Ink.dim, maxLines = 1, // faint is for decoration, never text
     modifier = modifier.clip(RoundedCornerShape(8.dp))
         .then(if (filled) Modifier.background(color) else Modifier.border(1.dp, Ink.line, RoundedCornerShape(8.dp)))
         .padding(horizontal = 7.dp, vertical = 5.dp),
@@ -193,7 +193,7 @@ fun Code(code: String, color: Color, modifier: Modifier = Modifier, filled: Bool
 @Composable
 fun RouteMark(code: String?, color: Color, modifier: Modifier = Modifier, filled: Boolean = true, direct: Boolean = false, hops: Int = 1) {
     val shape = RoundedCornerShape(8.dp)
-    val ink = if (filled) Ink.ground else Ink.faint
+    val ink = if (filled) Ink.ground else Ink.dim // an inherited route's code is text: dim, not faint
     Row(
         modifier.size(if (direct) 30.dp else 36.dp, 26.dp).clip(shape)
             .then(if (filled) Modifier.background(color) else Modifier.border(1.dp, Ink.line, shape)),
