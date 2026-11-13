@@ -97,7 +97,9 @@ while Mullvad counts unbraid as one device. The default route stays connected wh
 connect as soon as an app is assigned to them, even if that app is idle.
 
 The app needs Android 13 or later on a 64-bit ARM phone. It is not on Google Play yet. To update, download the
-new APK from the releases page and install it over the old one; your settings stay.
+new APK from the releases page and install it over the old one; your settings stay. The GitHub version can also
+check for a newer version about once a day, but only after you switch that on. It asks unbraid.app for a small file
+and identifies itself only as "unbraid".
 
 ## Questions
 
@@ -119,8 +121,9 @@ and still use their VPN exit for everything else.
 ### Does it have a kill switch?
 
 It works with Android's own "Always-on VPN" and "Block connections without VPN" settings, which you can open from
-the app's settings. With blocking on, apps stay offline while unbraid is paused or off. Apps you set to Direct
-still use your normal connection while unbraid is connected.
+the app's settings. With blocking on, apps cannot go online without unbraid, Direct apps included. Apps you set
+to Direct still use your normal connection while unbraid is connected. unbraid's own requests can still go online
+(see Privacy). Apps in a work profile are outside this VPN.
 
 ### Does it get around my provider's device limit?
 
@@ -142,8 +145,9 @@ Each TCP and UDP connection is routed by the app that owns it, which Android rep
 `ConnectivityManager.getConnectionOwnerUid`. When an app hands a connection to another app or system service, such as
 for a download, a browser tab or a push message, that connection follows the other app or service's route. Ping has no owning app, so it follows the default route (when Direct is the default and other apps use VPN routes, internet ping is blocked instead). DNS is answered with fake addresses and looked up again on the exit
 the app really uses, so a site sees the country you picked for that app. Apps you set to Direct are left out of the
-VPN by Android itself; apps that only follow a Direct default route still go through unbraid. If you turn on "Block connections without VPN", they are sent out directly from inside the
-app instead. Only the default route and the routes your apps use are connected.
+VPN by Android itself, unless you turn on "Block connections without VPN" or set the DNS filter to cover Direct
+traffic. Then they go through unbraid and are sent straight out from inside the app. Apps that only follow a
+Direct default route always go through unbraid. Only the default route and the routes your apps use are connected.
 
 For NordVPN, unbraid picks a server from the provider's low-load recommendations when it connects, unless you
 pinned one. Server lists
@@ -173,8 +177,12 @@ exists, so a plain checkout builds an unsigned APK.
 
 We add no advertising or analytics of our own. The Play version includes Google's Billing library for optional tips.
 You don't need an unbraid account. Your provider credentials are encrypted with
-an Android Keystore key and are only sent to the service they belong to. The list of installed apps is read on the
-phone so you can assign routes, and it never leaves the phone. App data is excluded from backups. The privacy
+an Android Keystore key and are only sent to the service they belong to. The app's own requests (provider sign-ins, server lists, the optional
+update check, and the connectivity check when every tunnel is down) use your phone's normal connection, not the VPN,
+so those services see your own IP address. The list of installed apps is read on the
+phone so you can assign routes, and it never leaves the phone. "Copy a report" in the app's settings only copies text to the clipboard: the phone
+model, Android version, app version, which providers and countries you use, and counts. It holds no keys, accounts,
+addresses or app names. App data is excluded from backups. The privacy
 policy, with every service the app talks to, is at [unbraid.app/privacy](https://unbraid.app/privacy).
 
 To report a security problem, see [SECURITY.md](SECURITY.md).

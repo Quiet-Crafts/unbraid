@@ -1,9 +1,9 @@
-unbraid is an open-source VPN client for Android with per-app split tunneling: each app goes through its own exit. At the same time, a banking app can skip the VPN, a streaming app can leave from one country, another app from a second country, and everything else from a third. Your home network can stay reachable through Tailscale.
+unbraid is an open-source VPN client for Android with per-app split tunneling: each app goes through its own exit. A banking app can skip the VPN, a streaming app can leave from one country, another from a second, and everything else from a third. Your home network can stay reachable through Tailscale.
 
-It uses one Android VPN service and the sing-box engine. Each TCP and UDP connection is routed by the app that owns it. DNS lookups are made again at the exit the app uses, so sites see the country that app is routed through. Only the default route and the routes your apps use are connected.
+It uses one Android VPN service and the sing-box engine. Each TCP and UDP connection is routed by the app that owns it. DNS lookups are made again at the exit the app uses, so sites see that app's country. Only the default route and the routes your apps use are connected.
 
 WHAT YOU NEED
-A supported provider account, including Proton VPN Free, or your own server. unbraid does not provide VPN servers.
+A supported provider account, including Proton VPN Free, or your own server. unbraid provides no servers.
 
 Sign in with:
 - NordVPN
@@ -23,9 +23,9 @@ Or add your own servers: import a WireGuard or OpenVPN config file, or paste a S
 FEATURES
 - Per-app routes: give an app its own exit or let it use the default. Direct skips the VPN.
 - Several exits connected at once.
-- Direct apps use your normal connection. Apps you set to Direct are left out of the VPN at the operating system level, unless Android's "Block connections without VPN" is on. When Direct is the default route, the apps that follow it still go through unbraid, IPv4 only.
-- Tailscale is built in: reach devices on your tailnet from apps routed through unbraid, or send chosen apps through a Tailscale exit node.
-- A low-load server chosen automatically for providers that publish server load.
+- Direct apps use your normal connection: Android leaves them out of the VPN, unless "Block connections without VPN" is on or unbraid's DNS filter covers Direct. When Direct is the default route, the apps that follow it still go through unbraid, IPv4 only.
+- Tailscale is built in: reach devices on your tailnet from apps routed through unbraid, or send apps through a Tailscale exit node.
+- Low-load server chosen automatically where providers publish load.
 - Choose a country or city, or pin one server. Favourites stay on top.
 - Per-route ad and tracker blocking with the provider's own blocking DNS, where it has one.
 - Pause for 5 minutes to an hour; it reconnects by itself (Android may delay it).
@@ -33,17 +33,19 @@ FEATURES
 - Custom DNS (it replaces provider blocking) and local network access.
 
 LIMITS
-- Android allows one active VPN at a time. unbraid cannot run next to another VPN app, including the official apps of the providers above.
-- Provider limits still apply. Mullvad counts unbraid as one device. Other providers may limit how many connections run at once, and each open exit is one.
-- Needs Android 13 or later. The build is for 64-bit ARM devices.
+- Android allows one active VPN at a time. unbraid cannot run next to another VPN app, even a provider's own.
+- Provider limits still apply. Mullvad counts unbraid as one device. Others may limit how many exits run at once.
+- Work profile apps are outside the VPN.
+- Needs Android 13 or later on a 64-bit ARM device.
 
 PRIVACY
-No ads and no unbraid account. We add no analytics of our own. unbraid has no servers. It connects to:
+No ads and no unbraid account. We add no analytics of our own. unbraid has no servers. Its own requests (sign-ins, server lists, update check) use your normal connection, not the VPN. It connects to:
 - the VPN services and servers you choose;
 - DNS from your provider or config, the DNS you set, or Quad9 as a fallback (your phone's own DNS for server addresses, local names and Direct apps);
 - Tailscale's servers and relays, if you turn Tailscale on;
 - Google and Cloudflare, for connection checks through the provider tunnels it picks (Google also over your own connection if all fail);
 - GitHub, for some public server lists;
+- unbraid.app, once a day, only if you switch on update checks (GitHub version);
 - M-Lab, only when you start a speed test;
 - Google Play for optional tips in the Play version. Google's Billing library may also send technical data in the background.
 
@@ -53,8 +55,8 @@ PERMISSIONS
 unbraid asks to see all installed apps, because per-app routing needs the full list. It uses a foreground service and a notification while the VPN runs.
 
 OPEN SOURCE AND SUPPORT
-unbraid is free software under the GPL-3.0 licence. Source code and issue tracker: https://github.com/quiet-crafts/unbraid
+unbraid is free software under the GPL-3.0 licence. Source and issues: https://github.com/quiet-crafts/unbraid
 
-If you find it useful, you can support its development: https://unbraid.app/donate/
+Support its development: https://unbraid.app/donate/
 
 unbraid is not affiliated with, endorsed by, or sponsored by NordVPN, Mullvad, Private Internet Access, IVPN, Proton, Surfshark, Windscribe, AirVPN, PureVPN, ExpressVPN, CyberGhost, or Tailscale. All names belong to their owners.
