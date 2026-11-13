@@ -149,6 +149,9 @@ internal fun tailscaleHubSub(reach: Boolean, exitOnly: Boolean, state: String) =
 internal fun removeServerText(used: Int, refused: app.unbraid.data.CarriesDefault?) = refused?.text
     ?: if (used == 0) "It isn't used by any route." else "The routes using it are removed too; their apps follow the default route."
 
+/** The profile whose default a refused removal needs changed: null for the setup in use. */
+internal fun defaultHolder(refused: app.unbraid.data.CarriesDefault) = if (refused.live) null else refused.profiles.firstOrNull()
+
 /** [rise]: the first rows' index on a page that plays the first-load reveal (the hub), or null. */
 private fun LazyListScope.group(title: String?, items: List<Item>, rise: Pair<Boolean, Int>? = null) {
     item { if (title != null) SectionLabel(title) else Gap(16.dp) }
@@ -208,7 +211,7 @@ fun settingsHub() { path = emptyList() }
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
+fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefault: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val setup by ui.setup.collectAsStateWithLifecycle()
@@ -227,6 +230,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
     val go = { p: String -> stack = stack + p; path = stack }
     val back = { stack = stack.dropLast(1); path = stack }
     var dialog by rememberSaveable { mutableStateOf<String?>(null) }
+    // The default picker for whichever setup carries the default a removal needs changed (the one in use or a saved profile).
+    val pickDefault = { r: app.unbraid.data.CarriesDefault -> ui.view(defaultHolder(r)); chooseDefault() }
     // Each page's Advanced settings start closed.
     var advOpen by rememberSaveable(page) { mutableStateOf(false) }
     var wgError by rememberSaveable { mutableStateOf<String?>(null) }
@@ -722,15 +727,22 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         Text("${s.kind}${if (used > 0) " · used by ${if (used == 1) "1 route" else "$used routes"}" else ""}", style = Type.sub)
                         DialogField(name, { name = it.take(40) }, "Name", "e.g. Home VPS")
                         ui.removeServerRefused(s.id).let { no ->
-                            if (no == null) Secondary("Remove server", { dialog = "remove:${s.id}" }, color = Ink.bad) else Text(no.text, style = Type.caption, color = Ink.bad)
+                            if (no == null) Secondary("Remove server", { dialog = "remove:${s.id}" }, color = Ink.bad)
+                            else {
+                                Text(no.text, style = Type.caption, color = Ink.bad)
+                                Secondary("Choose default", { dialog = null; pickDefault(no) })
+                            }
                         }
                     }
                 }
                 d.startsWith("remove:") -> setup.servers.firstOrNull { it.id == arg }?.let { s ->
                     val used = setup.routes.count { it.own == s.id }
                     val refused = ui.removeServerRefused(s.id)
-                    Prompt("Remove ${s.name}?", "Remove", { dialog = null; ui.removeServer(s.id)?.let { ui.notice.value = it.text } }, { dialog = null }, enabled = refused == null, danger = true) {
-                        Text(removeServerText(used, refused), style = Type.sub)
+                    // Refused: nothing picks another default by itself, so the way to choose one is offered here.
+                    if (refused != null) Prompt("Choose another default first", "Choose default", { dialog = null; pickDefault(refused) }, { dialog = null }) {
+                        Text(refused.text, style = Type.sub)
+                    } else Prompt("Remove ${s.name}?", "Remove", { dialog = null; ui.removeServer(s.id)?.let { ui.notice.value = it.text } }, { dialog = null }, danger = true) {
+                        Text(removeServerText(used, null), style = Type.sub)
                     }
                 }
             }

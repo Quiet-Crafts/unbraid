@@ -4,6 +4,7 @@ import app.unbraid.data.DIRECT
 import app.unbraid.data.Filter
 import app.unbraid.ui.filterChosen
 import app.unbraid.ui.filterSummary
+import app.unbraid.ui.defaultHolder
 import app.unbraid.ui.removeServerText
 import app.unbraid.ui.tailscaleHubSub
 import app.unbraid.data.CarriesDefault
@@ -45,6 +46,12 @@ class SettingsTextsTest {
         assertEquals("Home carries your default route. Choose another default route first.", removeServerText(2, CarriesDefault("Home", true, emptyList())))
         assertEquals("It isn't used by any route.", removeServerText(0, null))
         assertEquals("The routes using it are removed too; their apps follow the default route.", removeServerText(1, null))
+    }
+
+    /** A refused removal leads to the default picker of the setup that carries it: the one in use, or the saved profile named. */
+    @Test fun refusedRemovalChoosesTheRightDefault() {
+        assertNull(defaultHolder(CarriesDefault("Home", true, listOf("Trip"))))
+        assertEquals("Trip", defaultHolder(CarriesDefault("Home", false, listOf("Trip", "Work"))))
     }
 
     @Test fun tailscaleOverviewNamesExitOnlyUse() {

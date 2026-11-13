@@ -324,7 +324,7 @@ class MainActivity : ComponentActivity() {
                                         screen == Tab.Routes.name -> RoutesScreen(ui, ::connect, leakSetup = { sheet = "leak" }, quiet = tour < 0 && sheet == null && limit == null) { picker = it }
                                         screen == Tab.Apps.name -> AppsScreen(ui, disclose = { sheet = "apps" }) { picker = it }
                                         screen == Tab.Stats.name -> StatsScreen(ui)
-                                        else -> SettingsScreen(ui, addProvider = { adding = true }, tour = { tour = 0 })
+                                        else -> SettingsScreen(ui, addProvider = { adding = true }, tour = { tour = 0 }) { picker = "default" }
                                     }
                                 }
                             }
