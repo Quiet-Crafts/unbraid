@@ -396,20 +396,22 @@ class StoreTest {
         val dir = tmp.newFolder()
         val s = Store(dir) { key }
         assertTrue(s.account("mullvad", "blob-m")); assertTrue(s.account("ivpn", "blob-i"))
-        assertEquals("blob-m", s.signOut("mullvad"))
+        val out = s.signOut("mullvad", now = 1_000)!!
+        assertEquals("blob-m", out.blob); assertTrue(out.kept)
+        assertFalse(out.toString().contains("blob-m"))
         assertEquals(setOf("ivpn"), s.accounts.value.keys) // signed out at once
         assertEquals(null, s.signOut("mullvad")) // nothing left to sign out
         // The release failed (or the app closed): it survives a restart, sealed, and the account stays out.
         val again = Store(dir) { key }
-        assertEquals(listOf(app.unbraid.data.PendingRelease("mullvad", "blob-m")), again.pendingReleases)
+        assertEquals(listOf(app.unbraid.data.PendingRelease("mullvad", "blob-m", since = 1_000)), again.pendingReleases)
         assertEquals(setOf("ivpn"), again.accounts.value.keys)
         assertFalse(File(dir, "releases.bin").readText(Charsets.ISO_8859_1).contains("blob-m"))
         assertFalse(again.pendingReleases.toString().contains("blob-m"))
-        // Signed in again and out again: both slots wait, neither replaces the other.
-        assertTrue(again.account("mullvad", "blob-m2")); again.signOut("mullvad")
-        assertEquals(listOf("blob-m", "blob-m2"), again.pendingReleases.map { it.blob })
+        // Two providers' slots wait side by side.
+        again.signOut("ivpn")
+        assertEquals(listOf("blob-m", "blob-i"), again.pendingReleases.map { it.blob })
         again.released(again.pendingReleases.first())
-        assertEquals(listOf("blob-m2"), Store(dir) { key }.pendingReleases.map { it.blob })
+        assertEquals(listOf("blob-i"), Store(dir) { key }.pendingReleases.map { it.blob })
         again.released(again.pendingReleases.single())
         assertFalse(File(dir, "releases.bin").exists())
     }
@@ -424,6 +426,105 @@ class StoreTest {
         assertEquals(setOf("nord"), s.accounts.value.keys) // nord signed in again since: its newer account stays
         assertEquals(setOf("nord"), Store(dir) { key }.accounts.value.keys)
         assertEquals(2, s.pendingReleases.size)
+    }
+
+    /** A sign-out whose release can't be written still signs out, and says so: the caller releases at once. */
+    @Test fun aReleaseThatCantBeKeptIsReleasedAtOnce() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        assertTrue(s.account("airvpn", "blob-a"))
+        File(dir, "releases.bin.tmp").mkdir() // the journal can't be written
+        val out = s.signOut("airvpn")!!
+        assertFalse(out.kept)
+        assertEquals("blob-a", out.blob)
+        assertEquals(emptyMap<String, String>(), Store(dir) { key }.accounts.value) // signed out all the same, on disk
+    }
+
+    /**
+     * Released while the account's removal couldn't be written, then the app closed: a record stays until the removal
+     * is on disk, so the old file never brings the account back.
+     */
+    @Test fun aReleaseIsForgottenOnlyOnceTheSignOutIsOnDisk() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        assertTrue(s.account("mullvad", "blob-m"))
+        File(dir, "accounts.bin.tmp").mkdir() // accounts can't be written
+        val out = s.signOut("mullvad")!!
+        assertTrue(out.kept)
+        s.released(s.pendingReleases.single())
+        assertEquals(emptyList<Any>(), s.pendingReleases) // not tried again
+        assertTrue(File(dir, "releases.bin").exists()) // but its record stays
+        File(dir, "accounts.bin.tmp").delete()
+        val next = Store(dir) { key } // the app closed before a retry wrote the accounts
+        assertEquals(emptyMap<String, String>(), next.accounts.value)
+        assertEquals(emptyMap<String, String>(), Store(dir) { key }.accounts.value)
+        assertFalse(File(dir, "releases.bin").exists()) // the sign-out is on disk now: nothing left to keep
+    }
+
+    /** A list of releases that won't open is kept aside unchanged, reported, and merged back once it opens. */
+    @Test fun anUnreadableReleaseListIsKeptAside() {
+        val dir = tmp.newFolder()
+        Store(dir) { key }.apply { assertTrue(account("ivpn", "blob-i")) }
+        val junk = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
+        File(dir, "releases.bin").writeBytes(junk)
+        val s = Store(dir) { key }
+        assertTrue(s.releasesUnreadable)
+        assertEquals(emptyList<Any>(), s.pendingReleases)
+        assertTrue(s.signOut("ivpn")!!.kept) // a new list starts beside it
+        assertTrue(junk.contentEquals(File(dir, "releases.bin.bad").readBytes())) // never written over
+        assertEquals(listOf("blob-i"), Store(dir) { key }.pendingReleases.map { it.blob })
+        // The one kept aside opens again (it was a passing failure): its releases join the list.
+        File(dir, "releases.bin.bad").writeBytes(sealed("""[{"provider":"mullvad","blob":"blob-m"}]"""))
+        val back = Store(dir) { key }
+        assertEquals(setOf("blob-i", "blob-m"), back.pendingReleases.map { it.blob }.toSet())
+        assertFalse(back.releasesUnreadable)
+        assertFalse(File(dir, "releases.bin.bad").exists())
+        // Told and dismissed: an unreadable one is deleted.
+        File(dir, "releases.bin.bad").writeBytes(junk)
+        val told = Store(dir) { key }
+        assertTrue(told.releasesUnreadable)
+        told.forgetUnreadableReleases()
+        assertFalse(told.releasesUnreadable)
+        assertEquals(setOf("blob-i", "blob-m"), told.pendingReleases.map { it.blob }.toSet())
+    }
+
+    /**
+     * Signed out of AirVPN with the release failing, then signed in again (maybe adopting that very device by name): the
+     * earlier release is dropped, so no later start removes the device the new sign-in uses.
+     */
+    @Test fun aNewSignInDropsTheProvidersEarlierRelease() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        assertTrue(s.account("airvpn", "blob-old")); assertTrue(s.account("ivpn", "blob-i"))
+        s.signOut("airvpn"); s.signOut("ivpn")
+        assertTrue(s.account("airvpn", "blob-adopted"))
+        assertEquals(listOf("ivpn"), Store(dir) { key }.pendingReleases.map { it.provider })
+    }
+
+    /** A failing release waits longer each time and is given up after a bounded number of tries or time: its account erased. */
+    @Test fun failingReleasesBackOffAndStop() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        assertTrue(s.account("airvpn", "blob-a"))
+        s.signOut("airvpn", now = 1_000)
+        var now = 1_000L
+        repeat(app.unbraid.data.RELEASE_TRIES - 1) { n ->
+            val r = s.pendingReleases.single()
+            assertTrue(s.due(r, now))
+            assertFalse(s.failedRelease(r, now))
+            val next = s.pendingReleases.single()
+            assertEquals(n + 1, next.tries)
+            assertEquals(now + app.unbraid.data.RELEASE_WAITS[n], next.next)
+            assertFalse(s.due(next, now + 1)) // not before its time, nor at the next start
+            now = next.next
+        }
+        assertTrue(Store(dir) { key }.pendingReleases.single().tries == app.unbraid.data.RELEASE_TRIES - 1) // kept across restarts
+        assertTrue(s.failedRelease(s.pendingReleases.single(), now)) // the last try: given up
+        assertFalse(File(dir, "releases.bin").exists())
+        // Or two weeks after the first failure, however few tries.
+        val r = app.unbraid.data.PendingRelease("ivpn", "b", since = 1_000, tries = 1)
+        assertEquals(null, r.failedAt(1_000 + app.unbraid.data.RELEASE_FOR))
+        assertEquals(2, r.failedAt(1_000 + 60_000)!!.tries)
     }
 
     /** While a removal is under way (Tailscale's log-out), no edit can make one of its routes a default. */

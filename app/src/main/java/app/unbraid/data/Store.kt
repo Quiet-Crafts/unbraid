@@ -20,10 +20,36 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/** A provider account signed out of whose device slot isn't released yet ([Store.signOut]). [blob] holds its keys: sealed. */
+/**
+ * A provider account signed out of whose device slot isn't released yet ([Store.signOut]). [blob] holds its keys: sealed.
+ * [since] is when it was signed out (0: not known, counted from the first failed try), [tries] the failed tries so far,
+ * [next] the earliest time for another. [done]: released, kept only until the account's removal is on disk.
+ */
 @kotlinx.serialization.Serializable
-data class PendingRelease(val provider: String, val blob: String) {
+data class PendingRelease(val provider: String, val blob: String, val since: Long = 0, val tries: Int = 0, val next: Long = 0, val done: Boolean = false) {
     override fun toString() = "PendingRelease($provider)" // never the account itself
+    /** The same sign-out, whatever its tries. */
+    fun same(o: PendingRelease) = provider == o.provider && blob == o.blob
+
+    /**
+     * After a failed try at [now]: each next one waits longer ([RELEASE_WAITS]). Null = give up, the account is erased:
+     * [RELEASE_TRIES] tries failed, or the first failed [RELEASE_FOR] ago.
+     */
+    fun failedAt(now: Long): PendingRelease? {
+        val from = since.takeIf { it > 0 } ?: now
+        val n = tries + 1
+        return if (n >= RELEASE_TRIES || now - from >= RELEASE_FOR) null else copy(since = from, tries = n, next = now + RELEASE_WAITS[n - 1])
+    }
+}
+
+/** Waits after each failed release (5 minutes up to 3 days), at most this many tries, over at most two weeks. */
+val RELEASE_WAITS = listOf(5L, 60, 360, 1_440, 4_320).map { it * 60_000 }
+const val RELEASE_TRIES = 6
+const val RELEASE_FOR = 14 * 86_400_000L
+
+/** A sign-out ([Store.signOut]): the account to release, and whether its release is kept for retries ([kept]); if not, release it now. */
+class SignedOut(val blob: String, val kept: Boolean) {
+    override fun toString() = "SignedOut($kept)"
 }
 
 /**
@@ -41,7 +67,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
 
     // Declared before anything that loads sealed files at construction. A new key only while no sealed file exists: a
     // key missing beside them throws, and a failed lazy runs again on the next use, so those files are never orphaned.
-    private val key: SecretKey by lazy { keyOf(listOf(SETUP, ACCOUNTS, TS_STATE, RELEASES).none { File(dir, it).exists() }) }
+    private val key: SecretKey by lazy { keyOf(listOf(SETUP, ACCOUNTS, TS_STATE, RELEASES, RELEASES_BAD).none { File(dir, it).exists() }) }
 
     /**
      * True while the saved settings or sign-ins exist but won't open. Nothing changes them then, in memory or on disk,
@@ -51,6 +77,8 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     val unreadable: StateFlow<Boolean> = _unreadable.asStateFlow()
     private val bad = mutableSetOf<String>()
     @Volatile private var tsBad = false
+    /** A list of pending releases kept aside was tried this start ([journal]). Declared before the reads at construction. */
+    @Volatile private var asideTried = false
 
     /** Set when a change applied but couldn't be written: it would be gone after a restart, so the UI says so. */
     val unsaved = MutableStateFlow(false)
@@ -117,7 +145,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     private fun saveSetup() = safely { seal("setup.bin", explicit.encodeToString(Setup.serializer(), _setup.value)) }
         .also { if (!it) Log.e("Unbraid", "store: setup not saved"); failed(setup = !it) }
     private fun saveAccounts() = safely { seal("accounts.bin", json.encodeToString(accountsSer, _accounts.value)) }
-        .also { if (!it) Log.e("Unbraid", "store: accounts not saved"); failed(accounts = !it) }
+        .also { if (!it) Log.e("Unbraid", "store: accounts not saved"); failed(accounts = !it); if (it) settled() }
     private inline fun safely(f: () -> Boolean) = runCatching(f).getOrDefault(false)
 
     /** Writes what is in memory again, after a failed save (the user's retry). True if all of it is on disk now. */
@@ -165,35 +193,92 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     init { _unreadable.value = bad.isNotEmpty(); finishSignOuts() }
 
     /**
-     * Sign-outs whose device slot the provider hasn't released yet ([signOut]): kept sealed, retried at every start until
-     * [released]. Empty when there are none or they won't open.
+     * Sign-outs whose device slot the provider hasn't released yet ([signOut]): kept sealed, retried until [released] or
+     * given up ([failedRelease]). Empty when there are none or they won't open ([releasesUnreadable]).
      */
     val pendingReleases: List<PendingRelease>
-        @Synchronized get() = runCatching { open(RELEASES)?.let { explicit.decodeFromString(releasesSer, it) } }.getOrNull().orEmpty()
+        @Synchronized get() = journal().orEmpty().filter { !it.done }
+
+    /** The list of pending releases, or one kept aside, won't open: the user is told to check their accounts' devices. */
+    val releasesUnreadable: Boolean
+        @Synchronized get() = journal() == null || File(dir, RELEASES_BAD).exists()
+
+    private fun decodeJournal(name: String) = runCatching { load(name) { explicit.decodeFromString(releasesSer, it) }.orEmpty() }.getOrNull()
+
+    /**
+     * Every pending release, done ones too; null when the list won't open and can't be kept aside. One that won't open is
+     * moved to [RELEASES_BAD] (never written over) and a new list starts; once that one opens again, it joins the list.
+     */
+    private fun journal(): List<PendingRelease>? {
+        val bad = File(dir, RELEASES_BAD)
+        val now = decodeJournal(RELEASES) ?: run {
+            if (bad.exists() || !File(dir, RELEASES).renameTo(bad)) return null
+            Log.e("Unbraid", "store: $RELEASES won't open, kept aside")
+            emptyList()
+        }
+        if (!bad.exists() || asideTried) return now
+        asideTried = true // once per start: it waits on every try
+        val back = decodeJournal(RELEASES_BAD) ?: return now
+        val all = now + back.filter { b -> now.none { it.same(b) } }
+        return if (pending(all)) all.also { bad.delete() } else now
+    }
 
     private fun pending(list: List<PendingRelease>) = safely { seal(RELEASES, list.takeIf { it.isNotEmpty() }?.let { explicit.encodeToString(releasesSer, it) }) }
 
+    /** [f] on the list of pending releases, written back; false when it won't open or wasn't written. */
+    private fun journal(f: (List<PendingRelease>) -> List<PendingRelease>) = journal()?.let { old -> f(old).let { it == old || pending(it) } } ?: false
+
     /**
-     * Signs out of [provider]. Its account is first kept as a pending release, then forgotten: a sign-out cut short still
-     * releases the slot at the next start, and never leaves the account signed in. Returns the account to release, or
-     * null when not signed in (or the settings won't open).
+     * Signs out of [provider]. Its account is first kept as a pending release (on disk), then forgotten: a sign-out cut
+     * short still releases the slot later, and never leaves the account signed in. When the release can't be kept, the
+     * account goes all the same and [SignedOut.kept] is false: release it at once. Null when not signed in (or the settings
+     * won't open).
      */
     @Synchronized
-    fun signOut(provider: String): String? {
+    fun signOut(provider: String, now: Long = System.currentTimeMillis()): SignedOut? {
         if (_unreadable.value) return null
         val blob = _accounts.value[provider] ?: return null
-        if (!pending(pendingReleases + PendingRelease(provider, blob))) Log.w("Unbraid", "store: pending release not saved")
+        val kept = journal { it + PendingRelease(provider, blob, since = now) }
+        if (!kept) Log.w("Unbraid", "store: pending release not saved")
         account(provider, null)
-        return blob
+        return SignedOut(blob, kept)
     }
 
-    /** The provider let go of [r]'s slot, or the user was told to remove it by hand: no longer retried. */
+    /** [r] is still waiting and due at [now]: not released, given up or dropped meanwhile (by another screen, or a sign-in). */
     @Synchronized
-    fun released(r: PendingRelease) { pendingReleases.let { if (r in it) pending(it - r) } }
+    fun due(r: PendingRelease, now: Long = System.currentTimeMillis()) = pendingReleases.any { it.same(r) && it.next <= now }
+
+    /**
+     * The provider let go of [r]'s slot, or the user was told to remove it by hand: no longer retried. While the account's
+     * removal isn't on disk yet, a record stays (done) so a restart still finishes that sign-out.
+     */
+    @Synchronized
+    fun released(r: PendingRelease) {
+        journal { l -> if (accountsFailed) l.map { if (it.same(r)) it.copy(done = true) else it } else l.filterNot { it.same(r) } }
+    }
+
+    /** [r]'s release failed at [now]: tried later ([PendingRelease.failedAt]). True when given up: its account is erased. */
+    @Synchronized
+    fun failedRelease(r: PendingRelease, now: Long = System.currentTimeMillis()): Boolean {
+        var gaveUp = false
+        // Given up: erased, or kept as done (no more tries) while the account's removal isn't on disk yet.
+        journal { l -> l.mapNotNull { if (!it.same(r) || it.done) it else it.failedAt(now) ?: it.copy(done = true).takeIf { accountsFailed }.also { gaveUp = true } } }
+        return gaveUp
+    }
+
+    /** The user was told about a list of releases that won't open: it is deleted, its accounts with it. */
+    @Synchronized
+    fun forgetUnreadableReleases() {
+        if (journal() == null) File(dir, RELEASES).delete()
+        File(dir, RELEASES_BAD).delete()
+    }
+
+    /** Releases done whose sign-out is on disk now need no record. */
+    private fun settled() { journal()?.takeIf { l -> l.any { it.done } }?.let { l -> pending(l.filter { !it.done }) } }
 
     /** A sign-out cut short between keeping its release and forgetting the account: the user asked, so it is finished now. */
     private fun finishSignOuts() {
-        if (!_unreadable.value) pendingReleases.filter { _accounts.value[it.provider] == it.blob }.forEach { account(it.provider, null) }
+        if (!_unreadable.value) journal().orEmpty().filter { _accounts.value[it.provider] == it.blob }.forEach { account(it.provider, null) }
     }
 
     /** Reads the files that wouldn't open again; what opens goes into memory before the mark clears. True when all did. */
@@ -233,6 +318,9 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     @Synchronized
     fun account(provider: String, blob: String?): Boolean {
         if (_unreadable.value) return false
+        // Signed in again: an earlier sign-out's release could remove the device this one uses (one adopted by name, say),
+        // and the provider can't tell them apart, so it is no longer tried.
+        if (blob != null) journal { l -> l.filterNot { it.provider == provider } }
         _accounts.update { if (blob == null) it - provider else it + (provider to blob) }
         val ok = saveAccounts()
         if (blob == null) rememberLinks(emptyMap())
@@ -380,6 +468,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         const val SETUP = "setup.bin"
         const val ACCOUNTS = "accounts.bin"
         const val RELEASES = "releases.bin"
+        const val RELEASES_BAD = "releases.bin.bad"
         const val TS_UNREADABLE = "Couldn't open the saved Tailscale sign-in. Try again. If it keeps failing, sign out of Tailscale in Settings and sign in again."
         const val TS_STATE = "tailscale/state.bin"
         const val TS_PLAIN = "tailscale/tailscaled.state"

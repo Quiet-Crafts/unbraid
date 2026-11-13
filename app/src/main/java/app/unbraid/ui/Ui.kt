@@ -52,6 +52,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /** Where unbraid's website lists VPN providers, for people without an account (foss build only). */
@@ -94,8 +95,14 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     private companion object {
         /** Outlives the screen: a device slot release finishes even after the app is closed. */
         val background = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
-        /** Releases under way in this process, so two screens never ask for the same one at once. */
-        val releasing: MutableSet<app.unbraid.data.PendingRelease> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+        /**
+         * One per provider: its releases and its sign-ins run one at a time, so a release never removes a device a sign-in
+         * is taking (or took) meanwhile, and two screens never ask for the same release at once.
+         */
+        val providerLocks = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
+        fun lock(provider: String): kotlinx.coroutines.sync.Mutex = providerLocks.computeIfAbsent(provider) { kotlinx.coroutines.sync.Mutex() }
+        /** Releases that couldn't be kept for retries ([app.unbraid.data.SignedOut.kept]), until tried; a sign-in drops its provider's. */
+        val unkept: MutableSet<Pair<String, String>> = java.util.concurrent.ConcurrentHashMap.newKeySet()
     }
 
     private val store = Unbraid.store
@@ -274,9 +281,14 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         viewModelScope.launch(Dispatchers.IO) {
             val failure = runCatching {
                 val clean = (provider.fields + listOfNotNull(asked?.field)).associate { f -> f.key to input[f.key].orEmpty().let { if (f.secret) it else it.trim() } } + asked?.keep.orEmpty()
-                val blob = provider.signIn(clean)
-                val before = store.accounts.value.keys
-                val saved = store.account(id, blob)
+                // No release of this provider runs meanwhile, and none of an earlier sign-out runs after: it could remove
+                // the device this sign-in uses ([app.unbraid.data.Store.account] drops them).
+                val (blob, saved) = lock(id).withLock {
+                    val blob = provider.signIn(clean)
+                    if (store.pendingReleases.any { it.provider == id } || unkept.removeAll { it.first == id }) unreleased(listOf(provider.name))
+                    blob to store.account(id, blob)
+                }
+                val before = store.accounts.value.keys - id
                 Providers.signedInAt[id] = System.currentTimeMillis()
                 // First provider on a fresh install: its placeholder route goes there. Nothing else moves.
                 store.update { it.signedIn(id, before) }
@@ -320,33 +332,53 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     /** Releases that failed while this screen model lived: the user was told to remove them by hand ([dismissNotice]). */
     private val failedReleases: MutableSet<app.unbraid.data.PendingRelease> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    /** The user was told the list of pending releases won't open ([dismissNotice] then deletes it). */
+    private val toldUnreadable = java.util.concurrent.atomic.AtomicBoolean()
+
+    private fun name(provider: String) = Providers.get(provider)?.name ?: provider
 
     /**
-     * Asks each provider with a pending release ([app.unbraid.data.Store.pendingReleases]) to let go of this phone's slot,
-     * outside the screen's lifetime. A release that fails stays pending, is tried again at the next start and named in
-     * [notice] meanwhile.
+     * Asks each provider with a release due ([app.unbraid.data.Store.pendingReleases]) to let go of this phone's slot,
+     * outside the screen's lifetime. One that fails is tried later, waiting longer each time, and named in [notice]; after
+     * the last try its account is erased ([app.unbraid.data.Store.failedRelease]).
      */
     private fun releasePending() = background.launch {
-        val failed = store.pendingReleases.filter { releasing.add(it) }.map { r ->
+        if (store.releasesUnreadable && toldUnreadable.compareAndSet(false, true))
+            warn("Couldn't open the list of device slots unbraid still has to release. If your VPN accounts list old devices for this phone, remove them there.")
+        val now = System.currentTimeMillis()
+        val failed = store.pendingReleases.filter { it.next <= now }.map { r ->
             async {
-                try { if (release(r.provider, r.blob)) { store.released(r); null } else r } finally { releasing.remove(r) }
+                lock(r.provider).withLock {
+                    when {
+                        !store.due(r, now) -> null // released, dropped or tried meanwhile
+                        release(r.provider, r.blob) -> { store.released(r); null }
+                        else -> r.also { if (!store.failedRelease(r, now)) failedReleases += it }
+                    }
+                }
             }
         }.awaitAll().filterNotNull()
-        if (failed.isNotEmpty()) { failedReleases += failed; unreleased(failed.map { Providers.get(it.provider)?.name ?: it.provider }.distinct()) }
+        if (failed.isNotEmpty()) unreleased(failed.map { name(it.provider) }.distinct())
     }
 
-    /** Clears [notice]. Releases it named stop being retried: the user knows to remove those slots by hand. */
+    /** A release that couldn't be kept for later ([app.unbraid.data.SignedOut.kept]): tried once, now. */
+    private fun releaseNow(provider: String, blob: String) = (provider to blob).let { k ->
+        unkept += k
+        background.launch { lock(provider).withLock { if (unkept.remove(k) && !release(provider, blob)) unreleased(listOf(name(provider))) } }
+    }
+
+    /** Clears [notice]. Releases it named stop being retried (their accounts are erased): the user knows to remove those slots by hand. */
     fun dismissNotice() {
         notice.value = null
         val told = failedReleases.toList().also { failedReleases.removeAll(it.toSet()) }
-        if (told.isNotEmpty()) background.launch { told.forEach(store::released) }
+        val unreadable = toldUnreadable.getAndSet(false)
+        if (told.isNotEmpty() || unreadable) background.launch { told.forEach(store::released); if (unreadable) store.forgetUnreadableReleases() }
     }
 
-    /** Signs out of [provider]: the account goes at once, and its device slot is released, now or at a later start. */
+    /** Signs out of [provider]: the account goes at once, and its device slot is released, now or later. */
     fun signOut(provider: String) = background.launch {
-        store.signOut(provider) ?: return@launch // a failed save shows the unsaved banner; the account is out of memory either way
+        val out = store.signOut(provider) ?: return@launch // a failed save shows the unsaved banner; the account is out of memory either way
         resetIfEmpty()
-        releasePending()
+        if (out.kept) releasePending() else releaseNow(provider, out.blob)
     }
 
     /**
@@ -425,12 +457,17 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         viewModelScope.launch(Dispatchers.IO) {
             val loggedOut = stopVpn(tailscale)
             // Each account is kept as a pending release before it goes, so a slot is released even if the app closes now.
-            if (!whileStopped("sign out") { store.accounts.value.keys.toList().forEach(store::signOut); store.signOutAll() }) return@launch
+            var now = emptyList<Pair<String, String>>()
+            if (!whileStopped("sign out") {
+                now = store.accounts.value.keys.toList().mapNotNull { p -> store.signOut(p)?.takeIf { !it.kept }?.let { p to it.blob } }
+                store.signOutAll()
+            }) return@launch
             form.clear(); formError.clear(); importDraft.clear()
             _signedIn.value = false
             tailscaleLeft(loggedOut)
             // Released only now: a running tunnel would lose its key while still carrying traffic.
             releasePending()
+            now.forEach { (p, blob) -> releaseNow(p, blob) }
         }
     }
 
