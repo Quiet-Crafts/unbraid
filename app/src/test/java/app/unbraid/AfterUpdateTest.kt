@@ -23,6 +23,13 @@ class AfterUpdateTest {
         assertEquals("unbraid is off after the update. Tap to reconnect.", AfterUpdate.OFF)
     }
 
+    /** A start that couldn't go foreground tells the user when nobody watched it: after an update, or at a timed resume. */
+    @Test fun aRefusedBackgroundStartIsTold() {
+        assertEquals(AfterUpdate.OFF, AfterUpdate.refused(updated = true, timed = false))
+        assertEquals("unbraid couldn't resume by itself. Tap to reconnect.", AfterUpdate.refused(updated = false, timed = true))
+        assertEquals(null, AfterUpdate.refused(updated = false, timed = false))
+    }
+
     private val now = 1_000_000_000L
     private fun ended(reason: Int, run: String? = "vpn", ago: Long = 5_000) = AfterUpdate.Exit(run, reason, now - ago)
     private fun end(exits: List<AfterUpdate.Exit>, sdk: Int = 35, marked: String? = "vpn", mine: String = "receiver") =

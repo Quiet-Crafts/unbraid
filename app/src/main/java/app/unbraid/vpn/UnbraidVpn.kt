@@ -314,7 +314,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (!allowed && (state.value.phase == VpnState.Phase.Off || state.value.phase == VpnState.Phase.Paused)) {
                 cancelResume()
                 state.value = VpnState(error = "Open $APP to allow it as your VPN")
-                if (intent?.getBooleanExtra(EXTRA_UPDATED, false) == true) AfterUpdate.tell(this)
+                AfterUpdate.refused(intent?.getBooleanExtra(EXTRA_UPDATED, false) == true, (intent?.getIntExtra(EXTRA_PAUSE, 0) ?: 0) != 0)?.let { AfterUpdate.tell(this, it) }
                 handled(intent)
                 stopWanted = true
                 stopIfIdle()
@@ -953,7 +953,20 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         main.post(::stopIfIdle)
     }
 
-    private val resumeIntent get() = PendingIntent.getService(this, 4, Intent(this, UnbraidVpn::class.java).putExtra(EXTRA_PAUSE, pauses), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    private val resumeIntent get() = PendingIntent.getBroadcast(this, 4, Intent(this, Resume::class.java).putExtra(EXTRA_PAUSE, pauses), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+
+    /**
+     * A pause's timed resume. The alarm wakes this receiver rather than starting the service itself, so the app runs even
+     * when Android refuses the start (the process that paused was replaced by an update or ended meanwhile): the user is
+     * then told, instead of the VPN staying off unseen.
+     */
+    class Resume : android.content.BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            val pause = intent.getIntExtra(EXTRA_PAUSE, 0)
+            runCatching { ctx.startService(Intent(ctx, UnbraidVpn::class.java).putExtra(EXTRA_PAUSE, pause)) }
+                .onFailure { AfterUpdate.tell(ctx, AfterUpdate.RESUME) }
+        }
+    }
 
     private fun cancelResume() {
         resume?.cancel(); resume = null

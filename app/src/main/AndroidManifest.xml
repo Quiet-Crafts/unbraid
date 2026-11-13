@@ -74,6 +74,10 @@
         <receiver
             android:name=".vpn.StatusWidget$Action"
             android:exported="false" />
+        <!-- A pause's timed resume, sent by the app's own alarm. -->
+        <receiver
+            android:name=".vpn.UnbraidVpn$Resume"
+            android:exported="false" />
         <!-- Not exported: only Android's own "this app was replaced" broadcast reaches it. -->
         <receiver
             android:name=".vpn.AfterUpdate$Receiver"

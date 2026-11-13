@@ -41,6 +41,13 @@ object AfterUpdate {
     private const val TOKEN = "token"
     private const val EXTRA = "after_update"
     const val OFF = "$APP is off after the update. Tap to reconnect."
+    const val RESUME = "$APP couldn't resume by itself. Tap to reconnect."
+
+    /**
+     * The notice for a start that couldn't run or go foreground: the start after an update ([updated]) or a pause's timed
+     * resume ([timed]). Null for any other start, which the user made in the app or a control that shows its own error.
+     */
+    fun refused(updated: Boolean, timed: Boolean) = when { updated -> OFF; timed -> RESUME; else -> null }
 
     enum class Step { None, Start, Tell }
 
@@ -96,8 +103,8 @@ object AfterUpdate {
     /** The VPN stopped by a way the app sees (disconnect, pause, failure, revoke, service end). */
     fun off(ctx: Context) { runCatching { if (prefs(ctx).contains(ON_BOOT)) prefs(ctx).edit(commit = true) { remove(ON_BOOT); remove(PID); remove(RUN) } } }
 
-    /** "unbraid is off after the update" with a tap that reconnects: only that notice's tap carries the token. */
-    fun tell(ctx: Context) {
+    /** [text] ("unbraid is off after the update") with a tap that reconnects: only that notice's tap carries the token. */
+    fun tell(ctx: Context, text: String = OFF) {
         val token = java.util.UUID.randomUUID().toString()
         runCatching { prefs(ctx).edit(commit = true) { putString(TOKEN, token) } }
         val nm = ctx.getSystemService(NotificationManager::class.java)
@@ -105,7 +112,7 @@ object AfterUpdate {
         val tap = PendingIntent.getActivity(ctx, 5, Intent(ctx, MainActivity::class.java).putExtra(EXTRA, token),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         nm.notify(2, Notification.Builder(ctx, "alerts").setSmallIcon(R.drawable.ic_tile).setContentTitle(APP)
-            .setContentText(OFF).setContentIntent(tap).setAutoCancel(true).build())
+            .setContentText(text).setContentIntent(tap).setAutoCancel(true).build())
     }
 
     /**
