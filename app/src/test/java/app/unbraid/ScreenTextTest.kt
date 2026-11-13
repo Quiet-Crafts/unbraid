@@ -7,6 +7,7 @@ import app.unbraid.data.Setup
 import app.unbraid.ui.FOLLOW
 import app.unbraid.ui.defaultLabel
 import app.unbraid.ui.dropText
+import app.unbraid.ui.dropLabel
 import app.unbraid.ui.keepName
 import app.unbraid.ui.blockingToApply
 import app.unbraid.ui.blockingFor
@@ -68,6 +69,10 @@ class ScreenTextTest {
         assertEquals("No app in Work chose it. The route stays for other profiles.", dropText("Work", 0))
         assertEquals("No app in Work chose it. No other profile uses it.", dropText("Work", 0, elsewhere = false))
         assertEquals("In Work, 1 app that chose it follows Work's default route from now on. The route stays for other profiles.", dropText("Work", 1))
+        // No other profile lists it: the route itself goes, and the action says so.
+        assertEquals("No app in Work chose it. No other profile lists this route, so it is removed.", dropText("Work", 0, elsewhere = false, removes = true))
+        assertEquals("Remove route", dropLabel("Work", removes = true))
+        assertEquals("Remove from Work", dropLabel("Work", removes = false))
     }
 
     /** "Save your current setup first?": blank keeps it as Previous; a taken name or the target itself is refused with a reason. */
