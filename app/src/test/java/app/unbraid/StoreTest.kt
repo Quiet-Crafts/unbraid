@@ -12,6 +12,7 @@ import app.unbraid.data.Setup
 import app.unbraid.data.Store
 import app.unbraid.data.VERSION
 import app.unbraid.data.WgPeer
+import app.unbraid.data.newSetup
 import app.unbraid.data.UpdateState
 import app.unbraid.data.Release
 import app.unbraid.support.NudgeState
@@ -672,6 +673,22 @@ class StoreTest {
         val reset = Store(dir) { key }.apply { assertTrue(startFresh()); importFirst() }.setup.value
         assertEquals("r1", reset.defaultRoute)
         assertEquals(listOf(route), reset.routes)
+        // Start fresh with the VPN running stays on Routes, where an import comes from Settings (no route of its own):
+        // the first one still gets a new route, then the same saves follow.
+        val again = tmp.newFolder().also(::saved)
+        File(again, "setup.bin").writeText("garbage")
+        val viaSettings = Store(again) { key }.apply {
+            assertTrue(startFresh())
+            assertEquals("", setup.value.importFor(null, alone = accounts.value.isEmpty()))
+            importFirst()
+            // A later import from Settings only saves its server.
+            assertEquals(null, setup.value.importFor(null, alone = true))
+        }.setup.value
+        assertEquals("r1", viaSettings.defaultRoute)
+        assertEquals(listOf(route), viaSettings.routes)
+        // Signed in to a provider, or with a route asked for, nothing changes.
+        assertEquals(null, newSetup().importFor(null, alone = false))
+        assertEquals("app:x", newSetup().importFor("app:x", alone = true))
         // An established setup (its file has no pristine flag) keeps its routes and its default.
         val old = tmp.newFolder()
         Store(old) { key }.update { it.copy(pristine = false) }

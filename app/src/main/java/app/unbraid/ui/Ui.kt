@@ -679,12 +679,16 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     private fun newServerId(taken: List<OwnServer>) = generateSequence { "s" + java.util.UUID.randomUUID().toString().take(8) }.first { id -> taken.none { it.id == id } }
 
-    /** Saves one of the user's own servers; with a [target] ("" new route, "app:<pkg>" or a route id) that route uses it too. False if not written. */
+    /**
+     * Saves one of the user's own servers; with a [target] ("" new route, "app:<pkg>" or a route id) that route uses it too, as
+     * does a new route for the first import into a new install ([Setup.importFor]). False if not written.
+     */
     fun importServer(target: String?, server: OwnServer): Boolean {
         val s = server.copy(id = newServerId(setup.value.servers))
+        val to = setup.value.importFor(target, alone = store.accounts.value.isEmpty() && draft == null)
         val saved = store.update { it.copy(servers = it.servers + s) }
         _signedIn.value = true
-        target?.let { useServer(it, s) }
+        to?.let { useServer(it, s) }
         return saved
     }
 

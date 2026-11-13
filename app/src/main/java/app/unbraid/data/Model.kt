@@ -356,6 +356,12 @@ data class Setup(
         val gone = routes.map { it.id }.toSet() - id
         return next.copy(routes = next.routes.filter { it.id !in gone }, apps = next.apps.filterValues { it !in gone }, defaultRoute = id, pristine = false)
     }
+    /**
+     * The route an import of a server for [target] goes to (null: saved only, as from Settings). The first one into a new
+     * install's [untouched] setup, with no provider signed in ([alone]), gets a new route that replaces the placeholder,
+     * wherever it was imported from: a reset with the VPN running lands on Routes, not on the first-run list.
+     */
+    fun importFor(target: String?, alone: Boolean) = target ?: "".takeIf { alone && untouched }
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute
     /** App [pkg] has no route of its own: it goes where the default goes. */
     fun follows(pkg: String) = pkg !in apps
