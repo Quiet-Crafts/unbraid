@@ -22,6 +22,7 @@ import app.unbraid.data.WgConf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -51,8 +52,23 @@ class ImportDraft {
     /** What the file picker was opened for, so a result that arrives after rotation is read the same way. */
     var kind = "any"
     var prefix: String? = null
+    /** Counts [clear]s: a parse started before the prompt was closed or replaced finds it changed and is dropped. */
+    var generation = 0
+        private set
 
-    fun clear() { ovpn = null; user = ""; pass = ""; link = null; wg = null; name = ""; error = null; warning = null }
+    fun clear() { ovpn = null; user = ""; pass = ""; link = null; wg = null; name = ""; error = null; warning = null; generation++ }
+}
+
+/**
+ * Runs [work] (a parse, off the main thread), then [apply] with its outcome, unless the prompt was closed or replaced
+ * while it ran: then nothing is saved and nothing is shown. Returns whether [apply] ran.
+ */
+internal suspend fun <T> ImportDraft.unlessReplaced(work: suspend () -> T, apply: (Result<T>) -> Unit): Boolean {
+    val started = generation
+    val r = try { Result.success(work()) } catch (e: CancellationException) { throw e } catch (e: Exception) { Result.failure(e) }
+    if (generation != started) return false
+    apply(r)
+    return true
 }
 
 /** What to show for a config that failed to parse: our own reason, cleaned of anything that looks like a secret. */
@@ -67,6 +83,7 @@ class Importer(
     var error by mutableStateOf<String?>(null)
     internal var launcher: () -> Unit = {}
     private var busy = false
+    private var pending: Job? = null
 
     /** Opens the file picker. [kind] is "wg", "ovpn" or "any"; [prefix] names the route "<prefix> · <file>". */
     fun file(kind: String = "any", prefix: String? = null) {
@@ -81,19 +98,25 @@ class Importer(
 
     internal fun picked(uri: Uri?) {
         if (uri == null) return
+        val kind = draft.kind; val prefix = draft.prefix // as the picker was opened, whatever is opened meanwhile
         scope.launch {
             val (text, file) = withContext(Dispatchers.IO) { read(uri) }
             if (text == null) { error = "Couldn't read that file. Config files must be under 64 KB."; return@launch }
-            val name = draft.prefix?.let { "$it · $file" } ?: file
+            val name = prefix?.let { "$it · $file" } ?: file
             draft.clear(); draft.name = name
-            // A broken config fails here, before the user is asked to name it. Parsing runs off the main thread.
-            if (draft.kind == "wg" || (draft.kind == "any" && text.contains("[Interface]", ignoreCase = true))) {
-                error = withContext(Dispatchers.Default) { runCatching { WgConf.parse(text, name).also(WgConf::requireFullTunnel) }.exceptionOrNull()?.let(::problem) }
-                if (error == null) draft.wg = text
+            // A broken config fails here, before the user is asked to name it. Parsing runs off the main thread; a later
+            // pick or prompt opened meanwhile wins.
+            if (kind == "wg" || (kind == "any" && text.contains("[Interface]", ignoreCase = true))) {
+                draft.unlessReplaced({ withContext(Dispatchers.Default) { WgConf.parse(text, name).also(WgConf::requireFullTunnel) } }) { r ->
+                    error = r.exceptionOrNull()?.let(::problem)
+                    if (error == null) draft.wg = text
+                }
             } else {
                 // Placeholder login: everything but the login is checked before the prompt asks for a name and login.
-                error = withContext(Dispatchers.Default) { runCatching { Manual.parseOvpn(text, name, "check", "check") }.exceptionOrNull()?.let(::problem) }
-                if (error == null) draft.ovpn = text to name
+                draft.unlessReplaced({ withContext(Dispatchers.Default) { Manual.parseOvpn(text, name, "check", "check") } }) { r ->
+                    error = r.exceptionOrNull()?.let(::problem)
+                    if (error == null) draft.ovpn = text to name
+                }
             }
         }
     }
@@ -112,15 +135,22 @@ class Importer(
     private fun <T> attempt(secrets: List<String>, parse: () -> T, save: (T) -> Boolean?) {
         if (busy) return
         busy = true
-        scope.launch {
-            draft.error = try {
-                val parsed = withContext(Dispatchers.Default) { parse() }
-                val saved = save(parsed)
-                if (saved != null) { if (saved) secrets.forEach(ui::clearClipboardIf); draft.clear(); done() }
-                null
-            } catch (e: Exception) { if (e is CancellationException) throw e else problem(e) } finally { busy = false }
+        pending = scope.launch {
+            try {
+                // Closing or replacing the prompt meanwhile drops the result: nothing is saved, no route changes.
+                draft.unlessReplaced({ withContext(Dispatchers.Default) { parse() } }) { r ->
+                    draft.error = try {
+                        val saved = save(r.getOrThrow())
+                        if (saved != null) { if (saved) secrets.forEach(ui::clearClipboardIf); draft.clear(); done() }
+                        null
+                    } catch (e: Exception) { problem(e) }
+                }
+            } finally { busy = false }
         }
     }
+
+    /** Closes the open prompt and drops an import still being parsed for it. */
+    private fun dismiss() { pending?.cancel(); pending = null; draft.clear() }
 
     /** False the first time [weakness] is seen: the prompt shows it and the next tap goes ahead. */
     private fun accepted(weakness: String?) = weakness == null || weakness == draft.warning || run { draft.warning = weakness; false }
@@ -157,7 +187,7 @@ class Importer(
     @Composable
     fun Dialogs() {
         draft.wg?.let { text ->
-            Prompt("Name this server", "Import", { wg(text) }, { draft.clear() }) {
+            Prompt("Name this server", "Import", { wg(text) }, { dismiss() }) {
                 Text("Shown on your routes and in Apps. You can rename it later.", style = Type.sub)
                 DialogField(draft.name, { draft.name = it; draft.error = null }, "Name", "e.g. Home VPS")
                 draft.error?.let { Text(it, style = Type.caption, color = Ink.bad) }
@@ -165,7 +195,7 @@ class Importer(
         }
         draft.ovpn?.let { (text, name) ->
             SecureWindow()
-            Prompt("OpenVPN server", importLabel(), { importOvpn(text, name) }, { draft.clear() }, danger = draft.warning != null, secure = true) {
+            Prompt("OpenVPN server", importLabel(), { importOvpn(text, name) }, { dismiss() }, danger = draft.warning != null, secure = true) {
                 DialogField(draft.name, { draft.name = it; draft.error = null }, "Name", "e.g. Office")
                 Text("Leave the login empty if the config has its own.", style = Type.sub)
                 DialogField(draft.user, { draft.user = it; draft.error = null }, "Username")
@@ -175,7 +205,7 @@ class Importer(
         }
         draft.link?.let { link ->
             SecureWindow()
-            Prompt("Shadowsocks link", importLabel(), { importSs(link) }, { draft.clear() }, enabled = link.isNotBlank(), danger = draft.warning != null, secure = true) {
+            Prompt("Shadowsocks link", importLabel(), { importSs(link) }, { dismiss() }, enabled = link.isNotBlank(), danger = draft.warning != null, secure = true) {
                 DialogField(link, { draft.link = it; draft.error = null; draft.warning = null }, "Link", "ss://…", secret = true)
                 DialogField(draft.name, { draft.name = it; draft.error = null }, "Name (optional)", "e.g. Outline")
                 Problems()
