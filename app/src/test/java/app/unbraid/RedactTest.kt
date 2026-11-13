@@ -105,6 +105,61 @@ class RedactTest {
     }
 
     /** Plain words after a name stay: only values that look like credentials go. */
+    /**
+     * Texts that make a scan read the same stretch again for every name or tag in it take seconds to minutes when the
+     * cost grows with the square of the length; one pass takes milliseconds.
+     */
+    @Test fun repeatedNamesAndTagsCostOnePass() {
+        val n = 400_000
+        val cases = mapOf(
+            "unhidden password names" to "password word ".repeat(n / 14),
+            "common names before unclosed brackets" to "key [".repeat(n / 5),
+            "common names before unclosed quotes" to "key \"".repeat(n / 5),
+            "every escape depth once" to buildString { var d = 1; while (length < n) { append("key "); append("\\".repeat(d++)); append("\" ") } },
+            "tags named in prose" to "both <cert> and <key>, or neither ".repeat(n / 34),
+            "unclosed tags" to "<tls-auth> block ".repeat(n / 17),
+            "unclosed PEM headers" to "-----BEGIN X----- ".repeat(n / 18),
+            "token starts in one run" to "eyJ".repeat(n / 3),
+            "URL schemes with no login" to "=x://".repeat(n / 5),
+        )
+        for ((what, s) in cases) {
+            val t0 = System.nanoTime()
+            Redact.clean(s)
+            val ms = (System.nanoTime() - t0) / 1_000_000
+            assertTrue("$what took $ms ms", ms < 3_000)
+        }
+    }
+
+    /** The app's own messages that name OpenVPN blocks come out whole: they carry no key, only the instruction. */
+    @Test fun ownMessagesNamingBlocksStay() {
+        for (s in listOf(
+            "The profile needs both <cert> and <key>, or neither",
+            "tls-auth must be inline (<tls-auth> block), not a file path",
+            "tls-crypt must be inline (<tls-crypt> block), not a file path",
+            "key must be inline (<key> block), not a file path",
+            "PKCS#12 bundles aren't supported; use a .ovpn with inline <ca>, <cert> and <key> blocks",
+            "The <key> block is empty or malformed",
+            "The <tls-crypt-v2> block is empty or malformed",
+            "<extra-certs> needs a <cert> block",
+            "That username or password has characters ExpressVPN's manual-configuration login doesn't use",
+            "NordVPN didn't accept this token. Create a new one in your Nord Account under NordVPN, manual setup, and paste it here.",
+        )) assertEquals(s, Redact.clean(s))
+        // Key material after a tag is still hidden, closed or not, on one line or several.
+        assertEquals("<key>[hidden] tail", Redact.clean("<key>\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n</key> tail"))
+        assertEquals("<tls-auth>[hidden]", Redact.clean("<tls-auth> 6acef03f62675b4b1bbd03e53b187727"))
+        assertEquals("<key>[hidden]", Redact.clean("<key>\nabc"))
+        assertEquals("both <key>, then <key>[hidden]", Redact.clean("both <key>, then <key> -----BEGIN PRIVATE KEY----- abc"))
+    }
+
+    /** URL logins and tokens are still found after the scans were made linear. */
+    @Test fun urlLoginsAndTokensStillHidden() {
+        assertEquals("proxy https://[hidden]@host.invalid/x", Redact.clean("proxy https://user:p@ss@host.invalid/x"))
+        assertEquals("a://[hidden]@h b://[hidden]@h", Redact.clean("a://u:p1@h b://u:p2@h"))
+        assertEquals("https://host.invalid/x y@z", Redact.clean("https://host.invalid/x y@z"))
+        assertEquals("Bearer [hidden]", Redact.clean("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln"))
+        assertEquals("[hidden] tail", Redact.clean("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln tail"))
+    }
+
     @Test fun ordinaryTextAfterNamesStays() {
         for (s in listOf("Invalid WireGuard key for Sweden", "Your token has expired. Sign in again", "account number has 16 digits", "login failed", "auth-user-pass"))
             assertEquals(s, Redact.clean(s))
