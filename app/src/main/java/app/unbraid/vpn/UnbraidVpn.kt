@@ -500,9 +500,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             lastBlock = input.fakeBlock
             restarting = true
             openTable(true)
-            // Before the start too, with the running engine's: a check under way during it sends UDP through neither.
+            // Before the start too, with the running engine's: a check under way during it sends UDP through neither, and
+            // one already open through a tunnel that turns TCP-only is closed first.
             val udpless = Compiler.tcpOnly(json)
-            tcpOnly = tcpOnly + udpless
+            Health.stun.udpless(udpless) { tcpOnly = tcpOnly + udpless }
             engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
             tcpOnly = udpless
             restarting = false
@@ -571,7 +572,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val input = Compiler.Input(last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = now.tsSuffixAllowed)), last.links, last.selfPackage, last.lockdown,
             last.tsDir, last.cacheFile, store.tsSuffix, next, last.fakeBlock, last.blocked, last.tsLoginPending && tsLoginPending)
         val json = Compiler.compile(input)
-        tcpOnly = tcpOnly + Compiler.tcpOnly(json)
+        Compiler.tcpOnly(json).let { u -> Health.stun.udpless(u) { tcpOnly = tcpOnly + u } }
         srv.startOrReloadService(json, OverrideOptions())
         tcpOnly = Compiler.tcpOnly(json)
         starts++

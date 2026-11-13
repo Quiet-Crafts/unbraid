@@ -253,4 +253,24 @@ class HealthTest {
         assertEquals(setOf("b"), Health.answering(setOf("a", "b", "removed"), eligible, setOf("a"), emptySet()))
         assertEquals(emptySet<String>(), Health.answering(setOf("a"), emptySet(), emptySet(), setOf("a")))
     }
+
+    /**
+     * A STUN check already past its TCP-only test when a reload turns its route into a Shadowsocks plugin route: the
+     * reload's marking closes it before the new engine starts, and no new one starts through that route.
+     */
+    @Test fun reloadClosesQueuedStunOnATunnelTurningTcpOnly() {
+        val gate = Health.StunGate()
+        var tcpOnly = emptySet<String>()
+        val closed = mutableListOf<String>()
+        val refused = { t: String -> t in tcpOnly }
+        val a = gate.start("r-a", refused, { "session-a" }) { closed += it }
+        val b = gate.start("r-b", refused, { "session-b" }) { closed += it }
+        assertEquals("session-a", a)
+        gate.udpless(setOf("r-a")) { tcpOnly = tcpOnly + "r-a" } // route a replaced by a plugin route, same tag
+        assertEquals(listOf("session-a"), closed) // b carries UDP still: left alone
+        assertNull(gate.start("r-a", refused, { "late" }) { closed += it })
+        gate.done(b!!)
+        gate.udpless(setOf("r-b")) { tcpOnly = tcpOnly + "r-b" }
+        assertEquals(listOf("session-a"), closed) // b had ended already: nothing to close
+    }
 }

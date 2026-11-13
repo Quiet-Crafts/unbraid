@@ -140,6 +140,28 @@ object Health {
         }.getOrDefault(false)
     }
 
+    /**
+     * STUN checks open now. One already past its TCP-only test must not reach a tunnel that a reload turns TCP-only (a
+     * Shadowsocks plugin): the engine would send it straight to the server, past the plugin. So starting one and marking
+     * tunnels TCP-only exclude each other, and the marking closes every check already open through those tunnels.
+     */
+    internal class StunGate {
+        private val open = HashMap<Any, Pair<String, () -> Unit>>()
+
+        /** Starts a check through [tag] with [start], unless [refused] (TCP only now); [close] ends it early. */
+        @Synchronized fun <S : Any> start(tag: String, refused: (String) -> Boolean, start: () -> S?, close: (S) -> Unit): S? =
+            if (refused(tag)) null else start()?.also { s -> open[s] = tag to { close(s) } }
+
+        @Synchronized fun done(session: Any) { open.remove(session) }
+
+        /** Runs [mark] (tunnels [tags] are TCP-only from now) and closes the checks open through any of them. */
+        @Synchronized fun udpless(tags: Set<String>, mark: () -> Unit) {
+            mark()
+            open.entries.filter { it.value.first in tags }.toList().forEach { (s, v) -> open.remove(s); runCatching { v.second() } }
+        }
+    }
+    internal val stun = StunGate()
+
     private suspend fun binding(stun: String, tag: String): Boolean {
         // The STUN server's name is looked up through the tunnel's own DNS server, never the phone's network (an engine
         // patch reads "<dns server>|<host:port>"); a tunnel whose DNS server isn't known relies on HTTPS.
@@ -153,9 +175,11 @@ object Health {
         }
         // Opened and closed in one context, so a cancelled check can't lose a session it already has.
         return withContext(Dispatchers.IO) {
-            val session = runCatching { Libbox.newStandaloneCommandClient().startSTUNTest(server, tag, handler) }.getOrNull() ?: return@withContext false
+            val session = runCatching {
+                this@Health.stun.start(tag, { it in UnbraidVpn.tcpOnly }, { Libbox.newStandaloneCommandClient().startSTUNTest(server, tag, handler) }) { answer.complete(false); it.close() }
+            }.getOrNull() ?: return@withContext false
             try { withTimeoutOrNull(BUDGET) { answer.await() } ?: false }
-            finally { withContext(NonCancellable) { runCatching { session.close() } } }
+            finally { withContext(NonCancellable) { this@Health.stun.done(session); runCatching { session.close() } } }
         }
     }
 }
