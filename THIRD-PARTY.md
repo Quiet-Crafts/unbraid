@@ -34,6 +34,19 @@ app in `app/src/main/assets/notices.txt`. `tools/notices.sh` regenerates that fi
 
 The APK published on GitHub and meant for F-Droid doesn't contain it.
 
+## Provided by Android
+
+These are part of Android itself. The app uses them but doesn't include them.
+
+| Component | Used for | Licence |
+|---|---|---|
+| Android Keystore | Holds the key that encrypts saved logins, keys and Tailscale state on the phone | Part of Android |
+| Android's platform cryptography, usually [Conscrypt](https://github.com/google/conscrypt), built on [BoringSSL](https://boringssl.googlesource.com/boringssl/) | AES-256-GCM, HMAC-SHA256 and SHA-256, including for backup files | Conscrypt: Apache-2.0. BoringSSL: its own licence, which depends on the version in your Android |
+
+No cryptography library is bundled for backups. The scrypt function that turns a backup passphrase into keys
+(`data/Scrypt.kt`) was written for unbraid from [RFC 7914](https://www.rfc-editor.org/rfc/rfc7914), and its unit
+tests check it against the RFC's test vectors. [SECURITY.md](SECURITY.md#backup-files) describes the backup format.
+
 ## Downloaded while the app runs
 
 | Source | Used for | Licence |

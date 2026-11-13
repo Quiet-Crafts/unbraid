@@ -183,7 +183,8 @@ update check, and the connectivity check when every tunnel is down) use your pho
 so those services see your own IP address. The list of installed apps is read on the
 phone so you can assign routes, and it never leaves the phone. "Copy a report" in the app's settings only copies text to the clipboard: the phone
 model, Android version, app version, which providers and countries you use, and counts. It holds no keys, accounts,
-addresses or app names. App data is excluded from backups. The privacy
+addresses or app names. App data is excluded from Android's own backups. A backup file you save in Settings is locked with your passphrase
+([how](SECURITY.md#backup-files)). The privacy
 policy, with every service the app talks to, is at [unbraid.app/privacy](https://unbraid.app/privacy).
 
 To report a security problem, see [SECURITY.md](SECURITY.md).
