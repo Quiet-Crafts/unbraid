@@ -15,6 +15,7 @@ import app.unbraid.MainActivity
 import app.unbraid.R
 import app.unbraid.Unbraid
 import app.unbraid.data.Limits
+import app.unbraid.data.PREVIOUS
 import app.unbraid.data.Providers
 import app.unbraid.data.Setup
 import app.unbraid.vpn.VpnState.Phase
@@ -126,12 +127,15 @@ abstract class ProfileTile(private val slot: Int) : LiveTile<Setup>({ combine(Un
         if (old.profile == name && running()) { UnbraidVpn.pause(this, 15); return }
         // Over a provider's connection limit the app asks first, and Android's VPN consent needs the app too.
         val acc = Unbraid.store.accounts.value
-        val ask = Limits.over(old, old.use(name)) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } != null
+        // A setup in use that no profile holds is first kept as "Previous", so the switch loses nothing.
+        val next = old.use(name, PREVIOUS)
+        val ask = Limits.over(old, next) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } != null
         when {
-            // An empty profile has no default route yet: the app shows it, to be given one.
-            ask || !profile.ready || VpnService.prepare(this) != null -> openApp(Profiles.intent(this, name), slot, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            // An empty profile has no default route yet: the app shows it, to be given one. With no room to keep the
+            // setup in use (or this tile's profile is "Previous" itself), the app asks instead.
+            ask || !profile.ready || next.profile != name || VpnService.prepare(this) != null -> openApp(Profiles.intent(this, name), slot, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             else -> {
-                Unbraid.store.update { it.use(name) }
+                Unbraid.store.update { it.use(name, PREVIOUS) }
                 Profiles.started(name)
                 if (!running()) UnbraidVpn.start(this)
             }
