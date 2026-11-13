@@ -75,8 +75,13 @@ class ProviderFixesTest {
         assertEquals("185.65.135.9:51820", l.peer.endpoint)
         assertEquals(key2, l.peer.publicKey)
         assertEquals(key2, l.server.publicKey)
-        // The list is down: the pinned values stand in.
-        assertEquals("10.0.0.1:51820", Mullvad.link(null, Location("mullvad", pinned = stale), mullvad).peer.endpoint)
+        // The list is down: the pinned values stand in, if the saved address is a public one.
+        assertEquals("185.65.135.7:51820", Mullvad.link(null, Location("mullvad", pinned = stale.copy(ip = "185.65.135.7")), mullvad).peer.endpoint)
+        // Saved before addresses were checked: refused with a clear reason, never dialled.
+        for (saved in listOf("10.0.0.1", "vpn.example")) {
+            try { Mullvad.link(null, Location("mullvad", pinned = stale.copy(ip = saved)), mullvad); fail(saved) }
+            catch (e: app.unbraid.vpn.Fail) { assertEquals("se-got-wg-001 has a saved address that can't be used. Pick the server again", e.message) }
+        }
         // A relay the list no longer offers is an error, not a stale endpoint.
         for (gone in listOf(stale.copy(name = "se-got-wg-002", host = "se-got-wg-002", ip = "185.65.135.10"), stale.copy(name = "se-got-wg-777", host = "se-got-wg-777"))) {
             try { Mullvad.link(Mullvad.parse(relays), Location("mullvad", pinned = gone), mullvad); fail() } catch (e: IOException) { }

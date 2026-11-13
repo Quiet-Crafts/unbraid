@@ -57,6 +57,7 @@ object Nord : Provider {
             // device, and two devices with one key on one server knock each other off. Every device at the same
             // place (and Nord's own apps) is told the same first choice.
             else NordApi.recommend(loc, tech = tech).randomOrNull() ?: throw IOException("No NordVPN server for ${loc.label}")
+        Addr.usable(sv)
         if (tech == "wireguard_udp") return WgLink(sv, peer(sv, a.key))
         // OpenVPN: Nord publishes one profile per server; the login is the account's service credentials.
         val (user, pass) = if (a.user.isNotEmpty()) a.user to a.pass else NordApi.credentials(a.token).let { it.second to it.third }

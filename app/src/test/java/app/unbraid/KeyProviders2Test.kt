@@ -143,12 +143,15 @@ class KeyProviders2Test {
         try { ExpressVpn.link(express, Location("expressvpn", pinned = ex.copy(host = "gone.expressnetw.com")), ExpressVpn.Account("u", "p")); fail() } catch (e: app.unbraid.data.NoLongerOffered) {}
         // Nothing but a dotted IPv4 goes into the profile, a saved pinned address included.
         for (bad in listOf("1.2.3.4\nscript-security 2", "1.2.3", "1.2.3.256", "a.b.c.d", " 1.2.3.4", "١.2.3.4"))
-            try { ExpressVpn.link(null, Location("expressvpn", pinned = ex.copy(ip = bad)), ExpressVpn.Account("u", "p")); fail(bad) } catch (e: IllegalArgumentException) {}
+            try { ExpressVpn.link(null, Location("expressvpn", pinned = ex.copy(ip = bad)), ExpressVpn.Account("u", "p")); fail(bad) } catch (e: app.unbraid.vpn.Fail) { assertTrue(bad !in e.message!!) }
+        try { ExpressVpn.link(null, Location("expressvpn", pinned = ex.copy(ip = "10.8.0.1")), ExpressVpn.Account("u", "p")); fail() } catch (e: app.unbraid.vpn.Fail) {}
     }
 
     @Test fun windscribePinnedServerNeedsNoList() {
         val sv = Windscribe.link(rows, Location("windscribe", countryCode = "JP"), ws()).server
         val again = Windscribe.link(null, Location("windscribe", pinned = sv), ws(80))
+        // A node saved before addresses were checked is refused offline too.
+        try { Windscribe.link(null, Location("windscribe", pinned = sv.copy(ip = "192.168.1.5")), ws(80)); fail() } catch (e: app.unbraid.vpn.Fail) { assertTrue(e.message!!.endsWith("Pick the server again")) }
         assertEquals(sv, again.server)
         assertEquals("${sv.ip}:80", again.peer.endpoint)
     }

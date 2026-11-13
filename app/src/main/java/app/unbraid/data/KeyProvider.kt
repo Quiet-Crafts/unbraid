@@ -131,6 +131,7 @@ abstract class KeyProvider : Provider {
     internal fun link(loc: Location, a: Account, entries: () -> List<Catalog.Entry>): WgLink {
         val (sv, e) = loc.pinned?.let { refreshed(it, loc, a, entries) } ?: usable(entries(), loc).firstOrNull()?.let { Catalog.server(it) to it }
             ?: throw IOException("No $name server for ${loc.label}")
+        Addr.usable(sv)
         return WgLink(
             sv,
             WgPeer(

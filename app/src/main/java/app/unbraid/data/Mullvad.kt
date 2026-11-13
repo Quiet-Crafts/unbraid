@@ -288,6 +288,7 @@ object Mullvad : Provider {
             if (rs.isEmpty()) throw IOException("No active ${if (ownedOnly) "Mullvad-owned" else "Mullvad"} server for ${loc.label}")
             server(pick(rs, rnd), l)
         }
+        Addr.usable(sv)
         return WgLink(
             sv,
             WgPeer(

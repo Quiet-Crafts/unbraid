@@ -235,6 +235,7 @@ object Ivpn : Provider {
                 else l.match(loc).minByOrNull { it.second.load } ?: throw IOException("No IVPN server for ${loc.label}")
             server(g, h) to h.localIp.substringBefore('/')
         }
+        Addr.usable(sv)
         val ports = l?.ports?.let { listed -> FALLBACK.filter { it in listed } }.orEmpty()
         return WgLink(
             sv,

@@ -96,6 +96,7 @@ class IvpnTest {
     @Test fun pinnedServerNeedsNoList() {
         val sv = Ivpn.link(list, Location("ivpn", countryCode = "SE"), acct).server
         assertEquals(sv, Ivpn.link(null, Location("ivpn", pinned = sv), acct).server)
+        try { Ivpn.link(null, Location("ivpn", pinned = sv.copy(ip = "172.16.0.9")), acct); org.junit.Assert.fail() } catch (e: app.unbraid.vpn.Fail) { }
     }
 
     /** With the list readable, a pinned server takes its current address and key; gone from the list, it is final. */

@@ -76,6 +76,7 @@ object ExpressVpn : Provider {
             val e = Catalog.pick(entries.filter { it.ips.any(::isIpv4) }, loc).firstOrNull() ?: throw IOException("No ExpressVPN server for ${loc.label}")
             server(e, e.ips.filter(::isIpv4).random(rnd))
         }
+        Addr.usable(sv)
         return OvpnLink(sv, Manual.parseOvpn(profile(sv.ip), sv.name, a.username, a.password))
     }
 

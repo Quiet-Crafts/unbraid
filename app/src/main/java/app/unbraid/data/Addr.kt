@@ -27,6 +27,12 @@ object Addr {
     /** The tunnel address a provider assigns this phone, without its mask; null unless an IPv4 address (with or without one). */
     fun assigned(ip: String): String? = ip.takeIf { it == it.trim() && Compiler.ipv4(it) != null }?.substringBefore('/')
 
+    /**
+     * [s] when its address may be connected to. A server saved before addresses were checked, used when the provider's
+     * list can't be read, can hold one that may not.
+     */
+    fun usable(s: Server): Server = if (server(s.ip)) s else throw app.unbraid.vpn.Fail("${s.name} has a saved address that can't be used. Pick the server again")
+
     /** The error for a provider reply that holds a malformed address or key. */
     fun unexpected(provider: String) = app.unbraid.vpn.Fail("Unexpected reply from $provider. Try again later")
 }

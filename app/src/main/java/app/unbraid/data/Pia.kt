@@ -190,7 +190,9 @@ object Pia : Provider {
 
     /** `curl --connect-to cn::ip: --cacert ca.rsa.4096.crt https://cn:1337/addKey?pt=..&pubkey=..` */
     private fun addKey(sv: Wg, token: String, pubKey: String): AddKey {
-        require(sv.cn.matches(Regex("[A-Za-z0-9._-]+")) && Addr.server(sv.ip)) { "Unexpected PIA server ${sv.cn}" }
+        // Neither value is quoted: a server saved earlier, or a reply, could hold anything.
+        if (!sv.cn.matches(Regex("[A-Za-z0-9._-]+"))) throw Addr.unexpected("PIA")
+        if (!Addr.server(sv.ip)) throw app.unbraid.vpn.Fail("This PIA server has a saved address that can't be used. Pick the server again")
         return parseAddKey(Http.get("https://${sv.ip}:1337/addKey?pt=${Http.enc(token)}&pubkey=${Http.enc(pubKey)}", tls = tls, verifyHost = sv.cn, signed = true))
     }
 

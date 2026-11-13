@@ -129,6 +129,7 @@ object Windscribe : Provider {
             if (rs.isEmpty()) throw IOException("No Windscribe server for ${loc.label}")
             server(rs.shuffled(rnd).minBy { it.node.health })
         }
+        Addr.usable(sv)
         return WgLink(
             sv,
             WgPeer(
