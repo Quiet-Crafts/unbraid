@@ -148,7 +148,8 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
 
     Screen(
         state = list,
-        overline = "${apps.size} installed", title = "Apps", sub = "$routed routed · $direct direct",
+        // Before the app list may be read its counts are unknown, not 0.
+        overline = if (disclosed) "${apps.size} installed" else "", title = "Apps", sub = if (disclosed) "$routed routed · $direct direct" else "",
         search = {
             if (viewing != null && viewing != setup.profile) Column(Modifier.padding(start = 24.dp, end = Gutter, bottom = 4.dp)) {
                 Text("Editing $viewing · not in use. ${setup.profile?.let { "$it is in use." } ?: "No profile is in use."}", style = Type.caption, color = Ink.dim)
