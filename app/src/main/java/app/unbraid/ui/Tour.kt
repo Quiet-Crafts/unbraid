@@ -125,10 +125,10 @@ object Onboarding {
 /** The tour's stops: each names its tab and the concept its anchor marks, never a position on screen. */
 enum class TourStop(val tab: Tab, val title: String, val body: String) {
     Power(Tab.Routes, "Connect, pause, stop", "Tap to connect. Tap again to pause or disconnect. Green is protected, orange paused, red off."),
-    DefaultRoute(Tab.Routes, "The default exit", "Every app goes here unless you give it an exception. Tap it to change the location."),
-    AddRoute(Tab.Routes, "Add an exit", "The + button adds a route: your provider's countries, or your own servers and Tailscale. It saves profiles too."),
-    AppsList(Tab.Apps, "Choose per app", "Tap any app to pick its exit; Direct skips the VPN. Moved apps show on Routes as exceptions."),
-    StatsIntro(Tab.Stats, "Your numbers, if you want them", "Data per app and exit, flows and speed tests. Off until you turn it on. Statistics stay on this phone; M-Lab publishes speed test results."),
+    DefaultRoute(Tab.Routes, "The default route", "Every app goes here unless you give it its own route. Tap it to change the location."),
+    AddRoute(Tab.Routes, "Add a route", "The + button adds a route: your provider's countries, or your own servers and Tailscale. It saves profiles too."),
+    AppsList(Tab.Apps, "Choose per app", "Tap any app to pick its route; Direct skips the VPN. Apps you move show on Routes."),
+    StatsIntro(Tab.Stats, "Your numbers, if you want them", "Data per app and route, flows and speed tests. Off until you turn it on. Statistics stay on this phone; M-Lab publishes speed test results."),
     Connections(Tab.Settings, "Add connections", "Sign in to more providers, or import WireGuard, OpenVPN and Shadowsocks servers."),
     LocalHome(Tab.Settings, "Home and local", "Printers and casting stay reachable. Reach home through Tailscale or your router's WireGuard."),
     About(Tab.Settings, "You're set", "The Quick Settings tile and the widget work without opening $APP. Replay this tour here, in About & support."),
@@ -200,7 +200,7 @@ fun TourOverlay(step: Int, appsShown: Boolean, back: () -> Unit, next: () -> Uni
             }
             Text(stop.title, style = Type.title, color = Ink.text)
             Text(
-                if (stop == TourStop.AppsList && !appsShown) "Show my apps lists them here. Tap any app to pick its exit; Direct skips the VPN." else stop.body,
+                if (stop == TourStop.AppsList && !appsShown) "Show my apps lists them here. Tap any app to pick its route; Direct skips the VPN." else stop.body,
                 style = Type.sub, color = Ink.dim,
             )
             Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -293,8 +293,8 @@ fun SheetLine(icon: ImageVector, text: String) = Row(horizontalArrangement = Arr
 fun VpnDisclosure(agree: () -> Unit, dismiss: () -> Unit) = InfoSheet(
     Icons.tunnel, "Before you connect", "How the VPN works", "Agree and continue", agree, dismiss, foot = "Android asks for its own VPN permission next.",
 ) {
-    SheetLine(Icons.routes, "$APP creates a VPN on this phone to route each app through the exit you chose.")
-    SheetLine(Icons.dns, "Traffic goes to the exits you chose: VPN providers, your own servers or Tailscale.")
+    SheetLine(Icons.routes, "$APP creates a VPN on this phone to route each app through the route you chose.")
+    SheetLine(Icons.dns, "Traffic goes through the routes you chose: VPN providers, your own servers or Tailscale.")
     SheetLine(Icons.direct, "Apps set to Direct and your local network use your normal connection.")
     SheetLine(Icons.block, "$APP has no servers and collects nothing.")
     SheetLine(Icons.eyeOff, "$APP's own sign-ins, server lists and update check use your normal connection.")
@@ -307,7 +307,7 @@ fun AppsDisclosure(agree: () -> Unit, dismiss: () -> Unit) = InfoSheet(
     Icons.apps, "Before your apps appear", "Your installed apps", "Agree and continue", agree, dismiss, foot = "Not now keeps the list closed; Apps asks again.",
 ) {
     SheetLine(Icons.apps, "$APP reads the list of installed apps, only on this phone.")
-    SheetLine(Icons.routes, "It needs the list to let you give each app its own exit.")
+    SheetLine(Icons.routes, "It needs the list to let you give each app its own route.")
     SheetLine(Icons.phone, "The list never leaves this phone and is not uploaded.")
 }
 

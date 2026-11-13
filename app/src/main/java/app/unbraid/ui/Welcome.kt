@@ -96,7 +96,7 @@ fun Welcome(fresh: Boolean, answer: (Boolean) -> Unit, accept: () -> Unit) {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp)) {
                 Text(when (now) { "welcome" -> "Welcome"; "updates" -> "Updates"; "places" -> "Four places"; else -> if (fresh) "Terms" else "Updated" }.uppercase(), style = Type.overline, color = Ink.dim)
                 Gap(6.dp)
-                Headline(when (now) { "welcome" -> "Every app, its own exit" to "."; "updates" -> UPDATES_TITLE to "?"; "places" -> "Find your way" to "."; else -> (if (fresh) "Before you start" else "One thing first") to "." })
+                Headline(when (now) { "welcome" -> "Every app, its own route" to "."; "updates" -> UPDATES_TITLE to "?"; "places" -> "Find your way" to "."; else -> (if (fresh) "Before you start" else "One thing first") to "." })
                 Gap(20.dp)
                 when (now) {
                     "welcome" -> {
@@ -209,7 +209,7 @@ private fun Braid() {
     val strands = remember { braid() }
     val colors = listOf(Ink.accent, Ink.route(1), Ink.direct)
     BoxWithConstraints(Modifier.fillMaxWidth().height(230.dp).semantics {
-        contentDescription = "Three braided strands leave the phone and part into three exits: the Netherlands for everything else, the United States for streaming, Direct for the bank."
+        contentDescription = "Three braided strands leave the phone and part into three routes: the Netherlands for everything else, the United States for streaming, Direct for the bank."
     }) {
         val s = maxWidth.value / 342f
         Canvas(Modifier.fillMaxSize()) {
@@ -270,7 +270,7 @@ private fun braid(): List<Triple<Path, Int, Boolean>> {
 /** The four tabs, each with what lives there, above the bar they live in. */
 @Composable
 private fun Places() {
-    val what = listOf("Your exits and the power switch", "Which app goes where", "Data, flows and speed, if you want", "Providers, servers, home, protection")
+    val what = listOf("Your routes and the power switch", "Which app goes where", "Data, flows and speed, if you want", "Providers, servers, home, protection")
     Column {
         Row(Modifier.fillMaxWidth().heightIn(min = 260.dp).height(IntrinsicSize.Min)) {
             Tab.entries.forEachIndexed { i, t ->

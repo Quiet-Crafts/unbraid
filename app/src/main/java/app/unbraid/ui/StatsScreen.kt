@@ -444,10 +444,10 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                         val exits = v?.byExit?.filter { it.first != DIRECT }.orEmpty()
                         if (v == null || exits.isEmpty()) Text("No data yet", style = Type.sub, color = Ink.dim) else {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Ring(exits.map { (id, b) -> b.total.toFloat() to (v.exits[id]?.color ?: Ink.faint) }, "Share by exit: " + exits.joinToString { (id, b) -> "${v.exits[id]?.name} ${bytesText(b.total)}" }, size = 56.dp, stroke = 8.dp)
+                                Ring(exits.map { (id, b) -> b.total.toFloat() to (v.exits[id]?.color ?: Ink.faint) }, "Share by route: " + exits.joinToString { (id, b) -> "${v.exits[id]?.name} ${bytesText(b.total)}" }, size = 56.dp, stroke = 8.dp)
                                 Column {
                                     Num(v.apps.filter { it.second != DIRECT }.map { it.first }.distinct().size.toString(), "apps", 26)
-                                    Text("into ${exits.size} ${if (exits.size == 1) "exit" else "exits"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("into ${exits.size} ${if (exits.size == 1) "route" else "routes"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
                             // Of all the data, Direct included: the same total as the Usage tile's shares.
@@ -463,7 +463,7 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                         if (v != null) WeekMarks(v.week.map { it.coerceAtLeast(0f) }, DayOfWeek.entries.map { it.getDisplayName(DayStyle.NARROW, locale()) }, LocalDate.now().dayOfWeek.ordinal,
                             weekSummary(DayOfWeek.entries.map { it.getDisplayName(DayStyle.SHORT, locale()) }, v.week))
                     }
-                    HubTile("tunnels", "Tunnels", Icons.tunnel, 3, play, go) {
+                    HubTile("tunnels", "Routes", Icons.tunnel, 3, play, go) {
                         // Each exit's fastest download test.
                         val fastest = v?.let { it.tests.keys.associateWith(it::fastestDown).filterValues { b -> b > 0 } }.orEmpty()
                         val best = fastest.maxByOrNull { it.value }
@@ -571,7 +571,7 @@ private fun Usage(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, go
         })
     }
     item(key = "note") { Caption("Data that passes through unbraid. Apps you set to Direct skip it and aren't counted, unless connections without VPN are blocked or they pass through for the Protection filter. Apps that follow a Direct default route are counted. By exit and app: App flows.") }
-    item(key = "links") { Row(Modifier.padding(start = Gutter, top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { LinkButton(Icons.flows, "App flows") { go("flows") }; LinkButton(Icons.tunnel, "Tunnels") { go("tunnels") } } }
+    item(key = "links") { Row(Modifier.padding(start = Gutter, top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { LinkButton(Icons.flows, "App flows") { go("flows") }; LinkButton(Icons.tunnel, "Routes") { go("tunnels") } } }
 }
 
 /** The next round scale value at or above [x]: 1, 2, 2.5, 5 times a power of ten. */
@@ -591,7 +591,7 @@ private fun Live(v: View, go: (String?) -> Unit) {
     // One snapshot for the lazy rows below: the state is reset to empty when the subscription restarts.
     val down = live.down
     val ids = down.keys.filter { it != DIRECT }.sortedBy { v.exits[it]?.name }
-    Section("live", "Now · ${ids.size} ${if (ids.size == 1) "exit" else "exits"}", "Live", back = { go(null) }) {
+    Section("live", "Now · ${ids.size} ${if (ids.size == 1) "route" else "routes"}", "Live", back = { go(null) }) {
         if (!Unbraid.store.setup.value.prefs.stats) { item { Empty("Live speeds are measured while statistics are on.") }; return@Section }
         if (vpn.phase != Phase.On) { item { Empty("Connect to see live speeds.") }; return@Section }
         item(key = "hero") {
@@ -599,11 +599,11 @@ private fun Live(v: View, go: (String?) -> Unit) {
             val cap = niceCeil(maxTotal / 1e6).coerceAtLeast(1.0).toFloat()
             Hero("Download · now", rate(live.downNow).first, rate(live.downNow).second, "↑ ${rate(live.upNow).let { "${it.first} ${it.second}" }} upload · every second") {
                 LiveArea(ids.map { id -> down.getValue(id).let { a -> FloatArray(a.size) { a[it] / 1e6f } } to (v.exits[id]?.color ?: Ink.faint) }, cap, "Mbps",
-                    "Download per exit, last minute: " + ids.joinToString { "${v.exits[it]?.name} ${mbps(down[it]?.last()?.toLong() ?: 0)} Mbps" })
+                    "Download per route, last minute: " + ids.joinToString { "${v.exits[it]?.name} ${mbps(down[it]?.last()?.toLong() ?: 0)} Mbps" })
                 Row(Modifier.fillMaxWidth().padding(end = 48.dp)) { listOf("−60 s", "−30 s", "now").forEachIndexed { i, t -> Text(t, style = Type.code.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.weight(1f), textAlign = when (i) { 0 -> TextAlign.Start; 1 -> TextAlign.Center; else -> TextAlign.End }) } }
             }
         }
-        item(key = "perLabel") { SectionLabel("Per exit · now") }
+        item(key = "perLabel") { SectionLabel("Per route · now") }
         items(ids.size) { i ->
             val ex = v.exits[ids[i]]
             GroupRow(i, ids.size, ex?.name ?: ids[i], ex?.via, leading = { Chip(ex) }, trailing = { Num(listOf(rate(down[ids[i]]?.last()?.toLong() ?: 0)), 18) })
@@ -627,10 +627,10 @@ private fun Flows(ui: Ui, v: View, p: Period, periodPicker: LazyListScope.() -> 
     var picked by rememberSaveable { mutableStateOf<String?>(null) }
     val only = picked?.takeIf { it in exits } // an exit with no data in this period filters nothing
     var all by rememberSaveable { mutableStateOf(false) }
-    Section("flows", rangeLabel(p, LocalDate.now()), "App flows", "${apps.map { it.first }.distinct().size} apps into ${exits.size} exits · Direct traffic not shown", back = { go(null) }) {
+    Section("flows", rangeLabel(p, LocalDate.now()), "App flows", "${apps.map { it.first }.distinct().size} apps into ${exits.size} routes · Direct traffic not shown", back = { go(null) }) {
         periodPicker()
         if (apps.isEmpty()) { item { Empty("No data in this period yet.") }; return@Section }
-        item(key = "lanesLabel") { SectionLabel("Exits · data and their apps") }
+        item(key = "lanesLabel") { SectionLabel("Routes · data and their apps") }
         // The exits' shares of all data, as one thin bar.
         item(key = "share") {
             Row(Modifier.padding(horizontal = Gutter).padding(bottom = 10.dp).fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -806,7 +806,7 @@ private fun Tunnels(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, 
         .sortedWith(compareByDescending<String> { fastest(it) }.thenBy { v.exits[it]?.name ?: it })
     val top = ids.maxOfOrNull(fastest)?.coerceAtLeast(1) ?: 1
     val bestTest = v.tests.values.maxByOrNull { it.down }
-    Section("tunnels", rangeLabel(p, LocalDate.now()), "Tunnels", back = { go(null) }) {
+    Section("tunnels", rangeLabel(p, LocalDate.now()), "Routes", back = { go(null) }) {
         periodPicker()
         item(key = "hero") {
             when {
@@ -855,7 +855,7 @@ private fun Tunnel(v: View, p: Period, id: String, periodPicker: LazyListScope.(
             if (t == null) Empty("No speed test of this exit in this period yet.")
             else Hero("Fastest speed test", mbps(t.down), "Mbps", "↓ download · ↑ ${if (t.up > 0) mbps(t.up) else "—"} Mbps upload")
         }
-        item(key = "label") { SectionLabel("Servers · share of this exit's data") }
+        item(key = "label") { SectionLabel("Servers · share of this route's data") }
         val total = servers.sumOf { it.second }.coerceAtLeast(1)
         items(servers.size) { i ->
             val (name, b) = servers[i]
@@ -865,7 +865,7 @@ private fun Tunnel(v: View, p: Period, id: String, periodPicker: LazyListScope.(
                 }
             })
         }
-        item(key = "links") { Row(Modifier.padding(start = Gutter, top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { LinkButton(Icons.flows, "Apps on this exit") { go("flows") }; LinkButton(Icons.speed, "Speed test") { go("speed") } } }
+        item(key = "links") { Row(Modifier.padding(start = Gutter, top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { LinkButton(Icons.flows, "Apps on this route") { go("flows") }; LinkButton(Icons.speed, "Speed test") { go("speed") } } }
     }
 }
 
@@ -1446,7 +1446,7 @@ private fun StatsOff(hasData: Boolean, turnOn: () -> Unit, view: () -> Unit) = S
                 modifier = tourAnchor(TourStop.StatsIntro))
             Text(
                 if (hasData) "Nothing new is recorded. Statistics kept so far are still on this phone; delete them in Settings."
-                else "Data per app and per exit, time connected and speeds. Statistics aren't uploaded, and no browsing destinations are recorded.",
+                else "Data per app and per route, time connected and speeds. Statistics aren't uploaded, and no browsing destinations are recorded.",
                 style = Type.body.copy(fontWeight = FontWeight.Normal, lineHeight = 24.sp), color = Ink.dim,
             )
             listOf(Icons.phone to "Kept only on this phone", Icons.block to "No browsing destinations", Icons.deleteForever to "Delete it any time in Settings").forEach { (i, t) ->
@@ -1470,7 +1470,7 @@ fun StatsConsent(dismiss: () -> Unit, accept: () -> Unit) = ModalBottomSheet(dis
         listOf(
             Icons.phone to "Statistics stay on this phone. They are never uploaded.",
             Icons.clock to "Kept as hourly sums for a week and daily sums for about a year, with your last 100 speed tests.",
-            Icons.block to "Only apps, exits, bytes, times, speeds and speed-test exit IPs. No browsing destinations, ever.",
+            Icons.block to "Only apps, routes, bytes, times, speeds and speed-test exit IPs. No browsing destinations, ever.",
             Icons.deleteForever to "Turn off or delete everything in Settings at any time.",
         ).forEach { (i, t) -> Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) { Icon(i, null, Modifier.size(24.dp), tint = Ink.dim); Text(t, style = Type.sub, color = Ink.text) } }
         SheetButtons("Not now", dismiss, "Turn on", accept, Modifier.padding(top = 8.dp))

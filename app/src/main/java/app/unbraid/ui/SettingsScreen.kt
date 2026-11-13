@@ -361,7 +361,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                         }
                     }
                 }.ifEmpty { listOf(Item("No provider yet", "Sign in to one with Add connection", null)) })
-                if (setup.servers.isNotEmpty()) group("My servers", setup.servers.map { sv ->
+                if (setup.servers.isNotEmpty()) group("Own servers", setup.servers.map { sv ->
                     val n = setup.routes.count { it.own == sv.id }
                     Item(sv.name, "${sv.kind} · ${if (n == 0) "not used" else "used by $n ${if (n == 1) "route" else "routes"}"}", { dialog = "server:${sv.id}" }) { Chevron() }
                 })
@@ -382,7 +382,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     val tunnels = if (running) UnbraidVpn.tags.filterKeys { id -> UnbraidVpn.running?.route(id)?.let { !it.imported && it.loc.provider == pr.id } == true }.values.toSet().size else 0
                     // The same line for every provider: its limit (the user's own first), and what unbraid uses of it.
                     val lim = pr.limit(acc)
-                    val counted = Item(if (lim.unit == "device") "Devices" else "Connections", app.unbraid.data.Limits.line(pr.name, app.unbraid.data.Limits.effective(lim, setup.opt(pr.id, app.unbraid.data.LIMIT_OPT)), lim.unit, if (lim.perTunnel) tunnels else 1, device?.used),
+                    val counted = Item(if (lim.unit == "device") "Devices" else "Connections at once", app.unbraid.data.Limits.line(pr.name, app.unbraid.data.Limits.effective(lim, setup.opt(pr.id, app.unbraid.data.LIMIT_OPT)), lim.unit, if (lim.perTunnel) tunnels else 1, device?.used),
                         { dialog = "limit:${pr.id}" }, icon = Icons.phone) { Chevron() }
                     // A provider whose only server list is gluetun's public one: how old it is.
                     val list = pr.listSource?.let { c -> Item("Server list", "From gluetun's public list" + (app.unbraid.Unbraid.store.catalogDates.value[c]?.let { ", published ${publishedOn(it)}" } ?: ""), null, icon = Icons.dns) }
@@ -512,7 +512,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     val on = filter.id == d.id
                     Item(d.name, d.blocks + if (d.id == "nextdns") " · profile ${if (on) filter.value.ifBlank { "not set" } else "needed"}" else "",
                         { if (d.id == "nextdns") dialog = "filter:nextdns" else setFilter { filterChosen(it, d.id) } }, selected = on) { Radio(on) }
-                } + Item("Your own server", if (filter.id == app.unbraid.data.Filters.OWN) filter.value + if (filterDns?.tls == null && filterDns?.path == null) " · not encrypted" else "" else "https://… (DNS over HTTPS) or tls://… (DNS over TLS)",
+                } + Item("Own DNS server", if (filter.id == app.unbraid.data.Filters.OWN) filter.value + if (filterDns?.tls == null && filterDns?.path == null) " · not encrypted" else "" else "https://… (DNS over HTTPS) or tls://… (DNS over TLS)",
                     { dialog = "filter:own" }, selected = filter.id == app.unbraid.data.Filters.OWN) { Radio(filter.id == app.unbraid.data.Filters.OWN) })
                 if (filterDns != null) {
                     val providers = signedIn.mapNotNull { pr -> pr.protection?.takeIf { setup.opt(pr.id, app.unbraid.data.PROTECT) == "on" }?.label }
@@ -636,7 +636,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             val own = dialog == "filter:own"
             var text by rememberSaveable { mutableStateOf(filter.value.takeIf { filter.id == if (own) app.unbraid.data.Filters.OWN else "nextdns" }.orEmpty()) }
             val ok = if (own) app.unbraid.data.Filters.own(text) != null else app.unbraid.data.Filter("nextdns", text).server() != null
-            Prompt(if (own) "Your own server" else "NextDNS profile", "Save", { dialog = null; setFilter { filterChosen(it, if (own) app.unbraid.data.Filters.OWN else "nextdns", text.trim()) } }, { dialog = null }, enabled = ok) {
+            Prompt(if (own) "Own DNS server" else "NextDNS profile", "Save", { dialog = null; setFilter { filterChosen(it, if (own) app.unbraid.data.Filters.OWN else "nextdns", text.trim()) } }, { dialog = null }, enabled = ok) {
                 Text(if (own) "A DNS over HTTPS address (https://dns.example.com/dns-query), DNS over TLS (tls://dns.example.com), or a plain IPv4 address, which isn't encrypted." else "The ID of your profile, as on my.nextdns.io (6 characters).", style = Type.sub)
                 DialogField(text, { text = it.take(200) }, if (own) "Server" else "Profile ID", if (own) "https://dns.example.com/dns-query" else "abc123")
             }
