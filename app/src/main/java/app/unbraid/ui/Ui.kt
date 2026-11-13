@@ -350,6 +350,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             async {
                 lock(r.provider).withLock {
                     when {
+                        // Signed in there again: this release could remove the device now in use, so it is dropped.
+                        r.provider in store.accounts.value -> { store.released(r); null }
                         !store.due(r, now) -> null // released, dropped or tried meanwhile
                         release(r.provider, r.blob) -> { store.released(r); null }
                         else -> r.also { if (!store.failedRelease(r, now)) failedReleases += it }
@@ -363,7 +365,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** A release that couldn't be kept for later ([app.unbraid.data.SignedOut.kept]): tried once, now. */
     private fun releaseNow(provider: String, blob: String) = (provider to blob).let { k ->
         unkept += k
-        background.launch { lock(provider).withLock { if (unkept.remove(k) && !release(provider, blob)) unreleased(listOf(name(provider))) } }
+        // Checked under the lock sign-ins hold: one that finished after this sign-out may use the device this would remove.
+        background.launch { lock(provider).withLock { if (unkept.remove(k) && provider !in store.accounts.value && !release(provider, blob)) unreleased(listOf(name(provider))) } }
     }
 
     /** Clears [notice]. Releases it named stop being retried (their accounts are erased): the user knows to remove those slots by hand. */

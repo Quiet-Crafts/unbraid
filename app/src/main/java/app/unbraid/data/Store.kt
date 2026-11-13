@@ -260,9 +260,13 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         return SignedOut(blob, kept)
     }
 
-    /** [r] is still waiting and due at [now]: not released, given up or dropped meanwhile (by another screen, or a sign-in). */
+    /**
+     * [r] is still waiting and due at [now]: not released, given up or dropped meanwhile (by another screen, or a sign-in).
+     * Never while its provider is signed in again: that sign-in may use the very device [r] would remove, and a sign-in
+     * whose dropping of [r] couldn't be written leaves it listed.
+     */
     @Synchronized
-    fun due(r: PendingRelease, now: Long = System.currentTimeMillis()) = pendingReleases.any { it.same(r) && it.next <= now }
+    fun due(r: PendingRelease, now: Long = System.currentTimeMillis()) = r.provider !in _accounts.value && pendingReleases.any { it.same(r) && it.next <= now }
 
     /**
      * The provider let go of [r]'s slot, or the user was told to remove it by hand: no longer retried. While the account's

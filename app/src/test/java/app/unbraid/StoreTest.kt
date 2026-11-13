@@ -631,6 +631,27 @@ class StoreTest {
     }
 
     /**
+     * An AirVPN sign-out's release is pending; the user signs in again (adopting the same device by name), but dropping
+     * the old release can't be written, so it stays listed. It is never due while AirVPN is signed in: it would remove
+     * the device that sign-in now uses. Signed out again, a release is due once more.
+     */
+    @Test fun aStaleReleaseNeverRemovesALaterSignInsDevice() {
+        val dir = tmp.newFolder()
+        val s = Store(dir) { key }
+        assertTrue(s.account("airvpn", "old"))
+        assertTrue(s.signOut("airvpn")!!.kept)
+        val old = s.pendingReleases.single()
+        assertTrue(s.account("airvpn", "new"))
+        // The cancellation that failed to be written: the old record is still on disk.
+        File(dir, "releases.bin").writeBytes(sealed("""[{"provider":"airvpn","blob":"old"}]"""))
+        val stale = s.pendingReleases.single()
+        assertEquals(old.blob, stale.blob)
+        assertFalse(s.due(stale))
+        assertTrue(s.signOut("airvpn")!!.kept)
+        assertTrue(s.pendingReleases.all { s.due(it) })
+    }
+
+    /**
      * The first import on a new install, in the order the import screen saves it (the server, then its route), makes the
      * imported route the default and drops the placeholder. After Start fresh too. A setup read from a file keeps its own.
      */
