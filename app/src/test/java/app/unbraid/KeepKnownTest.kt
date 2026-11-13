@@ -6,6 +6,7 @@ import app.unbraid.data.Profile
 import app.unbraid.data.Route
 import app.unbraid.data.Setup
 import app.unbraid.ui.keepKnown
+import app.unbraid.ui.knownApps
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Test
@@ -29,5 +30,15 @@ class KeepKnownTest {
         // Without the archived app in the known set (what happened before), its route went.
         assertEquals(setOf("org.example.kept"), keepKnown(s, setOf("org.example.kept")).apps.keys)
         assertSame(s.routes, kept.routes)
+    }
+
+    /**
+     * Android 15's archived-apps query also lists an app uninstalled with its data kept: it isn't archived, so its
+     * route goes, while an archived app's stays.
+     */
+    @Test fun anAppUninstalledWithItsDataKeptLosesItsRoute() {
+        val known = knownApps(listOf("org.example.kept"), listOf("org.example.kept" to false, "org.example.archived" to true, "org.example.gone" to false))
+        assertEquals(setOf("org.example.kept", "org.example.archived"), known)
+        assertEquals(setOf("org.example.kept", "org.example.archived"), keepKnown(s, known).apps.keys)
     }
 }

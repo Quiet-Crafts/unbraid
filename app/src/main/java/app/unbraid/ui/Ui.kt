@@ -98,6 +98,13 @@ private inline fun Setup.removing(gone: Set<String>, name: String, refused: (app
 internal fun keepKnown(s: Setup, known: Set<String>) =
     s.copy(apps = s.apps.filterKeys { it in known }, profiles = s.profiles.map { p -> p.copy(apps = p.apps.filterKeys { it in known }) })
 
+/**
+ * The apps Android still knows: [installed], plus those of [withArchived] (name to archived) that are archived. That
+ * query also lists apps uninstalled with their data kept, which are gone and keep nothing.
+ */
+internal fun knownApps(installed: Collection<String>, withArchived: Collection<Pair<String, Boolean>>) =
+    (installed + withArchived.filter { it.second }.map { it.first }).toSet()
+
 /** The single screen-facing model. Thin: state lives in [app.unbraid.data.Store] and [UnbraidVpn.state]. */
 class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : AndroidViewModel(app) {
     private companion object {
@@ -513,12 +520,12 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             runCatching {
                 val all = pm.getInstalledApplications(0)
                 // Archived apps (Android 15+) are not installed but still known, and come back with a tap: they keep their route.
-                val archived = if (android.os.Build.VERSION.SDK_INT >= 35) pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(PackageManager.MATCH_ARCHIVED_PACKAGES)).map { it.packageName } else emptyList()
+                val archived = if (android.os.Build.VERSION.SDK_INT >= 35) pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(PackageManager.MATCH_ARCHIVED_PACKAGES)).map { it.packageName to it.isArchived } else emptyList()
                 // One query for every app allowed online, not one permission check per app.
                 val online = pm.getPackagesHoldingPermissions(arrayOf(android.Manifest.permission.INTERNET), 0).mapTo(HashSet()) { it.packageName }
                 all.filter { it.packageName != self && it.packageName in online }
                     .map { AppInfo(it.packageName, it.loadLabel(pm).toString(), it.flags and ApplicationInfo.FLAG_SYSTEM != 0 && pm.getLaunchIntentForPackage(it.packageName) == null) }
-                    .sortedBy { it.label.lowercase() } to (all.map { it.packageName } + archived).toSet()
+                    .sortedBy { it.label.lowercase() } to knownApps(all.map { it.packageName }, archived)
             }.getOrNull()
         } ?: return@launch
         if (n != appsAsked) return@launch // a newer read is under way (checked and applied here, on the main thread)
