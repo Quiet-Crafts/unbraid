@@ -70,6 +70,13 @@ class ReportTest {
         assertTrue(lines.any { it == "- Direct, active, 1 app" })
     }
 
+    /** Apps chosen for the default route count with those that follow it. */
+    @Test fun appsChosenOnTheDefaultCount() {
+        val chosen = setup.copy(apps = setup.apps + ("com.secret.five" to "a"))
+        val text = Report.build("1", "foss", "17", "Pixel", chosen, vpn, chosen, 20)
+        assertTrue(text.lines().contains("1. NordVPN, NL, active, the rest of the apps (16)"))
+    }
+
     @Test fun defaultAndDirect() {
         val direct = setup.copy(defaultRoute = DIRECT, apps = emptyMap())
         val text = Report.build("1", "foss", "17", "Pixel", direct, VpnState(), null, null)

@@ -33,8 +33,9 @@ object Report {
     fun build(app: String, flavor: String, android: String, device: String, setup: Setup, vpn: VpnState, running: Setup?, installed: Int?): String {
         val s = running ?: setup
         val used = s.activeRoutes.map { it.id }.toSet()
+        // On the default route: the apps that follow it plus those chosen for it.
         fun apps(id: String): String =
-            if (id == s.defaultRoute) "the rest of the apps" + installed?.let { " (${(it - s.apps.size).coerceAtLeast(0)})" }.orEmpty()
+            if (id == s.defaultRoute) "the rest of the apps" + installed?.let { " (${(it - s.apps.size).coerceAtLeast(0) + s.apps.count { a -> a.value == id }})" }.orEmpty()
             else s.apps.count { it.value == id }.let { if (it == 1) "1 app" else "$it apps" }
         val routes = s.routes.mapIndexed { i, r ->
             val status = when { r.id in vpn.notAnswering -> "not answering"; r.id in vpn.dropping -> "dropping"; r.id in used -> "active"; else -> "unused" }
