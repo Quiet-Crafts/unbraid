@@ -157,6 +157,9 @@ object Ivpn : Provider {
         false
     }
 
+    override fun otherDevice(old: String, current: String) =
+        account(old).sessionToken.let { it.isNotBlank() && it != account(current).sessionToken }
+
     /** IVPN's session status answers 601 (session not found) once the session was logged out elsewhere. */
     override fun revoked(account: String): Boolean = try {
         sessionGone(postJsonRaw("$API/v4/session/status", buildJsonObject { put("session_token", account(account).sessionToken) }.toString()))

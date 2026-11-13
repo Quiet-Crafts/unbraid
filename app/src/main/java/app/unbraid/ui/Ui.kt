@@ -105,6 +105,15 @@ internal fun keepKnown(s: Setup, known: Set<String>) =
 internal fun knownApps(installed: Collection<String>, withArchived: Collection<Pair<String, Boolean>>) =
     (installed + withArchived.filter { it.second }.map { it.first }).toSet()
 
+/**
+ * Whether a release of [old], found while the provider is signed in as [current], still runs: only when [provider] shows
+ * they are different devices. Otherwise it could remove the device in use, so it is dropped.
+ */
+internal fun staleRelease(provider: app.unbraid.data.Provider?, old: String, current: String?) =
+    provider != null && current != null && runCatching { provider.otherDevice(old, current) }.getOrDefault(false)
+
+internal fun staleNotice(name: String) = "An old device of this phone may still be listed at $name. You can remove it on the $name website."
+
 /** The single screen-facing model. Thin: state lives in [app.unbraid.data.Store] and [UnbraidVpn.state]. */
 class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : AndroidViewModel(app) {
     private companion object {
@@ -358,7 +367,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                 lock(r.provider).withLock {
                     when {
                         // Signed in there again: this release could remove the device now in use, so it is dropped.
-                        r.provider in store.accounts.value -> { store.released(r); null }
+                        r.provider in store.accounts.value -> { store.released(r); stale(r.provider, r.blob); null }
                         !store.due(r, now) -> null // released, dropped or tried meanwhile
                         release(r.provider, r.blob) -> { store.released(r); null }
                         else -> r.also { if (!store.failedRelease(r, now)) failedReleases += it }
@@ -373,7 +382,23 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     private fun releaseNow(provider: String, blob: String) = (provider to blob).let { k ->
         unkept += k
         // Checked under the lock sign-ins hold: one that finished after this sign-out may use the device this would remove.
-        background.launch { lock(provider).withLock { if (unkept.remove(k) && provider !in store.accounts.value && !release(provider, blob)) unreleased(listOf(name(provider))) } }
+        background.launch { lock(provider).withLock {
+            if (!unkept.remove(k)) return@withLock // a sign-in took it and told the user
+            if (provider in store.accounts.value) stale(provider, blob) else if (!release(provider, blob)) unreleased(listOf(name(provider)))
+        } }
+    }
+
+    /** Providers whose possibly listed old device the user was told about ([stale]). */
+    private val toldStale: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * A release of [blob] found after [provider] was signed in again, under its lock. Released when the provider shows it
+     * is another device than the one in use ([staleRelease]); otherwise not, and the user is told once.
+     */
+    private fun stale(provider: String, blob: String) {
+        if (staleRelease(Providers.get(provider), blob, store.accounts.value[provider])) {
+            if (!release(provider, blob)) unreleased(listOf(name(provider)))
+        } else if (toldStale.add(provider)) name(provider).let { warn(staleNotice(it)) }
     }
 
     /** Clears [notice]. Releases it named stop being retried (their accounts are erased): the user knows to remove those slots by hand. */

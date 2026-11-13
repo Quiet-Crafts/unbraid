@@ -166,6 +166,9 @@ object Mullvad : Provider {
         false
     }
 
+    override fun otherDevice(old: String, current: String) =
+        account(old).deviceId.let { it.isNotBlank() && it != account(current).deviceId }
+
     override fun revoked(account: String): Boolean {
         val a = try { account(account) } catch (e: IOException) { return false }
         return revoked({ tokenReply(a.account) }) { token ->

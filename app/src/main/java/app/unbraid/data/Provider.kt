@@ -110,6 +110,12 @@ interface Provider {
     fun signOut(account: String): Boolean = true
 
     /**
+     * True only when signing out [old] provably can't touch what the signed-in [current] uses: they name different
+     * devices or sessions. False when that can't be told.
+     */
+    fun otherDevice(old: String, current: String): Boolean = false
+
+    /**
      * True only when the provider confirms this phone's device or session is gone (removed on its website, say), so its
      * tunnels can't work until a new sign-in. A check that fails or isn't clear is false. Asked only after a tunnel died.
      */

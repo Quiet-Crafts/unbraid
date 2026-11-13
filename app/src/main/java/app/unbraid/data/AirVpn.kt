@@ -125,6 +125,12 @@ object AirVpn : KeyProvider() {
         else remove(a.apiKey, a.deviceId)
     } catch (e: java.io.IOException) { false }
 
+    /** Only a device the app made is removed; a pasted config doesn't say which device it uses. */
+    override fun otherDevice(old: String, current: String): Boolean {
+        val o = account(old); val id = account(current).deviceId
+        return o.ownDevice && o.deviceId != null && id != null && id != o.deviceId
+    }
+
     /** AmneziaWG obfuscation keys: Unbraid's engine would drop them silently, so such a config is refused. */
     private val AMNEZIA = Regex("(?im)^\\s*(jc|jmin|jmax|s[1-4]|h[1-4]|i[1-5])\\s*=")
 
