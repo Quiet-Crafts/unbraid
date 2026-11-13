@@ -4,6 +4,8 @@ import app.unbraid.data.DIRECT
 import app.unbraid.data.Filter
 import app.unbraid.ui.filterChosen
 import app.unbraid.ui.filterSummary
+import app.unbraid.ui.removeServerText
+import app.unbraid.data.CarriesDefault
 import org.junit.Test
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -37,4 +39,10 @@ class SettingsTextsTest {
     }
 
     @Test fun noFilterNoSummary() = assertNull(filterSummary(Filter(), "nl", emptyMap()))
+
+    @Test fun removingTheServerThatCarriesTheDefaultSaysSo() {
+        assertEquals("Home carries your default route. Choose another default route first.", removeServerText(2, CarriesDefault("Home", true, emptyList())))
+        assertEquals("It isn't used by any route.", removeServerText(0, null))
+        assertEquals("The routes using it are removed too; their apps follow the default route.", removeServerText(1, null))
+    }
 }

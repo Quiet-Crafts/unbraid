@@ -138,6 +138,10 @@ internal fun filterSummary(f: app.unbraid.data.Filter, defaultRoute: String, app
         .ifEmpty { listOf(dns.name, "not applied") }.joinToString(" · ")
 }
 
+/** What removing a saved server says: the refusal when it carries a default route, else what is removed with it. */
+internal fun removeServerText(used: Int, refused: app.unbraid.data.CarriesDefault?) = refused?.text
+    ?: if (used == 0) "It isn't used by any route." else "The routes using it are removed too; their apps follow the default route."
+
 /** [rise]: the first rows' index on a page that plays the first-load reveal (the hub), or null. */
 private fun LazyListScope.group(title: String?, items: List<Item>, rise: Pair<Boolean, Int>? = null) {
     item { if (title != null) SectionLabel(title) else Gap(16.dp) }
@@ -159,7 +163,7 @@ private fun LazyListScope.notice(ui: Ui, text: String?) = text?.let { n ->
     item(key = "notice") {
         Row(Modifier.padding(start = 24.dp, end = Gutter, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(n, style = Type.caption, color = Ink.bad, modifier = Modifier.weight(1f))
-            Secondary("Dismiss", { ui.notice.value = null }, color = Ink.dim)
+            Secondary("Dismiss", { ui.dismissNotice() }, color = Ink.dim)
         }
     }
 }
@@ -442,7 +446,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     },
                 ))
                 // Whatever the sign-in's state, and also with Tailscale off while its node is still kept on the phone.
-                if (setup.tailscale || tsStored) group(null, listOf(Item("Sign out of Tailscale", "Its exit routes are removed; their apps follow the default route", { dialog = "tsout" }, danger = true)))
+                if (setup.tailscale || tsStored) group(null, listOf(ui.signOutTailscaleRefused().let { no -> Item("Sign out of Tailscale", no?.text ?: "Its exit routes are removed; their apps follow the default route", { dialog = "tsout" }.takeIf { no == null }, danger = true) }))
             }
 
             p == "local" -> Page("Local & home access", back) {
@@ -627,7 +631,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 DialogField(text, { text = it.take(200) }, if (own) "Server" else "Profile ID", if (own) "https://dns.example.com/dns-query" else "abc123")
             }
         }
-        "tsout" -> Prompt("Sign out of Tailscale?", "Sign out", { dialog = null; ui.signOutTailscale() }, { dialog = null }, danger = true) {
+        "tsout" -> Prompt("Sign out of Tailscale?", "Sign out", { dialog = null; ui.signOutTailscale()?.let { ui.notice.value = it.text } }, { dialog = null }, danger = true) {
             Text("Tailscale exit routes are removed. Their apps follow the default route.", style = Type.sub)
         }
         "tsserver" -> {
@@ -709,13 +713,16 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     Prompt(s.name, "Save", { ui.renameServer(s.id, name); dialog = null }, { dialog = null }, enabled = name.isNotBlank()) {
                         Text("${s.kind}${if (used > 0) " · used by ${if (used == 1) "1 route" else "$used routes"}" else ""}", style = Type.sub)
                         DialogField(name, { name = it.take(40) }, "Name", "e.g. Home VPS")
-                        Secondary("Remove server", { dialog = "remove:${s.id}" }, color = Ink.bad)
+                        ui.removeServerRefused(s.id).let { no ->
+                            if (no == null) Secondary("Remove server", { dialog = "remove:${s.id}" }, color = Ink.bad) else Text(no.text, style = Type.caption, color = Ink.bad)
+                        }
                     }
                 }
                 d.startsWith("remove:") -> setup.servers.firstOrNull { it.id == arg }?.let { s ->
                     val used = setup.routes.count { it.own == s.id }
-                    Prompt("Remove ${s.name}?", "Remove", { dialog = null; ui.removeServer(s.id) }, { dialog = null }, danger = true) {
-                        Text(if (used == 0) "It isn't used by any route." else "The routes using it are removed too; their apps follow the default route.", style = Type.sub)
+                    val refused = ui.removeServerRefused(s.id)
+                    Prompt("Remove ${s.name}?", "Remove", { dialog = null; ui.removeServer(s.id)?.let { ui.notice.value = it.text } }, { dialog = null }, enabled = refused == null, danger = true) {
+                        Text(removeServerText(used, refused), style = Type.sub)
                     }
                 }
             }
