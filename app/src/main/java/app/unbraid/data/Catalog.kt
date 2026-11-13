@@ -50,7 +50,9 @@ object Catalog {
     internal fun timestamp(body: String) = file(body).timestamp
 
     private fun file(body: String) = Http.parsed("the server catalogue") { NordApi.json.decodeFromString(File.serializer(), body) }
-    private fun List<Entry>.usable(vpn: String) = filter { it.vpn == vpn && it.ipv4 != null && it.place.isNotEmpty() && (vpn != "wireguard" || !it.wgpubkey.isNullOrEmpty()) }
+    /** Only addresses a server on the internet can have are kept (see [Addr.server]); an entry left with none is dropped. */
+    private fun List<Entry>.usable(vpn: String) = map { it.copy(ips = it.ips.filter(Addr::server)) }
+        .filter { it.vpn == vpn && it.ipv4 != null && it.place.isNotEmpty() && (vpn != "wireguard" || !it.wgpubkey.isNullOrEmpty()) }
 
     /** Countries with their cities; ids are stable indexes, City.key = city name. */
     fun countries(entries: List<Entry>): List<Country> = entries.groupBy { it.place }.entries.sortedBy { it.key }
