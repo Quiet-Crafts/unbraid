@@ -463,12 +463,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                     Item("Local network bypasses the VPN", "Printers, casting and NAS on this network stay reachable", { ui.setPrefs { it.copy(lan = !it.lan) } }, checked = prefs.lan, icon = Icons.lan) { Toggle(prefs.lan) },
                     Item(
                         "Allow Nearby devices",
-                        when {
-                            setup.tailscale -> "Lets Tailscale reach devices on this network directly, not through a slower relay."
-                            home.wg != null -> "Needed to reach a home tunnel on this network."
-                            lockdownLan -> "Printers, casting and NAS need it while Block connections without VPN is on."
-                            else -> "Needed to reach your own server on this network."
-                        },
+                        nearbyReason(setup, lockdownLan),
                         { askLan.launch(LOCAL_NETWORK) }, cta = true,
                     ) { Chevron() }.takeIf { needsLan },
                 ))

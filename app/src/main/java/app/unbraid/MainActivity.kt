@@ -73,6 +73,8 @@ import app.unbraid.ui.Tab
 import app.unbraid.ui.Type
 import app.unbraid.ui.Ui
 import app.unbraid.ui.needsLocalNetwork
+import app.unbraid.ui.nearbyAfterConnect
+import app.unbraid.ui.nearbyReason
 import android.content.Intent
 import android.provider.Settings
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -107,6 +109,13 @@ class MainActivity : ComponentActivity() {
         if (VpnService.prepare(this) == null) ui.connect() else Onboarding.consentFailed = true
     }
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
+    private val nearby = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        // No dialog was shown (denied twice before): Android's app page is the only way left, as in Settings.
+        if (!granted && !shouldShowRequestPermissionRationale(LOCAL_NETWORK))
+            runCatching { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.fromParts("package", packageName, null))) }
+    }
+    /** A connect started here may still need Nearby devices once the VPN says Block connections without VPN is on. */
+    private var nearbyAfter = false
 
     /**
      * The sheet asking first: "vpn" (the VPN disclosure, before the first connect), "apps" (the installed-apps
@@ -129,6 +138,8 @@ class MainActivity : ComponentActivity() {
             LOCAL_NETWORK.takeIf { needsLocalNetwork(ui.setup.value, UnbraidVpn.state.value.lockdown && ui.setup.value.prefs.lan) },
         )
         if (ask.isNotEmpty()) permissions.launch(ask.toTypedArray())
+        // While unbraid is off it can't know Block connections without VPN: asked once the connect is up, if needed then.
+        nearbyAfter = LOCAL_NETWORK !in ask
         VpnService.prepare(this)?.let { vpnConsent.launch(it) } ?: ui.connect()
     }
 
@@ -136,7 +147,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); if (!Unbraid.store.unreadable.value) ui.refreshApps(); Stats.maintain(); if (BuildConfig.UPDATE_CHECK && Onboarding.termsOk && !Unbraid.store.unreadable.value) ui.checkUpdates() }
 
     // The open sheet and a connect waiting on it outlive a rotation (never a secret here); nothing connects by itself.
-    override fun onSaveInstanceState(out: Bundle) { super.onSaveInstanceState(out); out.putString("sheet", sheet); out.putBoolean("connectAfter", connectAfter) }
+    override fun onSaveInstanceState(out: Bundle) { super.onSaveInstanceState(out); out.putString("sheet", sheet); out.putBoolean("connectAfter", connectAfter); out.putBoolean("nearbyAfter", nearbyAfter) }
 
     // A profile shortcut (or a tile that needed the app) opens Routes on that profile: it switches only on Use, so an
     // intent from anywhere (a launcher fires shortcuts by itself) never changes routes on its own.
@@ -172,7 +183,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        savedInstanceState?.let { sheet = it.getString("sheet"); connectAfter = it.getBoolean("connectAfter") }
+        savedInstanceState?.let { sheet = it.getString("sheet"); connectAfter = it.getBoolean("connectAfter"); nearbyAfter = it.getBoolean("nearbyAfter") }
         window.setHideOverlayWindows(true) // no tapjacking over sign-in or connect
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -239,6 +250,15 @@ class MainActivity : ComponentActivity() {
                     if (vpn.phase != VpnState.Phase.On) return@LaunchedEffect
                     // Protection is checked live each time, so turning blocking off later brings the offer or reminder back.
                     if (!(vpn.alwaysOn && vpn.lockdown) && Onboarding.leak == 0 && tour < 0 && sheet == null) sheet = "leak"
+                }
+
+                LaunchedEffect(vpn.phase, vpn.lockdown, liveSetup, tour, sheet) {
+                    val on = vpn.phase == VpnState.Phase.On
+                    when (nearbyAfterConnect(nearbyAfter, on, on && needsLocalNetwork(liveSetup, vpn.lockdown && liveSetup.prefs.lan), tour < 0 && sheet == null)) {
+                        true -> { nearbyAfter = false; sheet = "nearby" }
+                        false -> nearbyAfter = false
+                        null -> Unit
+                    }
                 }
 
                 // The screen shown; the picker's carries its route, so a closing picker keeps its identity while it leaves.
@@ -322,6 +342,10 @@ class MainActivity : ComponentActivity() {
                         agree = { Onboarding.acceptVpn(); sheet = null; if (connectAfter) { connectAfter = false; proceed() } },
                         dismiss = { sheet = null; connectAfter = false },
                     )
+                    // Declined: nothing else changes; Settings, Local & home access keeps offering it.
+                    "nearby" -> Prompt("Allow Nearby devices?", "Continue", { sheet = null; nearby.launch(LOCAL_NETWORK) }, { sheet = null }) {
+                        Text(nearbyReason(liveSetup, vpn.lockdown && liveSetup.prefs.lan), style = Type.body)
+                    }
                     "apps" -> AppsDisclosure(agree = { ui.acceptDisclosure(); sheet = null }, dismiss = { sheet = null })
                     "leak" -> {
                         val both = vpn.alwaysOn && vpn.lockdown
