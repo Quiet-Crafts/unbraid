@@ -745,7 +745,13 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 val dropping = byTag.filterKeys { it != null && Health.dropping(history[it].orEmpty()) }.values.flatten().filter { current.route(it)?.imported == false }.toSet()
                 if (dropping != state.value.dropping) state.update { it.copy(dropping = dropping) }
                 val deadTags = checked.filter { t -> streaks[t]?.let { Health.dead(it, now, holds[t] ?: 0) } == true }
-                deadTags.forEach { t -> Health.moved(moves[t] ?: Health.Moves(), now).let { moves[t] = it; holds[t] = it.hold } }
+                // A dead tunnel on Automatic also tries its provider's next port: a failed check can't tell a blocked port from a dead server.
+                fun steps(id: String) = current.route(id)?.takeIf { !it.imported }?.loc?.provider?.takeIf { p -> (links[id] as? app.unbraid.data.WgLink)?.ports.orEmpty().size > 1 && current.opt(p, app.unbraid.data.PORT_OPT) == app.unbraid.data.AUTO }
+                // Only what a move restarts every tunnel for spends the move budget; imported routes keep their warning.
+                deadTags.forEach { t ->
+                    val acts = byTag[t].orEmpty().any { id -> current.route(id)?.let(Health::movable) == true || steps(id) != null }
+                    Health.handle(moves[t], now, acts).let { (m, hold) -> if (m != null) moves[t] = m; holds[t] = hold }
+                }
                 val given = moves.filterValues(Health::doesntWork).keys
                 val stalled = byTag.filterKeys { it in given }.values.flatten().filter { current.route(it)?.imported == false }.toSet()
                 if (stalled != state.value.stalled) state.update { it.copy(stalled = stalled) }
@@ -756,8 +762,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 // Given up on: still checked for a removed device (each time its hold ends while dead), but neither moved nor
                 // port-stepped (each restarts every tunnel).
                 val moving = byTag.filterKeys { it in deadTags && it !in given }.values.flatten().filter { it in dead }
-                // A dead tunnel on Automatic also tries its provider's next port: a failed check can't tell a blocked port from a dead server.
-                val stepped = moving.mapNotNull { id -> s.route(id)?.loc?.provider?.takeIf { p -> (links[id] as? app.unbraid.data.WgLink)?.ports.orEmpty().size > 1 && s.opt(p, app.unbraid.data.PORT_OPT) == app.unbraid.data.AUTO } }.toSet()
+                val stepped = moving.mapNotNull(::steps).toSet()
                 portStep = portStep + stepped.associateWith { (portStep[it] ?: 0) + 1 }
                 val movable = moving.filter { id -> s.route(id)?.let(Health::movable) == true }
                 Log.w(TAG, "health: ${dead.size} route(s) stopped answering, ${movable.size} to move to another server")

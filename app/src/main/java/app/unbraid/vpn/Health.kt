@@ -107,6 +107,14 @@ object Health {
         return Moves(count, when { count <= BACKOFF.size -> now + BACKOFF[count - 1]; count == BACKOFF.size + 1 -> now; else -> now + COOLDOWN })
     }
 
+    /**
+     * A dead tunnel handled at [now]: its run of moves and when it may be handled again. Only one the app [acts] on (moves
+     * it, or tries another port: each restarts every tunnel) spends the move budget; any other (imported, pinned on a set
+     * port) is judged again after [COOLDOWN], so its warning keeps coming back while it fails.
+     */
+    fun handle(m: Moves?, now: Long, acts: Boolean): Pair<Moves?, Long> =
+        if (acts) moved(m ?: Moves(), now).let { it to it.hold } else m to now + COOLDOWN
+
     /** Moved after every wait and still dead: it doesn't work on this network, so it stays where it is. */
     fun doesntWork(m: Moves) = m.count > BACKOFF.size + 1
 

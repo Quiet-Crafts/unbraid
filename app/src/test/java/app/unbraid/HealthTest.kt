@@ -188,6 +188,36 @@ class HealthTest {
         assertTrue(asked.zipWithNext().all { (a, b) -> b - a <= Health.COOLDOWN + 10_000 })
     }
 
+    /**
+     * An imported route that keeps failing spends no move budget (nothing moves it): after an unrelated engine restart,
+     * which clears its warning, its failures bring the warning back on the same network.
+     */
+    @Test fun importedRouteKeepsItsWarning() {
+        val min = 60_000L
+        var clock = 0L
+        var m: Health.Moves? = null
+        var hold = 0L
+        var s = Health.Streak()
+        var warned = false
+        fun round(): Boolean {
+            s = Health.next(s, ok = false, now = clock)
+            val dead = Health.dead(s, clock, hold)
+            if (dead) Health.handle(m, clock, acts = false).let { (next, h) -> m = next; hold = h }
+            clock += 10_000
+            return dead
+        }
+        repeat(2 * 60 * 6) { if (round()) warned = true } // two hours of failures
+        assertTrue(warned)
+        assertNull(m)
+        // An engine restart (another route's move, a sleep) clears the warning and the checks, not the hold.
+        s = Health.Streak(); warned = false
+        repeat(5 * 6) { if (round()) warned = true }
+        assertTrue(warned)
+        assertNull(m)
+        // A route the app does move spends the budget.
+        assertEquals(Health.Moves(1, 1_000 + Health.COOLDOWN), Health.handle(null, 1_000, acts = true).first)
+    }
+
     @Test fun routeEligibilityAndMovement() {
         val wg = WgPeer("wg", "private", listOf("10.0.0.2/32"), "public", endpoint = "host:1", allowedIps = listOf("10.0.0.0/8"))
         val provider = Route("provider")
