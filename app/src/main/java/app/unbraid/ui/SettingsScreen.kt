@@ -126,6 +126,18 @@ internal fun tailscaleSub(enabled: Boolean, connected: Boolean, state: String?) 
     else -> IDLE
 }
 
+/** The filter after [id] is chosen: the first choice also switches it on for VPN routes, so it works at once. */
+internal fun filterChosen(f: app.unbraid.data.Filter, id: String, value: String = f.value) =
+    f.copy(id = id, value = value, routes = f.routes || f.id == null)
+
+/** Where the filter applies, for the Settings overview: its name, then each place that really uses it, or "not applied". */
+internal fun filterSummary(f: app.unbraid.data.Filter, defaultRoute: String, apps: Map<String, String>): String? {
+    val dns = f.server() ?: return null
+    val direct = (f.direct && defaultRoute == app.unbraid.data.DIRECT) || apps.any { (pkg, route) -> route == app.unbraid.data.DIRECT && f.through(pkg) }
+    return listOfNotNull(dns.name.takeIf { f.routes || direct }, "VPN routes".takeIf { f.routes }, "Direct".takeIf { direct })
+        .ifEmpty { listOf(dns.name, "not applied") }.joinToString(" · ")
+}
+
 /** [rise]: the first rows' index on a page that plays the first-load reveal (the hub), or null. */
 private fun LazyListScope.group(title: String?, items: List<Item>, rise: Pair<Boolean, Int>? = null) {
     item { if (title != null) SectionLabel(title) else Gap(16.dp) }
@@ -303,7 +315,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                             running -> "Always-on on · blocking on"
                             else -> "Always-on and blocking, set in Android"
                         }, { go("behaviour") }, icon = Icons.tunnel, cta = running && !(vpn.alwaysOn && vpn.lockdown)) { Chevron() },
-                        Item("Protection", filterDns?.let { d -> listOfNotNull(d.name, "VPN routes".takeIf { filter.routes }, "Direct".takeIf { filter.direct || filter.directApps || filter.apps.containsValue(true) }).joinToString(" · ") } ?: "Each provider's own blocking", { go("dns") }, icon = Icons.dns) { Chevron() },
+                        Item("Protection", filterSummary(filter, setup.defaultRoute, setup.apps) ?: "Each provider's own blocking", { go("dns") }, icon = Icons.dns) { Chevron() },
                     ))
                     group("This app", listOf(
                         Item("Statistics", if (prefs.stats) "Recording · ${"%.1f".format(statsSize / 1e6)} MB" else if (statsSize > 0) "Off · ${"%.1f".format(statsSize / 1e6)} MB saved" else "Off", { go("stats") }, icon = Icons.stats) { Chevron() },
@@ -487,7 +499,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
                 ) + app.unbraid.data.Filters.all.map { d ->
                     val on = filter.id == d.id
                     Item(d.name, d.blocks + if (d.id == "nextdns") " · profile ${if (on) filter.value.ifBlank { "not set" } else "needed"}" else "",
-                        { if (d.id == "nextdns") dialog = "filter:nextdns" else setFilter { it.copy(id = d.id) } }, selected = on) { Radio(on) }
+                        { if (d.id == "nextdns") dialog = "filter:nextdns" else setFilter { filterChosen(it, d.id) } }, selected = on) { Radio(on) }
                 } + Item("Your own server", if (filter.id == app.unbraid.data.Filters.OWN) filter.value + if (filterDns?.tls == null && filterDns?.path == null) " · not encrypted" else "" else "https://… (DNS over HTTPS) or tls://… (DNS over TLS)",
                     { dialog = "filter:own" }, selected = filter.id == app.unbraid.data.Filters.OWN) { Radio(filter.id == app.unbraid.data.Filters.OWN) })
                 if (filterDns != null) {
@@ -610,7 +622,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit) {
             val own = dialog == "filter:own"
             var text by rememberSaveable { mutableStateOf(filter.value.takeIf { filter.id == if (own) app.unbraid.data.Filters.OWN else "nextdns" }.orEmpty()) }
             val ok = if (own) app.unbraid.data.Filters.own(text) != null else app.unbraid.data.Filter("nextdns", text).server() != null
-            Prompt(if (own) "Your own server" else "NextDNS profile", "Save", { dialog = null; setFilter { it.copy(id = if (own) app.unbraid.data.Filters.OWN else "nextdns", value = text.trim()) } }, { dialog = null }, enabled = ok) {
+            Prompt(if (own) "Your own server" else "NextDNS profile", "Save", { dialog = null; setFilter { filterChosen(it, if (own) app.unbraid.data.Filters.OWN else "nextdns", text.trim()) } }, { dialog = null }, enabled = ok) {
                 Text(if (own) "A DNS over HTTPS address (https://dns.example.com/dns-query), DNS over TLS (tls://dns.example.com), or a plain IPv4 address, which isn't encrypted." else "The ID of your profile, as on my.nextdns.io (6 characters).", style = Type.sub)
                 DialogField(text, { text = it.take(200) }, if (own) "Server" else "Profile ID", if (own) "https://dns.example.com/dns-query" else "abc123")
             }
