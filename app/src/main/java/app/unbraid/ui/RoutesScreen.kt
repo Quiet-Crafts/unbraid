@@ -21,6 +21,8 @@ import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -444,12 +446,13 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     }
 
     sheet?.let { id ->
-        val state = rememberModalBottomSheetState()
+        // Open in full, scrolling when taller than the screen: its actions are never below the edge.
+        val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         val scope = rememberCoroutineScope()
         var closing by remember(id) { mutableStateOf(false) } // taps while the sheet slides away are ignored
         fun act(f: () -> Unit = {}) { if (closing) return; closing = true; f(); scope.launch { state.hide() }.invokeOnCompletion { sheet = null } }
         ModalBottomSheet({ sheet = null }, sheetState = state, containerColor = Ink.surface, contentColor = Ink.text) {
-            Column(Modifier.padding(bottom = 16.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
                 Text(if (id == "power") "Pause or disconnect" else (if (id == DIRECT) "Direct" else shown.route(id)?.name).orEmpty(), style = Type.title, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
                 if (id == "power") {
                     SheetNote(

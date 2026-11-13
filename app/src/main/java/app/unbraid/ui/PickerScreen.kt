@@ -57,6 +57,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -462,7 +463,8 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         }
     }
 
-    if (sheet != null) ModalBottomSheet({ sheet = null }, containerColor = Ink.surface, contentColor = Ink.text) {
+    // Open in full (its list scrolls), so nothing in it starts below the screen's edge.
+    if (sheet != null) ModalBottomSheet({ sheet = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = Ink.surface, contentColor = Ink.text) {
         val s = sheet.orEmpty()
         // A country's servers load on request. Held here, so each one is a row of the sheet's lazy list: a long list
         // composes only the rows on screen.
