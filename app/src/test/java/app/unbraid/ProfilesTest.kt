@@ -37,6 +37,25 @@ class ProfilesTest {
         assertEquals(back, back.use("Nowhere")) // an unknown name changes nothing
     }
 
+    /** A route no profile lists any more, after deleting one or taking the route out of one, goes; one still listed stays. */
+    @Test fun aRouteNoProfileListsGoes() {
+        // Home uses nl and us; Trip (not in use) only lists it.
+        val s = base.saveAs("Home").add("Trip", true).editing("Trip") { p -> p.copy(defaultRoute = "nl", added = listOf("it")) }
+            .editing(null) { p -> p.copy(added = p.added - "it") }
+        assertEquals(emptySet<String>(), s.unlisted(setOf("it", "nl"))) // Trip still lists it
+        val forgot = s.forget("Trip")
+        assertEquals(listOf("nl", "us"), forgot.routes.map { r -> r.id })
+        // Out of Trip, its last listing: it goes; out of a profile while another still lists it: it stays.
+        val dropped = s.editing("Trip") { p -> p.copy(added = p.added - "it") }
+        assertEquals(setOf("it"), dropped.unlisted(setOf("it")))
+        assertEquals(listOf("nl", "us"), dropped.withoutUnlisted(setOf("it")).routes.map { r -> r.id })
+        assertEquals(emptySet<String>(), dropped.unlisted(setOf("nl")))
+        // Without profiles every route shows: nothing goes.
+        val none = base.saveAs("Home").forget("Home")
+        assertEquals(base.routes, none.routes)
+        assertEquals(emptySet<String>(), base.unlisted(setOf("it")))
+    }
+
     /** Deleting the profile in use leaves the routes as they are; renaming it keeps it in use. */
     @Test fun forgetAndRename() {
         val s = base.saveAs("Home").saveAs("Travel")

@@ -261,6 +261,16 @@ data class Setup(
 
     /** Deletes profile [name]. The current routes stay as they are, even when it was the one in use. */
     fun forget(name: String) = copy(profiles = profiles.filter { it.name != name }, profile = profile.takeIf { it != name })
+        .withoutUnlisted(profiles.firstOrNull { it.name == name }?.own.orEmpty())
+
+    /**
+     * Of routes [ids], those no profile lists any more (not the setup in use, nor a saved one): with profiles, a page
+     * shows only what a profile lists, so such a route is offered nowhere. Without profiles every route shows: none.
+     */
+    fun unlisted(ids: Set<String>): Set<String> = if (profiles.isEmpty()) emptySet() else ids - live.own - saved.flatMap { it.own }.toSet()
+
+    /** Routes [ids] that no profile lists any more go with their last listing: none is a default, nor used by an app. */
+    fun withoutUnlisted(ids: Set<String>) = unlisted(ids).let { g -> if (g.isEmpty()) this else copy(routes = routes.filter { it.id !in g }) }
 
     /**
      * Back to what [ran] (the setup the engine still runs after refusing a switch) uses: its profile when still saved, its

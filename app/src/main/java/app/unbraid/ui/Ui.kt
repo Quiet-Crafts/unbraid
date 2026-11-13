@@ -790,8 +790,16 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         return copy
     }
 
-    /** Takes route [id] out of the profile being viewed: its apps there follow that profile's default. The route stays for others. */
-    fun dropRoute(id: String) { draft?.let { d -> store.edit { it.editing(d) { p -> p.copy(apps = p.apps.filterValues { v -> v != id }, added = p.added - id) } } } }
+    /**
+     * Takes route [id] out of the profile being viewed: its apps there follow that profile's default. The route stays for
+     * the others; when none lists it, it goes too, as it would be offered nowhere.
+     */
+    fun dropRoute(id: String) { draft?.let { d -> store.edit { it.dropped(d, id).withoutUnlisted(setOf(id)) } } }
+
+    /** Taking route [id] out of the profile being viewed removes it altogether: no other profile lists it ([Setup.unlisted]). */
+    fun dropRemoves(id: String) = draft?.let { d -> setup.value.dropped(d, id).unlisted(setOf(id)).isNotEmpty() } ?: false
+
+    private fun Setup.dropped(d: String, id: String) = editing(d) { p -> p.copy(apps = p.apps.filterValues { v -> v != id }, added = p.added - id) }
 
     /**
      * Exit node [ip] for profile [d], not in use: only its own routes change, never another profile's. It reuses a route
