@@ -99,8 +99,18 @@ class ImportTest {
         assertEquals("Invalid port", msg("client\ndev tun\nport $secret\nremote h\n"))
         assertTrue(secret !in msg("client\ndev tun\nremote h 1\ncipher $secret\n"))
         assertTrue(secret !in msg("client\ndev tun\nremote h 1\n$secret abc\n"))
-        assertEquals("Unsupported OpenVPN option", msg("client\ndev tun\nremote h 1\nPass1234Word abc\n"))
-        assertEquals("Unsupported OpenVPN option: frobnicate", msg("client\ndev tun\nremote h 1\nfrobnicate abc\n"))
+        assertEquals("Unsupported OpenVPN option at line 4", msg("client\ndev tun\nremote h 1\nPass1234Word abc\n"))
+        assertEquals("Unsupported OpenVPN option at line 4", msg("client\ndev tun\nremote h 1\nfrobnicate abc\n"))
+        // A lowercase password or recovery word on a line of its own looks like an option name: it is never shown.
+        for (word in listOf("rosebud", "correct-horse-battery")) {
+            assertEquals("Unsupported OpenVPN option at line 4", msg("client\ndev tun\nremote h 1\n$word\n"))
+            assertEquals("Unterminated block at line 4", msg("client\ndev tun\nremote h 1\n<$word>\nabc\n"))
+            assertEquals("Unsupported OpenVPN block at line 4", msg("client\ndev tun\nremote h 1\n<$word>\nabc\n</$word>\n"))
+        }
+        // A name taken from the host (no fragment, no typed name) has no direction-override character: such a host is refused.
+        assertEquals("The link has an invalid server host", try { Manual.parseSs("ss://aes-256-gcm:pw@\u202Ehost.invalid:8388"); "" } catch (e: IllegalArgumentException) { e.message })
+        assertEquals("host.invalid", Manual.parseSs("ss://aes-256-gcm:pw@host.invalid:8388").name)
+        assertEquals("evil", Manual.parseSs("ss://aes-256-gcm:pw@host.invalid:8388", "\u202Eevil").name)
         for (link in listOf("ss://$secret:pw@h.example:8388", "ss://aes-256-gcm:pw@h.example:8388/?plugin=$secret")) {
             val m = try { Manual.parseSs(link); fail("accepted"); "" } catch (e: IllegalArgumentException) { e.message.orEmpty() }
             assertTrue(m, secret !in m)

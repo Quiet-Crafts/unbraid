@@ -138,7 +138,7 @@ class ManualTest {
         rejects("proxy") { Manual.parseOvpn(with("http-proxy 10.0.0.1 8080"), "x", "u", "p") }
         rejects("2FA") { Manual.parseOvpn(with("static-challenge \"Code\" 1"), "x", "u", "p") }
         rejects("fragment only works over UDP") { Manual.parseOvpn(ex.replace("proto udp", "proto tcp"), "x", "u", "p") }
-        rejects("Unsupported OpenVPN option: frobnicate") { Manual.parseOvpn(with("frobnicate 1"), "x", "u", "p") }
+        rejects("Unsupported OpenVPN option at line") { Manual.parseOvpn(with("frobnicate 1"), "x", "u", "p") }
         rejects("Encrypted private key") {
             Manual.parseOvpn(with("<cert>\n-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n</cert>\n<key>\n-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nAA==\n-----END RSA PRIVATE KEY-----\n</key>"), "x", "u", "p")
         }

@@ -96,7 +96,7 @@ object Manual {
     private val CLIENT_EKU = setOf("clientauth", "tls web client authentication", "1.3.6.1.5.5.7.3.2")
 
     /** [seq] keeps every directive in file order, for options where a later one overrides an earlier one of another name. */
-    private class Cfg(val d: Map<String, List<List<String>>>, val blocks: Map<String, String>, val seq: List<Pair<String, List<String>>>) {
+    private class Cfg(val d: Map<String, List<List<String>>>, val blocks: Map<String, String>, val seq: List<Pair<String, List<String>>>, val line: Map<String, Int>) {
         fun has(k: String) = k in d
         fun arg(k: String, i: Int = 0) = d[k]?.last()?.getOrNull(i)
         fun last(vararg k: String) = seq.lastOrNull { it.first in k }
@@ -127,9 +127,11 @@ object Manual {
         val d = LinkedHashMap<String, MutableList<List<String>>>()
         val blocks = HashMap<String, String>()
         val seq = mutableListOf<Pair<String, List<String>>>()
+        val at = HashMap<String, Int>() // the line each directive or block first appears on
         var open: String? = null
+        var openedAt = 0
         val buf = StringBuilder()
-        for (raw in text.removePrefix("\uFEFF").lineSequence()) {
+        for ((n, raw) in text.removePrefix("\uFEFF").lineSequence().withIndex()) {
             val line = raw.trim()
             if (open != null) {
                 if (line == "</$open>") { blocks[open] = buf.toString(); buf.clear(); open = null }
@@ -138,13 +140,16 @@ object Manual {
             }
             val t = tokens(line)
             if (t.isEmpty()) continue
-            if (t.size == 1 && t[0].startsWith("<") && t[0].endsWith(">") && !t[0].startsWith("</")) { open = t[0].substring(1, t[0].length - 1); continue }
+            if (t.size == 1 && t[0].startsWith("<") && t[0].endsWith(">") && !t[0].startsWith("</")) {
+                open = t[0].substring(1, t[0].length - 1); openedAt = n + 1; at.putIfAbsent("<$open>", n + 1); continue
+            }
             val name = t[0].removePrefix("--")
+            at.putIfAbsent(name, n + 1)
             d.getOrPut(name) { mutableListOf() } += t.drop(1)
             seq += name to t.drop(1)
         }
-        require(open == null) { "Unterminated block${shown(open.orEmpty())}" }
-        return Cfg(d, blocks, seq)
+        require(open == null) { "Unterminated block at line $openedAt" }
+        return Cfg(d, blocks, seq, at)
     }
 
     private const val DASHES = "-----"
@@ -193,8 +198,11 @@ object Manual {
         return found.joinToString("\n")
     }
 
-    /** `: name` for a directive that looks like a real one (lowercase letters and dashes), else nothing: a stray line of a key or password must not be quoted. */
-    private fun shown(name: String) = if (Regex("[a-z][a-z-]{1,30}").matches(name)) ": $name" else ""
+    /**
+     * Where an unsupported line is, by its number: the line itself is never quoted, since a stray line of a key or
+     * a password can look just like an option name.
+     */
+    private fun Cfg.where(name: String) = line[name]?.let { " at line $it" }.orEmpty()
 
     private fun network(s: String): String {
         val n = s.lowercase().removeSuffix("-client")
@@ -266,11 +274,11 @@ object Manual {
         val c = read(p.config)
         for (k in c.d.keys) {
             REJECTED[k]?.let { throw IllegalArgumentException(it) }
-            require(k in USED || k in IGNORED) { "Unsupported OpenVPN option${shown(k)}" }
+            require(k in USED || k in IGNORED) { "Unsupported OpenVPN option${c.where(k)}" }
         }
         for (k in c.blocks.keys) {
             REJECTED[k]?.let { throw IllegalArgumentException(it) }
-            require(k in BLOCKS) { "Unsupported OpenVPN block${shown(k)}" }
+            require(k in BLOCKS) { "Unsupported OpenVPN block${c.where("<$k>")}" }
         }
         require(c.has("client") || (c.has("tls-client") && c.has("pull"))) { "Not a client profile (no 'client' line)" }
         val dev = c.arg("dev")
@@ -501,7 +509,9 @@ object Manual {
 
         val host = if (hostPort.startsWith("[")) hostPort.substringAfter('[').substringBefore(']') else hostPort.substringBeforeLast(':')
         val port = hostPort.substringAfterLast(':', "").toIntOrNull()
-        require(host.isNotBlank() && host.none { it.isWhitespace() || it == '/' }) { "The link has no server host" }
+        require(host.isNotBlank()) { "The link has no server host" }
+        // Control and direction characters have no place in a host name and would carry into the name shown for it.
+        require(host.none { it.isWhitespace() || it == '/' || it.isISOControl() || it in BIDI }) { "The link has an invalid server host" }
         require(host.length <= MAX_HOST) { "The link's server host is too long" }
         require(port != null && port in 1..65535) { "The link has an invalid port" }
 
@@ -509,7 +519,7 @@ object Manual {
         require("prefix" !in params) { "Outline connection prefixes aren't supported" }
         val spec = params["plugin"]?.takeIf { it.isNotBlank() }
         val pluginName = spec?.substringBefore(';')?.let { SS_PLUGINS[it] ?: throw IllegalArgumentException("Unsupported Shadowsocks plugin (only obfs-local and v2ray-plugin)") }
-        val label = name.ifBlank { tag }.ifBlank { host }
+        val label = plain(name).ifBlank { tag }.ifBlank { host }
         require(label.length <= MAX_SS_NAME || label == host) { "The server name is too long (at most $MAX_SS_NAME characters)" }
         val opts = spec?.substringAfter(';', "")?.ifEmpty { null }
         // v2ray-plugin's cert= names a file on the phone, which the engine would read: only an inline certificate is taken.
