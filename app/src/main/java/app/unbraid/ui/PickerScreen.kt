@@ -2,6 +2,10 @@ package app.unbraid.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import app.unbraid.APP
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.graphics.graphicsLayer
@@ -103,7 +107,20 @@ private fun stale(l: Location) = l.provider != "nord" && l.city != null && l.reg
 private class Pick(
     val provider: String, val current: Location?, val group: String?, val protocol: String?, val tint: Color, val hasLoad: Boolean, val choose: (Location) -> Unit,
 ) {
-    fun on(l: Location) = current != null && !stale(l) && current.ident() == l.ident()
+    // The place ticks whatever protocol is pending: tapping it again applies a changed protocol or blocking.
+    fun on(l: Location) = current != null && !stale(l) && current.ident().copy(protocol = null) == l.ident().copy(protocol = null)
+}
+
+/**
+ * The provider blocking a picked location takes along: the pending choice [pending] when it differs from what the
+ * route has now ([now]), else null (nothing to change). Close or Back drop the pending choice.
+ */
+internal fun blockingToApply(pending: Boolean?, now: Boolean) = pending?.takeIf { it != now }
+
+/** The line under the picker while choices wait for a location tap ([protocol] and [blocking], null = unchanged). */
+internal fun pendingNote(protocol: String?, blocking: Pair<String, Boolean>?): String? {
+    val parts = listOfNotNull(protocol, blocking?.let { (name, on) -> "$name blocking ${if (on) "on" else "off"}" })
+    return if (parts.isEmpty()) null else "${parts.joinToString(" and ")}: tap a location to use ${if (parts.size == 1) "it" else "them"}. Close keeps the route as it is."
 }
 
 private val nodeName = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
@@ -149,6 +166,8 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     var groupChoice by rememberSaveable { mutableStateOf(current?.group) }
     val group = groupChoice.takeIf { provider == "nord" }
     var protocolChoice by rememberSaveable { mutableStateOf(current?.protocol) }
+    // The route's provider blocking as chosen here, applied with the location tap; null = unchanged.
+    var blockChoice by rememberSaveable { mutableStateOf<Boolean?>(null) }
     // Double VPN and Onion only run over OpenVPN: UDP unless TCP was chosen.
     val protocol = protocolChoice.takeIf { provider == "nord" }?.takeIf { group !in Nord.openVpnOnly || it?.startsWith("openvpn") == true }
         ?: "openvpn_udp".takeIf { provider == "nord" && group in Nord.openVpnOnly }
@@ -173,7 +192,11 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             target.isEmpty() -> ui.addRoute(loc)
             target == "default" -> if (draft != null) ui.chooseDefault(loc) else ui.setDefault(ui.addRoute(loc))
             target.startsWith("app:") -> ui.addRouteFor(target.removePrefix("app:"), loc)
-            else -> ui.setLocation(target, loc)
+            else -> {
+                ui.setLocation(target, loc)
+                // Blocking belongs to the route's provider: taken along only when the route stays with it.
+                if (route != null && !route.imported && route.loc.provider == loc.provider) blockingToApply(blockChoice, setup.protects(route))?.let { ui.setFilter(target, it) }
+            }
         }
         close()
     } }
@@ -196,16 +219,17 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             close()
         }
     }
-    // Protocol applies to this route at once, keeping its location; a server type narrows the list for the next pick.
-    fun setProtocol(p: String?) {
-        protocolChoice = p
-        // A pinned server found over OpenVPN may have no NordLynx key: let the server be picked again then.
-        // NordLynx can't carry Double VPN or Onion, so choosing it drops that server type from the route.
-        if (current?.provider == "nord" && route?.id == target) ui.setLocation(target, current.copy(
-            protocol = p, group = current.group.takeIf { p != null || it !in Nord.openVpnOnly },
-            pinned = current.pinned?.takeIf { p != null || it.publicKey.isNotEmpty() },
-        ))
-    }
+    // Protocol and server type are part of the choice: both go with the location tapped, never before.
+    fun setProtocol(p: String?) { protocolChoice = p }
+    // A changed protocol or blocking on this route waits for a location tap; said under the list until then.
+    val providerName = Providers.get(provider.orEmpty())?.name.orEmpty()
+    val blockable = route?.takeIf { !it.imported && current?.provider == provider && Providers.get(provider.orEmpty())?.protection != null }
+    val filterOverrides = setup.prefs.filter.routes && setup.prefs.filter.server() != null
+    val blockingNow = blockable?.let { blockChoice ?: setup.protects(it) }
+    val pending = pendingNote(
+        NordProtocols.firstOrNull { it.first == protocol }?.second?.takeIf { current?.provider == "nord" && provider == "nord" && protocol != current.protocol },
+        blockable?.let { r -> blockingToApply(blockChoice, setup.protects(r))?.let { providerName to it } },
+    )
     val groupLabel = NordGroups.first { it.first == group }.second
     val protocolLabel = NordProtocols.first { it.first == protocol }.second
 
@@ -403,14 +427,16 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             Gap(4.dp)
         },
         bottom = {
-            if (!mine && query.isEmpty() && provider != null) Row(
+            if (!mine && provider != null && (query.isEmpty() || pending != null)) Column(
                 Modifier.fillMaxWidth().background(Ink.ground).navigationBarsPadding().padding(horizontal = Gutter, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                BarButton("Route options", when {
+                pending?.let { Text(it, style = Type.caption, color = Ink.accent, modifier = Modifier.padding(horizontal = 8.dp).semantics { liveRegion = LiveRegionMode.Polite }) }
+                if (query.isEmpty()) BarButton("Route options", when {
                     provider == "nord" -> groupLabel
-                    Providers.get(provider.orEmpty())?.protection != null && route != null && current?.provider == provider -> if (setup.protects(route) && !(setup.prefs.filter.routes && setup.prefs.filter.server() != null)) "Protection on" else "Protection off"
+                    blockingNow != null -> if (filterOverrides) "$APP's filter" else "$providerName blocking ${if (blockingNow) "on" else "off"}"
                     else -> "App settings"
-                }, Modifier.weight(1f)) { sheet = "options" }
+                }, Modifier.fillMaxWidth()) { sheet = "options" }
             }
         },
     ) {
@@ -447,16 +473,17 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
                         item { Caption("Lists only the countries that offer it. Pick a location to use it.") }
                         item { Gap(16.dp) }
                     }
-                    val blocker = route?.takeIf { current?.provider == provider }?.let { r -> Providers.get(provider.orEmpty())?.protection?.let { r to it } }
+                    val blocker = blockable?.let { r -> Providers.get(provider.orEmpty())?.protection?.let { r to it } }
                     blocker?.let { (r, o) ->
                         // unbraid's filter on VPN routes replaces the provider's blocking resolver: shown off, the choice kept.
-                        val custom = setup.prefs.filter.routes && setup.prefs.filter.server() != null
-                        val on = setup.protects(r)
+                        val custom = filterOverrides
+                        // Held until a location is tapped, like the protocol.
+                        val on = blockingNow ?: setup.protects(r)
                         item { SectionLabel("Protection") }
                         item {
                             val name = Providers.get(provider.orEmpty())?.name
-                            GroupRow(0, 1, "$name blocking", if (custom) "Off while unbraid's filter is on for VPN routes" else "${o.label} · " + if (r.filter == null) "as set for $name in Settings" else "for this route only",
-                                onClick = { ui.setFilter(r.id, !on); Unit }.takeUnless { custom }, checked = on && !custom, trailing = { Toggle(on && !custom, enabled = !custom) })
+                            GroupRow(0, 1, "$name blocking", if (custom) "Off while unbraid's filter is on for VPN routes" else "${o.label} · " + when { blockChoice != null -> "tap a location to use it"; r.filter == null -> "as set for $name in Settings"; else -> "for this route only" },
+                                onClick = { blockChoice = (!on).takeIf { it != setup.protects(r) }; Unit }.takeUnless { custom }, checked = on && !custom, trailing = { Toggle(on && !custom, enabled = !custom) })
                         }
                         item { Gap(16.dp) }
                     }

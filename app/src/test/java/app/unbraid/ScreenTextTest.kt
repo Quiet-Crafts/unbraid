@@ -8,6 +8,8 @@ import app.unbraid.ui.FOLLOW
 import app.unbraid.ui.defaultLabel
 import app.unbraid.ui.dropText
 import app.unbraid.ui.keepName
+import app.unbraid.ui.blockingToApply
+import app.unbraid.ui.pendingNote
 import app.unbraid.data.PREVIOUS
 import app.unbraid.data.Profile
 import app.unbraid.ui.removeText
@@ -63,6 +65,19 @@ class ScreenTextTest {
         val after = s.use("Work", keepName(s, "Home", "Work").first)
         assertEquals("Work", after.profile)
         assertEquals(setup.apps, after.profiles.first { it.name == "Home" }.apps)
+    }
+
+    /** Picker: protocol and blocking wait for a location tap, which applies only a real change; Close drops them. */
+    @Test fun pickerAppliesPendingChoicesOnlyOnATap() {
+        assertEquals(null, blockingToApply(null, true)) // nothing chosen here
+        assertEquals(null, blockingToApply(true, true)) // chosen back to what the route has
+        assertEquals(false, blockingToApply(false, true))
+        assertEquals(null, pendingNote(null, null))
+        assertEquals("OpenVPN TCP: tap a location to use it. Close keeps the route as it is.", pendingNote("OpenVPN TCP", null))
+        assertEquals(
+            "OpenVPN TCP and NordVPN blocking off: tap a location to use them. Close keeps the route as it is.",
+            pendingNote("OpenVPN TCP", "NordVPN" to false),
+        )
     }
 
     @Test fun newDefaultSaysWhoMoves() {
