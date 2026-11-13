@@ -228,7 +228,8 @@ object Compiler {
                         // Android applies exclusions after inclusions, so an exclusion equal to a home prefix would win.
                         put("route_exclude_address", JsonArray((LAN - home.toSet()).map(::JsonPrimitive)))
                     }
-                    put("exclude_package", JsonArray(((if (i.lockdown) emptyList() else direct - through) + i.selfPackage).map(::JsonPrimitive)))
+                    // Left out by Android: the apps the setup calls outside, so the screens and the engine follow one rule.
+                    put("exclude_package", JsonArray(((if (i.lockdown) emptyList() else s.apps.keys.filter(s::outside).sorted()) + i.selfPackage).map(::JsonPrimitive)))
                 })
                 // No tunnel to test, no inbound: sing-box would run a proxy with an empty user list unauthenticated.
                 i.probe?.takeIf { probeTags.isNotEmpty() }?.let { (port, password) ->
