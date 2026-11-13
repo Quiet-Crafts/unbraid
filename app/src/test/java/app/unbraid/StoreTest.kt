@@ -394,6 +394,32 @@ class StoreTest {
         assertEquals(full.copy(version = VERSION), Store(old) { key }.setup.value)
     }
 
+    /** Settings saved by a newer version, profiles included, are not read: kept as they are, like settings that won't open. */
+    @Test fun newerFormatIsRefusedAndKept() {
+        val dir = tmp.newFolder()
+        val next = """{"routes":[{"id":"nl","loc":{"provider":"nord","countryId":153,"countryCode":"NL","country":"Netherlands"}}],""" +
+            """"defaultRoute":"nl","apps":{"org.example.mail":"nl"},"version":${VERSION + 1},"futureField":true,""" +
+            """"profiles":[{"name":"Home","defaultRoute":"nl","apps":{"org.example.mail":"nl"}}],"profile":"Home"}"""
+        File(dir, "setup.bin").writeBytes(sealed(next))
+        val bytes = File(dir, "setup.bin").readBytes().toList()
+        val s = Store(dir) { key }
+        assertTrue(s.unreadable.value)
+        assertTrue(s.newer)
+        assertTrue(s.setup.value.profiles.isEmpty())
+        assertFalse(s.update { it.copy(defaultRoute = "y") })
+        s.edit { it.copy(defaultRoute = "z") }; s.flush()
+        assertFalse(s.reopen())
+        assertEquals(bytes, File(dir, "setup.bin").readBytes().toList())
+        assertEquals("These settings were saved by a newer unbraid. Update unbraid, or start fresh.", unreadableText(s.newer))
+        assertTrue(s.startFresh())
+        assertFalse(s.newer)
+        assertFalse(File(dir, "setup.bin").exists())
+        // The current format still reads.
+        val now = tmp.newFolder()
+        File(now, "setup.bin").writeBytes(sealed(next.replace("\"version\":${VERSION + 1}", "\"version\":$VERSION")))
+        Store(now) { key }.let { assertFalse(it.unreadable.value); assertFalse(it.newer); assertEquals("Home", it.setup.value.profiles.single().name) }
+    }
+
     /** Settings that name a missing route load as they are and stay so through later edits: nothing goes to Direct or elsewhere. */
     @Test fun missingRoutesStayNamedAfterLoadAndEdits() {
         val dir = tmp.newFolder()

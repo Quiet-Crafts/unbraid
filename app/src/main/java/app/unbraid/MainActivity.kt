@@ -92,6 +92,11 @@ import app.unbraid.stats.Stats
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
 
+/** Why the saved settings won't open: a format from a newer version, or the phone's storage. Nothing is changed either way. */
+fun unreadableText(newer: Boolean) =
+    if (newer) "These settings were saved by a newer $APP. Update $APP, or start fresh."
+    else "The phone's secure storage didn't open them. Trying again often helps. Until then nothing is changed or removed."
+
 class MainActivity : ComponentActivity() {
     private val ui: Ui by viewModels()
 
@@ -153,9 +158,11 @@ class MainActivity : ComponentActivity() {
         val scope = rememberCoroutineScope()
         val act = { f: () -> Boolean -> busy = true; failed = false; scope.launch { failed = !withContext(Dispatchers.IO) { f() }; busy = false }; Unit }
         Column(Modifier.fillMaxSize().background(Ink.ground).windowInsetsPadding(WindowInsets.systemBars).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically)) {
+            val newer = Unbraid.store.newer
             Text("$APP couldn't open your saved settings.", style = Type.title, color = Ink.text)
-            Text("The phone's secure storage didn't open them. Trying again often helps. Until then nothing is changed or removed.", style = Type.body, color = Ink.dim)
-            Primary("Try again", { act(Unbraid.store::reopen) }, busy = busy)
+            Text(unreadableText(newer), style = Type.body, color = Ink.dim)
+            // Trying again can't read a newer format; updating can.
+            if (!newer) Primary("Try again", { act(Unbraid.store::reopen) }, busy = busy)
             if (failed) Text("Still couldn't open them. Restarting the phone often helps.", style = Type.caption, color = Ink.bad)
             Secondary("Start fresh", { confirm = true }, Modifier.align(Alignment.CenterHorizontally), color = Ink.bad, enabled = !busy)
         }

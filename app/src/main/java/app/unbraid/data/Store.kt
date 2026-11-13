@@ -89,10 +89,20 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         setupFailed = setup; accountsFailed = accounts; tsFailed = ts; unsaved.value = setup || accounts || ts
     }
 
+    /**
+     * The saved settings, profiles included, are in a format newer than this build reads ([VERSION]): they count as
+     * [unreadable], so nothing rewrites them in a form the newer version would read differently.
+     */
+    @Volatile var newer = false
+        private set
+
     // Sealed: it can hold imported WireGuard private keys and a Tailscale auth key.
     private val _setup = MutableStateFlow(readSetup() ?: newSetup())
     val setup: StateFlow<Setup> = _setup.asStateFlow()
-    private fun readSetup() = marked(SETUP) { explicit.decodeFromString(Setup.serializer(), it).migrated() }
+    private fun readSetup(): Setup? {
+        newer = false
+        return marked(SETUP) { explicit.decodeFromString(Setup.serializer(), it).also { s -> newer = s.version > VERSION; check(!newer) { "newer format" } }.migrated() }
+    }
 
     /** Applies [f]; false when it couldn't be written (see [unsaved]), so callers keep a pasted secret on the clipboard. */
     @Synchronized
@@ -311,7 +321,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         // The domain table only when no engine has it open (one keeping apps offline meanwhile): that engine deletes it
         // once it has stopped, so a new table never starts in the same block.
         app.unbraid.vpn.LookupTable.forget(dir)
-        _setup.value = newSetup(); _accounts.value = emptyMap(); failed(false, false, false); asideTried = false
+        _setup.value = newSetup(); _accounts.value = emptyMap(); failed(false, false, false); asideTried = false; newer = false
         bad.removeAll { !File(dir, it).exists() }
         _unreadable.value = bad.isNotEmpty()
         !_unreadable.value
