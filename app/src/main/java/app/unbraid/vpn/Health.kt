@@ -112,6 +112,12 @@ object Health {
     /** Answered its last three regular checks: the moves before no longer count. */
     fun settled(history: List<Boolean>) = history.size >= 3 && history.takeLast(3).all { it }
 
+    /**
+     * Whether [history] ends a route's run of moves [m]. One it gave up on ([doesntWork]) stays given up until the network
+     * changes or the user reconnects, however well it answers meanwhile: otherwise short recoveries would restart the moves.
+     */
+    fun ends(m: Moves?, history: List<Boolean>) = settled(history) && m?.let(::doesntWork) != true
+
     /** One HTTPS request over [network] itself, past every tunnel. */
     suspend fun direct(network: android.net.Network?) = withContext(Dispatchers.IO) {
         runCatching {

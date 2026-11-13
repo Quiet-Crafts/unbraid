@@ -738,7 +738,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     val s = Health.next(streaks[t] ?: Health.Streak(), t !in down, now)
                     if (s.fails == 0) streaks.remove(t) else { streaks[t] = s; Log.i(TAG, "health: $t failed ${s.fails}x, ${(now - s.since) / 1000} s") }
                     // Quick re-checks don't count here: one outage would look like a tunnel that keeps dropping.
-                    if (regular) history[t] = Health.record(history[t].orEmpty(), t !in down).also { h -> if (Health.settled(h)) { moves.remove(t); holds.remove(t) } }
+                    if (regular) history[t] = Health.record(history[t].orEmpty(), t !in down).also { h -> if (Health.ends(moves[t], h)) { moves.remove(t); holds.remove(t) } }
                 }
                 // The next connect, even a manual one, avoids them.
                 failing = streaks.keys.flatMap { servers[it].orEmpty() }.toSet()

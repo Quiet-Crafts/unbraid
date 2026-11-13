@@ -124,6 +124,43 @@ class HealthTest {
         assertTrue(Health.settled(listOf(false, false, true, true, true)))
     }
 
+    /**
+     * Given up on, a route that answers three regular checks on the same network stays given up: failing again, it gets
+     * no new run of moves. A route still being moved ends its run the same way.
+     */
+    @Test fun givenUpStaysUntilTheNetworkChanges() {
+        val min = 60_000L
+        var clock = 0L
+        var m: Health.Moves? = null
+        var hold = 0L
+        var s = Health.Streak()
+        var history = emptyList<Boolean>()
+        var moves = 0
+        // As the service does: checked every 10 s, regular checks counted in the history once a minute.
+        fun check(ok: Boolean) {
+            s = Health.next(s, ok, clock)
+            if (clock % min == 0L) history = Health.record(history, ok).also { h -> if (Health.ends(m, h)) { m = null; hold = 0 } }
+            if (Health.dead(s, clock, hold)) {
+                m = Health.moved(m ?: Health.Moves(), clock).also { hold = it.hold }
+                if (!Health.doesntWork(m!!)) moves++
+                s = Health.Streak()
+            }
+            clock += 10_000
+        }
+        while (m?.let(Health::doesntWork) != true) check(ok = false)
+        assertEquals(5, moves)
+        repeat(4 * 6) { check(ok = true) } // four minutes of answers
+        assertTrue(Health.settled(history))
+        assertTrue(Health.doesntWork(m!!))
+        repeat(6 * 60 * 6) { check(ok = false) } // then six hours of failures
+        assertEquals(5, moves)
+        assertTrue(Health.doesntWork(m!!))
+        // Still being moved: three answers end the run, so a later failure starts from the first wait again.
+        assertTrue(Health.ends(Health.Moves(3, 0), listOf(true, true, true)))
+        assertTrue(Health.ends(null, listOf(true, true, true)))
+        assertFalse(Health.ends(Health.Moves(3, 0), listOf(true, false, true)))
+    }
+
     @Test fun routeEligibilityAndMovement() {
         val wg = WgPeer("wg", "private", listOf("10.0.0.2/32"), "public", endpoint = "host:1", allowedIps = listOf("10.0.0.0/8"))
         val provider = Route("provider")
