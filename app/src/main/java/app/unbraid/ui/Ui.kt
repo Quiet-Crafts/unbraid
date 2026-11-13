@@ -477,7 +477,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             fetches.update { it - provider }
             // A fetched list is shown even when its cache can't be written; only a saved one counts as refreshed.
             if (runCatching { store.countries(provider, c) }.isSuccess) refreshed.update { it + 1 }
-        }.onFailure { e -> fetches.update { it + (provider to Fetch.Failed(Http.explain(e, p.name))) } }
+        }.onFailure { e -> fetches.update { it + (provider to Fetch.Failed(Http.explainList(e, p.name))) } }
     }
 
     private val groupCountries = mutableMapOf<String, Set<String>>()

@@ -57,6 +57,13 @@ object Http {
         else -> "Something went wrong signing in to $provider. Try again"
     }
 
+    /** What a failed server-list fetch at [provider] tells the user: as [explain], but about the list, not a sign-in. */
+    fun explainList(e: Throwable, provider: String): String = when {
+        e is Status && e.code != 429 -> "Couldn't load $provider's servers (error ${e.code}). Try again later"
+        e is Status || e is IOException || e is IllegalArgumentException || e is AuthException || e is app.unbraid.vpn.Fail -> explain(e, provider)
+        else -> "Couldn't load $provider's servers. Try again"
+    }
+
     fun postForm(url: String, form: Map<String, String>, headers: Map<String, String> = emptyMap()) =
         call("POST", url, headers, form.entries.joinToString("&") { (k, v) -> enc(k) + "=" + enc(v) }, "application/x-www-form-urlencoded", null, null, true)
 

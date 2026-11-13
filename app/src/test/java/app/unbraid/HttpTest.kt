@@ -71,4 +71,13 @@ class HttpTest {
         try { Http.postForm("https://api.example/token", mapOf("username" to "u")); fail() } catch (e: Exception) { assertTrue(e is app.unbraid.data.AuthException) }
         try { app.unbraid.data.NordApi.countries(); fail() } catch (e: Exception) { assertTrue(e is Http.Status && e.code == 401) }
     }
+
+    /** A server list that fails to load says so, never that a sign-in failed. */
+    @Test fun aFailedListIsNotASignIn() {
+        assertEquals("Couldn't load NordVPN's servers (error 503). Try again later", Http.explainList(Http.Status(503, "x"), "NordVPN"))
+        assertEquals("Couldn't reach NordVPN. Check the connection.", Http.explainList(java.io.IOException("x"), "NordVPN"))
+        assertEquals("NordVPN has had too many attempts. Wait a few minutes and try again", Http.explainList(Http.Status(429, "x"), "NordVPN"))
+        assertEquals("Couldn't load NordVPN's servers. Try again", Http.explainList(IllegalStateException("x"), "NordVPN"))
+        for (code in listOf(400, 500, 503)) assertFalse(Http.explainList(Http.Status(code, "x"), "NordVPN").contains("sign"))
+    }
 }
