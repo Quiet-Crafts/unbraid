@@ -49,6 +49,7 @@ providers. It needs macOS 26 or later.
 - A low-load server is picked for you when the provider publishes load, or you can pin one server yourself.
 - Ad and tracker blocking per route with the provider's own blocking DNS, where it has one.
 - Saved profiles, a home-screen widget, a quick-settings tile and a pause that reconnects by itself.
+- Back up your setup to a passphrase-protected file and restore it on this phone or a new one.
 - Stats on the phone: data per provider, connected time and speed tests across several exits at once.
 - No ads, no unbraid account and no analytics of our own. Free software under the GPL.
 

@@ -12,24 +12,25 @@ Sign in with:
 - IVPN
 - ExpressVPN (manual-configuration login)
 
-Add your WireGuard key or config once, then choose from the servers your plan includes:
+Add your WireGuard key or config once, then pick from your plan's servers:
 - Proton VPN
 - Surfshark
 - Windscribe
 - AirVPN
 
-Or add your own servers: import a WireGuard or OpenVPN config file, or paste a Shadowsocks key.
+Or add your own servers: a WireGuard or OpenVPN config file, or a Shadowsocks key.
 
 FEATURES
-- Per-app routes: give an app its own exit or let it use the default. Direct skips the VPN.
+- Per-app routes: an app gets its own exit or uses the default. Direct skips the VPN.
 - Several exits connected at once.
 - Direct apps use your normal connection: Android leaves them out of the VPN, unless "Block connections without VPN" is on or unbraid's DNS filter covers Direct. When Direct is the default route, the apps that follow it still go through unbraid, IPv4 only.
 - Tailscale is built in: reach devices on your tailnet from apps routed through unbraid, or send apps through a Tailscale exit node.
-- Low-load server chosen automatically where providers publish load.
-- Choose a country or city, or pin one server. Favourites stay on top.
+- Low-load server picked where providers publish load.
+- Pick a country, a city or one server. Favourites stay on top.
 - Per-route ad and tracker blocking with the provider's own blocking DNS, where it has one.
 - Pause for 5 minutes to an hour; it reconnects by itself (Android may delay it).
 - Home-screen widget and quick-settings tile.
+- Back up your setup to a passphrase-locked file.
 - Custom DNS (it replaces provider blocking) and local network access.
 
 LIMITS
