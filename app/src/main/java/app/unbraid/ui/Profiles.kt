@@ -261,11 +261,12 @@ fun NotSet(onChoose: () -> Unit) = Row(
     Text("Choose", style = Label, color = Ink.accent)
 }
 
-/** What a profile keeps, in words: "Netherlands · 3 exceptions". */
+/** What a profile keeps, in words: "Netherlands · 3 apps elsewhere" (apps on a route other than its default). */
 fun summary(s: Setup, p: Profile): String {
-    val n = p.apps.values.toSet().size
+    val n = p.apps.values.count { it != p.defaultRoute }
     if (!p.ready) return "Empty · no default route yet"
-    return "${s.route(p.defaultRoute)?.name ?: "Direct"} · ${if (n == 0) "no exceptions" else if (n == 1) "1 exception" else "$n exceptions"}"
+    val default = if (p.defaultRoute == DIRECT) "Direct" else s.route(p.defaultRoute)?.name ?: "Default route no longer exists"
+    return "$default · ${if (n == 0) "no apps elsewhere" else if (n == 1) "1 app elsewhere" else "$n apps elsewhere"}"
 }
 
 /**
@@ -327,8 +328,8 @@ fun ProfileSheet(setup: Setup, editing: String?, startEmpty: Boolean, onSave: (S
             Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Ink.surfaceHigh).padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("WHAT IT KEEPS", style = Type.overline, color = Ink.dim)
                 Keeps("Default route", listOf(if (!shown.ready) "Not set" else setup.route(shown.defaultRoute)?.name ?: "Direct"))
-                val ex = shown.apps.entries.groupBy({ it.value }, { it.key }).map { (id, pkgs) -> "${if (id == DIRECT) "Direct" else setup.route(id)?.name ?: id} · ${if (pkgs.size == 1) "1 app" else "${pkgs.size} apps"}" }
-                Keeps("Exceptions", ex.take(3).ifEmpty { listOf("None") } + listOfNotNull(if (ex.size > 3) "+${ex.size - 3} more" else null))
+                val ex = shown.apps.entries.filter { it.value != shown.defaultRoute }.groupBy({ it.value }, { it.key }).map { (id, pkgs) -> "${if (id == DIRECT) "Direct" else setup.route(id)?.name ?: id} · ${if (pkgs.size == 1) "1 app" else "${pkgs.size} apps"}" }
+                Keeps("Apps elsewhere", ex.take(3).ifEmpty { listOf("None") } + listOfNotNull(if (ex.size > 3) "+${ex.size - 3} more" else null))
             }
             Text("Routes are shared: changing a route's location changes it in every profile that uses it.", style = Type.caption, color = Ink.dim)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
