@@ -11,6 +11,8 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import app.unbraid.APP
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -221,22 +223,27 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
 }
 
 @Composable
-private fun FilterChip(label: String, dot: Color?, on: Boolean, direct: Boolean = false, independent: Boolean = false, onClick: () -> Unit) = Box(
-    // Exit filters are one choice among many; "System" is an independent on/off filter.
-    Modifier.heightIn(min = 48.dp).then(if (independent) Modifier.toggleable(on, role = Role.Checkbox) { onClick() } else Modifier.selectable(on, role = Role.RadioButton, onClick = onClick)),
-    contentAlignment = Alignment.Center,
-) {
-    val shape = RoundedCornerShape(12.dp)
-    // Selection fades in with the effects spring, like the other selectable pills.
-    val bg by animateColorAsState(if (on) Ink.surfaceTop else Color.Transparent, MaterialTheme.motionScheme.fastEffectsSpec(), label = "chip")
-    val edge by animateColorAsState(if (on) Ink.surfaceTop else Ink.line, MaterialTheme.motionScheme.fastEffectsSpec(), label = "chipEdge")
-    Row(
-        Modifier.heightIn(min = 36.dp).clip(shape).background(bg).border(1.dp, edge, shape).padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp),
+private fun FilterChip(label: String, dot: Color?, on: Boolean, direct: Boolean = false, independent: Boolean = false, onClick: () -> Unit) {
+    val seen = remember { BringIntoViewRequester() }
+    // The chosen route filter's chip scrolls into view, also when chosen from elsewhere (a restored filter, an empty list's Show all).
+    if (!independent) LaunchedEffect(on) { if (on) seen.bringIntoView() }
+    Box(
+        // Exit filters are one choice among many; "System" is an independent on/off filter.
+        Modifier.bringIntoViewRequester(seen).heightIn(min = 48.dp).then(if (independent) Modifier.toggleable(on, role = Role.Checkbox) { onClick() } else Modifier.selectable(on, role = Role.RadioButton, onClick = onClick)),
+        contentAlignment = Alignment.Center,
     ) {
-        if (direct) Icon(Icons.direct, null, Modifier.size(14.dp), tint = Ink.direct)
-        else dot?.let { Box(Modifier.size(8.dp).clip(CircleShape).background(it)) }
-        Text(label, style = Type.sub.copy(fontWeight = FontWeight.Medium), color = if (on) Ink.text else Ink.dim, maxLines = 1)
+        val shape = RoundedCornerShape(12.dp)
+        // Selection fades in with the effects spring, like the other selectable pills.
+        val bg by animateColorAsState(if (on) Ink.surfaceTop else Color.Transparent, MaterialTheme.motionScheme.fastEffectsSpec(), label = "chip")
+        val edge by animateColorAsState(if (on) Ink.surfaceTop else Ink.line, MaterialTheme.motionScheme.fastEffectsSpec(), label = "chipEdge")
+        Row(
+            Modifier.heightIn(min = 36.dp).clip(shape).background(bg).border(1.dp, edge, shape).padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            if (direct) Icon(Icons.direct, null, Modifier.size(14.dp), tint = Ink.direct)
+            else dot?.let { Box(Modifier.size(8.dp).clip(CircleShape).background(it)) }
+            Text(label, style = Type.sub.copy(fontWeight = FontWeight.Medium), color = if (on) Ink.text else Ink.dim, maxLines = 1)
+        }
     }
 }
 
