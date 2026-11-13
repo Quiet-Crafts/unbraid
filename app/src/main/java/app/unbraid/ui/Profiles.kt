@@ -1,5 +1,6 @@
 package app.unbraid.ui
 
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -44,7 +45,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -210,6 +210,7 @@ internal const val NO_ROOM = "There's no room for another profile. Delete one fi
  */
 @Composable
 fun rememberProfileSwitch(ui: Ui): (String) -> Unit {
+    val setup by ui.setup.collectAsStateWithLifecycle()
     var asking by rememberSaveable { mutableStateOf<String?>(null) }
     var name by rememberSaveable { mutableStateOf("") }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
@@ -222,7 +223,7 @@ fun rememberProfileSwitch(ui: Ui): (String) -> Unit {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("No profile holds the routes your apps use now. Without saving, $target replaces them.", style = Type.sub)
                     DialogField(name, { name = it.takeGraphemes(PROFILE_NAME); error = null }, "Save as", PREVIOUS)
-                    if (name.isBlank() && ui.setup.value.profiles.any { it.name.equals(PREVIOUS, ignoreCase = true) })
+                    if (name.isBlank() && setup.profiles.any { it.name.equals(PREVIOUS, ignoreCase = true) })
                         Text("Left blank, it replaces your older $PREVIOUS profile.", style = Type.caption, color = Ink.dim)
                     error?.let { Text(it, style = Type.caption, color = Ink.bad) }
                 }
@@ -290,7 +291,7 @@ fun ProfileSheet(setup: Setup, editing: String?, startEmpty: Boolean, onSave: (S
         setup.profile == null -> "Saves this setup so you can switch back in one tap"
         else -> "A copy of ${setup.profile}, not in use until you tap Use"
     }
-    ModalBottomSheet(onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = Ink.surface, contentColor = Ink.text) {
+    ModalBottomSheet(onDismiss, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
         Column(Modifier.imePadding().verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 Box(Modifier.size(48.dp).clip(RoundedCornerShape(16.dp)).background(Ink.accentContainer), contentAlignment = Alignment.Center) {

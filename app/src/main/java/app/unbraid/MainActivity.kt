@@ -197,6 +197,7 @@ class MainActivity : ComponentActivity() {
                 UpdateAsk(ui::answerUpdates)
               } else {
                 val signedIn by ui.signedIn.collectAsStateWithLifecycle()
+                val liveSetup by ui.setup.collectAsStateWithLifecycle()
                 var tab by rememberSaveable { mutableStateOf(Tab.Routes) }
                 // Picker target: null = closed, "" = new route, otherwise a route id. Prefixed "app:" = new route for that app.
                 var picker by rememberSaveable { mutableStateOf<String?>(null) }
@@ -273,7 +274,7 @@ class MainActivity : ComponentActivity() {
                                         screen == "signin" -> SignInScreen(ui)
                                         // From the picker, a file imported there goes to the picker's app or route, and the picker closes.
                                         screen == "add" -> picker.let { p ->
-                                            val importFor = importTarget(p, ui.setup.value)
+                                            val importFor = importTarget(p, liveSetup)
                                             SignInScreen(ui, importFor, onImported = { adding = false; if (importFor.isNotEmpty()) picker = null }) { adding = false }
                                         }
                                         // The route that was tapped grows into its picker (container transform).
