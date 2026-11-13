@@ -850,7 +850,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         // An empty profile can't be used yet: it is shown, to be given a default route.
         if (!p.ready) { viewing.value = name; return true }
         if (keepAs != null && s.loose && s.use(name, keepAs).profile != name) return false
-        guarded({ viewing.value = null; Profiles.started(name); then() }) { it.use(name, keepAs) }
+        // Only once it switched: a switch confirmed later may find no room left to keep the setup, and then changes nothing.
+        guarded({ if (setup.value.profile == name) { viewing.value = null; Profiles.started(name); then() } }) { it.use(name, keepAs) }
         return true
     }
 
