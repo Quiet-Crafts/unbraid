@@ -76,7 +76,7 @@ private fun Choose(ui: Ui, importFor: String, onImported: (() -> Unit)?, onClose
         navigation = onClose?.let { { IconTap(Icons.close, "Close", it) } },
     ) {
         // A sign-out that couldn't finish (e.g. a device slot left registered) lands here after the last provider goes.
-        notice?.let { n -> item { Caption(n, Modifier.tap({ ui.notice.value = null }), color = Ink.bad) } }
+        notice?.let { n -> item { Caption(n, Modifier.tap({ ui.dismissNotice() }), color = Ink.bad) } }
         item { Gap(8.dp) }
         itemsIndexed(providers) { i, p -> GroupRow(i, providers.size, p.name, p.fields.joinToString(" · ") { it.label }, onClick = { pick(p) }, trailing = { Chevron() }) }
         item { SectionLabel("Other") }
