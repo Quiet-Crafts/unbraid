@@ -177,10 +177,15 @@ object Mullvad : Provider {
      * Gone only when Mullvad says so: the account number is no longer valid, or the device lookup answers 404. Any
      * other refusal (a 401 means the request wasn't authorised, not that the device was removed) or failure is not proof.
      */
-    internal fun revoked(tokenReply: () -> Pair<Int, String>, lookup: (token: String) -> Unit): Boolean = try {
-        val reply = tokenReply()
-        if (reply.first == 400 && "INVALID_ACCOUNT" in reply.second) true else { lookup(token(reply)); false }
-    } catch (e: Http.Status) { e.code == 404 } catch (e: IOException) { false }
+    internal fun revoked(tokenReply: () -> Pair<Int, String>, lookup: (token: String) -> Unit): Boolean {
+        // The token request's own failures, a 404 among them, say nothing about the device.
+        val token = try {
+            val reply = tokenReply()
+            if (reply.first == 400 && "INVALID_ACCOUNT" in reply.second) return true
+            token(reply)
+        } catch (e: IOException) { return false }
+        return try { lookup(token); false } catch (e: Http.Status) { e.code == 404 } catch (e: IOException) { false }
+    }
 
     /** This phone's device and how many of the slots are taken (the page's device count); offline, the name saved at sign-in. */
     override fun device(account: String): Device {

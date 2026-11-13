@@ -212,6 +212,9 @@ class MullvadTest {
         assertFalse(Mullvad.revoked({ ok }, lookup(403)))
         assertFalse(Mullvad.revoked({ ok }, lookup(503)))
         assertFalse(Mullvad.revoked({ 401 to "" }, lookup(null)))
+        // A 404 from the token endpoint is not the device lookup's 404.
+        assertFalse(Mullvad.revoked({ 404 to "" }, lookup(null)))
+        assertFalse(Mullvad.revoked({ 404 to "" }, lookup(404)))
         assertFalse(Mullvad.revoked({ throw IOException("offline") }, lookup(null)))
     }
 }
