@@ -116,6 +116,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         @Volatile var tags: Map<String, String> = emptyMap()
         /** Tunnel tag → the DNS server that tunnel's own lookups use (health checks look their servers up there). */
         @Volatile var tunnelDns: Map<String, String> = emptyMap()
+        /** Tunnel tags that carry TCP only ([Compiler.tcpOnly]): health checks send no UDP through them. */
+        @Volatile var tcpOnly: Set<String> = emptySet()
         /** The setup the engine runs (not the one being edited): stats attribute traffic against it. */
         @Volatile var running: Setup? = null
         /** Loopback port and password of the app's own way into each exit ([Compiler.PROBE]); see [Probe]. */
@@ -485,7 +487,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             lastBlock = input.fakeBlock
             restarting = true
             openTable(true)
+            // Before the start too, with the running engine's: a check under way during it sends UDP through neither.
+            val udpless = Compiler.tcpOnly(json)
+            tcpOnly = tcpOnly + udpless
             engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
+            tcpOnly = udpless
             restarting = false
             starts++
             probe = next
@@ -552,7 +558,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val input = Compiler.Input(last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = now.tsSuffixAllowed)), last.links, last.selfPackage, last.lockdown,
             last.tsDir, last.cacheFile, store.tsSuffix, next, last.fakeBlock, last.blocked, last.tsLoginPending && tsLoginPending)
         val json = Compiler.compile(input)
+        tcpOnly = tcpOnly + Compiler.tcpOnly(json)
         srv.startOrReloadService(json, OverrideOptions())
+        tcpOnly = Compiler.tcpOnly(json)
         starts++
         state.update { it.copy(engine = starts) }
         lastBlock = input.fakeBlock
@@ -915,7 +923,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         forgetLookups(this)
         net.stop()
         applied = null; rejected = null; lastGood = null; lastInput = null; probe = null; links = emptyMap(); appliedAccounts = emptyMap()
-        running = null; tags = emptyMap(); tunnelDns = emptyMap()
+        running = null; tags = emptyMap(); tunnelDns = emptyMap(); tcpOnly = emptySet()
     }
 
     /** Caller holds [lock]. */
@@ -994,7 +1002,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 openTable(false)
                 forgetLookups(this@UnbraidVpn)
                 failing = emptySet()
-                probe = null; links = emptyMap(); running = null; tags = emptyMap(); tunnelDns = emptyMap()
+                probe = null; links = emptyMap(); running = null; tags = emptyMap(); tunnelDns = emptyMap(); tcpOnly = emptySet()
                 cancelResume() // again: a pause that was still running when the service went may have set an alarm
                 if (state.value.phase != VpnState.Phase.Off) state.value = VpnState()
             }

@@ -218,6 +218,18 @@ class HealthTest {
         assertEquals(Health.Moves(1, 1_000 + Health.COOLDOWN), Health.handle(null, 1_000, acts = true).first)
     }
 
+    /** A tunnel that carries TCP only is checked over HTTPS alone: no STUN query goes to its server past the plugin. */
+    @Test fun tcpOnlyTunnelGetsNoStun() = runBlocking {
+        val stun = java.util.concurrent.atomic.AtomicInteger()
+        assertTrue(Health.reachable(udp = false, stun = { stun.incrementAndGet(); true }) { true })
+        assertEquals(0, stun.get())
+        assertFalse(Health.reachable(udp = false, stun = { stun.incrementAndGet(); true }) { false })
+        assertEquals(0, stun.get())
+        // Any other tunnel still tries STUN on both servers first.
+        assertTrue(Health.reachable(udp = true, stun = { stun.incrementAndGet(); false }) { true })
+        assertEquals(2, stun.get())
+    }
+
     @Test fun routeEligibilityAndMovement() {
         val wg = WgPeer("wg", "private", listOf("10.0.0.2/32"), "public", endpoint = "host:1", allowedIps = listOf("10.0.0.0/8"))
         val provider = Route("provider")

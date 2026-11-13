@@ -42,12 +42,15 @@ object Health {
 
     /**
      * Some networks and providers block STUN, so HTTPS is tried too, from 3 s on; the first answer wins and stops the
-     * others. Never takes much longer than [BUDGET].
+     * others. Never takes much longer than [BUDGET]. A tunnel that carries TCP only (a Shadowsocks plugin) gets HTTPS
+     * alone: the engine would send STUN straight to its server, past the plugin.
      */
-    suspend fun reachable(tag: String) = withTimeoutOrNull(BUDGET) {
+    suspend fun reachable(tag: String) = reachable(tag !in UnbraidVpn.tcpOnly, { binding(it, tag) }) { https(tag) }
+
+    internal suspend fun reachable(udp: Boolean, stun: suspend (String) -> Boolean, https: suspend () -> Boolean) = withTimeoutOrNull(BUDGET) {
         channelFlow {
-            SERVERS.forEach { launch { send(binding(it, tag)) } }
-            launch { delay(3_000); send(https(tag)) }
+            if (udp) SERVERS.forEach { launch { send(stun(it)) } }
+            launch { if (udp) delay(3_000); send(https()) }
         }.firstOrNull { it }
     } == true
 

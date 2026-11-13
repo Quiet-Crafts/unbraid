@@ -441,6 +441,12 @@ object Compiler {
             .associate { ((it["auth_user"] as JsonArray)[0] as JsonPrimitive).content to (it["server"] as JsonPrimitive).content }
     }
 
+    /** Tunnel tags that carry TCP only (a Shadowsocks plugin), read back from a compiled [config]: nothing else goes to their server. */
+    fun tcpOnly(config: String): Set<String> = kotlinx.serialization.json.Json.parseToJsonElement(config).let { c ->
+        ((c as JsonObject)["outbounds"] as? JsonArray).orEmpty().map { it as JsonObject }
+            .filter { it["network"] == JsonPrimitive("tcp") }.mapNotNull { (it["tag"] as? JsonPrimitive)?.content }.toSet()
+    }
+
     /** Same key = same physical exit with the same credentials, whichever route asked for it. */
     internal fun linkKey(r: Route, l: Link): String = when (l) {
         // Everything the engine's WireGuard device is built from, whichever provider or import it came through.

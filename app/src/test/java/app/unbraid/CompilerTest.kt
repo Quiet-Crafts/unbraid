@@ -717,6 +717,9 @@ class CompilerTest {
         val m = compile(mixed, links = mapOf("s" to SsLink(sv("s"), p), "t" to SsLink(sv("t"), ssPlain.copy(server = "t.example"))))
         assertEquals("tcp", m.dnsServers()["dns-r-s"]!!.str("type")); assertEquals("udp", m.dnsServers()["dns-r-t"]!!.str("type"))
         assertNull(m["outbounds"]!!.jsonArray.map { it.jsonObject }.single { it.str("tag") == "r-t" }["network"])
+        // Health checks read which tunnels carry TCP only, and send no UDP through those.
+        assertEquals(setOf("r-s"), Compiler.tcpOnly(m.toString()))
+        assertEquals(setOf("r-s"), Compiler.tcpOnly(c.toString()))
     }
 
     /** A Shadowsocks route without a plugin compiles exactly as it always has. */
@@ -727,6 +730,7 @@ class CompilerTest {
         )
         val plainFilter = ssCompile(ssPlain, Prefs(lan = false, filter = Filter(Filters.OWN, "1.1.1.1", routes = true))).dnsServers()
         assertEquals("udp", plainFilter["dns-r-s"]!!.str("type"))
+        assertEquals(emptySet<String>(), Compiler.tcpOnly(ssCompile(ssPlain).toString()))
     }
 
     // ---- WireGuard keys ----
