@@ -385,7 +385,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (store.unreadable.value && !store.reopen()) { hold(); return }
             val setup = store.setup.value
             // Refused before any provider is asked for a server: the engine would refuse it anyway.
-            if (setup.noDefault()) throw Compiler.MissingDefault()
+            if (setup.defaultMissing) throw Compiler.MissingDefault()
             // A saved Tailscale node that won't open fails here with its own message, not as an engine error.
             if (setup.tailscale && store.tsStored) store.tsState
             val accounts = store.accounts.value
@@ -586,7 +586,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val ready = pickLinks(setup, keep?.takeIf { keepFrom == generation } ?: links, accounts, avoid, offline = true)
             // Without a default route the install is refused at once (the running engine stays and the error says why),
             // before any provider is asked.
-            if (ready.blocked.values.none { it is LinkPicker.Waiting } || setup.noDefault()) { install(srv, setup, ready, accounts); return }
+            if (ready.blocked.values.none { it is LinkPicker.Waiting } || setup.defaultMissing) { install(srv, setup, ready, accounts); return }
             // While a provider is asked for a server, apps moving off Direct already leave through their new route, or
             // wait blocked if that is the one still waiting: never on their real address for the time it takes. A tunnel
             // whose account was signed out or refused stops now too, not once the others are found.
@@ -1144,9 +1144,6 @@ private inline fun io.nekohasekai.libbox.RoutePrefixIterator.forEach(f: (RoutePr
 private fun io.nekohasekai.libbox.RoutePrefixIterator.toList(): List<RoutePrefix> = buildList { this@toList.forEach { add(it) } }
 private inline fun StringIterator.forEachString(f: (String) -> Unit) { while (hasNext()) f(next()) }
 private fun RoutePrefix.ipPrefix() = IpPrefix(InetAddress.getByName(address()), prefix())
-
-/** The default route names a route the setup no longer has ([Compiler.MissingDefault]). */
-internal fun Setup.noDefault() = defaultRoute != app.unbraid.data.DIRECT && route(defaultRoute) == null
 
 /** One line for Routes: which routes' apps are blocked and why, and that apps on a route that is gone are blocked too. */
 internal fun blockedText(setup: Setup, blocked: Map<String, Exception>): String? = listOfNotNull(

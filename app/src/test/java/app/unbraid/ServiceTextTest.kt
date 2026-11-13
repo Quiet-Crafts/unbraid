@@ -6,7 +6,6 @@ import app.unbraid.data.Location
 import app.unbraid.data.Route
 import app.unbraid.data.Setup
 import app.unbraid.vpn.blockedText
-import app.unbraid.vpn.noDefault
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -19,10 +18,10 @@ class ServiceTextTest {
 
     /** A default route that is gone is refused before any provider is asked; Direct as the default is a real choice. */
     @Test fun missingDefaultIsFoundBeforeConnecting() {
-        assertFalse(setup.noDefault())
-        assertFalse(setup.copy(defaultRoute = DIRECT).noDefault())
-        assertTrue(setup.copy(defaultRoute = "gone").noDefault())
-        assertTrue(setup.copy(routes = emptyList()).noDefault())
+        assertFalse(setup.defaultMissing)
+        assertFalse(setup.copy(defaultRoute = DIRECT).defaultMissing)
+        assertTrue(setup.copy(defaultRoute = "gone").defaultMissing)
+        assertTrue(setup.copy(routes = emptyList()).defaultMissing)
     }
 
     /** Apps on a route that no longer exists are said to be blocked, beside any route waiting for a server. */

@@ -111,7 +111,7 @@ object Compiler {
 
     fun compile(i: Input): String {
         val s = i.setup
-        if (s.defaultRoute != DIRECT && s.route(s.defaultRoute) == null) throw MissingDefault()
+        if (s.defaultMissing) throw MissingDefault()
         // Blocked routes get no tunnel, DNS server or probe; their apps still match, to be refused. So do apps on a route
         // that no longer exists.
         val refused = i.blocked + missing(s)
