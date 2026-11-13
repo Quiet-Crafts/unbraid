@@ -86,6 +86,7 @@ import app.unbraid.ui.VpnDisclosure
 import app.unbraid.ui.UpdateAsk
 import app.unbraid.ui.Welcome
 import app.unbraid.ui.settingsHub
+import app.unbraid.ui.importTarget
 import app.unbraid.ui.reselected
 import app.unbraid.stats.Stats
 import app.unbraid.vpn.UnbraidVpn
@@ -201,6 +202,8 @@ class MainActivity : ComponentActivity() {
                 var picker by rememberSaveable { mutableStateOf<String?>(null) }
 
                 var adding by rememberSaveable { mutableStateOf(false) }
+                // The picker left for Settings: Back from the Settings hub returns to it, for the same route or app.
+                var pickerAfter by rememberSaveable { mutableStateOf<String?>(null) }
                 val vpn by ui.vpn.collectAsStateWithLifecycle()
                 val limit by ui.limitAsk.collectAsStateWithLifecycle()
                 val disclosed by ui.disclosed.collectAsStateWithLifecycle()
@@ -208,7 +211,7 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(routesWanted) {
                     if (!routesWanted) return@LaunchedEffect
                     ui.routesWanted.value = false
-                    picker = null; adding = false; tab = Tab.Routes
+                    picker = null; adding = false; pickerAfter = null; tab = Tab.Routes
                 }
 
                 // The tour: a stop index, -1 = off. A new install gets it once it is set up; Settings replays it.
@@ -245,14 +248,17 @@ class MainActivity : ComponentActivity() {
                 val motion = MaterialTheme.motionScheme
                 PredictiveBackHandler(adding || picker != null) { events ->
                     try {
-                        events.collect { screens.seekTo(it.progress, targetState = tab.name) }
+                        // Leaving Add provider opened from the picker goes back to that picker.
+                        events.collect { screens.seekTo(it.progress, targetState = if (adding && picker != null) "picker:$picker" else tab.name) }
                         if (adding) adding = false else picker = null
                     } catch (e: CancellationException) {
                         scope.launch { screens.animateTo(screens.currentState) }
                         throw e
                     }
                 }
-                BackHandler(picker == null && !adding && tab != Tab.Routes) { tab = Tab.Routes }
+                BackHandler(picker == null && !adding && tab != Tab.Routes) {
+                    pickerAfter?.let { picker = it; pickerAfter = null } ?: run { tab = Tab.Routes }
+                }
 
                 Box(Modifier.fillMaxSize()) {
                 // While touring the app is looked at, not used: TalkBack reads the tour's note only.
@@ -265,13 +271,18 @@ class MainActivity : ComponentActivity() {
                                 CompositionLocalProvider(LocalScreen provides this) {
                                     when {
                                         screen == "signin" -> SignInScreen(ui)
-                                        screen == "add" -> SignInScreen(ui) { adding = false }
+                                        // From the picker, a file imported there goes to the picker's app or route, and the picker closes.
+                                        screen == "add" -> picker.let { p ->
+                                            val importFor = importTarget(p, ui.setup.value)
+                                            SignInScreen(ui, importFor, onImported = { adding = false; if (importFor.isNotEmpty()) picker = null }) { adding = false }
+                                        }
                                         // The route that was tapped grows into its picker (container transform).
                                         screen.startsWith("picker:") -> screen.removePrefix("picker:").let { target ->
                                             Box(Modifier.fillMaxSize().then(sharedRoute(target, RoundedCornerShape(28.dp)))) {
                                                 PickerScreen(
                                                     ui, target, close = { picker = null },
-                                                    settings = { picker = null; tab = Tab.Settings }, addProvider = { picker = null; adding = true },
+                                                    // Both come back here: Add provider closes onto the picker, Back from Settings reopens it.
+                                                    settings = { pickerAfter = picker; picker = null; settingsHub(); tab = Tab.Settings }, addProvider = { adding = true },
                                                 )
                                             }
                                         }
@@ -288,7 +299,7 @@ class MainActivity : ComponentActivity() {
                     val unsaved by Unbraid.store.unsaved.collectAsStateWithLifecycle()
                     if (unsaved) Caption("Some of your changes couldn't be saved and would be lost when unbraid restarts. Tap to try saving again.",
                         Modifier.fillMaxWidth().tap({ kotlin.concurrent.thread { Unbraid.store.saveAgain() } }).padding(horizontal = 24.dp, vertical = 12.dp), color = Ink.bad)
-                    if (signedIn && picker == null && !adding) NavBar(tab) { if (it == tab) reselected.tryEmit(it) else tab = it }
+                    if (signedIn && picker == null && !adding) NavBar(tab) { pickerAfter = null; if (it == tab) reselected.tryEmit(it) else tab = it }
                 }
                 if (tour >= 0) TourOverlay(
                     tour, disclosed, back = { tour-- }, close = endTour,

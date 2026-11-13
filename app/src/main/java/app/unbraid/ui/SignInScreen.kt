@@ -42,21 +42,31 @@ import app.unbraid.data.Field
 import app.unbraid.data.Provider
 import app.unbraid.data.Providers
 
-/** First run, or "Add provider" when [onClose] is set. Step 1 picks a provider or an import; step 2 is that provider's form. Never in screenshots. */
+/**
+ * First run, or "Add provider" when [onClose] is set. Step 1 picks a provider or an import; step 2 is that provider's
+ * form. A file imported here is used by [importFor] ("" a new route, "app:<pkg>" or a route id), then [onImported] runs
+ * (by default [onClose]). Never in screenshots.
+ */
 @Composable
-fun SignInScreen(ui: Ui, onClose: (() -> Unit)? = null) {
+fun SignInScreen(ui: Ui, importFor: String = "", onImported: (() -> Unit)? = null, onClose: (() -> Unit)? = null) {
     var step by rememberSaveable { mutableStateOf<String?>(null) }
     val provider = Providers.get(step.orEmpty())
     SecureWindow()
     BackHandler(provider != null) { provider?.let { ui.discardForm(it.id) }; step = null }
-    if (provider == null) Choose(ui, onClose) { step = it.id } else Form(ui, provider, onClose, back = { ui.discardForm(provider.id); step = null })
+    if (provider == null) Choose(ui, importFor, onImported ?: onClose, onClose) { step = it.id } else Form(ui, provider, onClose, back = { ui.discardForm(provider.id); step = null })
 }
+
+/**
+ * Where a file imported from Add provider goes when it was opened from the picker for [picker]: that app ("app:<pkg>")
+ * or that route; otherwise ("" new route, "default", no picker) a new route, as from Settings.
+ */
+internal fun importTarget(picker: String?, s: app.unbraid.data.Setup) = picker?.takeIf { it.startsWith("app:") || s.route(it) != null } ?: ""
 
 private class Other(val title: String, val sub: String, val go: () -> Unit)
 
 @Composable
-private fun Choose(ui: Ui, onClose: (() -> Unit)?, pick: (Provider) -> Unit) {
-    val importer = rememberImporter(ui, "") { onClose?.invoke() }
+private fun Choose(ui: Ui, importFor: String, onImported: (() -> Unit)?, onClose: (() -> Unit)?, pick: (Provider) -> Unit) {
+    val importer = rememberImporter(ui, importFor) { onImported?.invoke() }
     val accounts by ui.accounts.collectAsStateWithLifecycle()
     val notice by ui.notice.collectAsStateWithLifecycle()
     val providers = Providers.all.filter { it.id !in accounts }

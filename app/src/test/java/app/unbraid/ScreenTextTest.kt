@@ -10,6 +10,7 @@ import app.unbraid.ui.dropText
 import app.unbraid.ui.keepName
 import app.unbraid.ui.blockingToApply
 import app.unbraid.ui.pendingNote
+import app.unbraid.ui.importTarget
 import app.unbraid.data.PREVIOUS
 import app.unbraid.data.Profile
 import app.unbraid.ui.removeText
@@ -78,6 +79,15 @@ class ScreenTextTest {
             "OpenVPN TCP and NordVPN blocking off: tap a location to use them. Close keeps the route as it is.",
             pendingNote("OpenVPN TCP", "NordVPN" to false),
         )
+    }
+
+    /** A file imported from Add provider, opened in an app's or a route's picker, goes to that app or route. */
+    @Test fun importFromThePickerKeepsItsTarget() {
+        assertEquals("app:org.mozilla.firefox", importTarget("app:org.mozilla.firefox", setup))
+        assertEquals("us", importTarget("us", setup))
+        assertEquals("", importTarget("default", setup))
+        assertEquals("", importTarget("", setup))
+        assertEquals("", importTarget(null, setup))
     }
 
     @Test fun newDefaultSaysWhoMoves() {
