@@ -24,7 +24,7 @@ import org.junit.Test
 private fun link(sv: Server) = WgLink(sv, WgPeer(sv.name, "priv", listOf("10.5.0.2/32"), sv.publicKey, endpoint = "${sv.ip}:51820", allowedIps = listOf("0.0.0.0/0")))
 
 class LinkPickerTest {
-    private fun server(n: String, ip: String = "10.0.0.${n.length}", host: String = "shared.example") = Server(n, host, ip, "pub", 0)
+    private fun server(n: String, ip: String = "203.0.113.${n.length}", host: String = "shared.example") = Server(n, host, ip, "pub", 0)
 
     /** [best] is what connect() returns for an unpinned location; a pinned one returns its own server. */
     private class Fake(val best: List<Server>, var online: Boolean = true, var trusted: Boolean = true, var listed: Boolean = true) : Provider {
@@ -48,7 +48,7 @@ class LinkPickerTest {
         LinkPicker.pick(s, emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), last) { if (it == "fake") p else null }
 
     private val a = server("a")
-    private val b = server("bb", "10.0.0.9")
+    private val b = server("bb", "203.0.113.9")
 
     @Test fun unpinnedCollisionMovesToAnotherServerByIpNotHostname() {
         val p = Fake(listOf(a, b))
@@ -198,7 +198,7 @@ class LinkPickerTest {
         var asked: Server? = null
         val p = object : Provider by Fake(listOf(a)) { override fun connect(loc: Location, account: String): Link { asked = loc.pinned; return link(loc.pinned!!) } }
         val r = Route("1", Location("fake", countryCode = "NL", pinned = a))
-        val newer = a.copy(ip = "10.0.0.77", publicKey = "newer")
+        val newer = a.copy(ip = "203.0.113.77", publicKey = "newer")
         LinkPicker.pick(setup(r), emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), mapOf(LinkPicker.cacheKey(r) to link(newer))) { p }
         assertEquals(newer, asked)
     }
@@ -216,7 +216,7 @@ class LinkPickerTest {
         val down = Fake(listOf(a), online = false)
         assertTrue(LinkPicker.pick(setup(r), emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), mapOf(LinkPicker.cacheKey(r) to other)) { down }.links.isEmpty())
         // The pin decision: as listed now, as saved without a list, gone when the list lacks it.
-        val fresh = a.copy(ip = "10.0.0.88")
+        val fresh = a.copy(ip = "203.0.113.88")
         assertEquals(fresh, a.asListed(listOf(fresh)))
         assertEquals(a, a.asListed(null))
         try { a.asListed(listOf(b.copy(host = "elsewhere.example"))); fail() } catch (e: app.unbraid.data.NoLongerOffered) {}
@@ -283,5 +283,33 @@ class LinkPickerTest {
         assertEquals(mapOf("1" to 1400, "2" to 1280, "3" to 1200), mtu(s.copy(opts = mapOf("fake" to mapOf("mtu" to "1400")))))
         for (bad in listOf("9000", "1000", "x")) assertEquals(1280, mtu(s.copy(opts = mapOf("fake" to mapOf("mtu" to bad))))["1"])
         assertEquals("auto", s.opt("anything", "mtu"))
+    }
+
+    /**
+     * A tunnel saved by an older version at an address this one refuses (a private one): a cached copy never stands in
+     * when the provider can't be reached, a kept one is replaced, and the route says to pick the server again rather
+     * than that the server is unreachable.
+     */
+    @Test fun aSavedTunnelAtARefusedAddressIsNeverUsed() {
+        val local = server("old", "192.168.1.20")
+        val unpinned = Route("1", Location("fake", countryCode = "NL"))
+        val down = Fake(listOf(a), online = false)
+        val out = pick(setup(unpinned), down, mapOf(LinkPicker.cacheKey(unpinned) to link(local)))
+        assertTrue(out.links.isEmpty())
+        assertEquals("old has a saved address that can't be used. Pick the server again", out.blocked.getValue("1").message)
+        // Pinned to it: the provider refuses the saved address, and the cache can't replace it.
+        val refusing = object : Provider by Fake(listOf(a)) { override fun connect(loc: Location, account: String): Link = throw app.unbraid.data.Addr.refused(loc.pinned!!.name) }
+        val pinned = Route("2", Location("fake", countryCode = "NL", pinned = local))
+        val p = LinkPicker.pick(setup(pinned), emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), mapOf(LinkPicker.cacheKey(pinned) to link(local))) { refusing }
+        assertTrue(p.links.isEmpty())
+        assertEquals("old has a saved address that can't be used. Pick the server again", p.blocked.getValue("2").message)
+        // Kept from the running engine: replaced by a fresh pick.
+        val s = setup(unpinned)
+        val accounts = mapOf("fake" to "acc")
+        assertEquals(a, LinkPicker.pick(s, mapOf("1" to link(local)), s, accounts, accounts, emptyMap()) { Fake(listOf(a)) }.links.getValue("1").server)
+        // An alternate entry address counts too.
+        val entry = link(a).copy(entries = listOf("203.0.113.5", "10.1.2.3"))
+        assertEquals(false, app.unbraid.data.Addr.usable(entry))
+        assertEquals(true, app.unbraid.data.Addr.usable(link(a).copy(entries = listOf("203.0.113.5"))))
     }
 }

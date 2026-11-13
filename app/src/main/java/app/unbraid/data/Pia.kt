@@ -188,7 +188,7 @@ object Pia : Provider {
     private fun addKey(sv: Wg, token: String, pubKey: String): AddKey {
         // Neither value is quoted: a server saved earlier, or a reply, could hold anything.
         if (!sv.cn.matches(Regex("[A-Za-z0-9._-]+"))) throw Addr.unexpected("PIA")
-        if (!Addr.server(sv.ip)) throw app.unbraid.vpn.Fail("This PIA server has a saved address that can't be used. Pick the server again")
+        if (!Addr.server(sv.ip)) throw Addr.refused("This PIA server")
         return parseAddKey(Http.get("https://${sv.ip}:1337/addKey?pt=${Http.enc(token)}&pubkey=${Http.enc(pubKey)}", tls = tls, verifyHost = sv.cn, signed = true))
     }
 

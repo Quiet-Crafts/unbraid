@@ -1,5 +1,6 @@
 package app.unbraid.vpn
 
+import app.unbraid.data.Addr
 import app.unbraid.data.AuthException
 import app.unbraid.data.DIRECT
 import app.unbraid.data.Link
@@ -61,9 +62,9 @@ object LinkPicker {
                 r.tsExit != null -> TsLink(Server(r.name, r.tsExit, "", "", 0))
                 else -> keep[r.id]?.takeIf {
                     applied?.route(r.id)?.let { a -> !a.imported && a.loc == r.loc } == true && appliedAccounts[r.loc.provider] == accounts[r.loc.provider] &&
-                        trusted(it, r, accounts, providers)
+                        trusted(it, r, accounts, providers) && Addr.usable(it)
                 } ?: if (offline) throw if (accounts[r.loc.provider] == null) AuthException("Sign in to ${providers(r.loc.provider)?.name ?: r.loc.provider} for ${r.name}") else Waiting()
-                    else fresh(r, accounts, last, used, providers)
+                    else fresh(r, accounts, last, used, providers).also { if (!Addr.usable(it)) throw Addr.refused(it.server.name) }
             } } catch (e: Exception) { blocked[r.id] = e; continue }
             if (!r.imported) used += "${r.loc.provider}|${serverId(link.server)}"
             out[r.id] = link
@@ -122,8 +123,11 @@ object LinkPicker {
         val l = try {
             again(p, r, acc, last, used) ?: p.connect(loc, acc)
         } catch (e: Exception) {
-            if (e is AuthException || e is app.unbraid.data.NoLongerOffered) throw e
-            last[cacheKey(r)]?.takeIf { pinned == null || it.server.host == pinned.host }?.takeIf { trusted(it, r, accounts, providers) } ?: throw if (pinned != null) Fail("${r.name}: ${pinned.name} is unreachable") else e
+            if (e is AuthException || e is app.unbraid.data.NoLongerOffered || e is Addr.Refused) throw e
+            val cached = last[cacheKey(r)]?.takeIf { pinned == null || it.server.host == pinned.host }?.takeIf { trusted(it, r, accounts, providers) }
+            // A cached tunnel at an address that can't be used is no fallback: the user is told to pick the server again.
+            if (cached != null && !Addr.usable(cached)) throw Addr.refused(cached.server.name)
+            cached ?: throw if (pinned != null) Fail("${r.name}: ${pinned.name} is unreachable") else e
         }
         if (pinned != null || "${p.id}|${serverId(l.server)}" !in used) return l
         val other = runCatching {

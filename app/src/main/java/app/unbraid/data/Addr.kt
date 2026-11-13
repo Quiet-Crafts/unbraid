@@ -31,7 +31,15 @@ object Addr {
      * [s] when its address may be connected to. A server saved before addresses were checked, used when the provider's
      * list can't be read, can hold one that may not.
      */
-    fun usable(s: Server): Server = if (server(s.ip)) s else throw app.unbraid.vpn.Fail("${s.name} has a saved address that can't be used. Pick the server again")
+    fun usable(s: Server): Server = if (server(s.ip)) s else throw refused(s.name)
+
+    /** A saved server's address is refused: not a passing failure, so no cached tunnel stands in and the user is told. */
+    class Refused(message: String) : app.unbraid.vpn.Fail(message)
+
+    fun refused(name: String) = Refused("$name has a saved address that can't be used. Pick the server again")
+
+    /** A provider's tunnel [l] connects only to addresses a server on the internet can have, alternate entries too. */
+    fun usable(l: Link) = server(l.server.ip) && (l !is WgLink || (server(l.peer.endpoint.substringBeforeLast(':')) && l.entries.all(::server)))
 
     /** The error for a provider reply that holds a malformed address or key. */
     fun unexpected(provider: String) = app.unbraid.vpn.Fail("Unexpected reply from $provider. Try again later")
