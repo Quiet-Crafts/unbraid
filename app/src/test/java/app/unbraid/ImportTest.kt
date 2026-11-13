@@ -29,7 +29,16 @@ class ImportTest {
         assertEquals("Endpoint has an invalid host", refused(conf(endpoint = ":51820")))
         WgConf.parse(conf(endpoint = "[2001:db8::1]:51820"), "x")
         WgConf.parse(conf(endpoint = "vpn.example.net:51820"), "x")
-        assertEquals("AllowedIPs has an invalid range: 10.0.0.0/40", refused(conf(allowed = "0.0.0.0/0, 10.0.0.0/40")))
+        for (good in listOf("203.0.113.1:51820", "[::1]:1", "[::ffff:192.0.2.1]:443", "[2001:db8:0:0:0:0:0:1]:51820", "x:1", "a-1.b_c.example.:65535"))
+            WgConf.parse(conf(endpoint = good), "x")
+        for (bad in listOf("51820", "[2001:db8::1]", "[2001:db8::1]51820", "203.0.113.1:+51", "203.0.113.1:"))
+            assertEquals(bad, "Endpoint needs host:port", refused(conf(endpoint = bad)))
+        for (bad in listOf("[2001:db8:::1]:51820", "[1:2:3:4:5:6:7:8:9]:1", "[fe80::1%wlan0]:1", "[::1.2.3.999]:1", "[]:1", "999.1.2.3:51820", "1.2.3:51820",
+            "-a.example:1", "a..example:1", "a/b:1", "2001:db8::1:51820"))
+            assertEquals(bad, "Endpoint has an invalid host", refused(conf(endpoint = bad)))
+        assertEquals("Invalid AllowedIPs range in the config", refused(conf(allowed = "0.0.0.0/0, 10.0.0.0/40")))
+        // A word pasted into the wrong line is never shown back.
+        assertEquals("Invalid AllowedIPs range in the config", refused(conf(allowed = "0.0.0.0/0, rosebud")))
         // Keys are named by field and never quoted.
         val secret = "Zm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9v" // right shape, not a key (33 bytes)
         for (bad in listOf(secret, key.dropLast(2) + "!=")) {
