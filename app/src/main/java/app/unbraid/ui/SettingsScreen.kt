@@ -597,7 +597,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
             p == "about" -> Page("About & support", back) {
                 notice(ui, notice)
                 // Play build: tips through Play Billing (Play allows no other way to take money, nor links to one).
-                // GitHub/F-Droid build: a plain link to the donation page.
+                // GitHub build: a plain link to the donation page.
                 val jar = ui.tips
                 group(null, listOf(
                     Item("Take the tour", "How $APP works, in eight stops", tour, icon = Icons.routes) { Chevron() },

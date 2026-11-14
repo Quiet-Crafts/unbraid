@@ -49,8 +49,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures { compose = true; buildConfig = true }
-    // play = Google Play, with an in-app tip jar through Play Billing (a proprietary library F-Droid won't ship);
-    // foss = GitHub and F-Droid, no Google Play Billing (no tip jar). Everything else is the same app.
+    // play = Google Play, with an in-app tip jar through Play Billing (a proprietary library);
+    // foss = GitHub, no Google Play Billing (no tip jar). Everything else is the same app.
     flavorDimensions += "store"
     productFlavors {
         create("foss") { dimension = "store"; buildConfigField("boolean", "UPDATE_CHECK", "true"); buildConfigField("boolean", "SUPPORT_ASKS", "true") }
@@ -63,7 +63,7 @@ android {
     }
     // The UI is English only: drop library translations nobody sees.
     androidResources { localeFilters += "en" }
-    // Play gets the dependency list in the bundle; the APK (GitHub/F-Droid) stays free of the signing-block extra.
+    // Play gets the dependency list in the bundle; the APK (GitHub) stays free of the signing-block extra.
     dependenciesInfo { includeInApk = false }
 }
 

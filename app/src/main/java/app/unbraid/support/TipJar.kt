@@ -9,7 +9,7 @@ data class Tip(val id: String, val price: String)
 
 /**
  * Tips through the store this build is published on. [Tips.jar] gives null where the store allows none of its own
- * (the F-Droid/GitHub build, which links to GitHub Sponsors instead).
+ * (the GitHub build, which links to GitHub Sponsors instead).
  */
 interface TipJar {
     /** Offered tips, cheapest first; empty until the store answers, or while none are set up in the store. */

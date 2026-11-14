@@ -166,7 +166,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     val refreshed = MutableStateFlow(0)
     private val _apps = MutableStateFlow<List<AppInfo>>(emptyList())
     val apps = _apps.asStateFlow()
-    /** Store tips (Play build); null in the GitHub/F-Droid build. */
+    /** Store tips (Play build); null in the GitHub build. */
     val tips: TipJar? = Tips.jar(app)
 
     override fun onCleared() { tips?.close() }

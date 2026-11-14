@@ -32,7 +32,7 @@ app in `app/src/main/assets/notices.txt`. `tools/notices.sh` regenerates that fi
 |---|---|---|
 | Google Play Billing Library | The optional tip jar | Android Software Development Kit License |
 
-The APK published on GitHub and meant for F-Droid doesn't contain it.
+The APK published on GitHub doesn't contain it.
 
 ## Provided by Android
 
