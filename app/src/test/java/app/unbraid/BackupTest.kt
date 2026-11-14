@@ -23,7 +23,10 @@ import app.unbraid.data.Providers
 import app.unbraid.data.refilled
 import app.unbraid.data.restoredFrom
 import app.unbraid.vpn.LinkPicker
+import app.unbraid.ui.BACKUP_HOLDS
+import app.unbraid.ui.BACKUP_LEAVES
 import app.unbraid.ui.keepKnown
+import app.unbraid.ui.keysSwitch
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -312,6 +315,20 @@ class BackupTest {
         assertTrue(LinkPicker.pick(unmarked, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { Providers.get(it) }.blocked["w1"] is LinkPicker.KeyLeftOut)
         assertTrue(Backup.hasSecrets(full())); assertFalse(Backup.hasSecrets(newSetup()))
         assertTrue(Backup.read(Backup.export(full(), "", 0)).keys)
+    }
+
+    @Test fun theKeysSwitchIsAlwaysShownAndSaysWhatItCanInclude() {
+        // Provider routes only: nothing to include, so the switch is shown off and can't be turned on.
+        val providersOnly = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands"))), defaultRoute = "nl", version = VERSION)
+        val (none, noneText) = keysSwitch(Backup.hasSecrets(providersOnly), on = true)
+        assertFalse(none); assertTrue(noneText, noneText.startsWith("You have no own servers"))
+        // An own server: the switch works and keeps its on and off captions.
+        val (some, offText) = keysSwitch(Backup.hasSecrets(full()), on = false)
+        assertTrue(some); assertTrue(offText, offText.startsWith("Off:"))
+        assertTrue(keysSwitch(true, on = true).second.contains("strong passphrase"))
+        // Provider sign-ins are never offered: the texts say so and never suggest they can be included.
+        assertTrue(BACKUP_LEAVES.startsWith("Provider sign-ins are never saved"))
+        assertFalse(BACKUP_HOLDS.contains("sign-in", ignoreCase = true))
     }
 
     @Test fun aServerSavedWithoutKeysWaitsForItsConfig() {

@@ -49,11 +49,15 @@ import kotlinx.coroutines.withContext
 
 private const val KEYS_OFF = "Off: own servers are saved without keys or passwords, and home WireGuard is left out. On another phone, add each server's config again; until then its apps stay offline."
 private const val KEYS_ON = "The file holds your own servers' keys and passwords, so it needs a strong passphrase."
+private const val KEYS_NONE = "You have no own servers or home WireGuard, so there are no keys or passwords to include."
 private const val KEEP_NO_ROOM = "There's no room for another profile. Turn off keeping your current setup, or cancel."
 
 /** What a backup file holds, for the captions. */
-const val BACKUP_HOLDS = "Your routes, app choices, favourites, profiles, own servers and your settings. Server keys and passwords only if you choose."
-const val BACKUP_LEAVES = "Provider sign-ins and Tailscale are left out: sign in again after restoring. Statistics stay on this phone."
+const val BACKUP_HOLDS = "Your routes, app choices, favourites, profiles, own servers and your settings. Keys and passwords of your own servers and home WireGuard only if you choose."
+const val BACKUP_LEAVES = "Provider sign-ins are never saved in a backup: after restoring, sign in to each provider again. Tailscale is left out too. Statistics stay on this phone."
+
+/** The keys switch for a setup: whether it can be turned on (only with something to include), and its caption. */
+fun keysSwitch(secrets: Boolean, on: Boolean): Pair<Boolean, String> = secrets to when { !secrets -> KEYS_NONE; on -> KEYS_ON; else -> KEYS_OFF }
 
 /**
  * Back up and restore, held by [Ui] so a rotation keeps every step. In memory only: the passphrase, the file and what
@@ -216,10 +220,11 @@ private fun BackupSheet(ui: Ui, flow: BackupFlow) {
                 "save" -> {
                     Text("Back up settings", style = Type.title)
                     Text(BACKUP_HOLDS, style = Type.sub)
-                    Text(BACKUP_LEAVES, style = Type.caption, color = Ink.dim)
                     val here by ui.setup.collectAsStateWithLifecycle()
                     val secrets = Backup.hasSecrets(here)
-                    if (secrets) Switch("Include server keys and passwords", if (flow.keys) KEYS_ON else KEYS_OFF, flow.keys) { flow.keys = it }
+                    val (canInclude, keysText) = keysSwitch(secrets, flow.keys)
+                    Switch("Include server keys and passwords", keysText, flow.keys && canInclude, canInclude) { flow.keys = it }
+                    Text(BACKUP_LEAVES, style = Type.caption, color = Ink.dim)
                     DialogField(flow.pass, { flow.pass = it }, "Passphrase", secret = true)
                     DialogField(flow.pass2, { flow.pass2 = it }, "Passphrase again", secret = true)
                     val weak = flow.pass.isNotEmpty() && Backup.strength(flow.pass).first == 0
@@ -277,15 +282,15 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
 
 /** A switch row with what it means underneath, as on the confirm sheet. */
 @Composable
-private fun Switch(title: String, sub: String, on: Boolean, set: (Boolean) -> Unit) = Row(
-    Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Ink.surfaceHigh).toggleable(on, role = Role.Switch, onValueChange = set).padding(16.dp),
+private fun Switch(title: String, sub: String, on: Boolean, enabled: Boolean = true, set: (Boolean) -> Unit) = Row(
+    Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Ink.surfaceHigh).toggleable(on, enabled = enabled, role = Role.Switch, onValueChange = set).padding(16.dp),
     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
 ) {
     Column(Modifier.weight(1f)) {
-        Text(title, style = Type.body)
+        Text(title, style = Type.body, color = if (enabled) Ink.text else Ink.dim)
         Text(sub, style = Type.caption, color = Ink.dim)
     }
-    Toggle(on)
+    Toggle(on, enabled)
 }
 
 private fun count(n: Int, what: String) = "$n ${if (n == 1) what else what + "s"}"
