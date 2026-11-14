@@ -42,8 +42,8 @@ providers. It needs macOS 26 or later.
 
 ## Highlights
 
-- Give any app its own exit country or server, or let it skip the VPN with Direct. Several exits stay connected at
-  once.
+- Give any app its own exit country or server, let it follow the default route, or let it skip the VPN with
+  Direct. Several exits stay connected at once.
 - Use the VPN accounts you already have. One route can go through Mullvad while another uses NordVPN.
 - Reach your home network through Tailscale or Headscale, or send chosen apps out through a Tailscale exit node.
 - A low-load server is picked for you when the provider publishes load, or you can pin one server yourself.
@@ -124,7 +124,9 @@ and still use their VPN exit for everything else.
 It works with Android's own "Always-on VPN" and "Block connections without VPN" settings, which you can open from
 the app's settings. With blocking on, apps cannot go online without unbraid, Direct apps included. Apps you set
 to Direct still use your normal connection while unbraid is connected. unbraid's own requests can still go online
-(see Privacy). Apps in a work profile are outside this VPN.
+(see Privacy). Apps in a work profile are outside this VPN. If unbraid can't open its saved settings, it keeps apps
+offline until you retry or start fresh, and an app whose chosen route no longer exists is blocked rather than sent
+out over your normal connection.
 
 ### Does it get around my provider's device limit?
 
@@ -170,8 +172,8 @@ tools/build-libbox.sh                 # builds app/libs/libbox.aar from sing-box
 The build script keeps its work files in `~/.cache/unbraid-libbox`. Set `WORK` to use another folder. The patches
 in `tools/` stop libbox from writing the running configuration, which holds private keys, to disk, seal the
 Tailscale node state with an Android Keystore key, refuse files sent through Taildrop, give an OpenVPN tunnel a
-resolver inside it when its server pushes none, and let the app's connection checks look up their servers through
-the tunnel being checked. A release build is signed only if `.secrets/signing.properties`
+resolver inside it when its server pushes none, let the app's connection checks look up their servers through
+the tunnel being checked, and release every network part a tunnel built when it stops or fails to start. A release build is signed only if `.secrets/signing.properties`
 exists, so a plain checkout builds an unsigned APK.
 
 ## Privacy
@@ -184,7 +186,8 @@ so those services see your own IP address. The list of installed apps is read on
 phone so you can assign routes, and it never leaves the phone. "Copy a report" in the app's settings only copies text to the clipboard: the phone
 model, Android version, app version, which providers and countries you use, and counts. It holds no keys, accounts,
 addresses or app names. App data is excluded from Android's own backups. A backup file you save in Settings is locked with your passphrase
-([how](SECURITY.md#backup-files)). The privacy
+([how](SECURITY.md#backup-files)) and stays wherever you save it. Your own servers' keys and passwords go in only if
+you choose, and provider sign-ins never do. The privacy
 policy, with every service the app talks to, is at [unbraid.app/privacy](https://unbraid.app/privacy).
 
 To report a security problem, see [SECURITY.md](SECURITY.md).
