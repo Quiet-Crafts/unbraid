@@ -93,4 +93,16 @@ class WidgetGlanceTest {
         assertEquals("Tailscale", down.others.single().name)
         assertEquals(1 to 2, down.ok to down.total)
     }
+
+    /** A route only websites use is in use: listed, counted and checked like one with apps. */
+    @Test fun aRouteOnlyWebsitesUseIsShown() {
+        val s = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands")), Route("it", Location("nord", 106, "IT", "Italy"))), defaultRoute = "nl",
+            sites = mapOf("example.com" to "it", "bank.example" to app.unbraid.data.DIRECT))
+        val srv = app.unbraid.data.Server("x", "x", "10.0.0.1", "k", 1)
+        val g = glance(VpnState(Phase.On, servers = mapOf("nl" to srv)), s)
+        assertEquals(listOf("Italy", "Direct"), g.others.map { it.name })
+        assertEquals(listOf(1, 1), g.others.map { it.sites })
+        assertEquals(2, g.total); assertEquals(1, g.ok) // Italy has no tunnel yet
+        assertEquals("1 website", app.unbraid.vpn.usesLabel(0, 1)); assertEquals("2 apps · 3 websites", app.unbraid.vpn.usesLabel(2, 3)); assertEquals("0 apps", app.unbraid.vpn.usesLabel(0, 0))
+    }
 }

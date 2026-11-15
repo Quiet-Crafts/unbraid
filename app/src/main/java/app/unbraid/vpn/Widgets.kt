@@ -21,7 +21,9 @@ import app.unbraid.data.Setup
 import app.unbraid.vpn.VpnState.Phase
 
 /** One route as a widget shows it. [live] false = saved but carrying nothing now (off, paused, connecting). */
-data class WidgetRoute(val code: String, val name: String, val hue: Int, val apps: Int, val direct: Boolean, val live: Boolean, val failing: Boolean)
+data class WidgetRoute(val code: String, val name: String, val hue: Int, val apps: Int, val direct: Boolean, val live: Boolean, val failing: Boolean,
+    /** Websites with this route as their own: a count only, never an address. */
+    val sites: Int = 0)
 
 /**
  * What the home-screen widgets show, worked out from the connection and the setup alone: nothing is measured for them.
@@ -47,6 +49,12 @@ data class Glance(
     val down get() = total - ok
 }
 
+/** What a route carries, in a widget's words: its apps, its websites, or both. */
+fun usesLabel(apps: Int, sites: Int) = listOfNotNull(
+    (if (apps == 1) "1 app" else "$apps apps").takeIf { apps > 0 || sites == 0 },
+    (if (sites == 1) "1 website" else "$sites websites").takeIf { sites > 0 },
+).joinToString(" · ")
+
 /** [vpn] and [setup] as the widgets show them. */
 fun glance(vpn: VpnState, setup: Setup): Glance {
     val on = vpn.phase == Phase.On
@@ -56,12 +64,14 @@ fun glance(vpn: VpnState, setup: Setup): Glance {
         tsDown && setup.route(id)?.tsExit != null)
     fun row(id: String): WidgetRoute? {
         val apps = setup.apps.count { it.value == id }
-        val r = setup.route(id) ?: return if (id == DIRECT) WidgetRoute("", "Direct", 0, apps, direct = true, live = on, failing = false) else null
+        val sites = setup.sites.count { it.value == id }
+        val r = setup.route(id) ?: return if (id == DIRECT) WidgetRoute("", "Direct", 0, apps, direct = true, live = on, failing = false, sites = sites) else null
         // The name of an own server or a Tailscale device is the user's own: only its kind shows on a home screen.
-        return WidgetRoute(r.code, if (r.imported) r.source else r.name, r.hue, apps, direct = false, live = on, failing = failing(id))
+        return WidgetRoute(r.code, if (r.imported) r.source else r.name, r.hue, apps, direct = false, live = on, failing = failing(id), sites = sites)
     }
     val default = row(setup.defaultRoute)
-    val others = (setup.apps.values.toSet() - setup.defaultRoute).mapNotNull(::row).sortedWith(compareBy({ !it.failing }, { it.direct }, { it.name.lowercase() }))
+    // A route is in use through its apps or through websites alone.
+    val others = (setup.apps.values.toSet() + setup.sites.values - setup.defaultRoute).mapNotNull(::row).sortedWith(compareBy({ !it.failing }, { it.direct }, { it.name.lowercase() }))
     val tunnels = (listOfNotNull(default) + others).filter { !it.direct }
     return Glance(
         vpn.phase, !setup.directOnly, tunnels.count { !it.failing }, tunnels.size, setup.profile,
@@ -230,7 +240,7 @@ object Widgets {
         dot(R.id.dot, when { r.failing -> BAD; r.live && !r.direct -> GOOD; else -> null })
     }
 
-    private fun apps(n: Int) = if (n == 1) "1 app" else "$n apps"
+    private fun uses(r: WidgetRoute) = usesLabel(r.apps, r.sites)
 
     private fun small(ctx: Context, g: Glance) = RemoteViews(ctx.packageName, R.layout.widget_status).apply {
         val a = act(g)
@@ -253,7 +263,7 @@ object Widgets {
             addView(R.id.tiles, RemoteViews(ctx.packageName, R.layout.widget_tile).apply {
                 route(g, r, word = true)
                 val default = i == 0 && g.default != null
-                setTextViewText(R.id.label, if (default) "Default" else apps(r.apps))
+                setTextViewText(R.id.label, if (default) "Default" else uses(r))
                 setInt(R.id.tile, "setBackgroundResource", when { default -> R.drawable.widget_seg_hero; i == 0 -> R.drawable.widget_seg_l; i == shown.lastIndex -> R.drawable.widget_seg_r; else -> R.drawable.widget_seg_m })
             })
         }
@@ -266,7 +276,7 @@ object Widgets {
         g.others.forEachIndexed { i, r ->
             items.addItem(i.toLong(), RemoteViews(ctx.packageName, R.layout.widget_row).apply {
                 route(g, r, word = false)
-                setTextViewText(R.id.label, apps(r.apps))
+                setTextViewText(R.id.label, uses(r))
                 setOnClickFillInIntent(R.id.row, Intent())
             })
         }
