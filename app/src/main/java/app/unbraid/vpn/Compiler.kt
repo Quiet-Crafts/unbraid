@@ -1,7 +1,9 @@
 package app.unbraid.vpn
 
 import app.unbraid.APP
+import app.unbraid.data.BLOCK
 import app.unbraid.data.DIRECT
+import app.unbraid.data.builtIn
 import app.unbraid.data.Filters
 import app.unbraid.data.Home
 import app.unbraid.data.Link
@@ -71,6 +73,12 @@ object Compiler {
         val blocked: Set<String> = emptySet(),
         /** Tailscale asks the user to sign in (it gave a login link): only then do its sign-in pages skip the exit. */
         val tsLoginPending: Boolean = false,
+        /**
+         * Apps that share their Android user id with an app on Block. Android leaves an app outside the VPN by user id,
+         * so none of these may be left outside (a Direct one would take the blocked app out with it); inside, the engine
+         * refuses the whole id, as the blocked app's rule matches any app of it.
+         */
+        val blockedKin: Set<String> = emptySet(),
     )
 
     /**
@@ -97,7 +105,7 @@ object Compiler {
     class MissingDefault : Fail(MISSING_DEFAULT)
 
     /** Route ids that apps or websites are set to but the setup no longer has: their traffic is refused, never sent to the default. */
-    fun missing(s: Setup): Set<String> = (s.apps.values + s.sites.values).filterTo(HashSet()) { it != DIRECT && s.route(it) == null }
+    fun missing(s: Setup): Set<String> = (s.apps.values + s.sites.values).filterTo(HashSet()) { !builtIn(it) && s.route(it) == null }
 
     /**
      * A config that refuses every app's connections and lookups ($APP itself stays outside the VPN, as always): what runs
@@ -115,7 +123,9 @@ object Compiler {
         if (s.defaultMissing) throw MissingDefault()
         // Blocked routes get no tunnel, DNS server or probe; their apps still match, to be refused. So do apps on a route
         // that no longer exists.
-        val refused = i.blocked + missing(s)
+        val refused = i.blocked + missing(s) + BLOCK
+        // Apps on Block: refused before anything else is decided for them, a website's route, the home network and the LAN included.
+        val barred = JsonArray(s.apps.filterValues { it == BLOCK }.keys.sorted().map(::JsonPrimitive))
         val active = s.activeRoutes.filter { it.id !in i.blocked }
         val defaultBlocked = s.defaultRoute in i.blocked
         require(active.mapNotNull { it.tsExit }.distinct().size <= 1) { "Tailscale allows one exit node at a time. Use the same node for every Tailscale route." }
@@ -152,7 +162,7 @@ object Compiler {
             .apply { if (s.tailscale) putIfAbsent(TS_TAG, defaultDns); if (app.unbraid.BuildConfig.DEBUG) put("direct", "local") } // debug: the line itself, for comparisons
         // Apps with their own route, grouped. Direct only appears here under lockdown (otherwise excluded at OS level).
         val perApp = s.apps.entries.groupBy({ if (it.key in through) FILTERED else it.value }, { it.key }).toSortedMap()
-            .filterKeys { id -> id != s.defaultRoute && when (id) { DIRECT -> i.lockdown; else -> true } }
+            .filterKeys { id -> id != s.defaultRoute && when (id) { DIRECT -> i.lockdown; BLOCK -> false; else -> true } }
             .mapValues { (_, p) -> JsonArray(p.sorted().map(::JsonPrimitive)) }
         // Destination rules that beat any app rule. Repeated after every resolve, because fake-IP connections
         // only get a real address there.
@@ -195,11 +205,14 @@ object Compiler {
                     if (homeTs) add(obj("type" to "tailscale", "tag" to "dns-tailnet", "endpoint" to TS_TAG, "accept_default_resolvers" to false))
                 }
                 putJsonArray("rules") {
+                    // Block comes first: no name is looked up for a blocked app, nor a blocked website's for anyone.
+                    if (barred.isNotEmpty()) add(obj("package_name" to barred, "action" to "reject"))
+                    for ((id, names) in sites) if (id == BLOCK) add(obj(*names, "action" to "reject"))
                     if (homeTs && tsDomains.isNotEmpty()) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
                     if (s.prefs.lan) add(obj("domain_suffix" to arr("local", "lan", "home.arpa", "fritz.box"), "server" to "local"))
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
                     // Other query types (HTTPS, SVCB, TXT…) go to the website's exit, else to the asking app's own, never the ISP.
-                    for ((id, names) in sites) add(if (id in refused) obj(*names, "action" to "reject") else obj(*names, "server" to siteDns(id)))
+                    for ((id, names) in sites) if (id != BLOCK) add(if (id in refused) obj(*names, "action" to "reject") else obj(*names, "server" to siteDns(id)))
                     for ((id, pkgs) in perApp) add(if (id in refused) obj("package_name" to pkgs, "action" to "reject") else obj("package_name" to pkgs, "server" to dnsFor(id)))
                     // A blocked default never falls back to another resolver: the phone's network would see the names.
                     if (defaultBlocked) add(obj("action" to "reject"))
@@ -227,7 +240,9 @@ object Compiler {
                     // kills idle long-lived connections like push (FCM heartbeats run up to ~28 min apart).
                     put("udp_timeout", "30m")
                     // Under system lockdown Android drops anything that bypasses the TUN, so LAN goes through `direct` instead.
-                    if (s.prefs.lan && !i.lockdown) {
+                    // With an app on Block too: the LAN stays inside (and goes out through `direct`), or that app could still reach
+                    // the devices around it past every rule here.
+                    if (s.prefs.lan && !i.lockdown && barred.isEmpty()) {
                         // LAN never enters the tunnel: Android sends it straight to Wi-Fi. Home subnets reached
                         // through a tunnel stay routed, because the more specific route wins.
                         val home = (if (homeTs) homeSubnets(s) else emptyList()) + (homeWg?.let(::homeCidrs) ?: emptyList())
@@ -236,7 +251,7 @@ object Compiler {
                         put("route_exclude_address", JsonArray((LAN - home.toSet()).map(::JsonPrimitive)))
                     }
                     // Left out by Android: the apps the setup calls outside, so the screens and the engine follow one rule.
-                    put("exclude_package", JsonArray(((if (i.lockdown) emptyList() else s.apps.keys.filter(s::outside).sorted()) + i.selfPackage).map(::JsonPrimitive)))
+                    put("exclude_package", JsonArray(((if (i.lockdown) emptyList() else s.apps.keys.filter { s.outside(it) && it !in i.blockedKin }.sorted()) + i.selfPackage).map(::JsonPrimitive)))
                 })
                 // No tunnel to test, no inbound: sing-box would run a proxy with an empty user list unauthenticated.
                 i.probe?.takeIf { probeTags.isNotEmpty() }?.let { (port, password) ->
@@ -280,10 +295,21 @@ object Compiler {
                     val tunnels = active.filter { shared[it.id] == "r-${it.id}" && (i.links[it.id] is WgLink || i.links[it.id] is OvpnLink) }.map { tag(it.id) } +
                         listOfNotNull("home-wg".takeIf { homeWg != null }, TS_TAG.takeIf { ts })
                     if (tunnels.isNotEmpty()) add(obj("inbound" to JsonArray(tunnels.map(::JsonPrimitive)), "action" to "reject"))
+                    // An app on Block gets nothing, on any route: before its lookups are taken over, the home network, the LAN, a
+                    // website's route and its own.
+                    if (barred.isNotEmpty()) add(obj("package_name" to barred, "action" to "reject", "no_drop" to true))
                     add(obj("inbound" to arr("tun"), "protocol" to "dns", "action" to "hijack-dns"))
                     // UDP only: the engine never completes a hijacked TCP connection, and apps test "am I online?" by
                     // opening TCP to 8.8.8.8:53. That TCP goes out through the app's own exit like any other connection.
                     add(obj("inbound" to arr("tun"), "port" to 53, "network" to "udp", "action" to "hijack-dns"))
+                    // With an app on Block, what can't be told apart from its traffic goes too, here already (the LAN and home rules
+                    // come later): pings, which have no app, and connections Android names no app for. After the lookups above,
+                    // which every app needs and which are answered by who asks. Only from the phone's apps: the app's own tests
+                    // come in another way and name no app either.
+                    if (barred.isNotEmpty()) {
+                        add(obj("inbound" to arr("tun"), "network" to "icmp", "action" to "reject"))
+                        add(obj("type" to "logical", "mode" to "and", "rules" to JsonArray(listOf(obj("inbound" to arr("tun")), obj("package_name_regex" to arr("."), "invert" to true))), "action" to "reject"))
+                    }
                     // Fake IPs an app kept from the previous domain table name nothing now: refused at once, so the app
                     // looks the name up again instead of waiting on a dead address.
                     add(obj("ip_cidr" to JsonArray((FAKE_RANGES - FAKE_RANGES[i.fakeBlock]).map(::JsonPrimitive)), "action" to "reject", "no_drop" to true))
@@ -313,7 +339,8 @@ object Compiler {
                         // one read off the connection: an app could write any name there and take a website's route, Direct
                         // included, to an address of its choosing. So an app that looks names up itself keeps its own route.
                         // A website's route beats its app's. Looked up at its exit, then the home and LAN rules, as for an app.
-                        for ((id, names) in sites) {
+                        // Block before any website's route: a name under a blocked website goes nowhere, whatever else is set for it.
+                        for ((id, names) in sites.sortedBy { it.first != BLOCK }) {
                             if (id in refused) { add(obj(*names, "action" to "reject", "no_drop" to true)); continue }
                             // A website on a Tailscale exit that is itself a sign-in page skips the exit while the sign-in waits, as for an app.
                             if (onTs(id)) tsLogin.forEach { add(obj("type" to "logical", "mode" to "and", "rules" to JsonArray(listOf(obj(*names), obj(it))), "outbound" to "direct")) }

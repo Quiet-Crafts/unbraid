@@ -97,7 +97,7 @@ Your provider's limits still apply. Providers with a connection limit count each
 while Mullvad counts unbraid as one device. The default route stays connected while unbraid is on. Other routes
 connect as soon as an app is assigned to them, even if that app is idle.
 
-The app needs Android 13 or later on a 64-bit ARM phone. It is not on Google Play yet. To update, download the
+The app needs Android 13 or later on a 64-bit ARM phone. To update, download the
 new APK from the releases page and install it over the old one; your settings stay. The GitHub version can also
 check for a newer version about once a day, but only after you switch that on. It asks unbraid.app for a small file
 and identifies itself only as "unbraid".
@@ -108,6 +108,12 @@ and identifies itself only as "unbraid".
 
 In many VPN apps, split tunneling means you can pick apps that skip the VPN, while every other app leaves from the
 same place. unbraid lets you choose an exit for each app, and those exits can come from different providers.
+
+### Why isn't it on Google Play?
+
+Google only accepts VPN apps from developer accounts registered as an organisation, with a D-U-N-S business number
+and a verified legal name and address. unbraid is a small project made by one person, and we've chosen not to
+register that way, so there are no plans to publish it there. The APK on the releases page is the complete app.
 
 ### Can I use it without a VPN subscription?
 
@@ -165,7 +171,7 @@ You need JDK 17 or newer, Android SDK 37, NDK 28 and Go 1.26 (Go fetches the exa
 ```bash
 tools/build-libbox.sh                 # builds app/libs/libbox.aar from sing-box v1.14.4 with the patches in tools/
 ./gradlew :app:assembleFossRelease    # the APK published here, without Google Play Billing
-./gradlew :app:bundlePlayRelease      # the Google Play bundle, which adds an optional tip jar through Play Billing
+./gradlew :app:bundlePlayRelease      # a variant with a tip jar through Google Play Billing; not published
 ./gradlew :app:testFossDebugUnitTest
 ```
 
@@ -178,7 +184,7 @@ exists, so a plain checkout builds an unsigned APK.
 
 ## Privacy
 
-We add no advertising or analytics of our own. The Play version includes Google's Billing library for optional tips.
+We add no advertising or analytics of our own.
 You don't need an unbraid account. Your provider credentials are encrypted with
 an Android Keystore key and are only sent to the service they belong to. The app's own requests (provider sign-ins, server lists, the optional
 update check, and the connectivity check when every tunnel is down) use your phone's normal connection, not the VPN,

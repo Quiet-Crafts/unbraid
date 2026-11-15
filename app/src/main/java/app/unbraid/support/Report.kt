@@ -1,5 +1,6 @@
 package app.unbraid.support
 
+import app.unbraid.data.BLOCK
 import app.unbraid.data.DIRECT
 import app.unbraid.data.Filters
 import app.unbraid.data.Providers
@@ -44,6 +45,7 @@ object Report {
             "${i + 1}. ${kind(r)}, $place, $status, ${apps(r.id)}"
         }
         val direct = listOfNotNull("- Direct, active, ${apps(DIRECT)}".takeIf { s.defaultRoute == DIRECT || DIRECT in s.apps.values || DIRECT in s.sites.values })
+        val block = listOfNotNull("- Block, active, ${apps(BLOCK)}".takeIf { BLOCK in s.apps.values || BLOCK in s.sites.values })
         val filter = s.prefs.filter
         val filterKind = when (filter.id) { null -> "off"; Filters.OWN -> "own server"; "nextdns" -> "personal profile"; else -> "public resolver" }
         return (listOf(
@@ -68,6 +70,6 @@ object Report {
             "Providers refusing sign-in: ${vpn.stuck.values.count { it }}, without a tunnel: ${vpn.stuck.size}",
             "",
             "Routes (default: " + (if (s.defaultRoute == DIRECT) "Direct" else s.routes.indexOfFirst { it.id == s.defaultRoute }.let { if (it >= 0) "#${it + 1}" else "none" }) + ")",
-        ) + routes + direct).joinToString("\n")
+        ) + routes + direct + block).joinToString("\n")
     }
 }

@@ -224,17 +224,18 @@ fun Code(code: String, color: Color, modifier: Modifier = Modifier, filled: Bool
 
 /** A route chip: one slash per VPN hop, then the exit's code ("/NL"), in one size for every place; Direct keeps its small bypass glyph. */
 @Composable
-fun RouteMark(code: String?, color: Color, modifier: Modifier = Modifier, filled: Boolean = true, direct: Boolean = false, hops: Int = 1) {
+fun RouteMark(code: String?, color: Color, modifier: Modifier = Modifier, filled: Boolean = true, direct: Boolean = false, hops: Int = 1, block: Boolean = false) {
     val shape = RoundedCornerShape(8.dp)
     val ink = if (filled) Ink.ground else Ink.dim // an inherited route's code is text: dim, not faint
     Row(
-        modifier.size(if (direct) 30.dp else 36.dp, 26.dp).clip(shape)
+        modifier.size(if (direct || block) 30.dp else 36.dp, 26.dp).clip(shape)
             .then(if (filled) Modifier.background(color) else Modifier.border(1.dp, Ink.line, shape)),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center,
     ) {
         // Decorative marks keep their size while the exit's name follows the text scale.
         CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, 1f)) {
-            if (direct) Icon(Icons.direct, null, Modifier.size(14.dp), tint = ink)
+            if (block) Icon(Icons.block, null, Modifier.size(14.dp), tint = ink) // Block: no route at all
+            else if (direct) Icon(Icons.direct, null, Modifier.size(14.dp), tint = ink)
             else {
                 // Slash in the logo's face at the code's size, as in the wordmark; both faces share their metrics, so baselines meet.
                 if (hops > 0) Text("/".repeat(hops), style = Type.headline.copy(fontSize = Type.code.fontSize, lineHeight = Type.code.lineHeight), color = ink, maxLines = 1,

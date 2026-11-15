@@ -51,7 +51,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.unbraid.APP
+import app.unbraid.data.BLOCK
 import app.unbraid.data.DIRECT
+import app.unbraid.data.builtIn
 import app.unbraid.data.Route
 import app.unbraid.data.Setup
 import app.unbraid.data.Sites
@@ -60,9 +62,23 @@ import app.unbraid.data.Sites
 internal const val NO_ROUTE = "none"
 
 /** Where website [site] goes, for its row and for TalkBack. */
-internal fun siteState(s: Setup, site: String): String = when (val id = s.sites[site]) {
-    DIRECT -> "Direct, skips the VPN"
-    else -> s.route(id)?.name ?: "A route that no longer exists"
+internal fun siteState(s: Setup, site: String): String {
+    val id = s.sites[site]
+    // Block reaches every address under a blocked website, whatever route one of them has.
+    val over = s.sites.filter { (parent, to) -> to == BLOCK && site.endsWith(".$parent") }.keys.minOrNull()
+    return when {
+        id == BLOCK -> "Blocked, no traffic"
+        over != null -> "Blocked: it is under $over"
+        id == DIRECT -> "Direct, skips the VPN"
+        else -> s.route(id)?.name ?: "A route that no longer exists"
+    }
+}
+
+/** Said under a website's choices when it is on Direct or on Block: what that means for every app. */
+internal fun siteNote(id: String) = when (id) {
+    DIRECT -> "Direct: skips the VPN in every app that passes through $APP."
+    BLOCK -> "Block: apps that pass through $APP can't look this website up or reach it by name while it is connected. An app on Direct, or one using its own secure DNS, is not covered."
+    else -> null
 }
 
 /** Why [raw] can't be added as a website of [s], or null when it can (or nothing is typed yet). */
@@ -83,7 +99,7 @@ internal fun sitesNote(outside: Boolean) = "A website's route beats its app's, a
  * apps: the other exits A to Z by name, then Direct, then the default; addresses A to Z inside each.
  */
 internal fun shownSites(s: Setup, query: String, filter: String?): List<String> {
-    val rank = (s.routes.sortedBy { it.name.lowercase() }.map { it.id } + DIRECT).filter { it != s.defaultRoute }.withIndex().associate { (i, id) -> id to i }
+    val rank = (s.routes.sortedBy { it.name.lowercase() }.map { it.id } + DIRECT + BLOCK).filter { it != s.defaultRoute }.withIndex().associate { (i, id) -> id to i }
     return s.sites.filter { (site, id) -> (filter == null || id == filter) && (query.isEmpty() || site.contains(query, true)) }.keys
         .sortedWith(compareBy({ rank[s.sites[it]] ?: Int.MAX_VALUE }, { it }))
 }
@@ -129,7 +145,7 @@ internal fun LazyListScope.websites(
     open: String?, onOpen: (String?) -> Unit, outside: Boolean,
 ) {
     if (shown.isEmpty()) item("sites-empty") {
-        val name = when (filter) { null -> null; DIRECT -> "Direct"; else -> setup.route(filter)?.name ?: "this route" }
+        val name = when (filter) { null -> null; DIRECT -> "Direct"; BLOCK -> "Block"; else -> setup.route(filter)?.name ?: "this route" }
         val (text, all) = emptySites(setup.sites.isNotEmpty(), query, name)
         Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(text, style = Type.sub, color = Ink.dim)
@@ -155,16 +171,16 @@ private fun SiteRow(ui: Ui, site: String, setup: Setup, offered: List<Route>, ex
             Box(Modifier.size(40.dp).clip(RoundedCornerShape(14.dp)).background(Ink.surfaceTop), contentAlignment = Alignment.Center) { Icon(Icons.link, null, Modifier.size(22.dp), tint = Ink.text) }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(site, style = Type.body, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(siteState(setup, site), style = Type.caption, color = if (id != DIRECT && route == null) Ink.bad else Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(siteState(setup, site), style = Type.caption, color = if (!builtIn(id) && route == null) Ink.bad else Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            RouteMark(route?.code ?: "··", route?.let { Ink.route(it.hue) } ?: Ink.direct, Modifier.clearAndSetSemantics {}, direct = id == DIRECT)
+            RouteMark(route?.code ?: "··", route?.let { Ink.route(it.hue) } ?: if (id == BLOCK) Ink.bad else Ink.direct, Modifier.clearAndSetSemantics {}, direct = id == DIRECT, block = id == BLOCK)
         }
         AnimatedVisibility(
             expanded,
             enter = expandVertically(motion.defaultSpatialSpec()) + fadeIn(motion.fastEffectsSpec()),
             exit = shrinkVertically(motion.fastSpatialSpec()) + fadeOut(motion.fastEffectsSpec()),
         ) {
-            RouteTiles(routeTiles(setup, offered) + Tile(NO_ROUTE, "Remove", Icons.close, Ink.bad, tinted = false), id, "Direct: skips the VPN in every app that passes through $APP.".takeIf { id == DIRECT }) {
+            RouteTiles(routeTiles(setup, offered) + Tile(NO_ROUTE, "Remove", Icons.close, Ink.bad, tinted = false), id, siteNote(id)) {
                 ui.site(site, it.takeIf { t -> t != NO_ROUTE })
             }
         }
@@ -200,7 +216,7 @@ internal fun SiteSheet(setup: Setup, offered: List<Route>, onAdd: (String, Strin
                 Text(error ?: site?.let { "Covers $it and every address under it" } ?: "Type the address or paste a link", style = Type.caption, color = if (error != null) Ink.bad else Ink.dim, modifier = Modifier.padding(horizontal = 4.dp))
             }
             Text("GOES THROUGH", style = Type.overline, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp))
-            Box(Modifier.padding(start = 10.dp)) { RouteTiles(routeTiles(setup, offered), to, "Direct: skips the VPN in every app that passes through $APP.".takeIf { to == DIRECT }, indent = false) { to = it } }
+            Box(Modifier.padding(start = 10.dp)) { RouteTiles(routeTiles(setup, offered), to, siteNote(to), indent = false) { to = it } }
             Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                 Secondary("Cancel", onDismiss, color = Ink.dim)
                 Primary("Add", add, enabled = site != null && error == null)

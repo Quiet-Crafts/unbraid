@@ -101,6 +101,7 @@ import app.unbraid.Unbraid
 import app.unbraid.data.Updates
 import app.unbraid.stats.SpeedTest
 import app.unbraid.support.Nudges
+import app.unbraid.data.BLOCK
 import app.unbraid.data.DIRECT
 import app.unbraid.data.MAX_PROFILES
 import app.unbraid.data.Home
@@ -238,7 +239,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     // A profile lists its own routes, and routes nothing uses yet (one just added), never another profile's.
     val hidden = remember(setup, draft) { setup.hiddenRoutes(draft) }
     // Direct is built in, not a route: listed once an app in this profile uses it (its default shows as the card above).
-    val exceptions = (shown.routes.map { it.id } + DIRECT).filter { it != shown.defaultRoute && it !in hidden && (it != DIRECT || DIRECT in byRoute || DIRECT in sitesBy) }
+    // Block is built in too: listed last, once an app or a website is on it.
+    val exceptions = (shown.routes.map { it.id } + DIRECT + BLOCK).filter { it != shown.defaultRoute && it !in hidden && (!app.unbraid.data.builtIn(it) || it in byRoute || it in sitesBy) }
     val labels = remember(apps) { apps.associate { it.pkg to it.label } }
     // The default carries every app not sent elsewhere; its preview shows user apps, not system ones.
     val defaultPkgs = remember(apps, shown) { apps.filter { shown.routeOf(it.pkg) == shown.defaultRoute }.sortedBy { it.system }.map { it.pkg } }
@@ -442,7 +444,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     val route = shown.route(id)
                     Rise("routes", i + 1, reveal) { RouteRow(
                         ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size), sites = sitesBy[id].orEmpty(),
-                        exit = if (route == null) null else exitOf(id)?.let { it to pendingOf(it) }, warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering),
+                        exit = if (route == null) null else exitOf(id)?.let { it to pendingOf(it) }, warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering), blocked = id == BLOCK,
                     ) { sheet = id } }
                 }
                 // Nothing set apart yet: say what that means instead of leaving the page empty.
@@ -473,7 +475,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
         fun act(f: () -> Unit = {}) { if (closing) return; closing = true; f(); scope.launch { state.hide() }.invokeOnCompletion { sheet = null } }
         ModalBottomSheet({ sheet = null }, sheetState = state, containerColor = Ink.surface, contentColor = Ink.text) {
             Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
-                Text(if (id == "power") "Pause or disconnect" else (if (id == DIRECT) "Direct" else shown.route(id)?.name).orEmpty(), style = Type.title, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
+                Text(if (id == "power") "Pause or disconnect" else (if (id == DIRECT) "Direct" else if (id == BLOCK) "Block" else shown.route(id)?.name).orEmpty(), style = Type.title, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
                 if (id == "power") {
                     SheetNote(
                         if (vpn.lockdown) "Blocking is on: every app, Direct apps included, is offline while paused."
@@ -486,6 +488,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         SheetAction("Turn off in Android settings") { act { openSettings(Settings.ACTION_VPN_SETTINGS) } }
                         SheetNote("Always-on is set, so Android keeps $APP running; it can only be turned off there.")
                     } else SheetAction("Disconnect", Ink.bad) { act { ui.disconnect() } }
+                } else if (id == BLOCK) {
+                    SheetNote("Apps here can't connect to anything while $APP is connected: no connection, no lookup, on no route, the local network included. Websites here can't be looked up or reached by name in apps that pass through $APP. Paused or off, $APP blocks nothing. Assign them in Apps.", sub = true)
                 } else if (id == DIRECT) {
                     SheetNote("Apps here skip the VPN. Assign them in Apps.", sub = true)
                     if (shown.defaultRoute != DIRECT) SheetAction("Make default") { act { makeDefault(DIRECT) } }
@@ -793,13 +797,13 @@ private fun DefaultTile(
 @Composable
 private fun RouteRow(
     ui: Ui, route: Route?, live: Map<String, Server>, pkgs: List<String>, labels: Map<String, String>, lit: Boolean, shape: Shape,
-    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, sites: List<String> = emptyList(), onClick: () -> Unit,
+    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, sites: List<String> = emptyList(), blocked: Boolean = false, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val press = squish(source)
     val direct = route == null
     val fill = if (direct) Color.Transparent else Ink.surface
-    val chip = if (direct) Ink.direct else if (lit) Ink.route(route!!.hue) else Ink.dim // ground text on faint would be about 3:1
+    val chip = if (blocked) Ink.bad else if (direct) Ink.direct else if (lit) Ink.route(route!!.hue) else Ink.dim // ground text on faint would be about 3:1
     // Everything about the exit reads together on the right, its address under its server. A long (IPv6) address takes
     // a line of its own under the row; at large text the row stacks, apps above the exit, so nothing is cut away.
     val wide = exit?.first?.ip?.contains(':') == true
@@ -811,8 +815,8 @@ private fun RouteRow(
         Text(appsLabel(pkgs, labels, sites), style = Type.caption, color = if (pkgs.isEmpty() && sites.isEmpty()) Ink.dim else Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis)
     }
     val where = @Composable { end: Boolean ->
-        Text(route?.name ?: "Direct", style = Type.title, color = Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
-        Text(route?.let { place(it, live) } ?: "Skips the VPN", style = Type.caption, color = Ink.dim, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
+        Text(route?.name ?: if (blocked) "Block" else "Direct", style = Type.title, color = Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
+        Text(route?.let { place(it, live) } ?: if (blocked) "No traffic" else "Skips the VPN", style = Type.caption, color = Ink.dim, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
         warning?.let { Text(it, style = Type.caption, color = Ink.bad, textAlign = if (end) TextAlign.End else null) }
         if (!wide) exit?.let { (r, pending) -> ExitLine(r, pending) }
     }
@@ -828,14 +832,14 @@ private fun RouteRow(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { apps() }
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) { where(false) }
-                Slot { RouteMark(route?.code ?: "··", chip, Modifier.clearAndSetSemantics {}, direct = direct) }
+                Slot { RouteMark(route?.code ?: "··", chip, Modifier.clearAndSetSemantics {}, direct = direct, block = blocked) }
             }
         } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             // Fixed width, so the exit column always takes the rest and every row's chip ends on the same edge.
             Column(Modifier.width(AppsColumn), verticalArrangement = Arrangement.spacedBy(8.dp)) { apps() }
             // The exit reads right-aligned beside its chip, which closes the row on the right.
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) { where(true) }
-            Slot { RouteMark(route?.code ?: "··", chip, Modifier.clearAndSetSemantics {}, direct = direct) }
+            Slot { RouteMark(route?.code ?: "··", chip, Modifier.clearAndSetSemantics {}, direct = direct, block = blocked) }
         }
         exit?.takeIf { wide }?.let { (r, pending) -> Box(Modifier.fillMaxWidth().padding(end = 48.dp), contentAlignment = Alignment.CenterEnd) { ExitLine(r, pending) } }
     }

@@ -207,6 +207,9 @@ class SitesTest {
         assertEquals("A profile holds up to 50 websites", siteError(setup.copy(sites = (1..50).associate { "s$it.example" to "it" }), "rai.it"))
         assertEquals("Italy", siteState(setup, "example.com")); assertEquals("Direct, skips the VPN", siteState(setup, "bank.example"))
         assertEquals("A route that no longer exists", siteState(setup.copy(routes = emptyList()), "example.com"))
+        // A website under a blocked one is blocked with it, whatever route it has, and its row says so.
+        assertEquals("Blocked: it is under example.com", siteState(setup.copy(sites = mapOf("example.com" to app.unbraid.data.BLOCK, "api.example.com" to "us")), "api.example.com"))
+        assertEquals("Blocked, no traffic", siteState(setup.copy(sites = mapOf("example.com" to app.unbraid.data.BLOCK)), "example.com"))
         assertTrue(sitesNote(true).endsWith("Apps set to Direct are outside unbraid: websites opened in them aren't re-routed."))
         assertFalse("Direct" in sitesNote(false))
         // A route's row names its apps and websites while they fit, then counts them.
@@ -248,6 +251,7 @@ class SitesTest {
         assertEquals("example.com", appLabel(Stats.SITE + "example.com", null, null))
         assertEquals("2 apps and 1 website into 3 routes · Direct traffic not shown", flowsSub(listOf("a", "b", Stats.SITE + "example.com"), 3))
         assertEquals("1 app into 1 route · Direct traffic not shown", flowsSub(listOf("a"), 1))
+        assertEquals(2, setup.copy(sites = emptyMap()).stamped.version)
         assertEquals("1 app · 2 websites", laneCount(listOf("a", Stats.SITE + "x.com", Stats.SITE + "y.com"))); assertEquals("1 website", laneCount(listOf(Stats.SITE + "x.com"))); assertEquals("0 apps", laneCount(emptyList()))
     }
 }

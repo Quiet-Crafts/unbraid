@@ -334,7 +334,7 @@ fun ProfileSheet(setup: Setup, editing: String?, startEmpty: Boolean, onSave: (S
             Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Ink.surfaceHigh).padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("WHAT IT KEEPS", style = Type.overline, color = Ink.dim)
                 Keeps("Default route", listOf(if (!shown.ready) "Not set" else setup.route(shown.defaultRoute)?.name ?: "Direct"))
-                val ex = shown.apps.entries.filter { it.value != shown.defaultRoute }.groupBy({ it.value }, { it.key }).map { (id, pkgs) -> "${if (id == DIRECT) "Direct" else setup.route(id)?.name ?: id} · ${if (pkgs.size == 1) "1 app" else "${pkgs.size} apps"}" }
+                val ex = shown.apps.entries.filter { it.value != shown.defaultRoute }.groupBy({ it.value }, { it.key }).map { (id, pkgs) -> "${if (id == DIRECT) "Direct" else if (id == app.unbraid.data.BLOCK) "Block" else setup.route(id)?.name ?: id} · ${if (pkgs.size == 1) "1 app" else "${pkgs.size} apps"}" }
                 Keeps("Apps elsewhere", ex.take(3).ifEmpty { listOf("None") } + listOfNotNull(if (ex.size > 3) "+${ex.size - 3} more" else null))
             }
             if (shown.sites.isNotEmpty()) Text(if (shown.sites.size == 1) "And 1 website with its own route." else "And ${shown.sites.size} websites with their own routes.", style = Type.caption, color = Ink.dim)

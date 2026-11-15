@@ -3,6 +3,13 @@ package app.unbraid.data
 import kotlinx.serialization.Serializable
 
 const val DIRECT = "direct"
+/**
+ * In a route's place for an app or a website: nothing of it goes anywhere while the VPN is connected. No connection,
+ * no lookup, on no route, Direct included. Never a default route.
+ */
+const val BLOCK = "block"
+/** [id] is a choice that is no route: [DIRECT] or [BLOCK]. */
+fun builtIn(id: String) = id == DIRECT || id == BLOCK
 
 /** Where a route exits. Only [provider] set = that provider's fastest server anywhere. */
 @Serializable
@@ -316,7 +323,7 @@ data class Setup(
      * default and exceptions as far as their routes still exist. The refused profile keeps what it had.
      */
     fun back(ran: Setup): Setup {
-        val ok = { id: String -> id == DIRECT || route(id) != null }
+        val ok = { id: String -> builtIn(id) || route(id) != null }
         // Its profile again only if still as it ran: one edited meanwhile keeps those edits, the routes run unprofiled.
         val same = profiles.firstOrNull { it.name == ran.profile }?.takeIf { it == ran.live }
         return copy(profiles = saved, profile = same?.name,
@@ -352,9 +359,9 @@ data class Setup(
     /** The default of the setup in use names no route (damaged or older settings): the engine refuses to connect until another is chosen. */
     val defaultMissing get() = defaultRoute != DIRECT && route(defaultRoute) == null
     /** Apps whose chosen route no longer exists: blocked until they get another route or follow the default. */
-    val appsOnMissing get() = apps.filterValues { it != DIRECT && route(it) == null }.keys
+    val appsOnMissing get() = apps.filterValues { !builtIn(it) && route(it) == null }.keys
     /** Websites whose route no longer exists: blocked until they get another route or are removed. */
-    val sitesOnMissing get() = sites.filterValues { it != DIRECT && route(it) == null }.keys
+    val sitesOnMissing get() = sites.filterValues { !builtIn(it) && route(it) == null }.keys
     /** Saved profiles, not in use, whose default names no route: they need another default before they can be used. */
     val profilesMissingDefault get() = profiles.filter { it.name != profile && it.ready && it.defaultRoute != DIRECT && route(it.defaultRoute) == null }.map { it.name }
 
@@ -427,8 +434,11 @@ data class Setup(
     /** Website [site] (as [Sites.clean] gives it) on route [routeId], or with no route of its own (null), in profile [name] ([editing]). */
     fun site(name: String?, site: String, routeId: String?) = editing(name) { it.copy(sites = if (routeId == null) it.sites - site else it.sites + (site to routeId)) }
 
-    /** As saved: format 3 only with a website route somewhere, so a setup without one still opens in a build from before them. */
-    val stamped get() = copy(version = if (sites.isEmpty() && profiles.all { it.sites.isEmpty() }) minOf(version, 2) else VERSION)
+    /**
+     * As saved: format 3 only with a website route or a Block somewhere, so a setup without either still opens in a build
+     * from before them (which would drop the websites, and take a blocked app for one on a route that is gone).
+     */
+    val stamped get() = copy(version = if ((profiles + live).all { it.sites.isEmpty() && BLOCK !in it.apps.values }) minOf(version, 2) else VERSION)
 
     /** [provider]'s page setting [key], or its default. */
     fun opt(provider: String, key: String) = opts[provider]?.get(key) ?: Providers.get(provider)?.defaults?.get(key) ?: app.unbraid.data.COMMON_DEFAULTS[key]

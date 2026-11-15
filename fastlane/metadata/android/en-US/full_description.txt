@@ -47,8 +47,7 @@ No ads and no unbraid account. We add no analytics of our own. unbraid has no se
 - Google and Cloudflare, for connection checks through the provider tunnels it picks (Google also over your own connection if all fail);
 - GitHub, for some public server lists;
 - unbraid.app, once a day, only if you switch on update checks (GitHub version);
-- M-Lab, only when you start a speed test;
-- Google Play for optional tips in the Play version. Google's Billing library may also send technical data in the background.
+- M-Lab, only when you start a speed test.
 
 Logins and keys are encrypted with an Android Keystore key and sent only to the service they belong to. Your installed-app list stays on your phone. Privacy policy: https://unbraid.app/privacy
 

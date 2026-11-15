@@ -203,7 +203,7 @@ object Backup {
      */
     fun valid(s: Setup): Setup {
         need(s.routes.size <= 500 && s.servers.size <= 500 && s.favorites.size <= 2000 && s.profiles.size <= MAX_PROFILES, "it holds more than unbraid keeps")
-        need(s.routes.all { ID.matches(it.id) && it.id != DIRECT } && s.routes.map { it.id }.toSet().size == s.routes.size, "a route has a missing or repeated name")
+        need(s.routes.all { ID.matches(it.id) && !builtIn(it.id) } && s.routes.map { it.id }.toSet().size == s.routes.size, "a route has a missing or repeated name")
         need(s.servers.all { ID.matches(it.id) } && s.servers.map { it.id }.toSet().size == s.servers.size, "an own server has a missing or repeated name")
         s.servers.forEach { sv ->
             need(listOfNotNull(sv.wg, sv.ovpn, sv.ss).size == 1, "an own server has no configuration")
@@ -220,9 +220,11 @@ object Backup {
             if (r.keyless) keyless(r.name, r.wg, r.ovpn, r.ss) else server(r.name, r.wg, r.ovpn, r.ss)
         }
         s.home.wg?.let { server(it.name, it, null, null) }
-        val ok = { id: String -> id == DIRECT || s.route(id) != null }
+        // An app or a website may be on Block; a default route never is.
+        val ok = { id: String -> builtIn(id) || s.route(id) != null }
         val pkgs = { m: Map<String, String> -> m.keys.all { it.length <= 255 && PKG.matches(it) } }
         val sites = { m: Map<String, String> -> m.size <= Sites.MAX && m.all { (site, id) -> Sites.clean(site) == site && ok(id) } }
+        need(s.defaultRoute != BLOCK && s.profiles.none { it.defaultRoute == BLOCK }, "a default route can't be Block")
         need(s.defaultRoute.let(ok) && s.apps.values.all(ok) && s.added.all(ok) && pkgs(s.apps), "an app or the default route names a route that isn't there")
         need(sites(s.sites), "a website's route is damaged")
         need(s.onNet.all { (kind, name) -> kind in NET_KINDS && s.profiles.any { it.name == name } }, "a profile to switch to isn't there")
@@ -298,7 +300,7 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     if (r.profiles.size >= MAX_PROFILES) return null
     val name = (listOf(keepAs) + (2..MAX_PROFILES + 1).map { "$keepAs $it" }).firstNotNullOfOrNull { r.profileName(it) } ?: return null
     val fresh = { prefix: String, taken: Set<String> -> generateSequence { prefix + java.util.UUID.randomUUID().toString().take(8) }.first { it !in taken } }
-    val ok = { id: String -> id == DIRECT || route(id) != null }
+    val ok = { id: String -> builtIn(id) || route(id) != null }
     val apps = apps.filterValues(ok)
     val sites = sites.filterValues(ok)
     // Without profiles every route here shows, those no app uses too: all of them are kept, as saving a first profile does.

@@ -359,7 +359,9 @@ internal object Collector {
     private class Conn(val app: String, val exit: String, val server: String?, var up: Long, var down: Long)
     private class Ev(val type: Long, val id: String, val total: Pair<Long, Long>?, val delta: Pair<Long, Long>, val uid: Int, val tag: String?, val closed: Boolean, val created: Long, val own: Boolean, val pkg: String?,
         /** The name the connection goes to, when the engine knows one. Only compared with the user's websites, never kept. */
-        val host: String?)
+        val host: String?,
+        /** An address rule carried it (the home network or the LAN), not an app's or a website's route. */
+        val byAddress: Boolean = false)
 
     private var client: CommandClient? = null
     /**
@@ -438,7 +440,7 @@ internal object Collector {
                 list += Ev(e.type.toLong(), e.id, c?.let { x -> x.uplinkTotal to x.downlinkTotal }, e.uplinkDelta to e.downlinkDelta,
                     c?.processInfo?.userID ?: -1, c?.let { x -> first(x.chain()) }, (c?.closedAt ?: 0) > 0, c?.createdAt ?: 0, c?.inbound == Compiler.PROBE,
                     c?.processInfo?.packageNames()?.let { p -> buildList { while (p.hasNext()) add(p.next()) }.minOrNull() },
-                    c?.let { x -> x.domain.ifEmpty { x.destination.substringBeforeLast(':') } })
+                    c?.let { x -> x.domain.ifEmpty { x.destination.substringBeforeLast(':') } }, c?.rule?.startsWith("ip_cidr") == true)
             }
             val reset = events.reset
             Stats.post { if (gen == Stats.gen) { heard = System.currentTimeMillis(); retries = 0; apply(list, reset) } }
@@ -481,7 +483,7 @@ internal object Collector {
             // A connection to a website with a route of its own counts under that website, not under the app that opened it.
             val site = if (e.own) null else e.host?.let { Sites.match(it, setup.sites.keys) }
             val app = if (e.own) Stats.ctx.packageName else site?.let { Stats.SITE + it } ?: appOf(e).also(Stats::noteApp).pkg
-            val exit = (if (e.own) SpeedTest.exitOn(e.tag) else SpeedTest.nodeExitOn(e.tag)) ?: exitOf(e.tag, site?.let(setup.sites::get) ?: setup.routeOf(app), tags)
+            val exit = (if (e.own) SpeedTest.exitOn(e.tag) else SpeedTest.nodeExitOn(e.tag)) ?: exitOf(e.tag, site?.let(setup.sites::get) ?: setup.routeOf(app), tags, e.byAddress)
             Conn(app, ids.getOrPut(exit) { Stats.note(exit, setup) }, servers[exit]?.name, 0, 0)
         }
         val replayed = HashSet<String>()
@@ -563,9 +565,10 @@ internal object Collector {
     private fun appOf(e: Ev) = Stats.resolveApp(e.pkg, e.uid, if (e.uid < 0) null else uidPackages.getOrPut(e.uid) { Stats.ctx.packageManager.getPackagesForUid(e.uid)?.toList().orEmpty() })
 
     /** The tunnel tag says which tunnel; when routes share it, the app's or website's [own] route among them says which route. */
-    private fun exitOf(tag: String?, own: String, tags: Map<String, String>): String {
+    private fun exitOf(tag: String?, own: String, tags: Map<String, String>, byAddress: Boolean = false): String {
         if (tag == null || tag == "direct") return DIRECT
-        if (tag == "home-wg") return Stats.HOME
+        // The home network over Tailscale shares its tunnel with a Tailscale exit: the rule that carried it tells them apart.
+        if (tag == "home-wg" || byAddress && tag == Compiler.TS_TAG) return Stats.HOME
         val candidates = tags.filterValues { it == tag }.keys
         if (candidates.isEmpty()) return if (tag == Compiler.TS_TAG) Stats.HOME else tag.removePrefix("r-")
         return if (own in candidates) own else if (tag == Compiler.TS_TAG) Stats.HOME else candidates.first()

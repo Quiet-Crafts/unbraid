@@ -469,7 +469,8 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 Ring(exits.map { (id, b) -> b.total.toFloat() to (v.exits[id]?.color ?: Ink.faint) }, "Share by route: " + exits.joinToString { (id, b) -> "${v.exits[id]?.name} ${bytesText(b.total)}" }, size = 56.dp, stroke = 8.dp)
                                 Column {
-                                    Num(v.apps.filter { it.second != DIRECT }.map { it.first }.distinct().size.toString(), "apps", 26)
+                                    // Apps only: a website with a route of its own is no app.
+                                    Num(v.apps.filter { it.second != DIRECT && !it.first.startsWith(Stats.SITE) }.map { it.first }.distinct().size.toString(), "apps", 26)
                                     Text("into ${exits.size} ${if (exits.size == 1) "route" else "routes"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
@@ -740,7 +741,7 @@ private fun Lane(
             top.forEach { a ->
                 Text(buildAnnotatedString { append(name(a.first)); withStyle(SpanStyle(color = Ink.dim)) { append(" ${bytesText(a.third)}") } }, style = Type.caption.copy(fontSize = 12.sp), color = Ink.text, maxLines = 1)
             }
-            if (rest.isNotEmpty()) Text("+${rest.size} apps ${bytesText(restBytes)}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
+            if (rest.isNotEmpty()) Text("+${laneCount(rest.map { it.first })} ${bytesText(restBytes)}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1)
         }
     }
 }

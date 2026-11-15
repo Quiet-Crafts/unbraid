@@ -63,12 +63,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.unbraid.data.BLOCK
 import app.unbraid.data.DIRECT
 import app.unbraid.data.Setup
 import app.unbraid.data.Sites
 
 private fun Setup.codeOf(id: String) = route(id)?.code ?: "··"
-private fun Setup.colorOf(id: String) = route(id)?.let { Ink.route(it.hue) } ?: Ink.direct
+private fun Setup.colorOf(id: String) = route(id)?.let { Ink.route(it.hue) } ?: if (id == BLOCK) Ink.bad else Ink.direct
+
+/** Said under the choices of an app or a website on Block: when it holds. */
+internal const val BLOCK_NOTE = "Block: this app can't connect to anything while $APP is connected, the local network included. Paused or off, $APP blocks nothing."
 
 /**
  * The Apps list when nothing shows: why, and the one action that brings apps back ("Show system apps" or "Show all"),
@@ -100,6 +104,7 @@ internal fun routeState(s: Setup, pkg: String): String {
     val where = when {
         id.isEmpty() -> "Not set"
         id == DIRECT -> "Direct"
+        id == BLOCK -> "Blocked"
         else -> s.route(id)?.name ?: "A route that no longer exists"
     }
     return "$where, " + if (s.follows(pkg)) "follows default" else "chosen"
@@ -145,7 +150,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     val motion = MaterialTheme.motionScheme
     // Grouped by exit: the other exits A to Z by name (Albania, Bulgaria, United States), then Direct, then the default.
     val rank = remember(setup) {
-        (setup.routes.sortedBy { it.name.lowercase() }.map { it.id } + DIRECT).filter { it != setup.defaultRoute }
+        (setup.routes.sortedBy { it.name.lowercase() }.map { it.id } + DIRECT + BLOCK).filter { it != setup.defaultRoute }
             .withIndex().associate { (i, id) -> id to i }
     }
     // `apps` is already sorted by label, and sortedBy is stable, so each group stays in label order.
@@ -157,7 +162,8 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
         }.sortedBy { rank[placeOf(it.pkg)] ?: Int.MAX_VALUE }
     }
     val direct = apps.count { it.pkg in setup.apps && setup.apps[it.pkg] == DIRECT }
-    val routed = apps.count { it.pkg in setup.apps } - direct
+    val blocked = apps.count { setup.apps[it.pkg] == BLOCK }
+    val routed = apps.count { it.pkg in setup.apps } - direct - blocked
 
     LaunchedEffect(shown, land) {
         val key = land ?: return@LaunchedEffect
@@ -170,7 +176,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     Screen(
         state = list,
         // Before the app list may be read its counts are unknown, not 0.
-        overline = if (disclosed) "${apps.size} installed" else "", title = "Apps", sub = listOfNotNull("$routed routed · $direct direct".takeIf { disclosed }, setup.sites.size.takeIf { it > 0 }?.let { if (it == 1) "1 website" else "$it websites" }).joinToString(" · "),
+        overline = if (disclosed) "${apps.size} installed" else "", title = "Apps", sub = listOfNotNull("$routed routed · $direct direct".takeIf { disclosed }, "$blocked blocked".takeIf { disclosed && blocked > 0 }, setup.sites.size.takeIf { it > 0 }?.let { if (it == 1) "1 website" else "$it websites" }).joinToString(" · "),
         search = {
             if (viewing != null && viewing != setup.profile) Column(Modifier.padding(start = 24.dp, end = Gutter, bottom = 4.dp)) {
                 Text("Editing $viewing · not in use. ${setup.profile?.let { "$it is in use." } ?: "No profile is in use."}", style = Type.caption, color = Ink.dim)
@@ -203,6 +209,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                 }
                 if (!sites && setup.defaultRoute.isEmpty()) FilterChip("Not set", null, filter == "") { filter = "" }
                 FilterChip("Direct", Ink.direct, chosen == DIRECT, direct = true) { choose(DIRECT) }
+                FilterChip("Block", Ink.bad, chosen == BLOCK) { choose(BLOCK) }
                 if (!sites) FilterChip("System", null, showSystem, independent = true) { showSystem = !showSystem }
             }
         },
@@ -222,7 +229,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                 a.system && a.pkg !in setup.apps && (filter == null || placeOf(a.pkg) == filter) &&
                     (query.isEmpty() || a.label.contains(query, true) || a.pkg.contains(query, true))
             }
-            val name = when (filter) { null -> null; DIRECT -> "Direct"; "" -> "no route yet"; else -> setup.route(filter)?.name ?: "this route" }
+            val name = when (filter) { null -> null; DIRECT -> "Direct"; BLOCK -> "Block"; "" -> "no route yet"; else -> setup.route(filter)?.name ?: "this route" }
             val (text, action) = emptyApps(query, name, hidden)
             Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(text, style = Type.sub, color = Ink.dim)
@@ -293,7 +300,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
             // An empty profile has no default route yet: its unassigned apps have no exit.
             // Filled: the app chose this route (the default too); outlined: it follows the default.
             if (current.isEmpty()) Text("Not set", style = Type.caption, color = Ink.dim)
-            else RouteMark(setup.codeOf(current), setup.colorOf(current), Modifier.clearAndSetSemantics {}, filled = !setup.follows(a.pkg), direct = current == DIRECT)
+            else RouteMark(setup.codeOf(current), setup.colorOf(current), Modifier.clearAndSetSemantics {}, filled = !setup.follows(a.pkg), direct = current == DIRECT, block = current == BLOCK)
         }
         // The exits spring open under the row and fade in; closing reverses it.
         AnimatedVisibility(
@@ -307,7 +314,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
                 Tile(FOLLOW, "Follow default", Icons.layers, d?.let { Ink.route(it.hue) } ?: Ink.direct, tinted = false,
                     sub = followSub(setup)).takeIf { setup.defaultRoute.isNotEmpty() },
             ) + routeTiles(setup, offered) + Tile("", "More locations", Icons.more, Ink.dim, tinted = false)
-            RouteTiles(tiles, tickedTile(setup, a.pkg), outsideNote(setup, a.pkg, lockdown)) { id ->
+            RouteTiles(tiles, tickedTile(setup, a.pkg), outsideNote(setup, a.pkg, lockdown) ?: BLOCK_NOTE.takeIf { explicit == BLOCK }) { id ->
                 when (id) { "" -> openPicker("app:${a.pkg}"); FOLLOW -> ui.followDefault(a.pkg); else -> ui.assign(a.pkg, id) }
             }
         }
@@ -388,4 +395,4 @@ internal fun RouteTiles(tiles: List<Tile>, ticked: String?, note: String?, inden
 /** A route as a tile: the tiles of every profile route, in the order an app's menu shows them. */
 internal fun routeTiles(setup: Setup, offered: List<app.unbraid.data.Route>) = offered.sortedByDescending { it.id == setup.defaultRoute }.map {
     Tile(it.id, if (it.imported) it.name else it.loc.city ?: it.name, if (it.tsExit != null) Icons.home else Icons.tunnel, Ink.route(it.hue), sub = it.source.takeIf { s -> s != it.name })
-} + Tile(DIRECT, "Direct", Icons.direct, Ink.direct, tinted = false)
+} + Tile(DIRECT, "Direct", Icons.direct, Ink.direct, tinted = false) + Tile(BLOCK, "Block", Icons.block, Ink.bad, tinted = false, sub = "No traffic")

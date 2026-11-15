@@ -585,7 +585,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // What ran, but never with tailnet DNS authority or a sign-in way around the exit that was taken back since.
         val now = store.setup.value.home
         val input = Compiler.Input(last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = now.tsSuffixAllowed)), last.links, last.selfPackage, last.lockdown,
-            last.tsDir, last.cacheFile, store.tsSuffix, next, last.fakeBlock, last.blocked, last.tsLoginPending && tsLoginPending)
+            last.tsDir, last.cacheFile, store.tsSuffix, next, last.fakeBlock, last.blocked, last.tsLoginPending && tsLoginPending, last.blockedKin)
         val json = Compiler.compile(input)
         Compiler.tcpOnly(json).let { u -> Health.stun.udpless(u) { tcpOnly = tcpOnly + u } }
         srv.startOrReloadService(json, OverrideOptions())
@@ -880,7 +880,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var portNet: android.net.Network? = null
 
     private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
-        Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending)
+        Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(setup))
+
+    /** The apps that share their Android user id with an app on Block ([Compiler.Input.blockedKin]). */
+    private fun blockedKin(setup: Setup): Set<String> = setup.apps.filterValues { it == app.unbraid.data.BLOCK }.keys.flatMapTo(HashSet()) { pkg ->
+        runCatching { packageManager.getPackagesForUid(packageManager.getPackageUid(pkg, 0))?.toList() }.getOrNull().orEmpty()
+    }
 
     /** The open table's fake-IP block for a reload; a new table takes the next one, refusing the rest. */
     private fun fakeBlock() = Compiler.nextBlock(lastBlock ?: store.fakeBlock, LookupTable.isOpen())
