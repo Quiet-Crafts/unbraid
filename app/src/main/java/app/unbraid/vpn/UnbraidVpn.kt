@@ -1080,7 +1080,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     private fun notify(setup: Setup) {
         notice(setup.activeRoutes.joinToString("  ·  ") { r ->
-            if (r.id == setup.defaultRoute) "${r.code} default" else "${r.code} ${setup.apps.count { it.value == r.id }}"
+            if (r.id == setup.defaultRoute) "${r.code} default" else "${r.code} ${setup.apps.count { it.value == r.id } + setup.sites.count { it.value == r.id }}" // its apps and websites
         }.ifEmpty { "Only selected apps" })
     }
 

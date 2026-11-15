@@ -81,10 +81,10 @@ import app.unbraid.data.graphemes
 import app.unbraid.data.takeGraphemes
 
 /** The label style of the profile controls: the title face at body size. */
-private val Label = Type.title.copy(fontSize = Type.sub.fontSize)
+internal val Label = Type.title.copy(fontSize = Type.sub.fontSize)
 
 /** A connected button group's segment [i] of [n]: outer corners 22 dp, inner ones 8 dp. */
-private fun segmentShape(i: Int, n: Int): RoundedCornerShape {
+internal fun segmentShape(i: Int, n: Int): RoundedCornerShape {
     val start = if (i == 0) 22.dp else 8.dp
     val end = if (i == n - 1) 22.dp else 8.dp
     return RoundedCornerShape(start, end, end, start)
@@ -267,7 +267,8 @@ fun summary(s: Setup, p: Profile): String {
     val n = p.apps.values.count { it != p.defaultRoute }
     if (!p.ready) return "Empty · no default route yet"
     val default = if (p.defaultRoute == DIRECT) "Direct" else s.route(p.defaultRoute)?.name ?: "Default route no longer exists"
-    return "$default · ${if (n == 0) "no apps elsewhere" else if (n == 1) "1 app elsewhere" else "$n apps elsewhere"}"
+    return "$default · ${if (n == 0) "no apps elsewhere" else if (n == 1) "1 app elsewhere" else "$n apps elsewhere"}" +
+        when (p.sites.size) { 0 -> ""; 1 -> " · 1 website"; else -> " · ${p.sites.size} websites" }
 }
 
 /**
@@ -283,7 +284,7 @@ fun ProfileSheet(setup: Setup, editing: String?, startEmpty: Boolean, onSave: (S
     var empty by rememberSaveable { mutableStateOf(startEmpty) }
     val ok = setup.profileName(name, except = editing)
     val taken = name.isNotBlank() && ok == null && graphemes(name.trim()) <= PROFILE_NAME
-    val shown = setup.saved.firstOrNull { it.name == editing } ?: if (empty) Profile("", "") else Profile("", setup.defaultRoute, setup.apps)
+    val shown = setup.saved.firstOrNull { it.name == editing } ?: if (empty) Profile("", "") else Profile("", setup.defaultRoute, setup.apps, sites = setup.sites)
     val title = when { editing != null -> "Edit profile"; setup.profile == null && !empty -> "Save this setup"; else -> "New profile" }
     val sub = when {
         editing != null -> "Rename it, or delete it"
@@ -333,6 +334,7 @@ fun ProfileSheet(setup: Setup, editing: String?, startEmpty: Boolean, onSave: (S
                 val ex = shown.apps.entries.filter { it.value != shown.defaultRoute }.groupBy({ it.value }, { it.key }).map { (id, pkgs) -> "${if (id == DIRECT) "Direct" else setup.route(id)?.name ?: id} · ${if (pkgs.size == 1) "1 app" else "${pkgs.size} apps"}" }
                 Keeps("Apps elsewhere", ex.take(3).ifEmpty { listOf("None") } + listOfNotNull(if (ex.size > 3) "+${ex.size - 3} more" else null))
             }
+            if (shown.sites.isNotEmpty()) Text(if (shown.sites.size == 1) "And 1 website with its own route." else "And ${shown.sites.size} websites with their own routes.", style = Type.caption, color = Ink.dim)
             Text("Routes are shared: changing a route's location changes it in every profile that uses it.", style = Type.caption, color = Ink.dim)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                 if (editing != null) { Secondary("Delete", { deleting = true }, color = Ink.bad); Box(Modifier.weight(1f)) }

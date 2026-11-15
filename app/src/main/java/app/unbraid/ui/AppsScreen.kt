@@ -118,6 +118,10 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     // What points at one profile's exits starts over when another is viewed; the search stays.
     var filter by rememberSaveable(viewing) { mutableStateOf<String?>(null) }
     var showSystem by rememberSaveable { mutableStateOf(false) }
+    // The page's two lists: apps, and websites with a route of their own.
+    var sites by rememberSaveable { mutableStateOf(false) }
+    var openSite by rememberSaveable(viewing) { mutableStateOf<String?>(null) }
+    var addSite by rememberSaveable { mutableStateOf(false) }
     var open by rememberSaveable(viewing) { mutableStateOf<String?>(null) }
     // The exit the open app had when it was opened: it keeps its place (and filter) until closed, then regroups.
     var openedAs by rememberSaveable(viewing) { mutableStateOf<String?>(null) }
@@ -159,7 +163,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     Screen(
         state = list,
         // Before the app list may be read its counts are unknown, not 0.
-        overline = if (disclosed) "${apps.size} installed" else "", title = "Apps", sub = if (disclosed) "$routed routed · $direct direct" else "",
+        overline = if (disclosed) "${apps.size} installed" else "", title = "Apps", sub = listOfNotNull("$routed routed · $direct direct".takeIf { disclosed }, setup.sites.size.takeIf { it > 0 }?.let { if (it == 1) "1 website" else "$it websites" }).joinToString(" · "),
         search = {
             if (viewing != null && viewing != setup.profile) Column(Modifier.padding(start = 24.dp, end = Gutter, bottom = 4.dp)) {
                 Text("Editing $viewing · not in use. ${setup.profile?.let { "$it is in use." } ?: "No profile is in use."}", style = Type.caption, color = Ink.dim)
@@ -169,10 +173,11 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                     if (setup.defaultRoute.isNotEmpty()) Secondary("Use $viewing", { switchTo(viewing.orEmpty()) })
                 }
             }
-            SearchField(q, { q = it }, "Search apps")
+            AppsOrSites(sites, setup.sites.size) { sites = it }
+            if (!sites) SearchField(q, { q = it }, "Search apps")
         },
         belowSearch = {
-            Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (!sites) Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip("All", Ink.text, filter == null) { filter = null }
                 // Two routes with one country code (NordVPN NL, Mullvad NL) are told apart by provider.
                 offered.forEach { r ->
@@ -190,6 +195,10 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
             }
         },
     ) {
+        if (sites) {
+            websites(ui, setup, offered, openSite, { openSite = it }, { addSite = true }, outside = !lockdown && setup.apps.keys.any(setup::outside))
+            return@Screen
+        }
         if (!disclosed) item("disclose") {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 12.dp).then(tourAnchor(TourStop.AppsList)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("$APP needs the list of installed apps to route each one. It stays on this phone.", style = Type.sub, color = Ink.dim)
@@ -220,6 +229,8 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
             }
         }
     }
+
+    if (addSite) SiteSheet(setup, offered, { site, to -> ui.site(site, to); addSite = false }, { addSite = false })
 }
 
 @Composable
@@ -283,26 +294,47 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
             val tiles = listOfNotNull(
                 Tile(FOLLOW, "Follow default", Icons.layers, d?.let { Ink.route(it.hue) } ?: Ink.direct, tinted = false,
                     sub = followSub(setup)).takeIf { setup.defaultRoute.isNotEmpty() },
-            ) + offered.sortedByDescending { it.id == setup.defaultRoute }.map {
-                Tile(it.id, if (it.imported) it.name else it.loc.city ?: it.name, if (it.tsExit != null) Icons.home else Icons.tunnel, Ink.route(it.hue), sub = it.source.takeIf { s -> s != it.name })
-            } + Tile(DIRECT, "Direct", Icons.direct, Ink.direct, tinted = false) + Tile("", "More locations", Icons.more, Ink.dim, tinted = false)
-            val ticked = tickedTile(setup, a.pkg)
-            // Wrapped onto as many lines as it takes, so no choice hides off-screen; each line is one connected group.
-            BoxWithConstraints(Modifier.padding(start = 68.dp, end = 14.dp, bottom = 14.dp).fillMaxWidth()) {
-              val gap = ButtonGroupDefaults.ConnectedSpaceBetween
-              // Wider with large text, so labels keep whole words; fewer tiles per line then, one when it must.
-              val tileWidth = tileWidth(androidx.compose.ui.platform.LocalDensity.current.fontScale, maxWidth)
-              val perLine = ((maxWidth + gap) / (tileWidth + gap)).toInt().coerceAtLeast(1)
-              Column {
-              Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { tiles.chunked(perLine).forEach { line -> Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+            ) + routeTiles(setup, offered) + Tile("", "More locations", Icons.more, Ink.dim, tinted = false)
+            RouteTiles(tiles, tickedTile(setup, a.pkg), outsideNote(setup, a.pkg, lockdown)) { id ->
+                when (id) { "" -> openPicker("app:${a.pkg}"); FOLLOW -> ui.followDefault(a.pkg); else -> ui.assign(a.pkg, id) }
+            }
+        }
+        // A Direct app's lookups: outside unbraid (the phone's DNS) or through it, with unbraid's filter.
+        val f = setup.prefs.filter
+        // A setting of every profile: not offered while editing a profile not in use.
+        if (expanded && explicit == DIRECT && f.server() != null && !draft) {
+            val on = f.through(a.pkg)
+            GroupRow(0, 1, "Filter its lookups", if (on) "Through $APP, with ${f.server()?.name}. The app can see a VPN is on" else "Outside $APP, with the phone's DNS",
+                onClick = { ui.setPrefs { p -> p.copy(filter = p.filter.copy(apps = if (!on == p.filter.directApps) p.filter.apps - a.pkg else p.filter.apps + (a.pkg to !on))) } },
+                checked = on, trailing = { Toggle(on) }, modifier = Modifier.padding(start = 60.dp, end = 6.dp, bottom = 12.dp))
+        }
+    }
+}
+
+private val TileWidth = 96.dp
+
+/** A route tile's width: [TileWidth] grown with the font scale (never shrunk), at most the line's [max]. */
+internal fun tileWidth(fontScale: Float, max: androidx.compose.ui.unit.Dp) = minOf(TileWidth * fontScale.coerceAtLeast(1f), max)
+
+internal class Tile(val id: String, val label: String, val icon: ImageVector, val color: Color, val tinted: Boolean = true, val sub: String? = null)
+
+/** Route choices as tiles under a row ([ticked] the one chosen), wrapped onto as many lines as it takes so none hides off-screen; each line is one connected group. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+internal fun RouteTiles(tiles: List<Tile>, ticked: String?, note: String?, indent: Boolean = true, onPick: (String) -> Unit) {
+    val haptic = LocalHapticFeedback.current
+    BoxWithConstraints(Modifier.padding(start = if (indent) 68.dp else 14.dp, end = 14.dp, bottom = 14.dp).fillMaxWidth()) {
+        val gap = ButtonGroupDefaults.ConnectedSpaceBetween
+        // Wider with large text, so labels keep whole words; fewer tiles per line then, one when it must.
+        val tileWidth = tileWidth(androidx.compose.ui.platform.LocalDensity.current.fontScale, maxWidth)
+        val perLine = ((maxWidth + gap) / (tileWidth + gap)).toInt().coerceAtLeast(1)
+        Column {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { tiles.chunked(perLine).forEach { line -> Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
                 line.forEachIndexed { i, t ->
                     val on = t.id == ticked
                     ToggleButton(
                         checked = on,
-                        onCheckedChange = {
-                            haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
-                            when (t.id) { "" -> openPicker("app:${a.pkg}"); FOLLOW -> ui.followDefault(a.pkg); else -> ui.assign(a.pkg, t.id) }
-                        },
+                        onCheckedChange = { haptic.performHapticFeedback(HapticFeedbackType.SegmentTick); onPick(t.id) },
                         // One width for every route, whatever its name; taller when the text is large.
                         modifier = Modifier.width(tileWidth).heightIn(min = 72.dp),
                         // Selection changes the colour only; a press squishes and springs back.
@@ -335,26 +367,13 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
                         }
                     }
                 }
-              } } }
-              outsideNote(setup, a.pkg, lockdown)?.let { Text(it, style = Type.caption, color = Ink.dim, modifier = Modifier.padding(top = 8.dp)) }
-              }
-            }
-        }
-        // A Direct app's lookups: outside unbraid (the phone's DNS) or through it, with unbraid's filter.
-        val f = setup.prefs.filter
-        // A setting of every profile: not offered while editing a profile not in use.
-        if (expanded && explicit == DIRECT && f.server() != null && !draft) {
-            val on = f.through(a.pkg)
-            GroupRow(0, 1, "Filter its lookups", if (on) "Through $APP, with ${f.server()?.name}. The app can see a VPN is on" else "Outside $APP, with the phone's DNS",
-                onClick = { ui.setPrefs { p -> p.copy(filter = p.filter.copy(apps = if (!on == p.filter.directApps) p.filter.apps - a.pkg else p.filter.apps + (a.pkg to !on))) } },
-                checked = on, trailing = { Toggle(on) }, modifier = Modifier.padding(start = 60.dp, end = 6.dp, bottom = 12.dp))
+            } } }
+            note?.let { Text(it, style = Type.caption, color = Ink.dim, modifier = Modifier.padding(top = 8.dp)) }
         }
     }
 }
 
-private val TileWidth = 96.dp
-
-/** A route tile's width: [TileWidth] grown with the font scale (never shrunk), at most the line's [max]. */
-internal fun tileWidth(fontScale: Float, max: androidx.compose.ui.unit.Dp) = minOf(TileWidth * fontScale.coerceAtLeast(1f), max)
-
-private class Tile(val id: String, val label: String, val icon: ImageVector, val color: Color, val tinted: Boolean = true, val sub: String? = null)
+/** A route as a tile: the tiles of every profile route, in the order an app's menu shows them. */
+internal fun routeTiles(setup: Setup, offered: List<app.unbraid.data.Route>) = offered.sortedByDescending { it.id == setup.defaultRoute }.map {
+    Tile(it.id, if (it.imported) it.name else it.loc.city ?: it.name, if (it.tsExit != null) Icons.home else Icons.tunnel, Ink.route(it.hue), sub = it.source.takeIf { s -> s != it.name })
+} + Tile(DIRECT, "Direct", Icons.direct, Ink.direct, tinted = false)

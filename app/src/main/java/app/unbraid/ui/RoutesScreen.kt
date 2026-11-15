@@ -131,15 +131,16 @@ internal fun defaultLabel(total: Int?, chosen: Int) = when {
 }
 
 /** Asked before route removal: [chose] apps chose it (in use), and it also goes from the saved profiles [others]. */
-internal fun removeText(chose: Int, others: List<String>) = listOfNotNull(
+internal fun removeText(chose: Int, others: List<String>, sites: Int = 0) = listOfNotNull(
     if (chose == 0) "No app chose it." else "${if (chose == 1) "1 app chose it and follows" else "$chose apps chose it and follow"} the default route from now on.",
+    sitesLose(sites),
     "It also goes from ${others.joinToString()}.".takeIf { others.isNotEmpty() },
-    "You can add the route again, but not those choices.".takeIf { chose > 0 || others.isNotEmpty() },
+    "You can add the route again, but not those choices.".takeIf { chose > 0 || sites > 0 || others.isNotEmpty() },
 ).joinToString(" ")
 
 /** Asked before route removal from profile [draft], not in use, where [chose] apps chose it; [elsewhere]: another profile or the setup in use lists it. */
-internal fun dropText(draft: String, chose: Int, elsewhere: Boolean = true, removes: Boolean = false) =
-    (if (chose == 0) "No app in $draft chose it." else "In $draft, ${if (chose == 1) "1 app that chose it follows" else "$chose apps that chose it follow"} $draft's default route from now on.") +
+internal fun dropText(draft: String, chose: Int, elsewhere: Boolean = true, removes: Boolean = false, sites: Int = 0) =
+    (if (chose == 0) "No app in $draft chose it." else "In $draft, ${if (chose == 1) "1 app that chose it follows" else "$chose apps that chose it follow"} $draft's default route from now on.") + sitesLose(sites)?.let { " $it" }.orEmpty() +
         when { removes -> " No other profile lists this route, so it is removed."; elsewhere -> " The route stays for other profiles."; else -> " No other profile uses it." }
 
 /** The sheet action that takes a route out of profile [draft]: the route itself goes when no other profile lists it ([removes]). */
@@ -156,6 +157,12 @@ internal fun routeWarning(stalled: Boolean, notAnswering: Boolean) = when {
 }
 
 /** Apps whose chosen route no longer exists: [n] of them, offline until they get another. */
+/** Said before a route goes that [n] websites are set to: they go with their app again. Null for none. */
+internal fun sitesLose(n: Int) = when (n) { 0 -> null; 1 -> "1 website on it goes with its app again."; else -> "$n websites on it go with their app again." }
+
+internal fun missingSitesText(n: Int) =
+    "${if (n == 1) "1 website is on a route that no longer exists, so it's" else "$n websites are on a route that no longer exists, so they're"} blocked. Remove ${if (n == 1) "it" else "them"}, or choose a route on Apps."
+
 internal fun missingAppsText(n: Int) =
     "${if (n == 1) "1 app uses a route that no longer exists, so it's" else "$n apps use a route that no longer exists, so they're"} offline. Choose a route for ${if (n == 1) "it" else "them"}."
 
@@ -226,11 +233,12 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     val shown by ui.shown.collectAsStateWithLifecycle()
     val lit = on && draft == null
     val byRoute = remember(shown) { shown.apps.entries.groupBy({ it.value }, { it.key }) }
+    val sitesBy = remember(shown) { shown.sites.entries.groupBy({ it.value }, { it.key }).mapValues { it.value.sorted() } }
     val live = if (lit) vpn.servers else emptyMap()
     // A profile lists its own routes, and routes nothing uses yet (one just added), never another profile's.
     val hidden = remember(setup, draft) { setup.hiddenRoutes(draft) }
     // Direct is built in, not a route: listed once an app in this profile uses it (its default shows as the card above).
-    val exceptions = (shown.routes.map { it.id } + DIRECT).filter { it != shown.defaultRoute && it !in hidden && (it != DIRECT || DIRECT in byRoute) }
+    val exceptions = (shown.routes.map { it.id } + DIRECT).filter { it != shown.defaultRoute && it !in hidden && (it != DIRECT || DIRECT in byRoute || DIRECT in sitesBy) }
     val labels = remember(apps) { apps.associate { it.pkg to it.label } }
     // The default carries every app not sent elsewhere; its preview shows user apps, not system ones.
     val defaultPkgs = remember(apps, shown) { apps.filter { shown.routeOf(it.pkg) == shown.defaultRoute }.sortedBy { it.system }.map { it.pkg } }
@@ -249,6 +257,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     val server = if (lit) vpn.servers[shown.defaultRoute] else null
     // Routes that no longer exist (damaged or older settings): said once on the page, with what fixes it.
     val missingApps = shown.appsOnMissing
+    val missingSites = shown.sitesOnMissing
     val shownError = vpn.error?.let { e ->
         listOf(serviceMissingLine.takeIf { missingApps.isNotEmpty() }, app.unbraid.vpn.Compiler.MISSING_DEFAULT.takeIf { shown.defaultMissing })
             .fold(e) { t, line -> if (line == null) t else t.replace(line, "") }.trim().ifEmpty { null }
@@ -425,16 +434,19 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                 if (missingApps.isNotEmpty()) item(key = "missingApps") {
                     Notice(Icons.error, Ink.bad, missingAppsText(missingApps.size), "Follow default", live = true) { missingApps.forEach(ui::followDefault) }
                 }
+                if (missingSites.isNotEmpty()) item(key = "missingSites") {
+                    Notice(Icons.error, Ink.bad, missingSitesText(missingSites.size), "Remove", live = true) { missingSites.forEach { ui.site(it, null) } }
+                }
                 if (exceptions.isNotEmpty()) item(key = "exLabel") { SectionLabel("Exceptions", tall = true) }
                 itemsIndexed(exceptions, key = { _, id -> id }) { i, id ->
                     val route = shown.route(id)
                     Rise("routes", i + 1, reveal) { RouteRow(
-                        ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size),
+                        ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size), sites = sitesBy[id].orEmpty(),
                         exit = if (route == null) null else exitOf(id)?.let { it to pendingOf(it) }, warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering),
                     ) { sheet = id } }
                 }
                 // Nothing set apart yet: say what that means instead of leaving the page empty.
-                if (shown.apps.values.all { it == shown.defaultRoute } && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
+                if (shown.apps.values.all { it == shown.defaultRoute } && shown.sites.isEmpty() && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
                     Text("All apps use the default route. Tap + to send some apps through another route.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp))
                 }
                 if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {
@@ -523,7 +535,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     removing?.let { id ->
         val others = setup.saved.filter { p -> p.name != setup.profile && id in p.own }.map { it.name }
         Prompt("Remove ${setup.route(id)?.name ?: "this route"}?", "Remove", { removing = null; ui.removeRoute(id)?.let(refuse) }, { removing = null }, danger = true) {
-            Text(removeText(setup.apps.values.count { it == id }, others), style = Type.sub)
+            Text(removeText(setup.apps.values.count { it == id }, others, setup.sites.values.count { it == id }), style = Type.sub)
         }
     }
     dropping?.let { id ->
@@ -533,8 +545,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
         val name = setup.route(id)?.name ?: "this route"
         if (d != null) Prompt(if (removes) "Remove $name?" else "Remove $name from $d?", "Remove", { dropping = null; ui.dropRoute(id) }, { dropping = null }, danger = true) {
             val elsewhere = setup.saved.any { p -> p.name != d && id in p.own } ||
-                (setup.profile == null && (setup.defaultRoute == id || id in setup.apps.values || id in setup.added))
-            Text(dropText(d, shown.apps.values.count { it == id }, elsewhere, removes), style = Type.sub)
+                (setup.profile == null && (setup.defaultRoute == id || id in setup.apps.values || id in setup.sites.values || id in setup.added))
+            Text(dropText(d, shown.apps.values.count { it == id }, elsewhere, removes, shown.sites.values.count { it == id }), style = Type.sub)
         }
     }
     confirmDefault?.let { id ->
@@ -731,10 +743,10 @@ private fun AddMenu(expanded: Boolean, onExpanded: (Boolean) -> Unit, onRoute: (
 }
 
 /** App labels for a small group ("Signal", "Bank A, Bank B"), the app count for a larger one ("7 apps"). */
-private fun appsLabel(pkgs: List<String>, labels: Map<String, String>) = when {
-    pkgs.isEmpty() -> "No apps assigned"
-    pkgs.size <= 3 -> pkgs.joinToString(", ") { labels[it] ?: it.substringAfterLast('.') }
-    else -> count(pkgs.size)
+internal fun appsLabel(pkgs: List<String>, labels: Map<String, String>, sites: List<String> = emptyList()) = when {
+    pkgs.isEmpty() && sites.isEmpty() -> "No apps assigned"
+    pkgs.size + sites.size <= 3 -> (pkgs.map { labels[it] ?: it.substringAfterLast('.') } + sites).joinToString(", ")
+    else -> listOfNotNull(count(pkgs.size).takeIf { pkgs.isNotEmpty() }, (if (sites.size == 1) "1 website" else "${sites.size} websites").takeIf { sites.isNotEmpty() }).joinToString(" · ")
 }
 
 /** The default route as the hero: where everything else exits, large, and how many apps that is. No icons: it is "the rest". */
@@ -781,7 +793,7 @@ private fun DefaultTile(
 @Composable
 private fun RouteRow(
     ui: Ui, route: Route?, live: Map<String, Server>, pkgs: List<String>, labels: Map<String, String>, lit: Boolean, shape: Shape,
-    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, onClick: () -> Unit,
+    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, sites: List<String> = emptyList(), onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val press = squish(source)
@@ -793,8 +805,10 @@ private fun RouteRow(
     val wide = exit?.first?.ip?.contains(':') == true
     val stacked = LocalDensity.current.fontScale >= 1.5f
     val apps = @Composable {
-        AppStack(ui, pkgs, labels, edge = if (direct) Ink.ground else fill)
-        Text(appsLabel(pkgs, labels), style = Type.caption, color = if (pkgs.isEmpty()) Ink.dim else Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis)
+        // Websites only: their mark in place of the empty app slot.
+        if (pkgs.isEmpty() && sites.isNotEmpty()) Box(Modifier.size(24.dp).clip(RoundedCornerShape(8.dp)).background(Ink.surfaceTop), Alignment.Center) { Icon(Icons.link, null, Modifier.size(16.dp), tint = Ink.text) }
+        else AppStack(ui, pkgs, labels, edge = if (direct) Ink.ground else fill)
+        Text(appsLabel(pkgs, labels, sites), style = Type.caption, color = if (pkgs.isEmpty() && sites.isEmpty()) Ink.dim else Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis)
     }
     val where = @Composable { end: Boolean ->
         Text(route?.name ?: "Direct", style = Type.title, color = Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)

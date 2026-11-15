@@ -13,6 +13,7 @@ import app.unbraid.data.validWgKey
 import app.unbraid.data.WgLink
 import app.unbraid.data.Route
 import app.unbraid.data.Setup
+import app.unbraid.data.Sites
 import app.unbraid.data.WgPeer
 import java.security.MessageDigest
 import kotlinx.serialization.json.JsonArray
@@ -26,7 +27,7 @@ import kotlinx.serialization.json.putJsonObject
 /**
  * Turns a [Setup] into a sing-box config.
  *
- * Order of decisions for every connection: DNS → home networks → LAN → the app's route → default route.
+ * Order of decisions for every connection: DNS → home networks → LAN → the website's route → the app's route → default route.
  * Apps on Direct are excluded from the VPN at OS level, so they never see it; under system lockdown
  * (where Android would cut excluded apps off) they are routed through `direct` instead.
  */
@@ -95,8 +96,8 @@ object Compiler {
     /** The setup's default route names a route it no longer has: nothing starts, so no app ends up on the normal connection. */
     class MissingDefault : Fail(MISSING_DEFAULT)
 
-    /** Route ids that apps are set to but the setup no longer has: their apps are refused, never sent to the default. */
-    fun missing(s: Setup): Set<String> = s.apps.values.filterTo(HashSet()) { it != DIRECT && s.route(it) == null }
+    /** Route ids that apps or websites are set to but the setup no longer has: their traffic is refused, never sent to the default. */
+    fun missing(s: Setup): Set<String> = (s.apps.values + s.sites.values).filterTo(HashSet()) { it != DIRECT && s.route(it) == null }
 
     /**
      * A config that refuses every app's connections and lookups ($APP itself stays outside the VPN, as always): what runs
@@ -161,6 +162,11 @@ object Compiler {
             if (s.prefs.lan) add(obj("ip_cidr" to JsonArray(LAN.map(::JsonPrimitive)), "outbound" to "direct"))
         }
 
+        // A Direct website is looked up like other Direct traffic that passes through: with the filter where one applies to it.
+        val siteDns = { id: String -> if (id == DIRECT && filter != null && (directFiltered || through.isNotEmpty())) "dns-filter" else dnsFor(id) }
+        // Websites with a route of their own: each run matches its names and every name under them.
+        val sites = Sites.runs(s.sites).map { (id, names) -> id to arrayOf<Pair<String, Any>>("domain" to JsonArray(names.map(::JsonPrimitive)), "domain_suffix" to JsonArray(names.map { JsonPrimitive(".$it") })) }
+
         return buildJsonObject {
             putJsonObject("log") { put("level", "warn"); put("timestamp", false) }
             putJsonObject("dns") {
@@ -192,7 +198,8 @@ object Compiler {
                     if (homeTs && tsDomains.isNotEmpty()) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
                     if (s.prefs.lan) add(obj("domain_suffix" to arr("local", "lan", "home.arpa", "fritz.box"), "server" to "local"))
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
-                    // Other query types (HTTPS, SVCB, TXT…) go to the asking app's own exit, never the ISP.
+                    // Other query types (HTTPS, SVCB, TXT…) go to the website's exit, else to the asking app's own, never the ISP.
+                    for ((id, names) in sites) add(if (id in refused) obj(*names, "action" to "reject") else obj(*names, "server" to siteDns(id)))
                     for ((id, pkgs) in perApp) add(if (id in refused) obj("package_name" to pkgs, "action" to "reject") else obj("package_name" to pkgs, "server" to dnsFor(id)))
                     // A blocked default never falls back to another resolver: the phone's network would see the names.
                     if (defaultBlocked) add(obj("action" to "reject"))
@@ -286,6 +293,20 @@ object Compiler {
                         add(obj("inbound" to PROBE, "auth_user" to arr(t), "outbound" to t))
                     }
                     network.forEach { add(it) }
+                    if (sites.isNotEmpty()) {
+                        // An app with its own encrypted DNS connects to real addresses, whose names only the connection tells
+                        // (TLS, HTTP, QUIC). Web ports only, and only a destination that is an address: a fake-IP connection
+                        // reaches these rules as its name already, which a sniffed one must never replace. Such a connection
+                        // takes the website's route with the address its app found; nothing is looked up again.
+                        add(obj("inbound" to arr("tun"), "ip_cidr" to arr("0.0.0.0/0"), "port" to JsonArray(listOf(80, 443).map(::JsonPrimitive)), "action" to "sniff", "timeout" to "300ms"))
+                        // A website's route beats its app's. Looked up at its exit, then the home and LAN rules, as for an app.
+                        for ((id, names) in sites) {
+                            if (id in refused) { add(obj(*names, "action" to "reject", "no_drop" to true)); continue }
+                            add(obj(*names, "action" to "resolve", "server" to siteDns(id)))
+                            network.forEach { add(it) }
+                            add(obj(*names, "outbound" to tag(id)))
+                        }
+                    }
                     // While Tailscale waits for a sign-in, its login pages skip the tailnet for apps on a Tailscale exit: the
                     // exit node can't carry them before the sign-in. Other apps keep their own exits, and once signed in
                     // these sites follow the exit too (the engine's own control traffic never needs the rule).

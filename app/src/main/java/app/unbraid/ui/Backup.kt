@@ -53,7 +53,7 @@ private const val KEYS_NONE = "You have no own servers or home WireGuard, so the
 private const val KEEP_NO_ROOM = "There's no room for another profile. Turn off keeping your current setup, or cancel."
 
 /** What a backup file holds, for the captions. */
-const val BACKUP_HOLDS = "Your routes, app choices, favourites, profiles, own servers and your settings. Keys and passwords of your own servers and home WireGuard only if you choose."
+const val BACKUP_HOLDS = "Your routes, app and website choices, favourites, profiles, own servers and your settings. Keys and passwords of your own servers and home WireGuard only if you choose."
 const val BACKUP_LEAVES = "Provider sign-ins are never saved in a backup: after restoring, sign in to each provider again. Tailscale is left out too. Statistics stay on this phone."
 
 /** The keys switch for a setup: whether it can be turned on (only with something to include), and its caption. */
@@ -268,9 +268,9 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
     val canKeep = flow.canKeep(here)
     Text("Restore this backup?", style = Type.title)
     Text("Saved on $date${c.app.takeIf { it.isNotEmpty() }?.let { " by unbraid $it" }.orEmpty()}: ${count(b.routes.size, "route")}, " +
-        "${count(b.apps.size, "app choice")}, ${count(b.profiles.size, "profile")}, ${count(b.servers.size, "own server")}.", style = Type.sub)
+        "${count(b.apps.size, "app choice")}, ${websites(b)}${count(b.profiles.size, "profile")}, ${count(b.servers.size, "own server")}.", style = Type.sub)
     if (!here.untouched) Text("It replaces what is on this phone now: ${count(here.routes.size, "route")}, ${count(here.apps.size, "app choice")}, " +
-        "${count(here.profiles.size, "profile")}, ${count(here.servers.size, "own server")}, your favourites and settings.", style = Type.sub)
+        "${websites(here)}${count(here.profiles.size, "profile")}, ${count(here.servers.size, "own server")}, your favourites and settings.", style = Type.sub)
     Text("Your provider sign-ins and Tailscale stay as they are." + (flow.signIns(b)?.let { " Routes on $it stay blocked until you sign in." } ?: ""), style = Type.caption, color = Ink.dim)
     val missing = flow.needKeys(here)
     if (missing > 0) Text("Saved without server keys: ${count(missing, "own server")} will need ${if (missing == 1) "its" else "their"} config added again. Until then, ${if (missing == 1) "its" else "their"} apps stay offline.", style = Type.caption, color = Ink.bad)
@@ -292,6 +292,9 @@ private fun Switch(title: String, sub: String, on: Boolean, enabled: Boolean = t
     }
     Toggle(on, enabled)
 }
+
+/** The websites of [s], every profile's too, for a list of what a setup holds: "3 websites, " or nothing. */
+private fun websites(s: Setup) = (s.sites.keys + s.profiles.flatMap { it.sites.keys }).size.takeIf { it > 0 }?.let { count(it, "website") + ", " }.orEmpty()
 
 private fun count(n: Int, what: String) = "$n ${if (n == 1) what else what + "s"}"
 

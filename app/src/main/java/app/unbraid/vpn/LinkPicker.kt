@@ -107,9 +107,13 @@ object LinkPicker {
         return l.copy(peer = l.peer.copy(endpoint = "$host:$port", mtu = app.unbraid.data.mtu(setup.opt(p, app.unbraid.data.MTU_OPT))))
     }
 
-    /** True if an app that went Direct under [old] goes to one of [routes] under [new] (explicitly or by default). */
+    /**
+     * True if an app that went Direct under [old] goes to one of [routes] under [new] (explicitly or by default). Any change
+     * to the websites counts: one added, moved or removed (a Direct one too) can leave traffic Direct that [new] sends to them.
+     */
     fun leavesDirect(old: Setup?, new: Setup, routes: Set<String>): Boolean = old != null && routes.any { id ->
-        (old.apps.keys + new.apps.keys).any { new.routeOf(it) == id && old.routeOf(it) == DIRECT } || (new.defaultRoute == id && old.defaultRoute == DIRECT)
+        (old.apps.keys + new.apps.keys).any { new.routeOf(it) == id && old.routeOf(it) == DIRECT } || (new.defaultRoute == id && old.defaultRoute == DIRECT) ||
+            old.sites != new.sites
     }
 
     /** A kept or cached tunnel is reused only if its provider still vouches for its server key ([Provider.trusts]). */

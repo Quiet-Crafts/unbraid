@@ -127,7 +127,7 @@ class BackupTest {
         assertEquals(Reason.Newer, reason { Backup.open(f, "correct horse") })
         assertEquals("This backup was made by a newer unbraid. Update unbraid, then restore it.", Reason.Newer.text)
         // A newer setup inside a file this version reads: refused as newer too, before anything is checked.
-        val newer = Backup.export(full(), "3.0", 0).toString(Charsets.UTF_8).replace("\"version\":$VERSION", "\"version\":${VERSION + 1}").toByteArray()
+        val newer = Backup.export(full(), "3.0", 0).toString(Charsets.UTF_8).replace("\"version\":2", "\"version\":${VERSION + 1}").toByteArray()
         assertEquals(Reason.Newer, reason { Backup.read(newer) })
         val newerFormat = Backup.export(full(), "3.0", 0).toString(Charsets.UTF_8).replaceFirst("\"format\":1", "\"format\":2").toByteArray()
         assertEquals(Reason.Newer, reason { Backup.read(newerFormat) })

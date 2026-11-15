@@ -149,13 +149,20 @@ data class Profile(
     val name: String, val defaultRoute: String, val apps: Map<String, String> = emptyMap(),
     /** Routes added to this profile, which it lists even while no app uses them. */
     val added: List<String> = emptyList(),
+    /** Websites with a route of their own ([Sites]): address → route id or [DIRECT]. A website's route beats its app's. */
+    val sites: Map<String, String> = emptyMap(),
 ) {
     val ready get() = defaultRoute.isNotEmpty()
     /** App [pkg] on route [routeId], its default included: a choice that stays when the default changes. Null = it follows the default. */
     fun assigned(pkg: String, routeId: String?) = copy(apps = if (routeId == null) apps - pkg else apps + (pkg to routeId))
-    /** The routes this profile lists: its default, those its apps use, and those added to it. */
-    val own get() = setOf(defaultRoute) + apps.values + added
+    /** The routes this profile lists: its default, those its apps and websites use, and those added to it. */
+    val own get() = setOf(defaultRoute) + apps.values + sites.values + added
 }
+
+/** The kinds of network a profile can be set to follow ([Setup.onNet]): Wi-Fi (a cable too) and mobile data. */
+const val WIFI = "wifi"
+const val MOBILE = "mobile"
+val NET_KINDS = setOf(WIFI, MOBILE)
 
 const val MAX_PROFILES = 20
 /** The profile a quick-settings tile saves a setup in no profile as before switching, as it can't ask (an older one is replaced). */
@@ -174,8 +181,11 @@ fun graphemes(s: String): Int = chars(s).let { b -> var n = 0; while (b.next() !
 /** The first [n] characters people see of [s], never splitting one. */
 fun String.takeGraphemes(n: Int): String = chars(this).let { b -> var end = 0; repeat(n) { b.next().takeIf { it != java.text.BreakIterator.DONE }?.let { end = it } }; take(end) }
 
-/** The current [Setup.version]. 2: every value is written, defaults too (older files left out those equal to a default). */
-const val VERSION = 2
+/**
+ * The newest [Setup.version]. 2: every value is written, defaults too (older files left out those equal to a default).
+ * 3: website routes, which an older build would drop without a word; only a setup that has one is saved as 3 ([Setup.stamped]).
+ */
+const val VERSION = 3
 
 @Serializable
 data class Setup(
@@ -198,6 +208,10 @@ data class Setup(
     val profiles: List<Profile> = emptyList(),
     /** The profile in use's [Profile.added], kept live like [defaultRoute] and [apps]. */
     val added: List<String> = emptyList(),
+    /** The profile in use's [Profile.sites], kept live like [defaultRoute] and [apps]. */
+    val sites: Map<String, String> = emptyMap(),
+    /** The profile to switch to by itself on a kind of network ([app.unbraid.vpn.AutoSwitch]): "wifi" or "mobile" → its name. */
+    val onNet: Map<String, String> = emptyMap(),
     /** The profile in use; its saved copy follows every edit, as [defaultRoute] and [apps] hold it ([saved]). Null = none. */
     val profile: String? = null,
     /**
@@ -214,13 +228,16 @@ data class Setup(
     fun route(id: String?) = routes.firstOrNull { it.id == id }
 
     /** [profiles] as they stand: the one in use with the current default and exceptions. */
-    val saved get() = profiles.map { if (it.name == profile) it.copy(defaultRoute = defaultRoute, apps = apps, added = added) else it }
+    val saved get() = profiles.map { if (it.name == profile) live else it }
+
+    /** This setup routing as [p] does. */
+    private fun routedAs(p: Profile) = copy(defaultRoute = p.defaultRoute, apps = p.apps, added = p.added, sites = p.sites)
 
     /** The live setup as a profile: what is in use. */
-    private val live get() = Profile(profile.orEmpty(), defaultRoute, apps, added)
+    private val live get() = Profile(profile.orEmpty(), defaultRoute, apps, added, sites)
 
     /** No profile is in use and none holds the setup in use: switching to another would lose it, unless [use] keeps it. */
-    val loose get() = profile == null && profiles.none { it.defaultRoute == defaultRoute && it.apps == apps && it.added == added }
+    val loose get() = profile == null && profiles.none { it.copy(name = "") == live.copy(name = "") }
 
     /**
      * Switches to profile [name] (not an empty one); the one in use keeps what it has now. With [keepAs], a [loose] setup
@@ -231,7 +248,7 @@ data class Setup(
         if (name == profile) return this
         val p = profiles.firstOrNull { it.name == name && it.ready } ?: return this
         val from = if (keepAs != null && loose) kept(keepAs, name) ?: return this else this
-        return from.copy(profiles = from.saved, profile = p.name, defaultRoute = p.defaultRoute, apps = p.apps, added = p.added)
+        return from.routedAs(p).copy(profiles = from.saved, profile = p.name)
     }
 
     /** The setup in use saved as profile [name], not in use, over an older one of that name (any case) but never over [target]; null without room. */
@@ -246,14 +263,14 @@ data class Setup(
     fun saveAs(name: String): Setup {
         // The first profile keeps every route shown until now; a later one, what the setup in use lists.
         val keep = if (profiles.isEmpty()) (added + (routes.map { it.id } - live.own)).distinct() else added
-        return copy(profiles = saved + Profile(name, defaultRoute, apps, keep), profile = name, added = keep)
+        return copy(profiles = saved + live.copy(name = name, added = keep), profile = name, added = keep)
     }
 
     /** Adds profile [name], not in use: a copy of the current setup, or [empty]. */
     fun add(name: String, empty: Boolean) = copy(profiles = saved + if (empty) Profile(name, "") else live.copy(name = name))
 
     /** The setup as profile [name] routes it (its default and exceptions), for showing it; itself for the one in use or null. */
-    fun viewAs(name: String?) = profiles.firstOrNull { name != null && it.name == name && name != profile }?.let { copy(defaultRoute = it.defaultRoute, apps = it.apps, added = it.added) } ?: this
+    fun viewAs(name: String?) = profiles.firstOrNull { name != null && it.name == name && name != profile }?.let(::routedAs) ?: this
 
     /**
      * Routes a page leaves out when showing profile [name] (null = the setup in use): every route that profile doesn't
@@ -273,14 +290,15 @@ data class Setup(
 
     /** Changes the default and exceptions of profile [name] with [f]: only its saved copy, unless it is the one in use (or null). */
     fun editing(name: String?, f: (Profile) -> Profile): Setup {
-        if (name == null || name == profile || profiles.none { it.name == name }) return f(live).let { copy(defaultRoute = it.defaultRoute, apps = it.apps, added = it.added) }
+        if (name == null || name == profile || profiles.none { it.name == name }) return routedAs(f(live))
         return copy(profiles = profiles.map { if (it.name == name) f(it) else it })
     }
 
-    fun rename(old: String, new: String) = copy(profiles = profiles.map { if (it.name == old) it.copy(name = new) else it }, profile = if (profile == old) new else profile)
+    fun rename(old: String, new: String) = copy(profiles = profiles.map { if (it.name == old) it.copy(name = new) else it }, profile = if (profile == old) new else profile,
+        onNet = onNet.mapValues { if (it.value == old) new else it.value })
 
     /** Deletes profile [name]. The current routes stay as they are, even when it was the one in use. */
-    fun forget(name: String) = copy(profiles = profiles.filter { it.name != name }, profile = profile.takeIf { it != name })
+    fun forget(name: String) = copy(profiles = profiles.filter { it.name != name }, profile = profile.takeIf { it != name }, onNet = onNet.filterValues { it != name })
         .withoutUnlisted(profiles.firstOrNull { it.name == name }?.own.orEmpty())
 
     /**
@@ -299,9 +317,9 @@ data class Setup(
     fun back(ran: Setup): Setup {
         val ok = { id: String -> id == DIRECT || route(id) != null }
         // Its profile again only if still as it ran: one edited meanwhile keeps those edits, the routes run unprofiled.
-        val same = profiles.firstOrNull { it.name == ran.profile }?.takeIf { it.defaultRoute == ran.defaultRoute && it.apps == ran.apps && it.added == ran.added }
+        val same = profiles.firstOrNull { it.name == ran.profile }?.takeIf { it == ran.live }
         return copy(profiles = saved, profile = same?.name,
-            defaultRoute = ran.defaultRoute.takeIf(ok) ?: defaultRoute, apps = ran.apps.filterValues(ok), added = ran.added.filter(ok))
+            defaultRoute = ran.defaultRoute.takeIf(ok) ?: defaultRoute, apps = ran.apps.filterValues(ok), added = ran.added.filter(ok), sites = ran.sites.filterValues(ok))
     }
 
     /** Moves profile [name] [by] places (negative = earlier). */
@@ -318,20 +336,24 @@ data class Setup(
     }
 
     /**
-     * After routes [gone] were removed: apps on them follow their default, here and in every saved profile, and the lists
-     * drop them. A default is never changed here: removing one is refused first ([refusesRemoving]). Only [gone] is
+     * After routes [gone] were removed: apps on them follow their default and websites on them their app, here and in
+     * every saved profile, and the lists drop them. A default is never changed here: removing one is refused first ([refusesRemoving]). Only [gone] is
      * mended: a route missing since the settings were read stays named, for [defaultMissing] and [appsOnMissing] to report.
      */
     fun tidy(gone: Set<String>): Setup {
         val ok = { id: String -> id !in gone }
-        if (gone.isEmpty() || (apps.values.all(ok) && added.all(ok) && profiles.all { p -> p.apps.values.all(ok) && p.added.all(ok) })) return this
-        return copy(apps = apps.filterValues(ok), added = added.filter(ok), profiles = profiles.map { p -> p.copy(apps = p.apps.filterValues(ok), added = p.added.filter(ok)) })
+        val whole = { p: Profile -> p.apps.values.all(ok) && p.added.all(ok) && p.sites.values.all(ok) }
+        if (gone.isEmpty() || whole(live) && profiles.all(whole)) return this
+        val mend = { p: Profile -> p.copy(apps = p.apps.filterValues(ok), added = p.added.filter(ok), sites = p.sites.filterValues(ok)) }
+        return routedAs(mend(live)).copy(profiles = profiles.map(mend))
     }
 
     /** The default of the setup in use names no route (damaged or older settings): the engine refuses to connect until another is chosen. */
     val defaultMissing get() = defaultRoute != DIRECT && route(defaultRoute) == null
     /** Apps whose chosen route no longer exists: blocked until they get another route or follow the default. */
     val appsOnMissing get() = apps.filterValues { it != DIRECT && route(it) == null }.keys
+    /** Websites whose route no longer exists: blocked until they get another route or are removed. */
+    val sitesOnMissing get() = sites.filterValues { it != DIRECT && route(it) == null }.keys
     /** Saved profiles, not in use, whose default names no route: they need another default before they can be used. */
     val profilesMissingDefault get() = profiles.filter { it.name != profile && it.ready && it.defaultRoute != DIRECT && route(it.defaultRoute) == null }.map { it.name }
 
@@ -357,13 +379,13 @@ data class Setup(
     }
 
     /** A new install's setup as it started ([pristine]): only the placeholder route, as the default, nothing chosen or saved. */
-    val untouched get() = pristine && Setup().let { routes == it.routes && defaultRoute == it.defaultRoute } && apps.isEmpty() && profiles.isEmpty() && added.isEmpty()
+    val untouched get() = pristine && Setup().let { routes == it.routes && defaultRoute == it.defaultRoute } && apps.isEmpty() && sites.isEmpty() && profiles.isEmpty() && added.isEmpty()
 
     /**
      * This setup after a change from [old]: one that changes what the user sets up is no longer [pristine]. A saved
      * server alone routes nothing: an import saves it first, then gives it the route that replaces the placeholder.
      */
-    fun after(old: Setup) = if (!pristine || (routes == old.routes && defaultRoute == old.defaultRoute && apps == old.apps && profiles == old.profiles &&
+    fun after(old: Setup) = if (!pristine || (routes == old.routes && defaultRoute == old.defaultRoute && apps == old.apps && sites == old.sites && profiles == old.profiles &&
         added == old.added && profile == old.profile && home == old.home)) this else copy(pristine = false)
 
     /**
@@ -392,14 +414,20 @@ data class Setup(
     fun outside(pkg: String) = apps[pkg] == DIRECT && !prefs.filter.through(pkg)
     /** How many of [installed] follow the default: the apps a new default would move. */
     fun followers(installed: Collection<String>) = installed.count(::follows)
-    /** Routes that carry traffic right now: the default plus any with apps (and those up for a speed test). */
-    val activeRoutes get() = routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) }
+    /** Routes that carry traffic right now: the default plus any with apps or websites (and those up for a speed test). */
+    val activeRoutes get() = routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) }
     /** The Tailscale exit node in use, if any active route goes out through one (Tailscale allows one at a time). */
     val tsExit get() = activeRoutes.firstNotNullOfOrNull { it.tsExit }
     /** Tailscale runs for home access or for an exit-node route. */
     val tailscale get() = home.tailscale || tsExit != null
     /** Nothing goes through a VPN (Direct default, no app on a route, no home tunnel): running protects nothing. */
-    val directOnly get() = defaultRoute == DIRECT && apps.values.all { it == DIRECT } && home.wg == null && !home.tailscale
+    val directOnly get() = defaultRoute == DIRECT && (apps.values + sites.values).all { it == DIRECT } && home.wg == null && !home.tailscale
+
+    /** Website [site] (as [Sites.clean] gives it) on route [routeId], or with no route of its own (null), in profile [name] ([editing]). */
+    fun site(name: String?, site: String, routeId: String?) = editing(name) { it.copy(sites = if (routeId == null) it.sites - site else it.sites + (site to routeId)) }
+
+    /** As saved: format 3 only with a website route somewhere, so a setup without one still opens in a build from before them. */
+    val stamped get() = copy(version = if (sites.isEmpty() && profiles.all { it.sites.isEmpty() }) minOf(version, 2) else VERSION)
 
     /** [provider]'s page setting [key], or its default. */
     fun opt(provider: String, key: String) = opts[provider]?.get(key) ?: Providers.get(provider)?.defaults?.get(key) ?: app.unbraid.data.COMMON_DEFAULTS[key]

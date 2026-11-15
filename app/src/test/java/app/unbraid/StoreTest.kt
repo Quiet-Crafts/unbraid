@@ -379,7 +379,7 @@ class StoreTest {
         assertEquals(expected, s.setup.value)
         assertTrue(s.update { it })
         val text = opened(File(dir, "setup.bin"))
-        for (k in listOf("\"provider\":\"nord\"", "\"defaultRoute\":\"nl\"", "\"lan\":true", "\"threatProtection\":true", "\"hue\":0", "\"stats\":false", "\"version\":$VERSION"))
+        for (k in listOf("\"provider\":\"nord\"", "\"defaultRoute\":\"nl\"", "\"lan\":true", "\"threatProtection\":true", "\"hue\":0", "\"stats\":false", "\"version\":2")) // without a website route it is saved as the format before them
             assertTrue(k, k in text)
         assertEquals(expected, Store(dir) { key }.setup.value)
 

@@ -859,7 +859,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val copy = newId()
         store.edit { c ->
             c.copy(routes = c.routes + r.copy(id = copy, hue = nextHue(c))).editing(d) { p ->
-                p.copy(defaultRoute = if (p.defaultRoute == id) copy else p.defaultRoute, apps = p.apps.mapValues { (_, v) -> if (v == id) copy else v }, added = p.added.map { if (it == id) copy else it })
+                p.copy(defaultRoute = if (p.defaultRoute == id) copy else p.defaultRoute, apps = p.apps.mapValues { (_, v) -> if (v == id) copy else v }, added = p.added.map { if (it == id) copy else it },
+                    sites = p.sites.mapValues { (_, v) -> if (v == id) copy else v })
             }
         }
         return copy
@@ -874,7 +875,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** Taking route [id] out of the profile being viewed removes it altogether: no other profile lists it ([Setup.unlisted]). */
     fun dropRemoves(id: String) = draft?.let { d -> setup.value.dropped(d, id).unlisted(setOf(id)).isNotEmpty() } ?: false
 
-    private fun Setup.dropped(d: String, id: String) = editing(d) { p -> p.copy(apps = p.apps.filterValues { v -> v != id }, added = p.added - id) }
+    private fun Setup.dropped(d: String, id: String) = editing(d) { p -> p.copy(apps = p.apps.filterValues { v -> v != id }, added = p.added - id, sites = p.sites.filterValues { v -> v != id }) }
 
     /**
      * Exit node [ip] for profile [d], not in use: only its own routes change, never another profile's. It reuses a route
@@ -962,6 +963,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     /** App [pkg] chose route [routeId] (the default too: it stays there when the default changes); null = it follows the default. */
     fun assign(pkg: String, routeId: String?) = editRoutes { p -> p.assigned(pkg, routeId) }
+
+    /** Website [site] ([app.unbraid.data.Sites.clean]) goes through route [routeId] in the profile being viewed, whatever app opens it; null = no route of its own. */
+    fun site(site: String, routeId: String?) = editRoutes { p -> p.copy(sites = if (routeId == null) p.sites - site else p.sites + (site to routeId)) }
 
     /** App [pkg] gives up its own route and follows the default of the profile being viewed. */
     fun followDefault(pkg: String) = assign(pkg, null)

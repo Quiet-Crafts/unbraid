@@ -152,7 +152,7 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     fun unreserve(gone: (Setup) -> Set<String>) { synchronized(changing) { reserved -= gone } }
 
     // A Keystore hiccup must not crash a tap: the change stays in memory, the banner says so, and a retry writes it.
-    private fun saveSetup() = safely { seal("setup.bin", explicit.encodeToString(Setup.serializer(), _setup.value)) }
+    private fun saveSetup() = safely { seal("setup.bin", explicit.encodeToString(Setup.serializer(), _setup.value.stamped)) }
         .also { if (!it) Log.e("Unbraid", "store: setup not saved"); failed(setup = !it) }
     private fun saveAccounts() = safely { seal("accounts.bin", json.encodeToString(accountsSer, _accounts.value)) }
         .also { if (!it) Log.e("Unbraid", "store: accounts not saved"); failed(accounts = !it); if (it) settled() }

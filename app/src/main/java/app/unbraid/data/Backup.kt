@@ -179,7 +179,7 @@ object Backup {
     fun hasSecrets(s: Setup) = s.servers.isNotEmpty() || s.home.wg != null || s.routes.any { it.imported && it.tsExit == null }
 
     fun export(s: Setup, app: String, now: Long, keys: Boolean = true) =
-        json.encodeToString(Contents.serializer(), Contents(CONTENTS, app, now, contents(s, keys), keys)).toByteArray()
+        json.encodeToString(Contents.serializer(), Contents(CONTENTS, app, now, contents(s, keys).stamped, keys)).toByteArray()
 
     /** [plain] read and checked whole ([valid]); throws [Failed] (Newer, Invalid) and changes nothing. */
     fun read(plain: ByteArray): Contents {
@@ -222,17 +222,20 @@ object Backup {
         s.home.wg?.let { server(it.name, it, null, null) }
         val ok = { id: String -> id == DIRECT || s.route(id) != null }
         val pkgs = { m: Map<String, String> -> m.keys.all { it.length <= 255 && PKG.matches(it) } }
+        val sites = { m: Map<String, String> -> m.size <= Sites.MAX && m.all { (site, id) -> Sites.clean(site) == site && ok(id) } }
         need(s.defaultRoute.let(ok) && s.apps.values.all(ok) && s.added.all(ok) && pkgs(s.apps), "an app or the default route names a route that isn't there")
+        need(sites(s.sites), "a website's route is damaged")
+        need(s.onNet.all { (kind, name) -> kind in NET_KINDS && s.profiles.any { it.name == name } }, "a profile to switch to isn't there")
         s.profiles.forEach { p ->
             need(s.copy(profiles = s.profiles - p).profileName(p.name) == p.name, "a profile has a name unbraid can't use")
-            need((p.defaultRoute.isEmpty() || ok(p.defaultRoute)) && p.apps.values.all(ok) && p.added.all(ok) && pkgs(p.apps), "profile ${p.name} names a route that isn't there")
+            need((p.defaultRoute.isEmpty() || ok(p.defaultRoute)) && p.apps.values.all(ok) && p.added.all(ok) && pkgs(p.apps) && sites(p.sites), "profile ${p.name} names a route that isn't there")
         }
         need(s.profile == null || s.profiles.any { it.name == s.profile && it.ready }, "the profile in use is missing")
         need(s.prefs.filter.id == null || s.prefs.filter.server() != null, "the Protection filter is damaged")
         need(s.opts.size <= 64 && s.opts.values.all { o -> o.size <= 64 && o.all { (k, v) -> k.length <= 64 && v.length <= 256 } }, "a provider page setting is damaged")
         // Built as the engine would get it with no provider signed in: own servers get their tunnels, the rest is blocked.
         // Every ready profile too: one that can't run would only fail once the user switches to it.
-        for ((name, v) in listOf<Pair<String?, Setup>>(null to s) + s.profiles.filter { it.ready && it.name != s.profile }.map { it.name to s.copy(defaultRoute = it.defaultRoute, apps = it.apps, added = it.added) }) runCatching {
+        for ((name, v) in listOf<Pair<String?, Setup>>(null to s) + s.profiles.filter { it.ready && it.name != s.profile }.map { it.name to s.viewAs(it.name) }) runCatching {
             val p = app.unbraid.vpn.LinkPicker.pick(v, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { Providers.get(it) }
             app.unbraid.vpn.Compiler.compile(app.unbraid.vpn.Compiler.Input(v, p.links, "app.unbraid", false, "", "", blocked = p.blocked.keys))
         }.onFailure { bad("${name?.let { "profile $it" } ?: "its setup"} can't run (${it.message ?: "unknown reason"})") }
@@ -297,9 +300,10 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val fresh = { prefix: String, taken: Set<String> -> generateSequence { prefix + java.util.UUID.randomUUID().toString().take(8) }.first { it !in taken } }
     val ok = { id: String -> id == DIRECT || route(id) != null }
     val apps = apps.filterValues(ok)
+    val sites = sites.filterValues(ok)
     // Without profiles every route here shows, those no app uses too: all of them are kept, as saving a first profile does.
-    val listed = if (profiles.isEmpty()) (added + (routes.map { it.id } - (setOf(defaultRoute) + apps.values + added))).distinct() else added
-    val used = (setOf(defaultRoute) + apps.values + listed).mapNotNull(::route)
+    val listed = if (profiles.isEmpty()) (added + (routes.map { it.id } - (setOf(defaultRoute) + apps.values + sites.values + added))).distinct() else added
+    val used = (setOf(defaultRoute) + apps.values + sites.values + listed).mapNotNull(::route)
     val serverIds = r.servers.map { it.id }.toMutableSet()
     val sv = HashMap<String, String>()
     val addServers = servers.filter { s -> used.any { it.own == s.id } }.mapNotNull { s ->
@@ -317,7 +321,7 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     }
     val m = { id: String -> rt[id] ?: id }
     // The first profile: every route shown until now stays listed, as when the first profile is saved ([Setup.saveAs]).
-    if (r.profiles.isEmpty()) r = r.copy(added = (r.added + (r.routes.map { it.id } - (setOf(r.defaultRoute) + r.apps.values + r.added))).distinct())
-    val kept = Profile(name, if (ok(defaultRoute) && defaultRoute.isNotEmpty()) m(defaultRoute) else "", apps.mapValues { m(it.value) }, listed.filter(ok).map(m))
+    if (r.profiles.isEmpty()) r = r.copy(added = (r.added + (r.routes.map { it.id } - (setOf(r.defaultRoute) + r.apps.values + r.sites.values + r.added))).distinct())
+    val kept = Profile(name, if (ok(defaultRoute) && defaultRoute.isNotEmpty()) m(defaultRoute) else "", apps.mapValues { m(it.value) }, listed.filter(ok).map(m), sites.mapValues { m(it.value) })
     return r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers, profiles = r.profiles + kept)
 }

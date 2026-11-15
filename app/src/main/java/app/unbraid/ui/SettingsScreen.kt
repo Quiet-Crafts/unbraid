@@ -417,9 +417,10 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                     group("${pr.name} settings", listOf(blocking) + shownOpts.filter { !it.advanced }.map(optItem))
                     if (routes.isNotEmpty()) group("Used by", routes.map { r ->
                         val apps = setup.apps.count { it.value == r.id }
+                        val sites = setup.sites.count { it.value == r.id }
                         // A route that turned the provider's blocking on or off for itself says so.
                         val own = r.filter?.takeIf { protect != null }?.let { "${protect!!.label} ${if (it) "on" else "off"} here" }
-                        Item(r.name, listOfNotNull(if (r.id == setup.defaultRoute) "Default route" else "$apps ${if (apps == 1) "app" else "apps"}", vpn.servers[r.id]?.name, own).joinToString(" · ")) { RouteMark(r.code, Ink.route(r.hue), Modifier.clearAndSetSemantics {}) }
+                        Item(r.name, listOfNotNull(if (r.id == setup.defaultRoute) "Default route" else "$apps ${if (apps == 1) "app" else "apps"}", sites.takeIf { it > 0 }?.let { if (it == 1) "1 website" else "$it websites" }, vpn.servers[r.id]?.name, own).joinToString(" · ")) { RouteMark(r.code, Ink.route(r.hue), Modifier.clearAndSetSemantics {}) }
                     })
                     val adv = shownOpts.filter { it.advanced }
                     // How the key was made, read from its config, and where configs are managed: shown, never changed here.
