@@ -164,7 +164,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 state.value = VpnState(error = "Open $APP to allow it as your VPN")
                 // From the widget nothing else would show: say so, and redraw it so its button opens the app.
                 alert(ctx, "Open $APP to allow it as your VPN")
-                StatusWidget.update(ctx)
+                Widgets.update(ctx)
                 return
             }
             ask(true) { ctx.startForegroundService(Intent(ctx, UnbraidVpn::class.java).putExtra(EXTRA_ASK, it)) }

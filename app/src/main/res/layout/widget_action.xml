@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The one labelled action: Pause 15 min, View route, Resume or Connect. Colours, icon and text are set in code. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/actionArea"
+    android:layout_width="match_parent"
+    android:layout_height="36dp"
+    android:background="@drawable/widget_pill"
+    android:backgroundTint="#FFFFA66B"
+    android:gravity="center"
+    android:orientation="horizontal"
+    android:paddingHorizontal="14dp">
+
+    <ImageView
+        android:id="@+id/actionIcon"
+        android:layout_width="18dp"
+        android:layout_height="18dp"
+        android:importantForAccessibility="no"
+        android:src="@drawable/ic_w_power"
+        android:tint="#FF2A1A0F" />
+
+    <TextView
+        android:id="@+id/action"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="6dp"
+        android:fontFamily="sans-serif-medium"
+        android:includeFontPadding="false"
+        android:maxLines="1"
+        android:text="@string/widget_connect"
+        android:textColor="#FF2A1A0F"
+        android:textSize="13sp" />
+</LinearLayout>

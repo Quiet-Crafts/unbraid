@@ -72,6 +72,39 @@
                 android:resource="@xml/widget_status" />
         </receiver>
         <receiver
+            android:name=".vpn.HealthWidget"
+            android:exported="true"
+            android:label="@string/widget_health_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_health" />
+        </receiver>
+        <receiver
+            android:name=".vpn.RoutesWidget"
+            android:exported="true"
+            android:label="@string/widget_routes_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_routes" />
+        </receiver>
+        <receiver
+            android:name=".vpn.BoardWidget"
+            android:exported="true"
+            android:label="@string/widget_board_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_board" />
+        </receiver>
+        <receiver
             android:name=".vpn.StatusWidget$Action"
             android:exported="false" />
         <!-- A pause's timed resume, sent by the app's own alarm. -->

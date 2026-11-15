@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 1x1 status card: status badge top-left, the logo top-right, action pill at the bottom.
-     Colours, icons and texts are set in code (StatusWidget) from the live connection state. -->
+<!-- 1x1: the cookie badge, Tailscale, the profile in use and one action. Everything live is set in code (Widgets). -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools"
     android:id="@android:id/background"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -16,58 +14,77 @@
         android:layout_height="wrap_content"
         android:orientation="horizontal">
 
-        <FrameLayout
-            android:id="@+id/badge"
-            android:layout_width="34dp"
-            android:layout_height="34dp"
-            android:background="@drawable/widget_dot"
-            android:backgroundTint="#FFFF8A80">
+        <include
+            layout="@layout/widget_cookie"
+            android:layout_width="32dp"
+            android:layout_height="32dp" />
+
+        <FrameLayout android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
+
+        <LinearLayout
+            android:id="@+id/ts"
+            android:layout_width="wrap_content"
+            android:layout_height="18dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:visibility="gone">
 
             <ImageView
-                android:id="@+id/badgeIcon"
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:layout_gravity="center"
+                android:id="@+id/tsDot"
+                android:layout_width="7dp"
+                android:layout_height="7dp"
                 android:importantForAccessibility="no"
-                android:src="@drawable/ic_w_off"
-                android:tint="#FF0F1214" />
-        </FrameLayout>
+                android:src="@drawable/widget_dot" />
 
-        <!-- A flexible gap. Home-screen widgets (RemoteViews) don't allow Space, so an empty FrameLayout it is. -->
-        <FrameLayout
-            android:layout_width="0dp"
-            android:layout_height="1dp"
-            android:layout_weight="1"
-            tools:ignore="UselessLeaf" />
-
-        <ImageView
-            android:layout_width="20dp"
-            android:layout_height="20dp"
-            android:importantForAccessibility="no"
-            android:src="@drawable/ic_tile"
-            android:tint="#FFFFA66B" />
+            <TextView
+                android:id="@+id/tsText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:fontFamily="monospace"
+        android:textStyle="bold"
+                android:includeFontPadding="false"
+                android:text="TS"
+                android:textColor="#FFECEFF1"
+                android:textSize="9.5dp" />
+        </LinearLayout>
     </LinearLayout>
 
-    <!-- The whole lower part takes the action's taps, so the target is larger than the pill drawn at its foot. -->
+    <FrameLayout android:layout_width="1dp" android:layout_height="0dp" android:layout_weight="1" />
+
+    <TextView
+        android:id="@+id/profile"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:fontFamily="sans-serif-medium"
+        android:includeFontPadding="false"
+        android:maxLines="1"
+        android:paddingStart="2dp"
+        android:textColor="#FFFFA66B"
+        android:textSize="13dp" />
+
+    <FrameLayout android:layout_width="1dp" android:layout_height="0dp" android:layout_weight="1" />
+
+    <!-- The pill is 30 dp tall; the area that takes its taps is the whole lower part of the card. -->
     <FrameLayout
         android:id="@+id/actionArea"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:minHeight="40dp">
+        android:layout_height="wrap_content"
+        android:minHeight="30dp">
 
-    <TextView
-        android:id="@+id/action"
-        android:layout_width="match_parent"
-        android:layout_height="32dp"
-        android:layout_gravity="bottom"
-        android:background="@drawable/widget_pill"
-        android:backgroundTint="#FFFFA66B"
-        android:fontFamily="sans-serif-medium"
-        android:gravity="center"
-        android:maxLines="1"
-        android:text="@string/widget_connect"
-        android:textColor="#FF2A1A0F"
-        android:textSize="13sp" />
+        <TextView
+            android:id="@+id/action"
+            android:layout_width="match_parent"
+            android:layout_height="30dp"
+            android:background="@drawable/widget_pill"
+            android:backgroundTint="#FFFFA66B"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center"
+            android:includeFontPadding="false"
+            android:maxLines="1"
+            android:text="@string/widget_connect"
+            android:textColor="#FF2A1A0F"
+            android:textSize="13dp" />
     </FrameLayout>
 </LinearLayout>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The status badge: the power button's cookie, green protected, orange paused, red off, with the logo, pause or shield inside. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="42dp"
+    android:layout_height="42dp">
+
+    <ImageView
+        android:id="@+id/cookie"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no"
+        android:src="@drawable/widget_cookie"
+        android:tint="#FFFF8A80" />
+
+    <ImageView
+        android:id="@+id/cookieIcon"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no"
+        android:padding="10dp"
+        android:src="@drawable/ic_w_off"
+        android:tint="#FF0F1214" />
+</FrameLayout>

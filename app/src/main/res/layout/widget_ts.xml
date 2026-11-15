@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Tailscale, drawn only when it is set up: a dot (green connected, red not connected, hollow not running) and "TS". -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/ts"
+    android:layout_width="wrap_content"
+    android:layout_height="18dp"
+    android:background="@drawable/widget_tag"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingHorizontal="6dp"
+    android:visibility="gone">
+
+    <ImageView
+        android:id="@+id/tsDot"
+        android:layout_width="7dp"
+        android:layout_height="7dp"
+        android:importantForAccessibility="no"
+        android:src="@drawable/widget_dot" />
+
+    <TextView
+        android:id="@+id/tsText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:fontFamily="monospace"
+        android:textStyle="bold"
+        android:includeFontPadding="false"
+        android:letterSpacing="0.06"
+        android:text="TS"
+        android:textColor="#FFECEFF1"
+        android:textSize="9.5dp" />
+</LinearLayout>

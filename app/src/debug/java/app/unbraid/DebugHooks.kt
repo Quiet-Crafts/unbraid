@@ -13,7 +13,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * adb shell am broadcast -a app.unbraid.DEBUG -n app.unbraid/.DebugHooks --es cmd <signin|setup|start|stop|state|dump|all|allstate|go> [--es arg ...]
+ * adb shell am broadcast -a app.unbraid.DEBUG -n app.unbraid/.DebugHooks --es cmd <signin|setup|start|stop|state|dump|all|allstate|go|fake> [--es arg ...]
  */
 class DebugHooks : BroadcastReceiver() {
     override fun onReceive(ctx: Context, i: Intent) {
@@ -49,6 +49,11 @@ class DebugHooks : BroadcastReceiver() {
                         a.legs.joinToString(" | ") { "${it.exit} ${it.server?.city}${if (it.missing) "(nearest)" else ""} limited=${it.limited} ping=${it.ping?.median} down=${it.down} up=${it.up} now=${it.now} err=${it.error}" } }.toString()
                     "go" -> { app.unbraid.stats.SpeedTest.go(i.getStringExtra("arg").orEmpty().split(',').filter(String::isNotEmpty).toSet()); "go" }
                     "live" -> app.unbraid.stats.Stats.live.value.down.entries.joinToString(" | ") { (k, v) -> "$k " + v.joinToString(",") { (it / 1e6).toInt().toString() } }
+                    // Shows the widgets a connection that isn't there: "On|Paused|Off|Connecting[,tsState[,failing route ids…]]".
+                    "fake" -> { val a = i.getStringExtra("arg")!!.split(','); val ph = app.unbraid.vpn.VpnState.Phase.valueOf(a[0])
+                        UnbraidVpn.state.value = app.unbraid.vpn.VpnState(ph, servers = s.setup.value.routes.associate { it.id to app.unbraid.data.Server("s", "h", "0.0.0.0", "k", 0) },
+                            tsState = a.getOrNull(1)?.ifEmpty { null }, stalled = a.drop(2).toSet(), pausedUntil = if (ph == app.unbraid.vpn.VpnState.Phase.Paused) System.currentTimeMillis() + 900_000 else 0)
+                        "fake ${a[0]}" }
                     "keys" -> app.unbraid.data.WgKeys.generate().let { "keys ok sdk=${android.os.Build.VERSION.SDK_INT} priv=${it.private.length} pub=${it.public.length}" }
                     else -> UnbraidVpn.state.value.toString() + UnbraidVpn.asked.value.let { a -> if (a == null) " asked=none" else " asked=${a.n}:${a.on}" }
                 }

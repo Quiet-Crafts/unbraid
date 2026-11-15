@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 4x3: route board. The header, the default route, a scrolling list of the other routes, and the profile in use. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@android:id/background"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg"
+    android:backgroundTint="#FF1E2428"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <include layout="@layout/widget_head" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="46dp"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/widget_hero"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="12dp">
+
+        <include
+            layout="@layout/widget_chip"
+            android:layout_width="48dp"
+            android:layout_height="24dp" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:includeFontPadding="false"
+                android:letterSpacing="0.08"
+                android:maxLines="1"
+                android:text="@string/widget_all_other"
+                android:textAllCaps="true"
+                android:textColor="#FF9AA5AD"
+                android:textSize="9dp" />
+
+            <TextView
+                android:id="@+id/name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:ellipsize="end"
+                android:fontFamily="sans-serif-medium"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:textColor="#FFECEFF1"
+                android:textSize="16sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/health"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:fontFamily="sans-serif"
+            android:includeFontPadding="false"
+            android:maxLines="1"
+            android:textColor="#FF9AA5AD"
+            android:textSize="11sp" />
+
+        <ImageView
+            android:id="@+id/dot"
+            android:layout_width="7dp"
+            android:layout_height="7dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/widget_dot" />
+    </LinearLayout>
+
+    <ListView
+        android:id="@+id/list"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="2dp"
+        android:layout_weight="1"
+        android:background="@drawable/widget_list"
+        android:clipToOutline="true"
+        android:divider="@null"
+        android:fadingEdgeLength="14dp"
+        android:requiresFadingEdge="vertical"
+        android:scrollbarSize="3dp"
+        android:scrollbarThumbVertical="@drawable/widget_scroll" />
+
+    <LinearLayout
+        android:id="@+id/profileRow"
+        android:layout_width="match_parent"
+        android:layout_height="34dp"
+        android:layout_marginTop="4dp"
+        android:background="@drawable/widget_pill"
+        android:backgroundTint="#FF3A2A1F"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="12dp"
+        android:paddingEnd="6dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:includeFontPadding="false"
+            android:letterSpacing="0.08"
+            android:text="@string/widget_profile"
+            android:textAllCaps="true"
+            android:textColor="#FF9AA5AD"
+            android:textSize="9dp" />
+
+        <TextView
+            android:id="@+id/profileName"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:fontFamily="sans-serif-medium"
+            android:includeFontPadding="false"
+            android:maxLines="1"
+            android:textColor="#FFFFA66B"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFamily="sans-serif-medium"
+            android:includeFontPadding="false"
+            android:text="@string/widget_switch"
+            android:textColor="#FFECEFF1"
+            android:textSize="11sp" />
+
+        <ImageView
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_w_chevron"
+            android:tint="#FFECEFF1" />
+    </LinearLayout>
+</LinearLayout>

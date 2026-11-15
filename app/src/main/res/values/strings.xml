@@ -6,7 +6,16 @@
     <string name="profile_tile_1">Profile 1</string>
     <string name="profile_tile_2">Profile 2</string>
     <string name="profile_tile_3">Profile 3</string>
-    <string name="widget_description">Shows whether you\'re protected, paused or off, with one button to connect, pause or resume.</string>
+    <string name="widget_description">Protected, paused or off, the profile in use and Tailscale, with one button to connect, pause or resume.</string>
+    <string name="widget_health_name">unbraid status</string>
+    <string name="widget_health_description">How many of your routes are working, the profile in use and Tailscale, with one button.</string>
+    <string name="widget_routes_name">unbraid routes</string>
+    <string name="widget_routes_description">Your default route and the next two routes, each showing whether it works.</string>
+    <string name="widget_board_name">unbraid route board</string>
+    <string name="widget_board_description">Every route with whether it works, in a list that scrolls, and the profile in use.</string>
+    <string name="widget_all_other">All other apps</string>
+    <string name="widget_profile">Profile</string>
+    <string name="widget_switch">Switch</string>
     <!-- Placeholder until the widget gets its live state. -->
     <string name="widget_connect">Connect</string>
 </resources>

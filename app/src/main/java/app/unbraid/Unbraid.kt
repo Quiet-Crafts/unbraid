@@ -7,7 +7,7 @@ import app.unbraid.vpn.VpnState.Phase
 import kotlinx.coroutines.flow.combine
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.Profiles
-import app.unbraid.vpn.StatusWidget
+import app.unbraid.vpn.Widgets
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
@@ -59,8 +59,9 @@ class Unbraid : Application() {
         if (!java.io.File(filesDir, "box/Taildrop").deleteRecursively()) android.util.Log.w("Unbraid", "old received files not deleted")
         app.unbraid.data.Snapshot.dir = filesDir
         val scope = MainScope()
-        // The home-screen widget mirrors every connection change, and whether running protects anything.
-        combine(UnbraidVpn.state.map { it.phase }, store.setup.map { it.directOnly }) { p, d -> p to d }.distinctUntilChanged().onEach { StatusWidget.update(this) }.launchIn(scope)
+        // The home-screen widgets mirror what they show of the connection and the setup, and nothing else redraws them.
+        combine(UnbraidVpn.state, store.setup) { v, s -> app.unbraid.vpn.glance(v, s) }.distinctUntilChanged().onEach { Widgets.update(this) }.launchIn(scope)
+        Widgets.previews(this)
         // The launcher shortcuts and quick-settings tiles follow the first three profiles and the one in use.
         // Not while the saved settings won't open (defaults would remove the user's shortcuts); again once they do.
         combine(store.setup.map { s -> s.profiles.take(Profiles.SLOTS).map { it.name } to s.profile }, store.unreadable) { p, u -> p to u }

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A route chip: one slash and the exit's code, as on Routes. Solid when live, outline when saved only, dashed globe for Direct. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/chip"
+    android:layout_width="44dp"
+    android:layout_height="22dp"
+    android:background="@drawable/widget_chip"
+    android:gravity="center"
+    android:orientation="horizontal">
+
+    <TextView
+        android:id="@+id/chipSlash"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:fontFamily="sans-serif-condensed"
+        android:textStyle="bold"
+        android:includeFontPadding="false"
+        android:text="/"
+        android:textColor="#FF0F1214"
+        android:textSize="15dp" />
+
+    <TextView
+        android:id="@+id/chipCode"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="2dp"
+        android:fontFamily="monospace"
+        android:textStyle="bold"
+        android:includeFontPadding="false"
+        android:maxLines="1"
+        android:text="NL"
+        android:textColor="#FF0F1214"
+        android:textSize="11dp" />
+
+    <ImageView
+        android:id="@+id/chipIcon"
+        android:layout_width="15dp"
+        android:layout_height="15dp"
+        android:importantForAccessibility="no"
+        android:src="@drawable/ic_w_direct"
+        android:tint="#FF9AA5AD"
+        android:visibility="gone" />
+</LinearLayout>
