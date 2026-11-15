@@ -87,6 +87,7 @@
         android:divider="@null"
         android:fadingEdgeLength="14dp"
         android:requiresFadingEdge="vertical"
+        android:fadeScrollbars="false"
         android:scrollbarSize="3dp"
         android:scrollbarThumbVertical="@drawable/widget_scroll" />
 

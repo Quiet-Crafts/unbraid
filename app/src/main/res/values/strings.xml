@@ -10,7 +10,7 @@
     <string name="widget_health_name">unbraid status</string>
     <string name="widget_health_description">How many of your routes are working, the profile in use and Tailscale, with one button.</string>
     <string name="widget_routes_name">unbraid routes</string>
-    <string name="widget_routes_description">Your default route and the next two routes, each showing whether it works.</string>
+    <string name="widget_routes_description">Your routes as tiles, the default first, each showing whether it works. More routes scroll.</string>
     <string name="widget_board_name">unbraid route board</string>
     <string name="widget_board_description">Every route with whether it works, in a list that scrolls, and the profile in use.</string>
     <string name="widget_all_other">All other apps</string>

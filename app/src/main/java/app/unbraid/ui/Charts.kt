@@ -125,7 +125,9 @@ fun StackedBars(columns: List<List<Pair<Float, Color>>>, labels: List<String>, m
         }
         Row(Modifier.fillMaxWidth().padding(end = 48.dp, top = 6.dp)) {
             labels.forEachIndexed { i, l ->
-                Text(l, style = Type.code.copy(fontSize = 12.sp), color = if (i == selected) Ink.text else Ink.dim, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                // Never onto a second line (a two-digit day in a month's narrow slot): the chart keeps one height for every period.
+                Text(l, style = Type.code.copy(fontSize = 12.sp), color = if (i == selected) Ink.text else Ink.dim, modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Visible)
             }
         }
     }

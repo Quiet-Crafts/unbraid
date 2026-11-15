@@ -52,17 +52,39 @@
 
     <FrameLayout android:layout_width="1dp" android:layout_height="0dp" android:layout_weight="1" />
 
-    <TextView
-        android:id="@+id/profile"
+    <!-- The profile in use, small, and how many routes work as a bare count (set and coloured in code). -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:ellipsize="end"
-        android:fontFamily="sans-serif-medium"
-        android:includeFontPadding="false"
-        android:maxLines="1"
-        android:paddingStart="2dp"
-        android:textColor="#FFFFA66B"
-        android:textSize="13dp" />
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="2dp">
+
+        <TextView
+            android:id="@+id/profile"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:fontFamily="sans-serif-medium"
+            android:includeFontPadding="false"
+            android:maxLines="1"
+            android:textColor="#FFFFA66B"
+            android:textSize="10.5dp" />
+
+        <TextView
+            android:id="@+id/count"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:fontFamily="monospace"
+            android:includeFontPadding="false"
+            android:maxLines="1"
+            android:textColor="#FF8EE0A8"
+            android:textSize="11.5dp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+    </LinearLayout>
 
     <FrameLayout android:layout_width="1dp" android:layout_height="0dp" android:layout_weight="1" />
 

@@ -41,6 +41,8 @@ data class Glance(
     /** While paused: when it resumes (epoch ms), 0 = by hand. */
     val until: Long = 0,
     val default: WidgetRoute? = null,
+    /** Tailscale runs against the user's own control server (Headscale or another), not Tailscale's: the tag says HS. */
+    val hs: Boolean = false,
     /** The other routes in use: failing ones first (never hidden below the fold), then exits A to Z, Direct last. */
     val others: List<WidgetRoute> = emptyList(),
 ) {
@@ -50,10 +52,11 @@ data class Glance(
 }
 
 /** What a route carries, in a widget's words: its apps, its websites, or both. */
-fun usesLabel(apps: Int, sites: Int) = listOfNotNull(
+fun usesLabel(apps: Int, sites: Int, short: Boolean = false) = listOfNotNull(
     (if (apps == 1) "1 app" else "$apps apps").takeIf { apps > 0 || sites == 0 },
-    (if (sites == 1) "1 website" else "$sites websites").takeIf { sites > 0 },
-).joinToString(" · ")
+    // A tile is narrow: with apps beside them, websites are "sites" there.
+    (if (short && apps > 0) (if (sites == 1) "1 site" else "$sites sites") else if (sites == 1) "1 website" else "$sites websites").takeIf { sites > 0 },
+).joinToString(if (short) ", " else " · ")
 
 /** [vpn] and [setup] as the widgets show them. */
 fun glance(vpn: VpnState, setup: Setup): Glance {
@@ -82,7 +85,7 @@ fun glance(vpn: VpnState, setup: Setup): Glance {
             tsDown -> Glance.Ts.Down
             else -> Glance.Ts.Idle
         },
-        if (vpn.phase == Phase.Paused) vpn.pausedUntil else 0, default, others,
+        if (vpn.phase == Phase.Paused) vpn.pausedUntil else 0, default, setup.home.tsControlUrl != null, others,
     )
 }
 
@@ -102,6 +105,9 @@ object Widgets {
     private const val GROUND = 0xFF0F1214.toInt()
     private val HUES = intArrayOf(0xFFFFA66B.toInt(), 0xFF7CC4FF.toInt(), 0xFFC9A7FF.toInt(), 0xFF8EE0A8.toInt(), 0xFFFFD36B.toInt(), 0xFFFF9EBB.toInt(), 0xFF6BE3DC.toInt())
 
+    /** A two-cell-tall widget's height in dp where the launcher doesn't say: for the previews. */
+    private const val TYPICAL = 190
+
     /** Minutes the Pause button pauses for. */
     const val PAUSE = 15
 
@@ -113,7 +119,9 @@ object Widgets {
     fun update(ctx: Context) {
         val m = AppWidgetManager.getInstance(ctx)
         val g = now()
-        for ((cls, draw) in all) m.getAppWidgetIds(ComponentName(ctx, cls)).takeIf { it.isNotEmpty() }?.let { m.updateAppWidget(it, draw(ctx, g)) }
+        // Each placed widget by itself: one is drawn for the height its place gives it.
+        for ((cls, draw) in all) for (id in m.getAppWidgetIds(ComponentName(ctx, cls)))
+            m.updateAppWidget(id, draw(ctx, g, m.getAppWidgetOptions(id).getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, TYPICAL))) // its height upright
     }
 
     /** What the widget picker shows for each widget: a typical setup, not the user's (Android 15 and later; earlier ones show the plain layout). */
@@ -123,7 +131,7 @@ object Widgets {
         fun r(code: String, name: String, hue: Int, apps: Int) = WidgetRoute(code, name, hue, apps, direct = false, live = true, failing = false)
         val g = Glance(Phase.On, true, 3, 3, "Home", default = r("NL", "Netherlands", 0, 0), others = listOf(r("IT", "Italy", 2, 2), r("US", "United States", 1, 3)))
         // Android limits how often previews may be set; a refusal only keeps the plain layout.
-        for ((cls, draw) in all) runCatching { m.setWidgetPreview(ComponentName(ctx, cls), android.appwidget.AppWidgetProviderInfo.WIDGET_CATEGORY_HOME_SCREEN, draw(ctx, g)) }
+        for ((cls, draw) in all) runCatching { m.setWidgetPreview(ComponentName(ctx, cls), android.appwidget.AppWidgetProviderInfo.WIDGET_CATEGORY_HOME_SCREEN, draw(ctx, g, TYPICAL)) }
     }
 
     private val GHOSTS = intArrayOf(R.drawable.widget_chip_ghost_0, R.drawable.widget_chip_ghost_1, R.drawable.widget_chip_ghost_2, R.drawable.widget_chip_ghost_3, R.drawable.widget_chip_ghost_4, R.drawable.widget_chip_ghost_5, R.drawable.widget_chip_ghost_6)
@@ -141,7 +149,7 @@ object Widgets {
     private class Act(val label: String, val short: String, val icon: Int, val fill: Int, val ink: Int, val does: String?)
 
     private fun act(g: Glance) = when {
-        g.phase == Phase.On && g.down > 0 -> Act("View route", "${g.down} down", R.drawable.ic_w_error, BAD_TINT, BAD, null)
+        g.phase == Phase.On && g.down > 0 -> Act("View route", "View", R.drawable.ic_w_error, BAD_TINT, BAD, null)
         g.phase == Phase.On -> Act("Pause $PAUSE min", "Pause", R.drawable.ic_w_pause, TOP, TEXT, "pause")
         g.phase == Phase.Connecting -> Act("Connecting", "Connecting", R.drawable.ic_w_power, TOP, DIM, null)
         g.phase == Phase.Paused -> Act("Resume", "Resume", R.drawable.ic_w_power, ACCENT, ON_ACCENT, "connect")
@@ -181,7 +189,9 @@ object Widgets {
         show(R.id.ts, g.ts != Glance.Ts.None)
         dot(R.id.tsDot, when (g.ts) { Glance.Ts.Up -> GOOD; Glance.Ts.Down -> BAD; else -> null })
         setTextColor(R.id.tsText, when (g.ts) { Glance.Ts.Up -> TEXT; Glance.Ts.Down -> BAD; else -> DIM })
-        val ts = when (g.ts) { Glance.Ts.Up -> ", Tailscale connected"; Glance.Ts.Down -> ", Tailscale not connected"; else -> "" }
+        setTextViewText(R.id.tsText, if (g.hs) "HS" else "TS")
+        val net = if (g.hs) "Headscale" else "Tailscale"
+        val ts = when (g.ts) { Glance.Ts.Up -> ", $net connected"; Glance.Ts.Down -> ", $net not connected"; else -> "" }
         val routes = if (g.phase == Phase.On && g.total > 0) ", ${g.ok} of ${g.total} routes working" else ""
         setContentDescription(android.R.id.background, "$APP: ${headline(g).lowercase()}$routes${g.profile?.let { ", profile $it" }.orEmpty()}$ts. Open $APP")
         val open = open(ctx)
@@ -242,34 +252,45 @@ object Widgets {
 
     private fun uses(r: WidgetRoute) = usesLabel(r.apps, r.sites)
 
-    private fun small(ctx: Context, g: Glance) = RemoteViews(ctx.packageName, R.layout.widget_status).apply {
+    private fun small(ctx: Context, g: Glance, @Suppress("UNUSED_PARAMETER") height: Int) = RemoteViews(ctx.packageName, R.layout.widget_status).apply {
         val a = act(g)
         common(ctx, g, a)
         show(R.id.profile, g.profile != null)
         setTextViewText(R.id.profile, g.profile.orEmpty())
         setTextColor(R.id.profile, if (g.phase == Phase.Off) DIM else ACCENT)
+        // How many routes work, as a bare count: green when all do, red otherwise. Only while connected.
+        show(R.id.count, g.phase == Phase.On && g.total > 0)
+        setTextViewText(R.id.count, "${g.ok}/${g.total}")
+        setTextColor(R.id.count, if (g.down == 0) GOOD else BAD)
         bg(R.id.action, a.fill)
         setTextViewText(R.id.action, a.short)
         setTextColor(R.id.action, a.ink)
     }
 
-    private fun health(ctx: Context, g: Glance) = RemoteViews(ctx.packageName, R.layout.widget_health).apply { head(ctx, g, act(g), short = false, tag = true) }
+    private fun health(ctx: Context, g: Glance, @Suppress("UNUSED_PARAMETER") height: Int) = RemoteViews(ctx.packageName, R.layout.widget_health).apply { head(ctx, g, act(g), short = false, tag = true) }
 
-    private fun routes(ctx: Context, g: Glance) = RemoteViews(ctx.packageName, R.layout.widget_routes).apply {
+    /** Every route as a tile, three to a line: the default first, the rest reached by scrolling. A tile is as tall as the widget leaves ([height] dp). */
+    private fun routes(ctx: Context, g: Glance, height: Int) = RemoteViews(ctx.packageName, R.layout.widget_routes).apply {
         head(ctx, g, act(g), short = true, tag = true)
-        removeAllViews(R.id.tiles)
-        val shown = (listOfNotNull(g.default) + g.others).take(3)
-        shown.forEachIndexed { i, r ->
-            addView(R.id.tiles, RemoteViews(ctx.packageName, R.layout.widget_tile).apply {
+        val all = listOfNotNull(g.default) + g.others
+        // The card's padding, the header and the gap under it; never less than a tile needs.
+        val tile = (height - 24 - 44 - 10).coerceAtLeast(84)
+        val items = RemoteViews.RemoteCollectionItems.Builder().setHasStableIds(true).setViewTypeCount(1)
+        all.forEachIndexed { i, r ->
+            items.addItem(i.toLong(), RemoteViews(ctx.packageName, R.layout.widget_tile).apply {
                 route(g, r, word = true)
                 val default = i == 0 && g.default != null
-                setTextViewText(R.id.label, if (default) "Default" else uses(r))
-                setInt(R.id.tile, "setBackgroundResource", when { default -> R.drawable.widget_seg_hero; i == 0 -> R.drawable.widget_seg_l; i == shown.lastIndex -> R.drawable.widget_seg_r; else -> R.drawable.widget_seg_m })
+                setTextViewText(R.id.label, if (default) "Default" else usesLabel(r.apps, r.sites, short = true))
+                setInt(R.id.tile, "setBackgroundResource", when { default -> R.drawable.widget_seg_hero; i % 3 == 0 -> R.drawable.widget_seg_l; i % 3 == 2 || i == all.lastIndex -> R.drawable.widget_seg_r; else -> R.drawable.widget_seg_m })
+                setViewLayoutHeight(R.id.tile, tile.toFloat(), android.util.TypedValue.COMPLEX_UNIT_DIP)
+                setOnClickFillInIntent(R.id.cell, Intent())
             })
         }
+        setRemoteAdapter(R.id.tiles, items.build())
+        setPendingIntentTemplate(R.id.tiles, PendingIntent.getActivity(ctx, 2, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
     }
 
-    private fun board(ctx: Context, g: Glance) = RemoteViews(ctx.packageName, R.layout.widget_board).apply {
+    private fun board(ctx: Context, g: Glance, @Suppress("UNUSED_PARAMETER") height: Int) = RemoteViews(ctx.packageName, R.layout.widget_board).apply {
         head(ctx, g, act(g), short = false, tag = false)
         route(g, g.default ?: WidgetRoute("", "Not set", 0, 0, direct = true, live = false, failing = false), word = false)
         val items = RemoteViews.RemoteCollectionItems.Builder().setHasStableIds(true).setViewTypeCount(1)
@@ -292,6 +313,8 @@ object Widgets {
 /** A home-screen widget that mirrors the connection: drawn by [draw] from the current [Glance]. */
 abstract class GlanceWidget : AppWidgetProvider() {
     override fun onUpdate(ctx: Context, m: AppWidgetManager, ids: IntArray) = Widgets.update(ctx)
+    // Resized or moved: drawn again for its new height.
+    override fun onAppWidgetOptionsChanged(ctx: Context, m: AppWidgetManager, id: Int, options: android.os.Bundle) = Widgets.update(ctx)
 }
 
 /** 1x1: the status badge, the profile in use, and one action. */
@@ -310,7 +333,7 @@ class StatusWidget : GlanceWidget() {
 /** 2x2: how many routes work, with the profile in use and Tailscale. */
 class HealthWidget : GlanceWidget()
 
-/** 4x2: the default route and the next two, each with whether it works. */
+/** 4x2: every route as a tile with whether it works, three to a line, the rest by scrolling. */
 class RoutesWidget : GlanceWidget()
 
 /** 4x3: every route in a scrolling list, and the profile in use. */

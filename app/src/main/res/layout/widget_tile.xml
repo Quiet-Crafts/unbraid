@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- One route in the 4x2 widget: chip, what it carries, the exit's name and whether it answers. -->
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- In a cell of its own: the tile's height is set in code to what the widget leaves, which a list's own item can't take. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/cell"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+<LinearLayout
     android:id="@+id/tile"
-    android:layout_width="0dp"
-    android:layout_height="match_parent"
+    android:layout_width="match_parent"
+    android:layout_height="116dp"
     android:layout_marginHorizontal="1dp"
-    android:layout_weight="1"
     android:background="@drawable/widget_seg_m"
     android:orientation="vertical"
     android:paddingHorizontal="10dp"
@@ -67,3 +71,4 @@
             android:textSize="11sp" />
     </LinearLayout>
 </LinearLayout>
+</FrameLayout>

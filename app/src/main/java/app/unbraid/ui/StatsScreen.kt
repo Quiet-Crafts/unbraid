@@ -370,17 +370,23 @@ private fun hmParts(ms: Long): List<Pair<String, String>> = (ms / 60_000).let { 
 
 /** The first card of a section: its key number, then whatever explains it. */
 @Composable
-private fun Hero(over: String, value: String, unit: String, sub: String?, trailing: String? = null, parts: List<Pair<String, String>>? = null, content: @Composable ColumnScope.() -> Unit = {}) = Column(
+private fun Hero(
+    over: String, value: String, unit: String, sub: String?, trailing: String? = null, parts: List<Pair<String, String>>? = null,
+    /** Lines [sub] may take: one where the card must keep its height whatever the numbers (Usage, across Day, Week and Month). */
+    subLines: Int = Int.MAX_VALUE,
+    content: @Composable ColumnScope.() -> Unit = {},
+) = Column(
     Modifier.padding(horizontal = Gutter).fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Ink.surfaceTop).padding(20.dp),
     verticalArrangement = Arrangement.spacedBy(12.dp),
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(over.uppercase(), style = Type.overline, color = Ink.dim, modifier = Modifier.weight(1f))
-        trailing?.let { Text(it, style = Type.code.copy(fontSize = 14.sp), color = Ink.text) }
+        // One line each, however long the number beside it: a wrapped overline would make the card taller.
+        Text(over.uppercase(), style = Type.overline, color = Ink.dim, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        trailing?.let { Text(it, style = Type.code.copy(fontSize = 14.sp), color = Ink.text, maxLines = 1) }
     }
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Num(parts ?: listOf(value to unit), 48)
-        sub?.let { Text(it, style = Type.sub, color = Ink.dim) }
+        sub?.let { Text(it, style = Type.sub, color = Ink.dim, maxLines = subLines, overflow = TextOverflow.Ellipsis) }
     }
     content()
 }
@@ -549,7 +555,7 @@ private fun Usage(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, go
         val cap = niceCeil(max / div)
         val sel = v.columns.getOrNull(v.selected)?.values?.sumOf { it.total } ?: 0L
         bytes(v.total.total).let { (n, u) ->
-            Hero("${p.label} · per ${if (p == Period.Day) "hour" else "day"}", n, u, "↓ ${bytesText(v.total.down)} download · ↑ ${bytesText(v.total.up)} upload", if (p == Period.Day) "now ${bytesText(sel)}" else "today ${bytesText(sel)}") {
+            Hero("${p.label} · per ${if (p == Period.Day) "hour" else "day"}", n, u, "↓ ${bytesText(v.total.down)} down · ↑ ${bytesText(v.total.up)} up", if (p == Period.Day) "now ${bytesText(sel)}" else "today ${bytesText(sel)}", subLines = 1) {
                 // How much, when: neutral bars (which exit is Flows' subject, in the exits' colours).
                 StackedBars(
                     v.columns.map { c -> listOf((c.values.sumOf { it.total } / div).toFloat() to Ink.text.copy(alpha = 0.75f)) },

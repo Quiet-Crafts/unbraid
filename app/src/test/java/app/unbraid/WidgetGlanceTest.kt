@@ -104,5 +104,8 @@ class WidgetGlanceTest {
         assertEquals(listOf(1, 1), g.others.map { it.sites })
         assertEquals(2, g.total); assertEquals(1, g.ok) // Italy has no tunnel yet
         assertEquals("1 website", app.unbraid.vpn.usesLabel(0, 1)); assertEquals("2 apps · 3 websites", app.unbraid.vpn.usesLabel(2, 3)); assertEquals("0 apps", app.unbraid.vpn.usesLabel(0, 0))
+        assertEquals("1 app, 2 sites", app.unbraid.vpn.usesLabel(1, 2, short = true)); assertEquals("2 websites", app.unbraid.vpn.usesLabel(0, 2, short = true))
+        // Tailscale against the user's own server is tagged HS.
+        assertFalse(g.hs); assertTrue(glance(VpnState(Phase.On), s.copy(home = Home(tailscale = true, tsControlUrl = "https://hs.example"))).hs)
     }
 }
