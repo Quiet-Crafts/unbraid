@@ -191,7 +191,8 @@ class BackupTest {
     }
 
     @Test fun olderSetupsAreMigrated() {
-        val old = Backup.export(full(), "", 0).toString(Charsets.UTF_8).replace("\"version\":$VERSION", "\"version\":0").toByteArray()
+        val old = Backup.export(full(), "", 0).toString(Charsets.UTF_8).replace("\"version\":2", "\"version\":0").toByteArray()
+        assertTrue("\"version\":0" in String(old))
         assertEquals(VERSION, Backup.read(old).setup.version)
     }
 

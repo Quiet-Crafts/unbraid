@@ -293,18 +293,6 @@ object Compiler {
                         add(obj("inbound" to PROBE, "auth_user" to arr(t), "outbound" to t))
                     }
                     network.forEach { add(it) }
-                    if (sites.isNotEmpty()) {
-                        // Matched on the name the lookup gave (a fake-IP connection reaches these rules as that name), never on
-                        // one read off the connection: an app could write any name there and take a website's route, Direct
-                        // included, to an address of its choosing. So an app that looks names up itself keeps its own route.
-                        // A website's route beats its app's. Looked up at its exit, then the home and LAN rules, as for an app.
-                        for ((id, names) in sites) {
-                            if (id in refused) { add(obj(*names, "action" to "reject", "no_drop" to true)); continue }
-                            add(obj(*names, "action" to "resolve", "server" to siteDns(id)))
-                            network.forEach { add(it) }
-                            add(obj(*names, "outbound" to tag(id)))
-                        }
-                    }
                     // While Tailscale waits for a sign-in, its login pages skip the tailnet for apps on a Tailscale exit: the
                     // exit node can't carry them before the sign-in. Other apps keep their own exits, and once signed in
                     // these sites follow the exit too (the engine's own control traffic never needs the rule).
@@ -320,6 +308,20 @@ object Compiler {
                         } },
                     )
                     val onTs = { id: String -> s.route(id)?.tsExit != null }
+                    if (sites.isNotEmpty()) {
+                        // Matched on the name the lookup gave (a fake-IP connection reaches these rules as that name), never on
+                        // one read off the connection: an app could write any name there and take a website's route, Direct
+                        // included, to an address of its choosing. So an app that looks names up itself keeps its own route.
+                        // A website's route beats its app's. Looked up at its exit, then the home and LAN rules, as for an app.
+                        for ((id, names) in sites) {
+                            if (id in refused) { add(obj(*names, "action" to "reject", "no_drop" to true)); continue }
+                            // A website on a Tailscale exit that is itself a sign-in page skips the exit while the sign-in waits, as for an app.
+                            if (onTs(id)) tsLogin.forEach { add(obj("type" to "logical", "mode" to "and", "rules" to JsonArray(listOf(obj(*names), obj(it))), "outbound" to "direct")) }
+                            add(obj(*names, "action" to "resolve", "server" to siteDns(id)))
+                            network.forEach { add(it) }
+                            add(obj(*names, "outbound" to tag(id)))
+                        }
+                    }
                     for ((id, p) in perApp) {
                         if (id in refused) { add(obj("package_name" to p, "action" to "reject", "no_drop" to true)); continue }
                         // Before its exit's DNS, which an exit node not yet signed in can't answer; Direct resolves locally.

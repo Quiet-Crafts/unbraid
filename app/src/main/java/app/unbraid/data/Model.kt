@@ -255,7 +255,8 @@ data class Setup(
     private fun kept(name: String, target: String): Setup? {
         val i = profiles.indexOfFirst { it.name.equals(name, ignoreCase = true) }
         if (i >= 0 && profiles[i].name == target) return null
-        val mine = live.copy(name = name)
+        // Over an older one, under the name it has: what names that profile ([onNet]) still does.
+        val mine = live.copy(name = profiles.getOrNull(i)?.name ?: name)
         return if (i >= 0) copy(profiles = profiles.toMutableList().apply { set(i, mine) }) else if (profiles.size < MAX_PROFILES) copy(profiles = profiles + mine) else null
     }
 

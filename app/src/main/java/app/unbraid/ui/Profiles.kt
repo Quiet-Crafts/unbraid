@@ -381,7 +381,7 @@ fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: (empty: Boolea
     var picking by rememberSaveable { mutableStateOf<String?>(null) }
     picking?.let { kind ->
         Prompt("On ${NETS.first { it.first == kind }.second.removePrefix("On ")}, switch to", "Done", { picking = null }, { picking = null }) {
-            Column(Modifier.selectableGroup()) {
+            Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()).selectableGroup()) {
                 (listOf<String?>(null) + profiles.filter { it.ready }.map { it.name }).forEach { name ->
                     val on = setup.onNet[kind] == name
                     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(on, role = Role.RadioButton) { ui.setOnNet(kind, name); picking = null }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {

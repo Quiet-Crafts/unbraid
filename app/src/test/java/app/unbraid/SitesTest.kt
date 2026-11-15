@@ -65,12 +65,14 @@ class SitesTest {
     @Test fun anAddressIsKeptAsItsName() {
         for ((raw, want) in listOf(
             "netflix.com" to "netflix.com", " https://www.Netflix.com/browse?x=1#top " to "netflix.com", "http://user:pw@Example.org:8080/a" to "example.org",
-            "sub.example.co.uk." to "sub.example.co.uk", "www.rai.it" to "rai.it", "münchen.de" to "xn--mnchen-3ya.de", "www.com" to "www.com",
+            "sub.example.co.uk." to "sub.example.co.uk", "www.rai.it" to "rai.it", "www.www.example.com" to "example.com", "WWW.www.com" to "www.com", "münchen.de" to "xn--mnchen-3ya.de", "www.com" to "www.com",
         )) assertEquals(raw, want, Sites.clean(raw))
         for (bad in listOf("", "   ", "localhost", "com", "192.168.1.1", "http://10.0.0.1/x", "[2001:db8::1]", "exa mple.com", "-bad.com", "bad-.com", "a_b.com", "*.example.com",
             "example..com", "a".repeat(64) + ".com", ("a".repeat(60) + ".").repeat(5) + "com")) assertNull(bad, Sites.clean(bad))
         // What is kept reads back as itself: a saved address is checked that way.
-        assertEquals("netflix.com", Sites.clean(Sites.clean("WWW.netflix.com")!!))
+        for (raw in listOf("WWW.netflix.com", "www.www.example.com", "www.com", "www.www.com", "https://www.a.b.example/x")) Sites.clean(raw)!!.let { assertEquals(it, Sites.clean(it)) }
+        // So a backup of any address the app accepts opens again.
+        assertEquals(mapOf("example.com" to "it"), Backup.read(Backup.export(setup.copy(sites = mapOf(Sites.clean("www.www.example.com")!! to "it")), "2.10.0", 0)).setup.sites)
     }
 
     @Test fun aNameUnderAnotherComesFirstAndRunsShareARoute() {
@@ -117,6 +119,19 @@ class SitesTest {
         val gone = setup.copy(routes = setup.routes.filter { it.id != "it" })
         assertEquals(setOf("it"), Compiler.missing(gone)); assertEquals(setOf("example.com"), gone.sitesOnMissing)
         assertEquals("reject", compile(gone).rules().single { it.strings("domain") == listOf("example.com") }.text("action"))
+    }
+
+    /** While Tailscale waits for a sign-in, a website on its exit that is itself a sign-in page goes Direct, before its own lookup. */
+    @Test fun aWebsiteOnATailscaleExitLeavesTheSignInPagesOut() {
+        val s = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands")), Route("ts", tsExit = "100.64.0.9")), defaultRoute = "nl",
+            sites = mapOf("tailscale.com" to "ts"), home = app.unbraid.data.Home(tailscale = true), version = VERSION)
+        val links = mapOf("nl" to WgLink(sv("nl"), Nord.peer(sv("nl"), wgKey)), "ts" to app.unbraid.data.TsLink(sv("ts")))
+        fun rules(login: Boolean) = Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links, "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", tsLoginPending = login))).jsonObject.rules()
+        val pending = rules(true)
+        val escape = pending.indexOfFirst { it.text("type") == "logical" && it.text("outbound") == "direct" }
+        assertTrue(escape in 0 until pending.indexOfFirst { it.strings("domain") == listOf("tailscale.com") && it.text("action") == "resolve" })
+        assertEquals(listOf(listOf("tailscale.com"), null), pending[escape]["rules"]!!.jsonArray.map { it.jsonObject.strings("domain") })
+        assertTrue(rules(false).none { it.text("type") == "logical" })
     }
 
     @Test fun profilesCarryTheirWebsites() {

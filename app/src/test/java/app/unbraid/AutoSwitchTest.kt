@@ -50,6 +50,10 @@ class AutoSwitchTest {
         val loose = setup.copy(profile = null, defaultRoute = "us", apps = mapOf("org.a" to "nl"))
         assertEquals("Trip", step(loose, MOBILE).to)
         assertEquals(PREVIOUS, loose.use("Trip", PREVIOUS).profiles.last().name)
+        // Kept over an older one under the name that one has, so a kind of network set to it still names a profile.
+        val named = loose.copy(profiles = loose.profiles + Profile("previous", "nl"), onNet = mapOf(WIFI to "previous"))
+        assertEquals("previous", named.use("Trip", PREVIOUS).profiles.last().name)
+        assertEquals("previous", Backup.valid(named.use("Trip", PREVIOUS)).onNet[WIFI])
         val full = loose.copy(profiles = loose.profiles + (1..MAX_PROFILES - 3).map { Profile("P$it", "nl") })
         assertTrue(step(full, MOBILE).let { it.to == null && it.blocked!!.startsWith("Not switched to Trip: there is no room to keep your current setup") })
     }

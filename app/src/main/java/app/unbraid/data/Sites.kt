@@ -14,7 +14,8 @@ object Sites {
         val host = raw.trim().substringAfter("://").substringBefore('/').substringBefore('?').substringBefore('#').substringAfterLast('@')
             .substringBefore(':').trim('.')
         val name = runCatching { java.net.IDN.toASCII(host).lowercase() }.getOrNull() ?: return null
-        val labels = name.removePrefix("www.").takeIf { '.' in it }?.split('.') ?: name.split('.')
+        // Every leading "www." goes while a name is left, so what is kept reads back as itself.
+        val labels = generateSequence(name) { n -> n.removePrefix("www.").takeIf { it != n && '.' in it } }.last().split('.')
         // A last label of digits is an IP address, or nothing a name ends in.
         return labels.joinToString(".").takeIf { it.length <= 253 && labels.size >= 2 && labels.all(LABEL::matches) && !labels.last().all(Char::isDigit) }
     }
