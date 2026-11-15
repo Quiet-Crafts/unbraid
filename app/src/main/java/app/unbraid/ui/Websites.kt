@@ -123,7 +123,7 @@ private fun SiteRow(ui: Ui, site: String, setup: Setup, offered: List<Route>, ex
             Box(Modifier.size(40.dp).clip(RoundedCornerShape(14.dp)).background(Ink.surfaceTop), contentAlignment = Alignment.Center) { Icon(Icons.link, null, Modifier.size(22.dp), tint = Ink.text) }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(site, style = Type.body, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(siteState(setup, site), style = Type.small, color = if (id != DIRECT && route == null) Ink.bad else Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(siteState(setup, site), style = Type.caption, color = if (id != DIRECT && route == null) Ink.bad else Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             RouteMark(route?.code ?: "··", route?.let { Ink.route(it.hue) } ?: Ink.direct, Modifier.clearAndSetSemantics {}, direct = id == DIRECT)
         }
