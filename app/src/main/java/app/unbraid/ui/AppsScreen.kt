@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.unbraid.data.DIRECT
 import app.unbraid.data.Setup
+import app.unbraid.data.Sites
 
 private fun Setup.codeOf(id: String) = route(id)?.code ?: "··"
 private fun Setup.colorOf(id: String) = route(id)?.let { Ink.route(it.hue) } ?: Ink.direct
@@ -121,6 +122,9 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     // The page's two lists: apps, and websites with a route of their own.
     var sites by rememberSaveable { mutableStateOf(false) }
     var openSite by rememberSaveable(viewing) { mutableStateOf<String?>(null) }
+    // The websites' own search and exit filter: the two lists work alike, each on what it lists.
+    var siteQ by rememberSaveable { mutableStateOf("") }
+    var siteFilter by rememberSaveable(viewing) { mutableStateOf<String?>(null) }
     var addSite by rememberSaveable { mutableStateOf(false) }
     var open by rememberSaveable(viewing) { mutableStateOf<String?>(null) }
     // The exit the open app had when it was opened: it keeps its place (and filter) until closed, then regroups.
@@ -130,7 +134,10 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     val list = rememberLazyListState()
     var land by remember(viewing) { mutableStateOf<String?>(null) }
     // Tapping Apps again closes the open app and the exit filter; the search stays. With neither, it scrolls to the top.
-    OnReselect(Tab.Apps) { if (open != null || filter != null) { open = null; openedAs = null; filter = null } else list.animateScrollToItem(0) }
+    OnReselect(Tab.Apps) {
+        if (sites) { if (openSite != null || siteFilter != null) { openSite = null; siteFilter = null } else list.animateScrollToItem(0) }
+        else if (open != null || filter != null) { open = null; openedAs = null; filter = null } else list.animateScrollToItem(0)
+    }
 
     val query = q.trim()
     // The viewed profile's routes only: never another profile's, nor one no profile uses any more.
@@ -173,12 +180,17 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                     if (setup.defaultRoute.isNotEmpty()) Secondary("Use $viewing", { switchTo(viewing.orEmpty()) })
                 }
             }
-            AppsOrSites(sites, setup.sites.size) { sites = it }
-            if (!sites) SearchField(q, { q = it }, "Search apps")
+            AppsOrSites(sites) { sites = it }
+            if (sites) SearchField(siteQ, { siteQ = it }, "Search websites") else SearchField(q, { q = it }, "Search apps")
         },
+        // Websites are added from the bar under their list, where Profiles has Add profile.
+        bottom = if (!sites) null else { { AddSiteBar(setup.sites.size < Sites.MAX) { addSite = true } } },
         belowSearch = {
-            if (!sites) Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip("All", Ink.text, filter == null) { filter = null }
+            // The same exits filter either list: the one in use is the open list's own.
+            val chosen = if (sites) siteFilter else filter
+            val choose = { id: String? -> if (sites) siteFilter = id else filter = id }
+            Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip("All", Ink.text, chosen == null) { choose(null) }
                 // Two routes with one country code (NordVPN NL, Mullvad NL) are told apart by provider.
                 offered.forEach { r ->
                     // Same code and source too (two WireGuard servers): the route's own name.
@@ -187,16 +199,16 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                         offered.count { it.code == r.code && it.source == r.source } == 1 -> "${r.code} · ${r.source}"
                         else -> "${r.code} · ${r.name}"
                     }
-                    FilterChip(label, Ink.route(r.hue), filter == r.id) { filter = r.id }
+                    FilterChip(label, Ink.route(r.hue), chosen == r.id) { choose(r.id) }
                 }
-                if (setup.defaultRoute.isEmpty()) FilterChip("Not set", null, filter == "") { filter = "" }
-                FilterChip("Direct", Ink.direct, filter == DIRECT, direct = true) { filter = DIRECT }
-                FilterChip("System", null, showSystem, independent = true) { showSystem = !showSystem }
+                if (!sites && setup.defaultRoute.isEmpty()) FilterChip("Not set", null, filter == "") { filter = "" }
+                FilterChip("Direct", Ink.direct, chosen == DIRECT, direct = true) { choose(DIRECT) }
+                if (!sites) FilterChip("System", null, showSystem, independent = true) { showSystem = !showSystem }
             }
         },
     ) {
         if (sites) {
-            websites(ui, setup, offered, openSite, { openSite = it }, { addSite = true }, outside = !lockdown && setup.apps.keys.any(setup::outside))
+            websites(ui, setup, offered, shownSites(setup, siteQ.trim(), siteFilter), siteQ.trim(), siteFilter, { siteFilter = null }, openSite, { openSite = it }, outside = !lockdown && setup.apps.keys.any(setup::outside))
             return@Screen
         }
         if (!disclosed) item("disclose") {

@@ -15,6 +15,8 @@ import app.unbraid.data.WgLink
 import app.unbraid.data.restoredFrom
 import app.unbraid.ui.appsLabel
 import app.unbraid.ui.dropText
+import app.unbraid.ui.emptySites
+import app.unbraid.ui.shownSites
 import app.unbraid.ui.missingSitesText
 import app.unbraid.ui.removeText
 import app.unbraid.ui.siteError
@@ -213,5 +215,20 @@ class SitesTest {
         assertEquals("No app in Work chose it. 2 websites on it go with their app again. The route stays for other profiles.", dropText("Work", 0, sites = 2))
         assertEquals("1 website is on a route that no longer exists, so it's blocked. Remove it, or choose a route on Apps.", missingSitesText(1))
         assertEquals("Netherlands · 1 app elsewhere · 3 websites", summary(setup, Profile("P", "nl", setup.apps, sites = setup.sites)))
+    }
+
+    /** The Websites list filters and searches like the Apps list, and groups the same way: other exits A to Z, Direct, then the default. */
+    @Test fun theWebsitesListFiltersAndGroupsLikeApps() {
+        val s = setup.copy(sites = setup.sites + ("nos.nl" to "nl") + ("rai.it" to "it"))
+        assertEquals(listOf("example.com", "rai.it", "api.example.com", "bank.example", "nos.nl"), shownSites(s, "", null)) // Italy, United States, Direct, the default
+        assertEquals(listOf("example.com", "rai.it"), shownSites(s, "", "it"))
+        assertEquals(listOf("example.com", "api.example.com", "bank.example"), shownSites(s, "EXAMPLE", null))
+        assertEquals(listOf("api.example.com"), shownSites(s, "example", "us"))
+        assertEquals(listOf("bank.example"), shownSites(s, "", DIRECT))
+        assertTrue(shownSites(s, "nothing", null).isEmpty())
+        assertEquals("No websites yet. Add one to send it through a route of its own, in any browser or app." to false, emptySites(false, "", null))
+        assertEquals("No websites use Italy." to true, emptySites(true, "", "Italy"))
+        assertEquals("No websites on Italy match \"x\"." to true, emptySites(true, "x", "Italy"))
+        assertEquals("No websites match \"x\"." to false, emptySites(true, "x", null))
     }
 }

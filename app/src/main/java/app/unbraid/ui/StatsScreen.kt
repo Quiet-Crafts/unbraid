@@ -159,7 +159,7 @@ private fun View.byProvider(): List<Pair<String, Long>> =
     byExit.groupBy({ providerOf(it.first, exits[it.first]) }, { it.second.total }).mapValues { it.value.sum() }.entries.sortedByDescending { it.value }.map { it.key to it.value }
 
 /**
- * What an app is called in App flows: its current name; after it is removed, the name saved when it was first seen
+ * What an app is called in Flows: its current name; after it is removed, the name saved when it was first seen
  * ("Removed app (Name)", never a piece of its package name); traffic of a uid with no app is one "Other system traffic".
  * An app that shares its uid with others is named "Name and others", since their traffic counts under it.
  */
@@ -422,7 +422,7 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                             Text("↓ ${bytesText(v?.total?.down ?: 0)} · ↑ ${bytesText(v?.total?.up ?: 0)}", style = Type.sub, color = Ink.dim)
                         }
                     }
-                    // Who carried it, by provider: neutral meters (exits and their colours are App flows' subject).
+                    // Who carried it, by provider: neutral meters (exits and their colours are Flows' subject).
                     v?.byProvider()?.take(3)?.forEach { (name, b) -> ProviderMeter(name, b, t) }
                 }
             }
@@ -439,7 +439,7 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                             Spark(total, Ink.text, Modifier.fillMaxWidth(), "Download over the last minute, now ${rate(live.downNow).let { "${it.first} ${it.second}" }}")
                         } else Text("Not connected", style = Type.sub, color = Ink.dim)
                     }
-                    HubTile("flows", "App flows", Icons.flows, 2, play, go) {
+                    HubTile("flows", "Flows", Icons.flows, 2, play, go) {
                         // Where the data went: the share by exit as a ring, in the exits' colours, and how many apps.
                         val exits = v?.byExit?.filter { it.first != DIRECT }.orEmpty()
                         if (v == null || exits.isEmpty()) Text("No data yet", style = Type.sub, color = Ink.dim) else {
@@ -470,7 +470,7 @@ private fun Hub(ui: Ui, v: View?, p: Period, recording: Boolean, periodPicker: L
                         if (v == null || best == null) Text("No speed tests yet", style = Type.sub, color = Ink.dim) else {
                             Num(mbps(best.value), "Mbps", 28)
                             Text("best test · ${v.exits[best.key]?.name}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            // The two fastest, like App flows' legend: the hub fits one Pixel screen without scrolling.
+                            // The two fastest, like Flows' legend: the hub fits one Pixel screen without scrolling.
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 fastest.entries.sortedByDescending { it.value }.take(2).forEach { (id, b) ->
                                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -550,7 +550,7 @@ private fun Usage(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, go
         val sel = v.columns.getOrNull(v.selected)?.values?.sumOf { it.total } ?: 0L
         bytes(v.total.total).let { (n, u) ->
             Hero("${p.label} · per ${if (p == Period.Day) "hour" else "day"}", n, u, "↓ ${bytesText(v.total.down)} download · ↑ ${bytesText(v.total.up)} upload", if (p == Period.Day) "now ${bytesText(sel)}" else "today ${bytesText(sel)}") {
-                // How much, when: neutral bars (which exit is App flows' subject, in the exits' colours).
+                // How much, when: neutral bars (which exit is Flows' subject, in the exits' colours).
                 StackedBars(
                     v.columns.map { c -> listOf((c.values.sumOf { it.total } / div).toFloat() to Ink.text.copy(alpha = 0.75f)) },
                     v.labels, cap.toFloat(), "${scaleText(cap.toFloat())} $unit", dataSummary(if (p == Period.Day) "hour" else "day", v.columns.map { c -> c.values.sumOf { it.total } }, v.selected, ::bytesText), v.selected,
@@ -570,8 +570,8 @@ private fun Usage(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, go
             }
         })
     }
-    item(key = "note") { Caption("Data that passes through unbraid. Apps you set to Direct skip it and aren't counted, unless connections without VPN are blocked or they pass through for the Protection filter. Apps that follow a Direct default route are counted. By exit and app: App flows.") }
-    item(key = "links") { Row(Modifier.padding(start = Gutter, top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { LinkButton(Icons.flows, "App flows") { go("flows") }; LinkButton(Icons.tunnel, "Routes") { go("tunnels") } } }
+    item(key = "note") { Caption("Data that passes through unbraid. Apps you set to Direct skip it and aren't counted, unless connections without VPN are blocked or they pass through for the Protection filter. Apps that follow a Direct default route are counted. By exit and app: Flows.") }
+    item(key = "links") { Row(Modifier.padding(start = Gutter, top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { LinkButton(Icons.flows, "Flows") { go("flows") }; LinkButton(Icons.tunnel, "Routes") { go("tunnels") } } }
 }
 
 /** The next round scale value at or above [x]: 1, 2, 2.5, 5 times a power of ten. */
@@ -627,7 +627,7 @@ private fun Flows(ui: Ui, v: View, p: Period, periodPicker: LazyListScope.() -> 
     var picked by rememberSaveable { mutableStateOf<String?>(null) }
     val only = picked?.takeIf { it in exits } // an exit with no data in this period filters nothing
     var all by rememberSaveable { mutableStateOf(false) }
-    Section("flows", rangeLabel(p, LocalDate.now()), "App flows", "${apps.map { it.first }.distinct().size} apps into ${exits.size} routes · Direct traffic not shown", back = { go(null) }) {
+    Section("flows", rangeLabel(p, LocalDate.now()), "Flows", "${apps.map { it.first }.distinct().size} apps into ${exits.size} routes · Direct traffic not shown", back = { go(null) }) {
         periodPicker()
         if (apps.isEmpty()) { item { Empty("No data in this period yet.") }; return@Section }
         item(key = "lanesLabel") { SectionLabel("Routes · data and their apps") }

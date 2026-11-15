@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -77,35 +78,66 @@ internal fun siteError(s: Setup, raw: String): String? = when {
 internal fun sitesNote(outside: Boolean) = "A website's route beats its app's, and covers every address under it (example.com and www.example.com). " +
     "A service that uses other addresses too needs each added. A browser set to its own secure DNS keeps its app's route." + if (outside) " Apps set to Direct are outside $APP: websites opened in them aren't re-routed." else ""
 
-/** The Apps page's two lists as a connected pair: apps, and websites ([count] of them). */
+/**
+ * The websites the list shows: those on route [filter] (null = all) whose address has [query] in it, grouped like the
+ * apps: the other exits A to Z by name, then Direct, then the default; addresses A to Z inside each.
+ */
+internal fun shownSites(s: Setup, query: String, filter: String?): List<String> {
+    val rank = (s.routes.sortedBy { it.name.lowercase() }.map { it.id } + DIRECT).filter { it != s.defaultRoute }.withIndex().associate { (i, id) -> id to i }
+    return s.sites.filter { (site, id) -> (filter == null || id == filter) && (query.isEmpty() || site.contains(query, true)) }.keys
+        .sortedWith(compareBy({ rank[s.sites[it]] ?: Int.MAX_VALUE }, { it }))
+}
+
+/** The Websites list when nothing shows: why, and whether "Show all" brings websites back (a route filter hides them). */
+internal fun emptySites(any: Boolean, query: String, filter: String?): Pair<String, Boolean> = when {
+    !any -> "No websites yet. Add one to send it through a route of its own, in any browser or app." to false
+    filter != null -> (if (query.isEmpty()) "No websites use $filter." else "No websites on $filter match \"$query\".") to true
+    else -> "No websites match \"$query\"." to false
+}
+
+/** The Apps page's two lists as a connected pair. Selection is the colour alone. */
 @Composable
-internal fun AppsOrSites(sites: Boolean, count: Int, onPick: (Boolean) -> Unit) =
+internal fun AppsOrSites(sites: Boolean, onPick: (Boolean) -> Unit) =
     Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 4.dp).selectableGroup(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-        listOf(false to "Apps", true to if (count == 0) "Websites" else "Websites · $count").forEachIndexed { i, (s, label) ->
+        listOf(false to "Apps", true to "Websites").forEachIndexed { i, (s, label) ->
             val on = sites == s
             val bg by animateColorAsState(if (on) Ink.accentContainer else Ink.surfaceHigh, MaterialTheme.motionScheme.fastEffectsSpec(), label = "list")
-            Row(
+            Box(
                 Modifier.weight(1f).heightIn(min = 48.dp).clip(segmentShape(i, 2)).background(bg).selectable(on, role = Role.Tab) { onPick(s) }.padding(horizontal = 12.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
-            ) {
-                if (on) Icon(Icons.check, null, Modifier.size(18.dp), tint = Ink.accent)
-                Text(label, style = Label, color = if (on) Ink.accent else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
+                contentAlignment = Alignment.Center,
+            ) { Text(label, style = Label, color = if (on) Ink.accent else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis) }
         }
     }
 
-/** The Websites list: each address with its route, opening the same route tiles as an app; then Add website and what a rule covers. */
-internal fun LazyListScope.websites(ui: Ui, setup: Setup, offered: List<Route>, open: String?, onOpen: (String?) -> Unit, onAdd: () -> Unit, outside: Boolean) {
-    if (setup.sites.isEmpty()) item("sites-empty") {
-        Text("No websites yet. Add one to send it through a route of its own, in any browser or app.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp))
-    }
-    items(setup.sites.keys.sorted(), key = { "site:$it" }) { site -> SiteRow(ui, site, setup, offered, open == site) { onOpen(site.takeIf { open != site }) } }
-    item("sites-add") {
-        Column(Modifier.padding(horizontal = 24.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Secondary("Add website", onAdd, enabled = setup.sites.size < Sites.MAX)
-            Text(sitesNote(outside), style = Type.caption, color = Ink.dim)
+/** Add website, under the list: the page's one accent action, as Add profile is on Profiles. Greyed at the most a profile holds. */
+@Composable
+internal fun AddSiteBar(room: Boolean, onAdd: () -> Unit) =
+    Row(Modifier.fillMaxWidth().padding(Gutter), horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
+        if (!room) Text("${Sites.MAX} websites is the most. Remove one to add another.", style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f))
+        Row(
+            Modifier.height(56.dp).clip(RoundedCornerShape(28.dp)).background(if (room) Ink.accent else Ink.surfaceHigh).tap({ if (room) onAdd() }, role = Role.Button).padding(start = 18.dp, end = 22.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(Icons.add, null, Modifier.size(24.dp), tint = if (room) Ink.onAccent else Ink.faint)
+            Text("Add website", style = Type.title, color = if (room) Ink.onAccent else Ink.faint)
         }
     }
+
+/** The Websites list: [shown] of the setup's addresses, each opening the same route tiles as an app; then what a rule covers. */
+internal fun LazyListScope.websites(
+    ui: Ui, setup: Setup, offered: List<Route>, shown: List<String>, query: String, filter: String?, showAll: () -> Unit,
+    open: String?, onOpen: (String?) -> Unit, outside: Boolean,
+) {
+    if (shown.isEmpty()) item("sites-empty") {
+        val name = when (filter) { null -> null; DIRECT -> "Direct"; else -> setup.route(filter)?.name ?: "this route" }
+        val (text, all) = emptySites(setup.sites.isNotEmpty(), query, name)
+        Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(text, style = Type.sub, color = Ink.dim)
+            if (all) Secondary("Show all", showAll)
+        }
+    }
+    items(shown, key = { "site:$it" }) { site -> Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null)) { SiteRow(ui, site, setup, offered, open == site) { onOpen(site.takeIf { open != site }) } } }
+    item("sites-note") { Text(sitesNote(outside), style = Type.caption, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)) }
 }
 
 @Composable
