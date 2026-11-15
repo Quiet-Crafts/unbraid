@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.core.database.sqlite.transaction
 import app.unbraid.Unbraid
 import app.unbraid.data.DIRECT
+import app.unbraid.data.Sites
 import app.unbraid.data.Route
 import app.unbraid.data.Setup
 import app.unbraid.vpn.Compiler
@@ -31,7 +32,8 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Local traffic statistics. Off until the user agrees; then the engine's per-connection byte counts
- * are summed per hour, day, app and exit into an app-private SQLite file. Never uploaded; no destinations kept.
+ * are summed per hour, day, app and exit into an app-private SQLite file. Never uploaded. No destinations are kept,
+ * but for a website the user gave a route of its own: its traffic is summed under that address, as the user wrote it.
  *
  * One ordered worker thread owns all state and every write: engine callbacks, lifecycle (start, stop, delete) and
  * sessions are queued to it, so nothing needs a lock, and a callback from a stopped or deleted recording (an older
@@ -162,7 +164,10 @@ object Stats {
     }
 
     /** A real package name (not "?" or a bare uid). */
-    internal fun isPackage(pkg: String) = pkg != "?" && !pkg.startsWith("uid:")
+    internal fun isPackage(pkg: String) = pkg != "?" && !pkg.startsWith("uid:") && !pkg.startsWith(SITE)
+
+    /** How a website with a route of its own is recorded in an app's place: this, then its address as the setup has it. */
+    const val SITE = "site:"
 
     /** The row every uid-only app ("uid:N") is folded into. */
     const val OTHER = "uid:"
@@ -352,7 +357,9 @@ object Stats {
  */
 internal object Collector {
     private class Conn(val app: String, val exit: String, val server: String?, var up: Long, var down: Long)
-    private class Ev(val type: Long, val id: String, val total: Pair<Long, Long>?, val delta: Pair<Long, Long>, val uid: Int, val tag: String?, val closed: Boolean, val created: Long, val own: Boolean, val pkg: String?)
+    private class Ev(val type: Long, val id: String, val total: Pair<Long, Long>?, val delta: Pair<Long, Long>, val uid: Int, val tag: String?, val closed: Boolean, val created: Long, val own: Boolean, val pkg: String?,
+        /** The name the connection goes to, when the engine knows one. Only compared with the user's websites, never kept. */
+        val host: String?)
 
     private var client: CommandClient? = null
     /**
@@ -430,7 +437,8 @@ internal object Collector {
                 val c = e.connection
                 list += Ev(e.type.toLong(), e.id, c?.let { x -> x.uplinkTotal to x.downlinkTotal }, e.uplinkDelta to e.downlinkDelta,
                     c?.processInfo?.userID ?: -1, c?.let { x -> first(x.chain()) }, (c?.closedAt ?: 0) > 0, c?.createdAt ?: 0, c?.inbound == Compiler.PROBE,
-                    c?.processInfo?.packageNames()?.let { p -> buildList { while (p.hasNext()) add(p.next()) }.minOrNull() })
+                    c?.processInfo?.packageNames()?.let { p -> buildList { while (p.hasNext()) add(p.next()) }.minOrNull() },
+                    c?.let { x -> x.domain.ifEmpty { x.destination.substringBeforeLast(':') } })
             }
             val reset = events.reset
             Stats.post { if (gen == Stats.gen) { heard = System.currentTimeMillis(); retries = 0; apply(list, reset) } }
@@ -470,8 +478,10 @@ internal object Collector {
         uidPackages.clear() // a uid can change hands between batches
         val ids = HashMap<String, String>() // the recorded id of each exit, worked out once per batch (a replay lists hundreds)
         val open = { e: Ev ->
-            val app = if (e.own) Stats.ctx.packageName else appOf(e).also(Stats::noteApp).pkg
-            val exit = (if (e.own) SpeedTest.exitOn(e.tag) else SpeedTest.nodeExitOn(e.tag)) ?: exitOf(e.tag, app, setup, tags)
+            // A connection to a website with a route of its own counts under that website, not under the app that opened it.
+            val site = if (e.own) null else e.host?.let { Sites.match(it, setup.sites.keys) }
+            val app = if (e.own) Stats.ctx.packageName else site?.let { Stats.SITE + it } ?: appOf(e).also(Stats::noteApp).pkg
+            val exit = (if (e.own) SpeedTest.exitOn(e.tag) else SpeedTest.nodeExitOn(e.tag)) ?: exitOf(e.tag, site?.let(setup.sites::get) ?: setup.routeOf(app), tags)
             Conn(app, ids.getOrPut(exit) { Stats.note(exit, setup) }, servers[exit]?.name, 0, 0)
         }
         val replayed = HashSet<String>()
@@ -552,13 +562,12 @@ internal object Collector {
     /** The app as the engine found it for this connection, and whether other apps share its uid; looked up afresh each batch. */
     private fun appOf(e: Ev) = Stats.resolveApp(e.pkg, e.uid, if (e.uid < 0) null else uidPackages.getOrPut(e.uid) { Stats.ctx.packageManager.getPackagesForUid(e.uid)?.toList().orEmpty() })
 
-    /** The tunnel tag says which tunnel; when routes share it, the app's own route among them says which route. */
-    private fun exitOf(tag: String?, app: String, setup: app.unbraid.data.Setup, tags: Map<String, String>): String {
+    /** The tunnel tag says which tunnel; when routes share it, the app's or website's [own] route among them says which route. */
+    private fun exitOf(tag: String?, own: String, tags: Map<String, String>): String {
         if (tag == null || tag == "direct") return DIRECT
         if (tag == "home-wg") return Stats.HOME
         val candidates = tags.filterValues { it == tag }.keys
         if (candidates.isEmpty()) return if (tag == Compiler.TS_TAG) Stats.HOME else tag.removePrefix("r-")
-        val own = setup.routeOf(app) // the running setup's assignment, not one still being edited
         return if (own in candidates) own else if (tag == Compiler.TS_TAG) Stats.HOME else candidates.first()
     }
 

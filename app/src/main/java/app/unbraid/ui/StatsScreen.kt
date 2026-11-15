@@ -161,9 +161,26 @@ private fun View.byProvider(): List<Pair<String, Long>> =
 /**
  * What an app is called in Flows: its current name; after it is removed, the name saved when it was first seen
  * ("Removed app (Name)", never a piece of its package name); traffic of a uid with no app is one "Other system traffic".
- * An app that shares its uid with others is named "Name and others", since their traffic counts under it.
+ * An app that shares its uid with others is named "Name and others", since their traffic counts under it. A website
+ * with a route of its own stands beside the apps under its address.
  */
+/** On a route's lane: how many apps it carried, and websites with a route of their own when it carried any. */
+internal fun laneCount(names: List<String>): String {
+    val sites = names.count { it.startsWith(Stats.SITE) }
+    val apps = names.size - sites
+    return listOfNotNull((if (apps == 1) "1 app" else "$apps apps").takeIf { apps > 0 || sites == 0 }, (if (sites == 1) "1 website" else "$sites websites").takeIf { sites > 0 }).joinToString(" · ")
+}
+
+/** Under the Flows title: how many apps, and websites when some have data, go into how many routes. */
+internal fun flowsSub(names: List<String>, routes: Int): String {
+    val sites = names.count { it.startsWith(Stats.SITE) }
+    val apps = names.size - sites
+    return listOfNotNull(if (apps == 1) "1 app" else "$apps apps", (if (sites == 1) "1 website" else "$sites websites").takeIf { sites > 0 }).joinToString(" and ") +
+        " into ${if (routes == 1) "1 route" else "$routes routes"} · Direct traffic not shown"
+}
+
 internal fun appLabel(pkg: String, installed: String?, saved: Stats.AppName?): String = when {
+    pkg.startsWith(Stats.SITE) -> pkg.removePrefix(Stats.SITE) // a website with a route of its own, by its address
     pkg == "?" -> "Unknown app"
     pkg == Stats.OTHER -> "Other system traffic"
     installed != null -> if (saved?.shared == true) "$installed and others" else installed
@@ -633,10 +650,10 @@ private fun Flows(ui: Ui, v: View, p: Period, periodPicker: LazyListScope.() -> 
     var picked by rememberSaveable { mutableStateOf<String?>(null) }
     val only = picked?.takeIf { it in exits } // an exit with no data in this period filters nothing
     var all by rememberSaveable { mutableStateOf(false) }
-    Section("flows", rangeLabel(p, LocalDate.now()), "Flows", "${apps.map { it.first }.distinct().size} apps into ${exits.size} routes · Direct traffic not shown", back = { go(null) }) {
+    Section("flows", rangeLabel(p, LocalDate.now()), "Flows", flowsSub(apps.map { it.first }.distinct(), exits.size), back = { go(null) }) {
         periodPicker()
         if (apps.isEmpty()) { item { Empty("No data in this period yet.") }; return@Section }
-        item(key = "lanesLabel") { SectionLabel("Routes · data and their apps") }
+        item(key = "lanesLabel") { SectionLabel(if (apps.any { it.first.startsWith(Stats.SITE) }) "Routes · data, their apps and websites" else "Routes · data and their apps") }
         // The exits' shares of all data, as one thin bar.
         item(key = "share") {
             Row(Modifier.padding(horizontal = Gutter).padding(bottom = 10.dp).fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -650,7 +667,7 @@ private fun Flows(ui: Ui, v: View, p: Period, periodPicker: LazyListScope.() -> 
         // The list: every app by data, filtered by exit; long lists open on request.
         val shown = apps.filter { only == null || it.second == only }
         item(key = "listLabel") {
-            SectionLabel("Apps · by data")
+            SectionLabel(if (apps.any { it.first.startsWith(Stats.SITE) }) "Apps and websites · by data" else "Apps · by data")
             LazyRow(Modifier.fillMaxWidth().selectableGroup(), contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 item { FilterPill(null, "All", apps.map { it.first }.distinct().size, only == null) { picked = null; all = false } }
                 items(exits) { e -> FilterPill(v.exits[e], v.exits[e]?.name ?: e, apps.count { it.second == e }, only == e) { picked = e; all = false } }
@@ -661,7 +678,11 @@ private fun Flows(ui: Ui, v: View, p: Period, periodPicker: LazyListScope.() -> 
         items(list.size, key = { "app:" + list[it].first + list[it].second }) { i ->
             val (pkg, exit, b) = list[i]
             val ex = v.exits[exit]
-            GroupRow(i, list.size, name(pkg), null, leading = { AppIcon(ui, pkg, name(pkg), 32.dp) }, trailing = {
+            GroupRow(i, list.size, name(pkg), null, leading = {
+                // A website wears the mark it has on Apps, in an app icon's place.
+                if (pkg.startsWith(Stats.SITE)) Box(Modifier.size(32.dp).clip(RoundedCornerShape(10.dp)).background(Ink.surfaceTop), contentAlignment = Alignment.Center) { Icon(Icons.link, null, Modifier.size(18.dp), tint = Ink.text) }
+                else AppIcon(ui, pkg, name(pkg), 32.dp)
+            }, trailing = {
                 Column(Modifier.width(150.dp), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) { Chip(ex); Text(bytesText(b), style = Type.code.copy(fontSize = 14.sp), color = Ink.text) }
                     Meter(b.toFloat() / shown.first().third.coerceAtLeast(1), ex?.color ?: Ink.faint, Modifier.fillMaxWidth())
@@ -702,7 +723,7 @@ private fun Lane(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Chip(ex)
             Text(ex?.name ?: "?", style = Type.body, color = Ink.text, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("${apps.size} ${if (apps.size == 1) "app" else "apps"}", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
+            Text(laneCount(apps.map { it.first }), style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
             Text(bytesText(bytes), style = Type.code.copy(fontSize = 15.sp, fontWeight = FontWeight.Medium), color = Ink.text)
             Text("${sharePct(bytes, total)}%", style = Type.code.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
         }
@@ -1452,10 +1473,10 @@ private fun StatsOff(hasData: Boolean, turnOn: () -> Unit, view: () -> Unit) = S
                 modifier = tourAnchor(TourStop.StatsIntro))
             Text(
                 if (hasData) "Nothing new is recorded. Statistics kept so far are still on this phone; delete them in Settings."
-                else "Data per app and per route, time connected and speeds. Statistics aren't uploaded, and no browsing destinations are recorded.",
+                else "Data per app and per route, time connected and speeds. Statistics aren't uploaded. Where you browse isn't recorded, except how much data goes to the websites you gave a route of their own.",
                 style = Type.body.copy(fontWeight = FontWeight.Normal, lineHeight = 24.sp), color = Ink.dim,
             )
-            listOf(Icons.phone to "Kept only on this phone", Icons.block to "No browsing destinations", Icons.deleteForever to "Delete it any time in Settings").forEach { (i, t) ->
+            listOf(Icons.phone to "Kept only on this phone", Icons.block to "No browsing history", Icons.deleteForever to "Delete it any time in Settings").forEach { (i, t) ->
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) { Icon(i, null, Modifier.size(20.dp), tint = Ink.dim); Text(t, style = Type.sub, color = Ink.text) }
             }
             Row(
@@ -1476,7 +1497,7 @@ fun StatsConsent(dismiss: () -> Unit, accept: () -> Unit) = ModalBottomSheet(dis
         listOf(
             Icons.phone to "Statistics stay on this phone. They are never uploaded.",
             Icons.clock to "Kept as hourly sums for a week and daily sums for about a year, with your last 100 speed tests.",
-            Icons.block to "Only apps, routes, bytes, times, speeds and speed-test exit IPs. No browsing destinations, ever.",
+            Icons.block to "Only apps, the websites you gave a route of their own, routes, bytes, times, speeds and speed-test exit IPs. Nothing else of where you browse, ever.",
             Icons.deleteForever to "Turn off or delete everything in Settings at any time.",
         ).forEach { (i, t) -> Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) { Icon(i, null, Modifier.size(24.dp), tint = Ink.dim); Text(t, style = Type.sub, color = Ink.text) } }
         SheetButtons("Not now", dismiss, "Turn on", accept, Modifier.padding(top = 8.dp))

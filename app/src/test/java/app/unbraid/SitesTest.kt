@@ -13,7 +13,11 @@ import app.unbraid.data.Store
 import app.unbraid.data.VERSION
 import app.unbraid.data.WgLink
 import app.unbraid.data.restoredFrom
+import app.unbraid.stats.Stats
+import app.unbraid.ui.appLabel
 import app.unbraid.ui.appsLabel
+import app.unbraid.ui.flowsSub
+import app.unbraid.ui.laneCount
 import app.unbraid.ui.dropText
 import app.unbraid.ui.emptySites
 import app.unbraid.ui.shownSites
@@ -230,5 +234,20 @@ class SitesTest {
         assertEquals("No websites use Italy." to true, emptySites(true, "", "Italy"))
         assertEquals("No websites on Italy match \"x\"." to true, emptySites(true, "x", "Italy"))
         assertEquals("No websites match \"x\"." to false, emptySites(true, "x", null))
+    }
+
+    /** A connection counts under the most specific of the user's websites it goes to; any other name counts under its app, and is not kept. */
+    @Test fun trafficIsCountedUnderTheWebsiteItGoesTo() {
+        val sites = setup.sites.keys
+        assertEquals("example.com", Sites.match("example.com", sites)); assertEquals("example.com", Sites.match("WWW.Example.com.", sites))
+        assertEquals("api.example.com", Sites.match("v2.api.example.com", sites))
+        for (other in listOf("notexample.com", "example.org", "com", "", "93.184.216.34", "example.com.evil.net")) assertNull(other, Sites.match(other, sites))
+        assertNull(Sites.match("example.com", emptySet()))
+        // In Flows a website stands beside the apps under its address, never as a package.
+        assertFalse(Stats.isPackage(Stats.SITE + "example.com")); assertTrue(Stats.isPackage("org.example.app"))
+        assertEquals("example.com", appLabel(Stats.SITE + "example.com", null, null))
+        assertEquals("2 apps and 1 website into 3 routes · Direct traffic not shown", flowsSub(listOf("a", "b", Stats.SITE + "example.com"), 3))
+        assertEquals("1 app into 1 route · Direct traffic not shown", flowsSub(listOf("a"), 1))
+        assertEquals("1 app · 2 websites", laneCount(listOf("a", Stats.SITE + "x.com", Stats.SITE + "y.com"))); assertEquals("1 website", laneCount(listOf(Stats.SITE + "x.com"))); assertEquals("0 apps", laneCount(emptyList()))
     }
 }

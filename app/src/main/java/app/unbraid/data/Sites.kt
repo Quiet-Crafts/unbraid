@@ -20,6 +20,10 @@ object Sites {
         return labels.joinToString(".").takeIf { it.length <= 253 && labels.size >= 2 && labels.all(LABEL::matches) && !labels.last().all(Char::isDigit) }
     }
 
+    /** The website among [sites] that [host] belongs to (the name itself or one under it), the most specific one; null for none. */
+    fun match(host: String, sites: Collection<String>): String? =
+        host.lowercase().trimEnd('.').let { h -> sites.filter { h == it || h.endsWith(".$it") }.maxByOrNull { it.length } }
+
     /** [sites], most specific first (a name under another comes before it), as runs that share a route: route id to its addresses. */
     fun runs(sites: Map<String, String>): List<Pair<String, List<String>>> =
         sites.entries.sortedWith(compareBy({ -it.key.count { c -> c == '.' } }, { it.value }, { it.key }))
