@@ -136,6 +136,7 @@ abstract class ProfileTile(private val slot: Int) : LiveTile<Setup>({ combine(Un
             ask || !profile.ready || next.profile != name || VpnService.prepare(this) != null -> openApp(Profiles.intent(this, name), slot, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             else -> {
                 Unbraid.store.update { it.use(name, PREVIOUS) }
+                AutoSwitch.pickedByHand()
                 Profiles.started(name)
                 if (!running()) UnbraidVpn.start(this)
             }

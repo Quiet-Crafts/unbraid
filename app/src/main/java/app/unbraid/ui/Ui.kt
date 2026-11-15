@@ -935,7 +935,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         if (!p.ready) { viewing.value = name; return true }
         if (keepAs != null && s.loose && s.use(name, keepAs).profile != name) return false
         // Only once it switched: a switch confirmed later may find no room left to keep the setup, and then changes nothing.
-        guarded({ if (setup.value.profile == name) { viewing.value = null; Profiles.started(name); then() } }) { it.use(name, keepAs) }
+        guarded({ if (setup.value.profile == name) { viewing.value = null; app.unbraid.vpn.AutoSwitch.pickedByHand(); Profiles.started(name); then() } }) { it.use(name, keepAs) }
         return true
     }
 
@@ -956,6 +956,12 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         store.edit { s -> s.profileName(name, except = old)?.let { s.rename(old, it) } ?: s }
         // Renamed while shown: keep showing it under its new name.
         if (viewing.value == old && setup.value.profiles.none { it.name == old }) viewing.value = name.trim()
+    }
+
+    /** On [kind] of network ([app.unbraid.data.NET_KINDS]) the app switches to profile [name] by itself; null = it doesn't switch. */
+    fun setOnNet(kind: String, name: String?) {
+        store.edit { s -> s.copy(onNet = if (name == null) s.onNet - kind else s.onNet + (kind to name)) }
+        app.unbraid.vpn.AutoSwitch.rulesChanged()
     }
 
     fun forgetProfile(name: String) { store.edit { it.forget(name) }; if (viewing.value == name) viewing.value = null }

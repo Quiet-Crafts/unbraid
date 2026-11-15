@@ -72,6 +72,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.unbraid.data.DIRECT
 import app.unbraid.data.MAX_PROFILES
+import app.unbraid.data.MOBILE
+import app.unbraid.data.WIFI
+import app.unbraid.APP
 import app.unbraid.data.PROFILE_NAME
 import app.unbraid.data.PREVIOUS
 import androidx.compose.material3.AlertDialog
@@ -354,6 +357,19 @@ private fun Keeps(label: String, lines: List<String>) = Row(Modifier.fillMaxWidt
     Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(2.dp)) { lines.forEach { Text(it, style = Type.sub) } }
 }
 
+/** The kinds of network a profile can follow, as the Profiles page names them. */
+internal val NETS = listOf(WIFI to "On Wi-Fi", MOBILE to "On mobile data")
+
+/** Under a kind of network's row: what it counts, or why its profile can't be used yet. */
+internal fun onNetSub(s: Setup, kind: String): String? = when {
+    s.onNet[kind]?.let { n -> s.saved.none { it.name == n && it.ready } } == true -> "This profile needs a default route first"
+    kind == WIFI -> "A cable too"
+    else -> null
+}
+
+internal const val ON_NET_NOTE = "Switches while $APP is connected, a few seconds after the phone moves between Wi-Fi and mobile data, and not while $APP is open on screen. " +
+    "A profile you pick by hand stays until the network changes again. Every app reconnects for a moment."
+
 /** Manage profiles: rename or delete behind the pencil, drag the handle (or TalkBack's Move up / down) to reorder. */
 @Composable
 fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: (empty: Boolean) -> Unit, onEdit: (String) -> Unit) {
@@ -361,6 +377,21 @@ fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: (empty: Boolea
     var dragging by remember { mutableStateOf<String?>(null) }
     var drift by remember { mutableFloatStateOf(0f) }
     var rowPx by remember { mutableFloatStateOf(1f) }
+    // The kind of network whose profile is being chosen.
+    var picking by rememberSaveable { mutableStateOf<String?>(null) }
+    picking?.let { kind ->
+        Prompt("On ${NETS.first { it.first == kind }.second.removePrefix("On ")}, switch to", "Done", { picking = null }, { picking = null }) {
+            Column(Modifier.selectableGroup()) {
+                (listOf<String?>(null) + profiles.filter { it.ready }.map { it.name }).forEach { name ->
+                    val on = setup.onNet[kind] == name
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(on, role = Role.RadioButton) { ui.setOnNet(kind, name); picking = null }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Icon(Icons.check, null, Modifier.size(20.dp), tint = if (on) Ink.accent else Color.Transparent)
+                        Text(name ?: "Don't switch", style = Type.body, color = Ink.text)
+                    }
+                }
+            }
+        }
+    }
     Screen(
         overline = "Routes", title = "Profiles",
         sub = "${profiles.size} of $MAX_PROFILES · drag to reorder",
@@ -423,6 +454,17 @@ fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: (empty: Boolea
                 }
                 IconTap(Icons.edit, "Edit ${p.name}", { onEdit(p.name) }, tint = Ink.dim)
             }
+        }
+        // With a profile to switch to: which one each kind of network takes, by itself.
+        if (profiles.isNotEmpty()) {
+            item(key = "netLabel") { SectionLabel("Switch by itself", tall = true) }
+            itemsIndexed(NETS, key = { _, n -> "net:" + n.first }) { i, (kind, label) ->
+                val name = setup.onNet[kind]
+                GroupRow(i, NETS.size, label, onNetSub(setup, kind), onClick = { picking = kind },
+                    leading = { Box(Modifier.size(40.dp).clip(RoundedCornerShape(14.dp)).background(Ink.surfaceTop), contentAlignment = Alignment.Center) { Icon(if (kind == WIFI) Icons.router else Icons.phone, null, Modifier.size(22.dp), tint = Ink.text) } },
+                    trailing = { Text(name ?: "Don't switch", style = Label, color = if (name == null) Ink.dim else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis) })
+            }
+            item(key = "netNote") { Caption(ON_NET_NOTE) }
         }
         item(key = "note") { Caption("The first three are also Quick Settings tiles and launcher shortcuts. Removing a route moves its apps to each profile's default route. A profile whose default it is needs a new default first.") }
     }

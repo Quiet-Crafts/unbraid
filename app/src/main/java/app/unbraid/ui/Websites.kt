@@ -75,7 +75,7 @@ internal fun siteError(s: Setup, raw: String): String? = when {
 
 /** Said under the websites: what a rule covers and what it can't reach. [outside] = some app is left outside unbraid by Android. */
 internal fun sitesNote(outside: Boolean) = "A website's route beats its app's, and covers every address under it (example.com and www.example.com). " +
-    "A service that uses other addresses too needs each added." + if (outside) " Apps set to Direct are outside $APP: websites opened in them aren't re-routed." else ""
+    "A service that uses other addresses too needs each added. A browser set to its own secure DNS keeps its app's route." + if (outside) " Apps set to Direct are outside $APP: websites opened in them aren't re-routed." else ""
 
 /** The Apps page's two lists as a connected pair: apps, and websites ([count] of them). */
 @Composable

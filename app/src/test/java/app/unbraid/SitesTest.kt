@@ -102,16 +102,10 @@ class SitesTest {
         assertTrue(dns.indexOfFirst { it.text("server") == "fake" } < dns.indexOfFirst { it.strings("domain") == listOf("example.com") })
     }
 
-    /** Names are read off the connection only with a website rule, only on web ports, and never for a fake-IP connection (an address only). */
-    @Test fun namesAreSniffedOnlyForWebsites() {
-        val sniff = compile(setup).rules().single { it.text("action") == "sniff" }
-        assertEquals(listOf("tun"), sniff.strings("inbound"))
-        assertEquals(listOf("0.0.0.0/0"), sniff.strings("ip_cidr"))
-        assertEquals(listOf("80", "443"), sniff.strings("port"))
-        val rules = compile(setup).rules()
-        assertTrue(rules.indexOf(sniff) < rules.indexOfFirst { it["domain"] != null })
-        val none = compile(setup.copy(sites = emptyMap())).rules()
-        assertTrue(none.none { it.text("action") == "sniff" || it["domain"] != null })
+    /** A name is only ever the one a lookup gave: nothing is read off a connection, where an app could write any name to take a website's route. */
+    @Test fun noNameIsReadOffAConnection() {
+        assertTrue(compile(setup).rules().none { it.text("action") == "sniff" })
+        assertTrue(compile(setup.copy(sites = emptyMap())).rules().none { it["domain"] != null })
     }
 
     /** A website on a route without a tunnel, or on one that is gone, is refused: never sent on with its app or the default. */

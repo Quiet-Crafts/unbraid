@@ -170,12 +170,15 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             ask(true) { ctx.startForegroundService(Intent(ctx, UnbraidVpn::class.java).putExtra(EXTRA_ASK, it)) }
         }
         /** "unbraid is off" with [text]; a tap opens the app. */
-        private fun alert(ctx: Context, text: String) {
+        private fun alert(ctx: Context, text: String) = problem(ctx, text, "$APP is off", 2)
+
+        /** A notice on the Problems channel: [text] under [title]; a tap opens the app. */
+        fun problem(ctx: Context, text: String, title: String = "Profile not switched", id: Int = 3) {
             val nm = ctx.getSystemService(NotificationManager::class.java)
             nm.createNotificationChannel(NotificationChannel("alerts", "Problems", NotificationManager.IMPORTANCE_DEFAULT))
             val open = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-            nm.notify(2, Notification.Builder(ctx, "alerts").setSmallIcon(R.drawable.ic_tile).setContentTitle("$APP is off")
-                .setContentText(text).setContentIntent(open).setAutoCancel(true).build())
+            nm.notify(id, Notification.Builder(ctx, "alerts").setSmallIcon(R.drawable.ic_tile).setContentTitle(title)
+                .setContentText(text).setStyle(Notification.BigTextStyle().bigText(text)).setContentIntent(open).setAutoCancel(true).build())
         }
         /** The start after the app was replaced ([AfterUpdate]): if it fails, the notice says so and offers a reconnect. */
         fun startAfterUpdate(ctx: Context) = ask(true) { ctx.startForegroundService(Intent(ctx, UnbraidVpn::class.java).putExtra(EXTRA_ASK, it).putExtra(EXTRA_UPDATED, true)) }
@@ -1079,7 +1082,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun alert(text: String) = alert(this, text)
 
     private fun notify(setup: Setup) {
-        notice(setup.activeRoutes.joinToString("  ·  ") { r ->
+        // The profile in use first: a switch made by itself ([AutoSwitch]) shows here, without a sound.
+        notice(setup.profile?.let { "$it  ·  " }.orEmpty() + setup.activeRoutes.joinToString("  ·  ") { r ->
             if (r.id == setup.defaultRoute) "${r.code} default" else "${r.code} ${setup.apps.count { it.value == r.id } + setup.sites.count { it.value == r.id }}" // its apps and websites
         }.ifEmpty { "Only selected apps" })
     }

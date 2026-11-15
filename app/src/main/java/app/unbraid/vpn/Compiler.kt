@@ -294,11 +294,9 @@ object Compiler {
                     }
                     network.forEach { add(it) }
                     if (sites.isNotEmpty()) {
-                        // An app with its own encrypted DNS connects to real addresses, whose names only the connection tells
-                        // (TLS, HTTP, QUIC). Web ports only, and only a destination that is an address: a fake-IP connection
-                        // reaches these rules as its name already, which a sniffed one must never replace. Such a connection
-                        // takes the website's route with the address its app found; nothing is looked up again.
-                        add(obj("inbound" to arr("tun"), "ip_cidr" to arr("0.0.0.0/0"), "port" to JsonArray(listOf(80, 443).map(::JsonPrimitive)), "action" to "sniff", "timeout" to "300ms"))
+                        // Matched on the name the lookup gave (a fake-IP connection reaches these rules as that name), never on
+                        // one read off the connection: an app could write any name there and take a website's route, Direct
+                        // included, to an address of its choosing. So an app that looks names up itself keeps its own route.
                         // A website's route beats its app's. Looked up at its exit, then the home and LAN rules, as for an app.
                         for ((id, names) in sites) {
                             if (id in refused) { add(obj(*names, "action" to "reject", "no_drop" to true)); continue }

@@ -34,6 +34,8 @@ class Unbraid : Application() {
     companion object {
         lateinit var store: Store
             private set
+        /** The app is on screen: nothing switches profile by itself meanwhile ([app.unbraid.vpn.AutoSwitch]). */
+        val foreground = MutableStateFlow(false)
         /** The support card's rules state; null until read from disk. */
         val nudges = MutableStateFlow<NudgeState?>(null)
         private val nudgeLock = Any()
@@ -64,6 +66,7 @@ class Unbraid : Application() {
         combine(store.setup.map { s -> s.profiles.take(Profiles.SLOTS).map { it.name } to s.profile }, store.unreadable) { p, u -> p to u }
             .distinctUntilChanged().onEach { (_, u) -> if (!u) Profiles.refresh(this) }.launchIn(scope)
         Profiles.watch(scope)
+        app.unbraid.vpn.AutoSwitch.watch(scope, this)
         // Statistics follow the connection while they're on: sessions from the phase, traffic from the running engine.
         Stats.init(this)
         combine(UnbraidVpn.state.map { it.phase }, store.setup.map { it.prefs.stats }) { p, on -> p to on }.distinctUntilChanged().onEach { (p, on) ->

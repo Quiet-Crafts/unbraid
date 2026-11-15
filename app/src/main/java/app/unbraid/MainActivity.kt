@@ -145,6 +145,9 @@ class MainActivity : ComponentActivity() {
     }
 
     // Android's Always-on and Block connections, and the installed apps, can change while unbraid is in the background.
+    override fun onStart() { super.onStart(); Unbraid.foreground.value = true }
+    override fun onStop() { super.onStop(); Unbraid.foreground.value = false }
+
     override fun onResume() { super.onResume(); UnbraidVpn.refreshFlags(this); if (!Unbraid.store.unreadable.value) ui.refreshApps(); Stats.maintain(); if (BuildConfig.UPDATE_CHECK && Onboarding.termsOk && !Unbraid.store.unreadable.value) ui.checkUpdates() }
 
     // The open sheet and a connect waiting on it outlive a rotation (never a secret here); nothing connects by itself.
