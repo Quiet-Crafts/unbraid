@@ -97,6 +97,10 @@ class BlockTest {
         val tun = c["inbounds"]!!.jsonArray[0].jsonObject
         assertTrue(tun["route_exclude_address"] == null && setup.prefs.lan)
         assertTrue(rules.any { it.strings("ip_cidr")?.contains("192.168.0.0/16") == true && it.text("outbound") == "direct" })
+        // With that switch off the LAN bypasses the VPN as usual; the blocked app is still refused everything else.
+        val lax = compile(setup.copy(prefs = setup.prefs.copy(blockLan = false)))
+        assertTrue(lax["inbounds"]!!.jsonArray[0].jsonObject["route_exclude_address"] != null)
+        assertEquals("reject", lax.rules().first { it.strings("package_name") == listOf("com.b") }.text("action"))
         val none = compile(setup.copy(apps = mapOf("com.a" to "us")))
         assertTrue(none.rules().none { it["package_name_regex"] != null || it.text("network") == "icmp" || it.text("type") == "logical" })
         assertTrue(none["inbounds"]!!.jsonArray[0].jsonObject["route_exclude_address"] != null)

@@ -72,7 +72,13 @@ private fun Setup.codeOf(id: String) = route(id)?.code ?: "··"
 private fun Setup.colorOf(id: String) = route(id)?.let { Ink.route(it.hue) } ?: if (id == BLOCK) Ink.bad else Ink.direct
 
 /** Said under the choices of an app or a website on Block: when it holds. */
-internal const val BLOCK_NOTE = "Block: this app can't connect to anything while $APP is connected, the local network included. Paused or off, $APP blocks nothing."
+internal const val BLOCK_NOTE = "Block: this app can't connect to anything while $APP is connected. Paused or off, $APP blocks nothing."
+
+/** The switch that cuts apps on Block off from the local network too: its name, and what each position costs. */
+internal const val BLOCK_LAN = "Block the local network too"
+internal fun blockLanSub(on: Boolean) =
+    if (on) "Blocked apps can't reach devices on your Wi-Fi either. While an app is blocked, the local network goes through $APP: casting or printing may not find devices."
+    else "The local network stays outside $APP, as usual. A blocked app can't reach the internet, but can reach devices on your Wi-Fi."
 
 /**
  * The Apps list when nothing shows: why, and the one action that brings apps back ("Show system apps" or "Show all"),

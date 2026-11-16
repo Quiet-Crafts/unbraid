@@ -489,7 +489,9 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         SheetNote("Always-on is set, so Android keeps $APP running; it can only be turned off there.")
                     } else SheetAction("Disconnect", Ink.bad) { act { ui.disconnect() } }
                 } else if (id == BLOCK) {
-                    SheetNote("Apps here can't connect to anything while $APP is connected: no connection, no lookup, on no route, the local network included. Websites here can't be looked up or reached by name in apps that pass through $APP. Paused or off, $APP blocks nothing. Assign them in Apps.", sub = true)
+                    SheetNote("Apps here can't connect to anything while $APP is connected: no connection, no lookup, on no route. Websites here can't be looked up or reached by name in apps that pass through $APP. Paused or off, $APP blocks nothing. Assign them in Apps.", sub = true)
+                    // Only where the local network bypasses the VPN is there something to choose (a setting of every profile).
+                    if (setup.prefs.lan) SheetSwitch(BLOCK_LAN, blockLanSub(setup.prefs.blockLan), setup.prefs.blockLan) { on -> ui.setPrefs { it.copy(blockLan = on) } }
                 } else if (id == DIRECT) {
                     SheetNote("Apps here skip the VPN. Assign them in Apps.", sub = true)
                     if (shown.defaultRoute != DIRECT) SheetAction("Make default") { act { makeDefault(DIRECT) } }

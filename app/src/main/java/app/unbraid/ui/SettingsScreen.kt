@@ -468,6 +468,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 notice(ui, notice)
                 group("This network", listOfNotNull(
                     Item("Local network bypasses the VPN", "Printers, casting and NAS on this network stay reachable", { ui.setPrefs { it.copy(lan = !it.lan) } }, checked = prefs.lan, icon = Icons.lan) { Toggle(prefs.lan) },
+                    // For apps on Block, where the local network bypasses the VPN: whether it is cut off for them too.
+                    Item(BLOCK_LAN, blockLanSub(prefs.blockLan), { ui.setPrefs { it.copy(blockLan = !it.blockLan) } }, checked = prefs.blockLan, icon = Icons.block) { Toggle(prefs.blockLan) }.takeIf { prefs.lan },
                     Item(
                         "Allow Nearby devices",
                         nearbyReason(setup, lockdownLan),

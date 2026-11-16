@@ -240,9 +240,9 @@ object Compiler {
                     // kills idle long-lived connections like push (FCM heartbeats run up to ~28 min apart).
                     put("udp_timeout", "30m")
                     // Under system lockdown Android drops anything that bypasses the TUN, so LAN goes through `direct` instead.
-                    // With an app on Block too: the LAN stays inside (and goes out through `direct`), or that app could still reach
-                    // the devices around it past every rule here.
-                    if (s.prefs.lan && !i.lockdown && barred.isEmpty()) {
+                    // With an app on Block too, unless the user lets the LAN be: it stays inside (and goes out through `direct`),
+                    // or that app could still reach the devices around it past every rule here.
+                    if (s.prefs.lan && !i.lockdown && (barred.isEmpty() || !s.prefs.blockLan)) {
                         // LAN never enters the tunnel: Android sends it straight to Wi-Fi. Home subnets reached
                         // through a tunnel stay routed, because the more specific route wins.
                         val home = (if (homeTs) homeSubnets(s) else emptyList()) + (homeWg?.let(::homeCidrs) ?: emptyList())

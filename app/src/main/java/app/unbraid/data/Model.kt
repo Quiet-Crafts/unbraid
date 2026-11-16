@@ -121,6 +121,11 @@ data class Prefs(
     val stats: Boolean = false,
     /** unbraid's own DNS filter and where it applies. [customDns] is read only to carry an older choice over. */
     val filter: Filter = Filter(),
+    /**
+     * An app on [BLOCK] is cut off from the local network too: while one is, the LAN stays inside the VPN instead of
+     * bypassing it ([lan]), so that app can't reach the devices around it. Off: the LAN bypasses as usual, for every app.
+     */
+    val blockLan: Boolean = true,
 )
 
 /** One of the user's own servers, added in Settings and picked for any route (which keeps a copy of the config). */
