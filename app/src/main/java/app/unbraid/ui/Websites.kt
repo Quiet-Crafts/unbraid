@@ -33,6 +33,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -125,18 +126,16 @@ internal fun AppsOrSites(sites: Boolean, onPick: (Boolean) -> Unit) =
         }
     }
 
-/** Add website, under the list: the page's one accent action, as Add profile is on Profiles. Greyed at the most a profile holds. */
+/** Add website, under the list: the same square as the add button on Routes. Greyed at the most a profile holds. */
 @Composable
 internal fun AddSiteBar(room: Boolean, onAdd: () -> Unit) =
     Row(Modifier.fillMaxWidth().padding(Gutter), horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
         if (!room) Text("${Sites.MAX} websites is the most. Remove one to add another.", style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f))
-        Row(
-            Modifier.height(56.dp).clip(RoundedCornerShape(28.dp)).background(if (room) Ink.accent else Ink.surfaceHigh).tap({ if (room) onAdd() }, role = Role.Button).padding(start = 18.dp, end = 22.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Icon(Icons.add, null, Modifier.size(24.dp), tint = if (room) Ink.onAccent else Ink.faint)
-            Text("Add website", style = Type.title, color = if (room) Ink.onAccent else Ink.faint)
-        }
+        Box(
+            Modifier.size(56.dp).clip(RoundedCornerShape(16.dp)).background(if (room) Ink.accent else Ink.surfaceHigh).tap({ if (room) onAdd() }, role = Role.Button)
+                .semantics { contentDescription = "Add website" },
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.add, null, Modifier.size(24.dp), tint = if (room) Ink.onAccent else Ink.faint) }
     }
 
 /** The Websites list: [shown] of the setup's addresses, each opening the same route tiles as an app; then what a rule covers. */
