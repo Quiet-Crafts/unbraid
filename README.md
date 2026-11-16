@@ -24,14 +24,16 @@ at the same time. If you use Tailscale, your home network stays reachable too.
 
 <table align="center">
   <tr>
-    <td align="center" width="25%"><img src=".github/screenshots/routes.png" alt="Routes screen: a default exit in the Netherlands, with Chrome and YouTube in the US, Gmail in Sweden, Drive in Japan and Photos set to Direct" width="200"></td>
-    <td align="center" width="25%"><img src=".github/screenshots/apps.png" alt="Apps screen: every installed app with the exit it uses" width="200"></td>
-    <td align="center" width="25%"><img src=".github/screenshots/providers.png" alt="Choosing a location for a new route, with the list of signed-in providers open" width="200"></td>
-    <td align="center" width="25%"><img src=".github/screenshots/stats.png" alt="Stats screen: data used per provider, live speed, connected time and speed tests" width="200"></td>
+    <td align="center" width="20%"><img src=".github/screenshots/routes.png" alt="Routes screen: the profile in use, a default exit in the Netherlands, and Chrome, YouTube and a website in the US, Gmail in Sweden, Drive and a website in Japan" width="170"></td>
+    <td align="center" width="20%"><img src=".github/screenshots/apps.png" alt="Apps screen: every installed app with the exit it uses, one set to Direct and one blocked" width="170"></td>
+    <td align="center" width="20%"><img src=".github/screenshots/websites.png" alt="Websites list: one website through Japan, one through the United States, one Direct and one blocked" width="170"></td>
+    <td align="center" width="20%"><img src=".github/screenshots/providers.png" alt="Choosing a location for a new route, with the list of signed-in providers open" width="170"></td>
+    <td align="center" width="20%"><img src=".github/screenshots/stats.png" alt="Stats screen: data used per provider, live speed, connected time and speed tests" width="170"></td>
   </tr>
   <tr>
     <td align="center"><sub>Each app gets its own exit</sub></td>
     <td align="center"><sub>See every app's route at a glance</sub></td>
+    <td align="center"><sub>Route or block a website</sub></td>
     <td align="center"><sub>Mix providers and countries</sub></td>
     <td align="center"><sub>Usage, speed and connected time</sub></td>
   </tr>
@@ -44,13 +46,17 @@ providers. It needs macOS 26 or later.
 
 - Give any app its own exit country or server, let it follow the default route, or let it skip the VPN with
   Direct. Several exits stay connected at once.
+- Give a website its own route too, in the apps that go through unbraid. A website's route wins over the app's.
+- Block an app or a website: a blocked app gets no internet connection while unbraid is connected.
 - Use the VPN accounts you already have. One route can go through Mullvad while another uses NordVPN.
 - Reach your home network through Tailscale or Headscale, or send chosen apps out through a Tailscale exit node.
 - A low-load server is picked for you when the provider publishes load, or you can pin one server yourself.
 - Ad and tracker blocking per route with the provider's own blocking DNS, where it has one.
-- Saved profiles, a home-screen widget, a quick-settings tile and a pause that reconnects by itself.
+- Saved profiles that can switch by themselves on Wi-Fi and on mobile data, home-screen widgets, a quick-settings
+  tile and a pause that reconnects by itself.
 - Back up your setup to a passphrase-protected file and restore it on this phone or a new one.
-- Stats on the phone: data per provider, connected time and speed tests across several exits at once.
+- Stats on the phone: data per provider, app and routed website, connected time and speed tests across several
+  exits at once.
 - No ads, no unbraid account and no analytics of our own. Free software under the GPL.
 
 ## What it works with
@@ -79,7 +85,9 @@ Routes can mix providers. One app can use Mullvad in Sweden while another uses N
    Tailscale.
 5. To send some apps somewhere else, tap +, then Route, and choose another country or server. Open the Apps tab
    and tap Show my apps (the list stays on your phone). Then tap an app and pick its route. Pick Direct for apps
-   that should not use the VPN at all, like a banking app.
+   that should not use the VPN at all, like a banking app, or Block for an app that should get no internet connection.
+6. To route a website, switch the Apps tab to Websites, tap +, type its address and pick a route. It applies in
+   the apps that go through unbraid and look names up through it.
 
 Each release lists the APK's SHA-256 checksum and the fingerprint of the signing certificate.
 [unbraid.app/download](https://unbraid.app/download/) explains how to check them before you install.
@@ -108,6 +116,22 @@ and identifies itself only as "unbraid".
 
 In many VPN apps, split tunneling means you can pick apps that skip the VPN, while every other app leaves from the
 same place. unbraid lets you choose an exit for each app, and those exits can come from different providers.
+
+### Can I route a website and not a whole app?
+
+Yes. On the Apps tab, the Websites list gives an address its own route, Direct or Block, and that beats the route
+of the app that opens it. A rule covers the address and everything under it (example.com and www.example.com); a
+service that uses other addresses needs each one added. unbraid knows a website by the name the app looks up, so
+the rule does not reach apps that Android keeps outside the VPN, such as apps set to Direct, or a browser that
+uses its own secure DNS, which keeps its app's route.
+
+### What does Block do?
+
+An app on Block gets no internet connection while unbraid is connected: not through a route, not Direct, and no
+names are looked up for it. A switch decides whether it can still reach devices on your local network. While any
+app is blocked, unbraid refuses pings and connections that Android can't tie to an app. A blocked website can't be
+looked up in the apps that go through unbraid. Block works only while unbraid is connected; for the time it is
+off, use Android's "Block connections without VPN".
 
 ### Why isn't it on Google Play?
 
@@ -144,7 +168,7 @@ Android allows one VPN app at a time, so unbraid runs a single `VpnService` with
 [sing-box](https://github.com/SagerNet/sing-box) engine behind it.
 
 ```
-apps -> TUN -> sing-box -> rules: DNS, home, LAN, the app's route, default
+apps -> TUN -> sing-box -> rules: block, DNS, home, LAN, website routes, the app's route, default
                            |- one WireGuard or OpenVPN exit per location
                            |- Tailscale node (home)
                            '- direct
@@ -153,10 +177,13 @@ apps -> TUN -> sing-box -> rules: DNS, home, LAN, the app's route, default
 Each TCP and UDP connection is routed by the app that owns it, which Android reports through
 `ConnectivityManager.getConnectionOwnerUid`. When an app hands a connection to another app or system service, such as
 for a download, a browser tab or a push message, that connection follows the other app or service's route. Ping has no owning app, so it follows the default route (when Direct is the default and other apps use VPN routes, internet ping is blocked instead). DNS is answered with fake addresses and looked up again on the exit
-the app really uses, so a site sees the country you picked for that app. Apps you set to Direct are left out of the
+the app really uses, so a site sees the country you picked for that app, or for that website when it has a route of its own. Apps you set to Direct are left out of the
 VPN by Android itself, unless you turn on "Block connections without VPN" or set the DNS filter to cover Direct
 traffic. Then they go through unbraid and are sent straight out from inside the app. Apps that only follow a
-Direct default route always go through unbraid. Only the default route and the routes your apps use are connected.
+Direct default route always go through unbraid. Only the default route and the routes your apps and websites use are connected.
+
+A website rule matches the name unbraid itself answered with a fake address, never a name read from the connection,
+so an app can't claim another site's route. Blocked apps are refused before any other rule, DNS included.
 
 For NordVPN, unbraid picks a server from the provider's low-load recommendations when it connects, unless you
 pinned one. Server lists

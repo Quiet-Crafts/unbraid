@@ -1,6 +1,6 @@
 unbraid is an open-source VPN client for Android with per-app split tunneling: each app goes through its own exit. A banking app can skip the VPN, a streaming app can leave from one country, another from a second, and everything else from a third. Your home network can stay reachable through Tailscale.
 
-It uses one Android VPN service and the sing-box engine. Each TCP and UDP connection is routed by the app that owns it. DNS lookups are made again at the exit the app uses, so sites see that app's country. Only the default route and the routes your apps use are connected.
+It uses one Android VPN service and the sing-box engine. Each TCP and UDP connection is routed by the app that owns it. DNS lookups are made again at the exit the app uses, so sites see that app's country, or the website's own route when it has one. Only the default route and the routes your apps and websites use are connected.
 
 WHAT YOU NEED
 A supported provider account, including Proton VPN Free, or your own server. unbraid provides no servers.
@@ -22,6 +22,9 @@ Or add your own servers: a WireGuard or OpenVPN config file, or a Shadowsocks ke
 
 FEATURES
 - Per-app routes: an app gets its own exit or uses the default. Direct skips the VPN.
+- Website routes: an address gets its own exit, Direct or Block in apps that go through unbraid. It applies to names unbraid looks up, so not to apps Android leaves outside the VPN or a browser using its own secure DNS.
+- Block: an app on Block gets no internet connection while unbraid is connected. A switch decides whether it can still reach your local network.
+- Profiles can switch by themselves on Wi-Fi and on mobile data.
 - Several exits connected at once.
 - Direct apps use your normal connection: Android leaves them out of the VPN, unless "Block connections without VPN" is on or unbraid's DNS filter covers Direct. When Direct is the default route, the apps that follow it still go through unbraid, IPv4 only.
 - Tailscale is built in: reach devices on your tailnet from apps routed through unbraid, or send apps through a Tailscale exit node.
@@ -29,7 +32,7 @@ FEATURES
 - Pick a country, a city or one server. Favourites stay on top.
 - Per-route ad and tracker blocking with the provider's own blocking DNS, where it has one.
 - Pause for 5 minutes to an hour; it reconnects by itself (Android may delay it).
-- Home-screen widget and quick-settings tile.
+- Home-screen widgets and a quick-settings tile.
 - Back up your setup to a passphrase-locked file.
 - Custom DNS (it replaces provider blocking) and local network access.
 

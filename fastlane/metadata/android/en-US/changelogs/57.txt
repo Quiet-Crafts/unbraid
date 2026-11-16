@@ -1,0 +1,7 @@
+• New: give a website its own route, Direct or Block, in apps that go through unbraid.
+• New: Block. A blocked app gets no internet connection while unbraid is connected.
+• New: profiles can switch by themselves on Wi-Fi and mobile data.
+• New: three home-screen widgets.
+• Stats: routed websites get a line in Flows (App flows is now Flows).
+• With statistics on, data to routed websites is now counted, on your phone only.
+• A setup with a website or a Block can't be opened by 2.9.1 or older.
