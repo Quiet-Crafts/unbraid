@@ -603,7 +603,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 // GitHub build: a plain link to the donation page.
                 val jar = ui.tips
                 group(null, listOf(
-                    Item("Take the tour", "How $APP works, in eight stops", tour, icon = Icons.routes) { Chevron() },
+                    Item("Take the tour", "How $APP works, in ${TourStop.entries.size} stops", tour, icon = Icons.routes) { Chevron() },
                     Item("$WORDMARK ${BuildConfig.VERSION_NAME}", "sing-box 1.14 · GPL-3.0", icon = Icons.info),
                     Item("Privacy policy", "No analytics, no account with us", { context.openUrl(PRIVACY) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) },
                     Item("Terms of use", TERMS_URL.removePrefix("https://"), { context.openUrl(TERMS_URL) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) },
