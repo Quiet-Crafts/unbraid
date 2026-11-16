@@ -101,7 +101,7 @@ fun Welcome(fresh: Boolean, answer: (Boolean) -> Unit, accept: () -> Unit) {
                 Gap(20.dp)
                 when (now) {
                     "welcome" -> {
-                        Lead("Your bank direct, streaming through another country, everything else private. All at once, from one switch.")
+                        Lead("Your bank direct, streaming through another country, everything else private. Per app and per website, all at once, from one switch.")
                         Gap(40.dp)
                         Braid()
                     }
@@ -271,7 +271,7 @@ private fun braid(): List<Triple<Path, Int, Boolean>> {
 /** The four tabs, each with what lives there, above the bar they live in. */
 @Composable
 private fun Places() {
-    val what = listOf("Your routes and the power switch", "Which app goes where", "Data, flows and speed, if you want", "Providers, servers, home, protection")
+    val what = listOf("Your routes and the power switch", "Which app or website goes where", "Data, flows and speed, if you want", "Providers, servers, home, protection")
     // Four narrow columns: with large text a word too wide for one is set smaller rather than split.
     BoxWithConstraints { val column = maxWidth / Tab.entries.size
     Column {

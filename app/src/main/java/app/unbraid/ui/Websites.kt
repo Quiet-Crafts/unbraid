@@ -114,7 +114,7 @@ internal fun emptySites(any: Boolean, query: String, filter: String?): Pair<Stri
 /** The Apps page's two lists as a connected pair. Selection is the colour alone. */
 @Composable
 internal fun AppsOrSites(sites: Boolean, onPick: (Boolean) -> Unit) =
-    Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 4.dp).selectableGroup(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 4.dp).then(tourAnchor(TourStop.Websites)).selectableGroup(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         listOf(false to "Apps", true to "Websites").forEachIndexed { i, (s, label) ->
             val on = sites == s
             val bg by animateColorAsState(if (on) Ink.accentContainer else Ink.surfaceHigh, MaterialTheme.motionScheme.fastEffectsSpec(), label = "list")

@@ -128,9 +128,10 @@ object Onboarding {
 enum class TourStop(val tab: Tab, val title: String, val body: String) {
     Power(Tab.Routes, "Connect, pause, stop", "Tap to connect. Tap again to pause or disconnect. Green is protected, orange paused, red off."),
     DefaultRoute(Tab.Routes, "The default route", "Every app goes here unless you give it its own route. Tap it to change the location."),
-    AddRoute(Tab.Routes, "Add a route", "The + button adds a route: your provider's countries, or your own servers and Tailscale. It saves profiles too."),
-    AppsList(Tab.Apps, "Choose per app", "Tap any app to pick its route; Direct skips the VPN. Apps you move show on Routes."),
-    StatsIntro(Tab.Stats, "Your numbers, if you want them", "Data per app and route, flows and speed tests. Off until you turn it on. Statistics stay on this phone; M-Lab publishes speed test results."),
+    AddRoute(Tab.Routes, "Add a route", "The + button adds a route: your provider's countries, or your own servers and Tailscale. It saves profiles too, and a profile can switch by itself on Wi-Fi or mobile data."),
+    AppsList(Tab.Apps, "Choose per app", "Tap any app to pick its route. Direct skips the VPN, Block gives it no connection at all. Apps you move show on Routes."),
+    Websites(Tab.Apps, "Websites too", "Give a website its own route, in any browser. Its route beats the app's. Block works here too."),
+    StatsIntro(Tab.Stats, "Your numbers, if you want them", "Data per app, website and route, flows and speed tests. Off until you turn it on. Statistics stay on this phone; M-Lab publishes speed test results."),
     Connections(Tab.Settings, "Add connections", "Sign in to more providers, or import WireGuard, OpenVPN and Shadowsocks servers."),
     LocalHome(Tab.Settings, "Home and local", "Printers and casting stay reachable. Reach home through Tailscale or your router's WireGuard."),
     About(Tab.Settings, "You're set", "The Quick Settings tile and the widget work without opening $APP. Replay this tour here, in About & support."),
@@ -204,7 +205,7 @@ fun TourOverlay(step: Int, appsShown: Boolean, back: () -> Unit, next: () -> Uni
             }
             Text(stop.title, style = Type.title, color = Ink.text)
             Text(
-                if (stop == TourStop.AppsList && !appsShown) "Show my apps lists them here. Tap any app to pick its route; Direct skips the VPN." else stop.body,
+                if (stop == TourStop.AppsList && !appsShown) "Show my apps lists them here. Tap any app to pick its route. Direct skips the VPN, Block gives it no connection at all." else stop.body,
                 style = Type.sub, color = Ink.dim,
             )
             Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
