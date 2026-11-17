@@ -21,6 +21,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,12 +39,14 @@ import app.unbraid.Unbraid
 import app.unbraid.data.Backup
 import app.unbraid.data.PREVIOUS
 import app.unbraid.data.Providers
+import app.unbraid.data.RestoreTraffic
 import app.unbraid.data.Setup
 import app.unbraid.data.restoredFrom
 import app.unbraid.vpn.Profiles
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -96,12 +99,52 @@ class BackupFlow(private val ui: Ui) {
     private var file: ByteArray? = null
     var opened by mutableStateOf<Backup.Contents?>(null)
         private set
+    /** What restoring [opened] over the setup it was worked out for makes weaker ([RestoreTraffic.notes]); null while it is worked out. */
+    var notes by mutableStateOf<List<String>?>(null)
+        private set
+    private var judged: Pair<Setup, Backup.Contents>? = null
+    private var judging: Job? = null
+    /** The user accepts the weak security of servers in [opened] ([Backup.weak]): Restore waits for it. */
+    var acceptWeak by mutableStateOf(false)
     /** Set by [BackupHost]: the document pickers. */
     internal var pickSave: (String) -> Unit = {}
     internal var pickOpen: () -> Unit = {}
     private val app get() = ui.getApplication<android.app.Application>()
 
-    fun close() { if (!busy) { step = null; pass = ""; pass2 = ""; file = null; opened = null; message = null; keep = true; keys = false } }
+    fun close() { if (!busy) { step = null; pass = ""; pass2 = ""; file = null; opened(null); message = null; keep = true; keys = false } }
+
+    /** A new backup shown (or none): nothing worked out or accepted for another one carries over. */
+    private fun opened(c: Backup.Contents?) { opened = c; notes = null; weak = emptyList(); judged = null; judging?.cancel(); judging = null; acceptWeak = false }
+
+    /**
+     * Works out, away from the main thread, what restoring [opened] over [here] makes weaker; a result for a setup or
+     * backup that changed meanwhile is dropped. Apps that share their user id with another are told to the walk, as
+     * Android and the engine decide by user id.
+     */
+    fun judge(here: Setup) {
+        val c = opened ?: return
+        if (judged?.let { it.first == here && it.second === c } == true) return
+        judged = here to c; notes = null; judging?.cancel()
+        val pm = app.packageManager
+        judging = ui.viewModelScope.launch {
+            val found = withContext(Dispatchers.Default) {
+                val next = here.restoredFrom(c.setup, null, 0, c.keys) ?: return@withContext null
+                // The installed apps by user id, read once.
+                val all = runCatching { pm.getInstalledApplications(0) }.getOrDefault(emptyList())
+                val uid = all.associate { it.packageName to it.uid }
+                val byUid = all.groupBy({ it.uid }, { it.packageName })
+                Backup.weak(next, here) to RestoreTraffic.notes(here, next) { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }
+            }
+            if (judged?.let { it.first === here && it.second === c } == true) { weak = found?.first.orEmpty(); notes = found?.second ?: listOf(RestoreTraffic.UNKNOWN) }
+        }
+    }
+
+    /** Servers in [opened] an import would warn about, not already on this phone ([Backup.weak]); worked out with [notes]. */
+    var weak by mutableStateOf(emptyList<String>())
+        private set
+
+    /** Restore may go: the check is in for this backup and this setup, and weak servers are accepted. */
+    fun ready(here: Setup) = notes != null && judged?.let { it.first == here && it.second === opened } == true && (acceptWeak || weak.isEmpty())
 
     fun startSave() { close(); step = "save" }
 
@@ -164,7 +207,7 @@ class BackupFlow(private val ui: Ui) {
         ui.viewModelScope.launch {
             val r = withContext(Dispatchers.Default) { runCatching { Backup.open(b, p).let { plain -> try { Backup.read(plain) } finally { plain.fill(0) } } } }
             busy = false
-            r.onSuccess { opened = it; pass = ""; step = "confirm"; keep = canKeep(Unbraid.store.setup.value) }
+            r.onSuccess { opened(it); pass = ""; step = "confirm"; keep = canKeep(Unbraid.store.setup.value) }
                 .onFailure { e -> message = (e as? Backup.Failed)?.message ?: Backup.Reason.Damaged.text; if ((e as? Backup.Failed)?.reason != Backup.Reason.Passphrase) { step = "done"; ok = false } }
         }
     }
@@ -178,15 +221,19 @@ class BackupFlow(private val ui: Ui) {
     /** Replaces the setup with [opened]'s, all at once; the VPN, if on, reconnects with it. */
     fun apply() {
         val c = opened ?: return
+        val here = Unbraid.store.setup.value
+        // Only over the setup the sheet's check was made for, and with weak servers accepted.
+        if (!ready(here)) return
         var target: Setup? = null
         val keepAs = PREVIOUS.takeIf { keep }
-        if (Unbraid.store.setup.value.restoredFrom(c.setup, keepAs, 0, c.keys) == null) { finish(false, KEEP_NO_ROOM); return }
+        if (here.restoredFrom(c.setup, keepAs, 0, c.keys) == null) { finish(false, KEEP_NO_ROOM); return }
         // Counted first: the running engine's setup is gone once the store changes, so a refused reload must stop the VPN.
         UnbraidVpn.restores.incrementAndGet()
-        val saved = Unbraid.store.update { s -> s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)?.also { target = it } ?: s }
+        var moved = false
+        val saved = Unbraid.store.update { s -> if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)?.also { target = it } ?: s }
         val t = target
         if (t == null || Unbraid.store.setup.value != t) {
-            finish(false, if (t == null) KEEP_NO_ROOM else "Couldn't restore: your settings are busy. Try again.")
+            finish(false, if (t == null && !moved) KEEP_NO_ROOM else "Couldn't restore: your settings are busy. Try again.")
             return
         }
         ui.restored()
@@ -205,7 +252,7 @@ class BackupFlow(private val ui: Ui) {
     fun signIns(s: Setup) = s.routes.filter { !it.imported }.map { it.loc.provider }.distinct().filter { it !in Unbraid.store.accounts.value }
         .map { Providers.get(it)?.name ?: it }.takeIf { it.isNotEmpty() }?.joinToString(", ")
 
-    private fun finish(success: Boolean, text: String) { pass = ""; pass2 = ""; file = null; opened = null; ok = success; message = text; step = "done" }
+    private fun finish(success: Boolean, text: String) { pass = ""; pass2 = ""; file = null; opened(null); ok = success; message = text; step = "done" }
 }
 
 /** The pickers and the sheet, wherever the app is: a backup can also be picked from the import of a config file. */
@@ -280,15 +327,22 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
     Text("Restore this backup?", style = Type.title)
     Text("Saved on $date${c.app.takeIf { it.isNotEmpty() }?.let { " by unbraid $it" }.orEmpty()}: ${count(b.routes.size, "route")}, " +
         "${count(b.apps.size, "app choice")}, ${websites(b)}${count(b.profiles.size, "profile")}, ${count(b.servers.size, "own server")}.", style = Type.sub)
-    if (!here.untouched) Text("It replaces what is on this phone now: ${count(here.routes.size, "route")}, ${count(here.apps.size, "app choice")}, " +
-        "${websites(here)}${count(here.profiles.size, "profile")}, ${count(here.servers.size, "own server")}, your favourites and settings.", style = Type.sub)
+    // With the setup in use kept, its routes and own servers stay: what goes is the rest.
+    if (!here.untouched) Text(if (canKeep && flow.keep) "It replaces your profiles, favourites and settings on this phone." else "It replaces what is on this phone now: ${count(here.routes.size, "route")}, " +
+        "${count(here.apps.size, "app choice")}, ${websites(here)}${count(here.profiles.size, "profile")}, ${count(here.servers.size, "own server")}, your favourites and settings.", style = Type.sub)
     Text("Your provider sign-ins and Tailscale stay as they are." + (flow.signIns(b)?.let { " Routes on $it stay blocked until you sign in." } ?: ""), style = Type.caption, color = Ink.dim)
     val missing = flow.needKeys(here)
     if (missing > 0) Text("Saved without server keys: ${count(missing, "own server")} will need ${if (missing == 1) "its" else "their"} config added again. Until then, ${if (missing == 1) "its" else "their"} apps stay offline.", style = Type.caption, color = Ink.bad)
-    if (!c.keys && here.home.wg != null) Text("Your home WireGuard stays as it is on this phone.", style = Type.caption, color = Ink.dim)
+    if (here.home.wg != null && !(c.keys && b.home.wg == here.home.wg)) Text(homeNote(c.keys, b.home.wg != null), style = Type.caption, color = if (c.keys && b.home.wg == null) Ink.bad else Ink.dim)
+    // What gets less protected, worked out for this backup and this setup; Restore waits for it.
+    LaunchedEffect(c, here) { flow.judge(here) }
+    val notes = flow.notes
+    if (notes == null) Text("Checking what the restore changes…", style = Type.caption, color = Ink.dim)
+    else if (notes.isNotEmpty()) Text(notes.joinToString("\n"), style = Type.caption, color = Ink.bad)
+    if (notes != null && flow.weak.isNotEmpty()) Switch(WEAK_TITLE, weakCaption(flow.weak), flow.acceptWeak) { flow.acceptWeak = it }
     if (vpn.phase == VpnState.Phase.On) Text("unbraid is connected. It reconnects with the restored setup, and apps may be offline for a few seconds.", style = Type.caption, color = Ink.dim)
     if (canKeep) Switch("Keep my current setup", "Saved as the profile $PREVIOUS, to switch back later. Your other profiles here are replaced.", flow.keep) { flow.keep = it }
-    Buttons(flow, "Restore") { flow.apply() }
+    Buttons(flow, "Restore", enabled = flow.ready(here)) { flow.apply() }
 }
 
 /** A switch row with what it means underneath, as on the confirm sheet. */
@@ -302,6 +356,18 @@ private fun Switch(title: String, sub: String, on: Boolean, enabled: Boolean = t
         Text(sub, style = Type.caption, color = Ink.dim)
     }
     Toggle(on, enabled)
+}
+
+/** The switch Restore waits for when the backup holds a server an import would warn about. */
+const val WEAK_TITLE = "Accept weak security to restore"
+
+fun weakCaption(weak: List<String>) = (weak + "Someone between you and ${if (weak.size == 1) "this server" else "these servers"} may be able to read or change the traffic. Restore waits until you accept it.").joinToString("\n")
+
+/** What happens to this phone's home WireGuard, when it has one: a backup with keys brings its own, or none. */
+fun homeNote(keys: Boolean, backupHas: Boolean) = when {
+    !keys -> "Your home WireGuard stays as it is on this phone."
+    backupHas -> "Your home WireGuard is replaced by the one in this backup."
+    else -> "Your home WireGuard on this phone is removed: this backup has none."
 }
 
 /** The websites of [s], every profile's too, for a list of what a setup holds: "3 websites, " or nothing. */

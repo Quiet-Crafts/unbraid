@@ -1,18 +1,28 @@
 package app.unbraid
 
+import app.unbraid.data.BLOCK
 import app.unbraid.data.Backup
 import app.unbraid.data.Backup.Reason
 import app.unbraid.data.DIRECT
+import app.unbraid.data.Filter
+import app.unbraid.data.Home
 import app.unbraid.data.Location
+import app.unbraid.data.Manual
 import app.unbraid.data.OwnServer
 import app.unbraid.data.PREVIOUS
+import app.unbraid.data.Prefs
+import app.unbraid.data.Profile
+import app.unbraid.data.RestoreTraffic
 import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.data.Setup
 import app.unbraid.data.VERSION
 import app.unbraid.data.WgConf
 import app.unbraid.data.restoredFrom
+import app.unbraid.ui.WEAK_TITLE
+import app.unbraid.ui.homeNote
 import app.unbraid.ui.passProblem
+import app.unbraid.ui.weakCaption
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -28,6 +38,94 @@ class BackupAdversarialTest {
     private fun reason(f: () -> Unit) = try { f(); fail("accepted"); null } catch (e: Backup.Failed) { e.reason }
     private fun text(s: Setup, app: String = "3.0.2") = Backup.export(s, app, 0).toString(Charsets.UTF_8)
     private fun forKeys(p: String) = passProblem(p, p, keys = true) == null
+
+    /** This phone: a VPN default with its provider's blocking, a filter, a blocked app and website, an own server and a home tunnel, LAN closed. */
+    private val phone = Setup(
+        routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands")), Route("w", wg = wg, own = "s")), defaultRoute = "nl",
+        apps = mapOf("org.example.mail" to "w", "org.example.game" to BLOCK, "org.example.bank" to DIRECT), sites = mapOf("tracker.example" to BLOCK, "work.example" to "w"),
+        servers = listOf(OwnServer("s", wg = wg)), home = Home(wg = wg.copy(name = "Home", endpoint = "203.0.113.7:51820", publicKey = "D".repeat(42) + "E=", allowedIps = listOf("192.168.50.0/24"))),
+        prefs = Prefs(lan = false, filter = Filter("quad9", routes = true, apps = mapOf("org.example.bank" to true))), opts = mapOf("nord" to mapOf("protect" to "on")), version = VERSION,
+    )
+
+    /** What the sheet would say for backup [b] opened on [phone]: the backup goes through the file and the reader first. */
+    private fun sheet(b: Setup, keys: Boolean = true): List<String> {
+        val c = Backup.read(Backup.export(b, "3.0.2", 0, keys))
+        return RestoreTraffic.notes(phone, phone.restoredFrom(c.setup, null, 0, c.keys)!!)
+    }
+
+    @Test fun eachWeakeningAloneAndAllTogetherIsSaid() {
+        assertEquals(emptyList<String>(), sheet(phone))
+        val kinds = listOf<Pair<String, (Setup) -> Setup>>(
+            "The default route goes from Netherlands to Direct." to { it.copy(defaultRoute = DIRECT) },
+            "The DNS filter is turned off." to { it.copy(prefs = it.prefs.copy(filter = Filter())) },
+            "1 app loses the DNS filter." to { it.copy(prefs = it.prefs.copy(filter = it.prefs.filter.copy(apps = emptyMap()))) },
+            "Apps can reach the local network again." to { it.copy(prefs = it.prefs.copy(lan = true)) },
+            "1 app that is blocked now won't be." to { it.copy(apps = it.apps - "org.example.game") },
+            "1 website that is blocked now won't be." to { it.copy(sites = it.sites - "tracker.example") },
+            "1 app goes from a VPN route to Direct." to { it.copy(apps = it.apps + ("org.example.mail" to DIRECT)) },
+            "1 website goes from a VPN route to Direct." to { it.copy(sites = it.sites + ("work.example" to DIRECT)) },
+            "\"Box\" connects to 198.51.100.66 instead of 203.0.113.1." to { s -> wg.copy(endpoint = "198.51.100.66:51820").let { e -> s.copy(servers = listOf(OwnServer("s", wg = e)), routes = s.routes.map { if (it.id == "w") it.copy(wg = e) else it }) } },
+            "Your home WireGuard uses other DNS servers: 198.51.100.53." to { it.copy(home = it.home.copy(wg = it.home.wg!!.copy(dns = listOf("198.51.100.53")))) },
+            // With the local network closed the rest of a home range goes through the VPN, not Direct: open here.
+            "Part of the home network goes Direct instead of through the home tunnel." to { it.copy(prefs = it.prefs.copy(lan = true), home = it.home.copy(wg = it.home.wg!!.copy(allowedIps = listOf("192.168.50.0/25")))) },
+        )
+        for ((said, change) in kinds) assertTrue("$said in ${sheet(change(phone))}", said in sheet(change(phone)))
+        // The provider's own blocking: said once the filter no longer stands in for it.
+        val noFilter = phone.copy(prefs = phone.prefs.copy(filter = Filter()))
+        assertEquals(listOf("The default route loses the provider's ad and tracker blocking it has now."),
+            RestoreTraffic.notes(noFilter, noFilter.copy(opts = mapOf("nord" to mapOf("protect" to "off")))))
+        val all = kinds.fold(phone) { s, (_, change) -> change(s) }
+        val together = sheet(all)
+        // Together, counts join ("1 app and 1 website go…") and a filter turned off is said once for all.
+        for ((said, _) in kinds.filter { it.first != "1 app loses the DNS filter." && !it.first.startsWith("1 app goes") && !it.first.startsWith("1 website goes") }) assertTrue("$said in $together", said in together)
+        assertTrue(together.toString(), "1 app and 1 website go from a VPN route to Direct." in together)
+    }
+
+    @Test fun weakOwnServersAreNamedUntilAccepted() {
+        val ss = Manual.parseSs("ss://aes-256-cfb:secret@198.51.100.20:8388", "Old box")
+        val ovpn = Manual.parseOvpn("client\ndev tun\nremote 198.51.100.21 1194\ntls-version-min 1.0\nremote-cert-tls server\n<ca>\n-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n</ca>\n", "Office", "u", "p")
+        val b = phone.copy(routes = phone.routes + Route("x", ss = ss, own = "sx") + Route("o", ovpn = ovpn, own = "so"), servers = phone.servers + OwnServer("sx", ss = ss) + OwnServer("so", ovpn = ovpn))
+        val c = Backup.read(Backup.export(b, "3.0.2", 0))
+        val weak = Backup.weak(phone.restoredFrom(c.setup, null, 0)!!, phone)
+        assertEquals(listOf("Old box: aes-256-cfb has no integrity check", "Office: allows TLS 1.0 or 1.1"), weak)
+        // Already on this phone, accepted at its import: not asked again.
+        val hasBox = phone.copy(servers = phone.servers + OwnServer("sx", ss = ss))
+        assertEquals(listOf("Office: allows TLS 1.0 or 1.1"), Backup.weak(hasBox.restoredFrom(c.setup, null, 0)!!, hasBox))
+        // Saved without keys: nothing to connect with until the config is added again, through the import's own warning.
+        val k = Backup.read(Backup.export(b, "3.0.2", 0, keys = false))
+        assertEquals(emptyList<String>(), Backup.weak(phone.restoredFrom(k.setup, null, 0, false)!!, Setup()))
+        assertEquals("Accept weak security to restore", WEAK_TITLE)
+        assertEquals("Old box: aes-256-cfb has no integrity check\nSomeone between you and this server may be able to read or change the traffic. Restore waits until you accept it.", weakCaption(weak.take(1)))
+    }
+
+    @Test fun homeTunnelAndAppChoiceLimits() {
+        assertEquals("Your home WireGuard on this phone is removed: this backup has none.", homeNote(keys = true, backupHas = false))
+        assertEquals("Your home WireGuard stays as it is on this phone.", homeNote(keys = false, backupHas = false))
+        assertEquals("Your home WireGuard is replaced by the one in this backup.", homeNote(keys = true, backupHas = true))
+        val s = Setup(routes = listOf(Route("nl", Location("nord"))), defaultRoute = "nl", version = VERSION)
+        val many = (0 until Backup.MAX_APPS).associate { "org.example.a$it" to DIRECT }
+        Backup.valid(s.copy(apps = many))
+        assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(apps = many + ("org.example.more" to DIRECT))) })
+        assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(profiles = listOf(Profile("P", "nl", many + ("org.example.more" to DIRECT))))) })
+    }
+
+    /** The sheet's sentences: plain words, no dash used as punctuation. */
+    @Test fun restoreTextsUseNoDashes() {
+        for (f in listOf("src/main/java/app/unbraid/data/RestoreTraffic.kt", "src/main/java/app/unbraid/ui/Backup.kt")) {
+            val texts = Regex("\"([^\"\\\\]|\\\\.)*\"").findAll(java.io.File(f).readText()).map { it.value }.filter { it.length > 12 && ' ' in it }.toList()
+            assertTrue(f, texts.size > 10)
+            texts.forEach { assertFalse(it, "—" in it || " – " in it || " - " in it) }
+        }
+    }
+
+    @Test fun aBackupThatNamesAMissingRouteIsRefusedWhole() {
+        for (bad in listOf(phone.copy(apps = phone.apps + ("org.example.x" to "gone")), phone.copy(sites = phone.sites + ("x.example" to "gone")), phone.copy(defaultRoute = "gone"),
+            phone.copy(profiles = listOf(Profile("P", "gone"))))) {
+            val plain = Backup.export(bad, "3.0.2", 0)
+            assertEquals(Reason.Invalid, reason { Backup.read(plain) })
+            assertEquals(Reason.Unrestorable, reason { Backup.readBack(plain) })
+        }
+    }
 
     @Test fun aPinnedServerKeepsOnlyItsNameAndHost() {
         val pinned = Location("mullvad", countryCode = "SE", country = "Sweden", pinned = evil)

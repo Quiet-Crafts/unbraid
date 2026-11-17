@@ -38,6 +38,8 @@ object Backup {
     private val HEAD = MAGIC.size + 5 + SALT + NONCE + CHECK + 4
     /** No setup comes near this; a larger file is refused before it is read whole. */
     const val MAX = 4 shl 20
+    /** The most app choices a backup's setup or one of its profiles may hold. */
+    const val MAX_APPS = 5000
 
     enum class Reason(val text: String) {
         NotBackup("This file isn't an unbraid backup."),
@@ -330,7 +332,9 @@ object Backup {
      * reference names something that exists, profiles follow their rules, and the engine can build it. Throws [Failed].
      */
     fun valid(s: Setup): Setup {
-        need(s.routes.size <= 500 && s.servers.size <= 500 && s.favorites.size <= 2000 && s.profiles.size <= MAX_PROFILES, "it holds more than unbraid keeps")
+        // App choices: far more than any phone has apps, and few enough for the restore sheet's check to stay quick.
+        need(s.routes.size <= 500 && s.servers.size <= 500 && s.favorites.size <= 2000 && s.profiles.size <= MAX_PROFILES &&
+            (listOf(s.apps) + s.profiles.map { it.apps }).all { it.size <= MAX_APPS }, "it holds more than unbraid keeps")
         need(s.routes.all { ID.matches(it.id) && !builtIn(it.id) } && s.routes.map { it.id }.toSet().size == s.routes.size, "a route has a missing or repeated name")
         need(s.servers.all { ID.matches(it.id) } && s.servers.map { it.id }.toSet().size == s.servers.size, "an own server has a missing or repeated name")
         s.servers.forEach { sv ->
@@ -373,6 +377,19 @@ object Backup {
         }.onFailure { bad("${name?.let { "profile $it" } ?: "its setup"} can't run (${it.message ?: "unknown reason"})") }
         // A route copied from an own server that is gone keeps its config, no longer tied to it.
         return s.copy(routes = s.routes.map { r -> if (r.own != null && s.servers.none { it.id == r.own }) r.copy(own = null) else r })
+    }
+
+    /**
+     * Own servers and routes of their own in [s] that an import would warn about ([Manual.weakness]), unless [accepted]
+     * (this phone, which accepted them at their import) has the very same config: "name: what is weak", once each.
+     */
+    fun weak(s: Setup, accepted: Setup): List<String> {
+        val known = (accepted.servers.flatMap { listOf(it.ovpn, it.ss) } + accepted.routes.flatMap { listOf(it.ovpn, it.ss) }).filterNotNullTo(HashSet())
+        return (s.servers.filter { !it.keyless }.map { Triple(it.name, it.ovpn, it.ss) } + s.routes.filter { !it.keyless }.map { Triple(it.name, it.ovpn, it.ss) }).mapNotNull { (name, o, x) ->
+            val why = o?.takeIf { it !in known }?.let { runCatching { Manual.weakness(it) }.getOrNull() } ?: x?.takeIf { it !in known }?.let(Manual::weakness) ?: return@mapNotNull null
+            // The import's first sentence says what is weak; the sheet says what it risks once for all.
+            "${name.takeGraphemes(60)}: " + why.substringBefore(". ").removeSuffix(".").removePrefix("This config ")
+        }.distinct()
     }
 
     /** A server saved without keys holds nothing secret, and the rest of it is as an import would leave it. */
