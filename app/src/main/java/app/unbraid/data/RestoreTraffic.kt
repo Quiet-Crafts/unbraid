@@ -28,9 +28,8 @@ import java.util.IdentityHashMap
  *    address it really goes to, and how: TCP, UDP (which goes as TCP does but where an exit carries TCP only) or a
  *    ping. A lookup alone has a question type. Every condition a rule can test is a package list or pattern, a name list,
  *    an address range, the network and port, or the question type, so the classes are read from the configs' own rules:
- *    every user id a package list names, one none names, and none; every name a rule names, one under it no rule names,
- *    and one no rule covers; one address between every two range boundaries; each question type a rule names, and one
- *    it doesn't. A made-up probe is checked against every rule. Classes that meet the same conditions are walked once.
+ *    every user id a package list names, one none names, and none; every name a rule names, and one no rule covers;
+ *    one address between every two range boundaries; each question type a rule names, and one it doesn't. A made-up probe is checked against every rule. Classes that meet the same conditions are walked once.
  * 3. Outcomes, part by part ([Outcome]): the exit (refused, an empty answer, a tunnel or Direct, per protocol), who
  *    answered the name and the way that question went out, and what that resolver blocks. Each part is compared on its
  *    own ([losses]): refused above any tunnel above Direct; a question kept on the phone or sent through a tunnel above
@@ -486,7 +485,9 @@ object RestoreTraffic {
             val covered = { n: String -> endings(n).any { it in roots } }
             val top = fresh({ if (it == 0) "unbraid-check.example" else "unbraid-check-$it.t$it" }, covered)
             val nameSig = { n: String -> endings(n).let { e -> exact.map { n in it } + under.map { l -> e.withIndex().any { (i, x) -> x in l || (i > 0 && ".$x" in l) } } }.toString() }
-            val candidates = listOf(top) + roots.flatMap { r -> listOf(r, fresh({ "zz-check${if (it == 0) "" else it}.$r" }) { it in roots }) }
+            // A name under a rule's name meets the same rules as that name: every list the compiler writes takes a name with the
+            // names under it, but the sign-in host while Tailscale waits, whose names are walked without that rule too.
+            val candidates = listOf(top) + roots
             val names = listOf(Name(null, emptyList())) + candidates.groupBy(nameSig).values.map { Name(it.first(), it) }.sortedBy { it.name != top }
 
             // Range lists once each, tested by binary search: one address between every two boundaries, those alike everywhere walked once.

@@ -92,10 +92,9 @@ class RestoreGate {
     private var asked: Ask? = null
     var result: Result? = null
         private set
-    private var accepted: Backup.Contents? = null
 
     /** Backup [c] opened (or none): nothing checked or accepted for another one carries over. */
-    fun open(c: Backup.Contents?) { backup = c; asked = null; result = null; accepted = null }
+    fun open(c: Backup.Contents?) { backup = c; asked = null; result = null; acceptWeak = false }
 
     /** The check to start for [here] and [keep]; null when one for them is under way or in. */
     fun ask(here: Setup, keep: Boolean): Ask? {
@@ -107,10 +106,8 @@ class RestoreGate {
     /** [r] for check [a]; dropped unless [a] is still the one asked. */
     fun answer(a: Ask, r: Result) { if (asked === a) result = r }
 
-    /** Weak servers accepted, for the backup open now only. */
-    var acceptWeak: Boolean
-        get() = accepted != null && accepted === backup
-        set(v) { accepted = if (v) backup else null }
+    /** Weak servers accepted, for the backup open now only: [open] clears it. */
+    var acceptWeak = false
 
     fun ready(here: Setup, keep: Boolean): Boolean {
         val r = result ?: return false

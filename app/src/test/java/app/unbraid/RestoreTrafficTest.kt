@@ -441,6 +441,13 @@ class RestoreTrafficTest {
         assertEquals(emptyList<String>(), notes(here, here))
     }
 
+    /** Traffic Android names no app for meets a website's rule before the hold that keeps it off Direct: walked as its own program. */
+    @Test fun trafficWithNoAppIsWalkedOnItsOwn() {
+        val here = base.copy(defaultRoute = "k1", prefs = Prefs(lan = false))
+        val said = notes(here, here.copy(defaultRoute = DIRECT, apps = mapOf("org.vpn" to "nl"), sites = mapOf("bank.example" to DIRECT)))
+        assertTrue(said.toString(), "Traffic Android can't tie to an app is no longer refused." in said)
+    }
+
     private val headscale = Home(tailscale = true, tsControlUrl = "https://hs.example.com", tsSuffixAllowed = "corp.example")
 
     /** Tailscale's states are inputs the check walks, every one of them, not read from the running VPN. */

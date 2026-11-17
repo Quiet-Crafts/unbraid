@@ -178,6 +178,10 @@ class BackupAdversarialTest {
         val damaged = Backup.export(phone.copy(servers = phone.servers + OwnServer("k", wg = wg.copy(name = "‮evil\nname", privateKey = ""), keyless = true)), "3.0.2", 0)
         val e = try { Backup.read(damaged); null } catch (x: Backup.Failed) { x }!!
         assertTrue(e.message!!, e.message!!.none { it == '‮' || it == '\n' })
+        // A profile's name may hold a word joiner; the error that names it never shows it.
+        val joined = phone.copy(profiles = listOf(Profile("Wo⁠rk", "gone")))
+        val p = try { Backup.valid(joined); null } catch (x: Backup.Failed) { x }!!
+        assertTrue(p.message!!, "Work" in p.message!! && '⁠' !in p.message!!)
     }
 
     /** A website an older version saved, that the stricter reader of today refuses, keeps the backup restorable: it stays as this phone keeps it. */
