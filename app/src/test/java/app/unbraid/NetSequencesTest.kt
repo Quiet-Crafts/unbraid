@@ -251,5 +251,20 @@ class NetSequencesTest {
         }
     }
 
+    /**
+     * The model in the glue: a test can't reach Android's network callbacks, so it checks that the monitor tells the model
+     * of a new network in the callback that moves the monitor itself, of a loss, and of stopping; and that the save is
+     * checked inside the store's own update.
+     */
+    @Test fun theGlueFeedsTheModelWhereItActs() {
+        val net = java.io.File("src/main/java/app/unbraid/vpn/Net.kt").readText()
+        assertTrue(Regex("""override fun onAvailable\(n: Network\) \{[^\n]*network = n;[^\n]*AutoSwitch\.seen\(""").containsMatchIn(net))
+        assertTrue(Regex("""private val lose = Runnable \{[^\n]*AutoSwitch\.seen\(null\)""").containsMatchIn(net))
+        assertTrue(Regex("""fun stop\(\) \{[^\n]*AutoSwitch\.unwatched\(\)""").containsMatchIn(net))
+        assertFalse(net.contains("AutoSwitch.net.value ="))
+        val watch = java.io.File("src/main/java/app/unbraid/vpn/AutoSwitch.kt").readText().substringAfter("fun watch(")
+        assertTrue(Regex("""store\.update \{ if \(run\.commit\(d, it\.onNet, Unbraid\.foreground\.value\)\) it\.use\(to, PREVIOUS\) else it \}""").containsMatchIn(watch))
+    }
+
     private fun Random.nextKind() = if (nextBoolean()) WIFI else MOBILE
 }
