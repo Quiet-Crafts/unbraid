@@ -14,6 +14,19 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 
 class SettingsTextsTest {
+    /** The own DNS server's line says how a server at home is reached, or what it still needs. */
+    @Test fun ownDnsServerLine() {
+        fun line(v: String, home: app.unbraid.data.Home = app.unbraid.data.Home(tailscale = true)) =
+            app.unbraid.ui.ownDnsSub(app.unbraid.data.Setup(home = home, prefs = app.unbraid.data.Prefs(filter = Filter(app.unbraid.data.Filters.OWN, v))))
+        assertEquals("100.101.1.2 · through Tailscale", line("100.101.1.2"))
+        assertEquals("tls://box.tail1234.ts.net · through Tailscale", line("tls://box.tail1234.ts.net"))
+        assertEquals("100.101.1.2 · needs Reach your tailnet on, under Tailscale", line("100.101.1.2", app.unbraid.data.Home()))
+        assertEquals("1.1.1.1 · not encrypted", line("1.1.1.1"))
+        assertEquals("tls://dns.corp.example · through Tailscale", line("tls://dns.corp.example", app.unbraid.data.Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example")))
+        assertEquals("tls://dns.example.org", line("tls://dns.example.org"))
+        assertEquals("nonsense · not encrypted", line("nonsense"))
+    }
+
     @Test fun firstChoiceSwitchesVpnRoutesOn() {
         val f = filterChosen(Filter(), "quad9")
         assertEquals("quad9", f.id); assertTrue(f.routes)

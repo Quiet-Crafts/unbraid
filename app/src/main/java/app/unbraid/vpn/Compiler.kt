@@ -147,10 +147,12 @@ object Compiler {
         val ts = s.tailscale
         // An exit keeps the endpoint running, but only the home toggle grants every app tailnet access.
         val homeTs = s.home.tailscale
+        // A filter that lives in a home network is asked through that tunnel, as any connection to its address goes.
+        val filterVia = filter?.let { homeVia(s, it, tsDomains) }
         // A route on its OpenVPN server's pushed DNS asks that tunnel's one DNS server (the engine allows one per tunnel).
         val ovpnDns = { id: String -> i.links[id] is OvpnLink && s.route(id)?.let(pushedDns) == true }
         // A filter reached by name, on an imported OpenVPN route, is looked up with that tunnel's pushed DNS (it may only be known there).
-        val ovpnBoot = { id: String -> filterRoutes && filter != null && Filters.byName(filter) && i.links[id] is OvpnLink && s.route(id)?.imported == true }
+        val ovpnBoot = { id: String -> filterRoutes && filter != null && filterVia == null && Filters.byName(filter) && i.links[id] is OvpnLink && s.route(id)?.imported == true }
         // A Shadowsocks plugin (obfs-local, v2ray-plugin) carries TCP only: the engine sends UDP straight to the server,
         // past the plugin, where a server behind one often doesn't answer. Such routes look names up over TCP and carry no UDP.
         val tcpOnly = { id: String -> (i.links[id] as? SsLink)?.profile?.plugin != null }
@@ -187,7 +189,7 @@ object Compiler {
                     active.filter { !ovpnDns(it.id) }.forEach { r ->
                         val boot = "boot-${tag(r.id)}"
                         val own = obj("type" to if (tcpOnly(r.id)) "tcp" else "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))
-                        if (filter == null || !filterRoutes) add(own) else {
+                        if (filter == null || !filterRoutes) add(own) else if (filterVia != null) add(filterDns(filter, "dns-r-${r.id}", filterVia, "dns-tailnet")) else {
                             // A filter reached by name is looked up first through the same tunnel, with the route's own resolver.
                             if (Filters.byName(filter) && boots.add(boot)) add(
                                 if (ovpnBoot(r.id)) obj("type" to "openvpn", "tag" to boot, "endpoint" to tag(r.id), "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9")
@@ -197,7 +199,7 @@ object Compiler {
                         }
                     }
                     // Direct traffic the filter applies to goes to it straight, not through a tunnel.
-                    if (filter != null && (directFiltered || through.isNotEmpty())) add(filterDns(filter, "dns-filter", "direct", "local"))
+                    if (filter != null && (directFiltered || through.isNotEmpty())) add(filterDns(filter, "dns-filter", filterVia ?: "direct", if (filterVia != null) "dns-tailnet" else "local"))
                     active.filter { ovpnDns(it.id) }.map { tag(it.id) }.distinct().forEach { t ->
                         // A server that pushes no DNS at all is answered by Quad9 through the same tunnel (an engine patch).
                         add(obj("type" to "openvpn", "tag" to "dns-ovpn-$t", "endpoint" to t, "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9"))
@@ -407,9 +409,25 @@ object Compiler {
     private fun homeSubnets(s: Setup) = s.home.subnets.mapNotNull(::canonical).filter(::isPrivate).distinct()
 
     /** True when the whole of [cidr] lies inside a private IPv4 range. */
-    fun isPrivate(cidr: String): Boolean {
+    fun isPrivate(cidr: String) = PRIVATE.any { within(cidr, it) }
+
+    /** True when the whole of IPv4 address or network [cidr] lies inside [range]. */
+    private fun within(cidr: String, range: String): Boolean {
         val (a, l) = ipv4(cidr) ?: return false
-        return PRIVATE.any { r -> val (b, m) = ipv4(r)!!; l >= m && (a xor b) shr (32 - m) == 0L }
+        val (b, m) = ipv4(range) ?: return false
+        return l >= m && (a xor b) shr (32 - m) == 0L
+    }
+
+    /**
+     * The home tunnel that reaches DNS server [d], or null when it is out on the internet: the home WireGuard tunnel or
+     * the tailnet for an address inside it, the tailnet for a name its DNS answers ([tsDomains]). The same order as for
+     * an app's connection to that address. The local network is left out: there the address is whoever holds it.
+     */
+    fun homeVia(s: Setup, d: Filters.Dns, tsDomains: List<String> = listOfNotNull(if (officialTs(s.home)) "ts.net" else s.home.tsSuffixAllowed)): String? = when {
+        s.home.wg?.let(::homeCidrs).orEmpty().any { within(d.ip, it) } -> "home-wg"
+        !s.home.tailscale -> null
+        (homeSubnets(s) + TAILNET).any { within(d.ip, it) } || Filters.byName(d) && tsDomains.any { d.ip.endsWith(".$it") } -> TS_TAG
+        else -> null
     }
 
     /** Networks to send through the home tunnel: its private AllowedIPs; else the interface's own subnet. */

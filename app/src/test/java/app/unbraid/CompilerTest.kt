@@ -144,6 +144,40 @@ class CompilerTest {
     private fun JsonObject.dnsServers() = this["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }.associateBy { it["tag"]!!.jsonPrimitive.content }
     private fun JsonObject.str(k: String) = this[k]?.jsonPrimitive?.content
 
+    /** An own DNS server that lives at home is asked through the home tunnel, on VPN routes and on Direct; any other as before. */
+    @Test fun filterAtHomeGoesThroughTheHomeTunnel() {
+        fun own(v: String, s: Setup = example, suffix: String? = null) = compile(s.copy(prefs = Prefs(filter = Filter(Filters.OWN, v, routes = true, directApps = true))), tsSuffix = suffix).dnsServers()
+        val routes = listOf("dns-r-nl", "dns-r-us", "dns-r-it")
+        // A tailnet address, or one in a home subnet behind Tailscale: every route and Direct ask through Tailscale, over UDP.
+        for (ip in listOf("100.101.1.2", "192.168.178.5")) own(ip).let { d ->
+            for (t in routes + "dns-filter") { assertEquals("$ip $t", "home-ts", d[t]!!.str("detour")); assertEquals(ip, d[t]!!.str("server")); assertEquals("udp", d[t]!!.str("type")) }
+            assertTrue(d.keys.none { it.startsWith("boot-") })
+        }
+        // Not at home: each route's own tunnel and straight out, as before. So is a tailnet address while the tailnet is off.
+        for ((ip, s) in listOf("192.168.1.5" to example, "1.1.1.1" to example, "100.101.1.2" to example.copy(home = Home()))) own(ip, s).let { d ->
+            assertEquals(ip, listOf("r-nl", "r-us", "r-it"), routes.map { d[it]!!.str("detour") }); assertNull(ip, d["dns-filter"]!!["detour"])
+        }
+        // The home WireGuard tunnel for an address in its networks, before the tailnet.
+        val wg = Home(tailscale = true, wg = WgConf.parse(FRITZ, "Home").copy(allowedIps = listOf("192.168.1.0/24", "100.64.0.0/10")))
+        for (ip in listOf("192.168.1.5", "100.101.1.2")) own(ip, example.copy(home = wg)).let { d -> for (t in routes + "dns-filter") assertEquals("$ip $t", "home-wg", d[t]!!.str("detour")) }
+        // A name the tailnet's DNS answers is looked up there and reached through Tailscale; any other name through the route.
+        own("tls://box.tail1234.ts.net", suffix = "tail1234.ts.net").let { d ->
+            for (t in routes + "dns-filter") { assertEquals("home-ts", d[t]!!.str("detour")); assertEquals("dns-tailnet", d[t]!!.str("domain_resolver")) }
+            assertTrue(d.keys.none { it.startsWith("boot-") }); assertTrue("dns-tailnet" in d)
+        }
+        own("tls://dns.example.org").let { d -> assertEquals("r-nl", d["dns-r-nl"]!!.str("detour")); assertEquals("boot-r-nl", d["dns-r-nl"]!!.str("domain_resolver")) }
+        // On another control server only the suffix the user allowed counts, never ts.net.
+        val hs = example.copy(home = example.home.copy(tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "hs.example.org"))
+        assertEquals("r-nl", own("tls://box.tail1234.ts.net", hs, "hs.example.org")["dns-r-nl"]!!.str("detour"))
+        assertEquals("home-ts", own("tls://box.hs.example.org", hs, "hs.example.org")["dns-r-nl"]!!.str("detour"))
+        assertEquals("home-ts", own("100.101.1.2", hs)["dns-r-nl"]!!.str("detour"))
+        // A suffix made of digits never turns a public address into a tailnet name.
+        val digits = example.copy(home = example.home.copy(tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "1.1"))
+        assertEquals("r-nl", own("1.1.1.1", digits, "1.1")["dns-r-nl"]!!.str("detour"))
+        // The home WireGuard tunnel alone, with the tailnet off.
+        assertEquals("home-wg", own("192.168.1.5", example.copy(home = wg.copy(tailscale = false)))["dns-r-nl"]!!.str("detour"))
+    }
+
     /** unbraid's filter: over HTTPS by address and TLS name, through each route's tunnel; Direct scopes go straight to it. */
     @Test fun filterScopes() {
         val quad9 = Filter("quad9")

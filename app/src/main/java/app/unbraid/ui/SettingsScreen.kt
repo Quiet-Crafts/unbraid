@@ -130,6 +130,22 @@ internal fun tailscaleSub(enabled: Boolean, connected: Boolean, state: String?) 
 internal fun filterChosen(f: app.unbraid.data.Filter, id: String, value: String = f.value) =
     f.copy(id = id, value = value, routes = f.routes || f.id == null)
 
+/**
+ * The own DNS server's line: what was typed, then how it is reached when it lives at home (or what that still needs),
+ * else that a plain address isn't encrypted.
+ */
+internal fun ownDnsSub(s: app.unbraid.data.Setup): String {
+    val d = s.prefs.filter.server()
+    val via = d?.let { app.unbraid.vpn.Compiler.homeVia(s, it) }
+    return s.prefs.filter.value + when {
+        via == app.unbraid.vpn.Compiler.TS_TAG -> " · through Tailscale"
+        via != null -> " · through your home tunnel"
+        d != null && app.unbraid.vpn.Compiler.homeVia(s.copy(home = s.home.copy(tailscale = true)), d) != null -> " · needs Reach your tailnet on, under Tailscale"
+        d?.tls == null && d?.path == null -> " · not encrypted"
+        else -> ""
+    }
+}
+
 /** Where the filter applies, for the Settings overview: its name, then each place that really uses it, or "not applied". */
 internal fun filterSummary(f: app.unbraid.data.Filter, defaultRoute: String, apps: Map<String, String>): String? {
     val dns = f.server() ?: return null
@@ -516,7 +532,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                     val on = filter.id == d.id
                     Item(d.name, d.blocks + if (d.id == "nextdns") " · profile ${if (on) filter.value.ifBlank { "not set" } else "needed"}" else "",
                         { if (d.id == "nextdns") dialog = "filter:nextdns" else setFilter { filterChosen(it, d.id) } }, selected = on) { Radio(on) }
-                } + Item("Own DNS server", if (filter.id == app.unbraid.data.Filters.OWN) filter.value + if (filterDns?.tls == null && filterDns?.path == null) " · not encrypted" else "" else "https://… (DNS over HTTPS) or tls://… (DNS over TLS)",
+                } + Item("Own DNS server", if (filter.id == app.unbraid.data.Filters.OWN) ownDnsSub(setup) else "https://… (DNS over HTTPS) or tls://… (DNS over TLS)",
                     { dialog = "filter:own" }, selected = filter.id == app.unbraid.data.Filters.OWN) { Radio(filter.id == app.unbraid.data.Filters.OWN) })
                 if (filterDns != null) {
                     val providers = signedIn.mapNotNull { pr -> pr.protection?.takeIf { setup.opt(pr.id, app.unbraid.data.PROTECT) == "on" }?.label }
@@ -652,7 +668,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
             var text by rememberSaveable { mutableStateOf(filter.value.takeIf { filter.id == if (own) app.unbraid.data.Filters.OWN else "nextdns" }.orEmpty()) }
             val ok = if (own) app.unbraid.data.Filters.own(text) != null else app.unbraid.data.Filter("nextdns", text).server() != null
             Prompt(if (own) "Own DNS server" else "NextDNS profile", "Save", { dialog = null; setFilter { filterChosen(it, if (own) app.unbraid.data.Filters.OWN else "nextdns", text.trim()) } }, { dialog = null }, enabled = ok) {
-                Text(if (own) "A DNS over HTTPS address (https://dns.example.com/dns-query), DNS over TLS (tls://dns.example.com), or a plain IPv4 address, which isn't encrypted." else "The ID of your profile, as on my.nextdns.io (6 characters).", style = Type.sub)
+                Text(if (own) "A DNS over HTTPS address (https://dns.example.com/dns-query), DNS over TLS (tls://dns.example.com), or a plain IPv4 address, which isn't encrypted. A server on your tailnet or home tunnel is reached through it." else "The ID of your profile, as on my.nextdns.io (6 characters).", style = Type.sub)
                 DialogField(text, { text = it.take(200) }, if (own) "Server" else "Profile ID", if (own) "https://dns.example.com/dns-query" else "abc123")
             }
         }
