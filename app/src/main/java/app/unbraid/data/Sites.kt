@@ -3,7 +3,6 @@
 package app.unbraid.data
 
 import app.unbraid.vpn.Compiler
-import java.lang.Character.UnicodeScript
 import java.net.IDN
 import java.text.Normalizer
 
@@ -11,7 +10,7 @@ import java.text.Normalizer
  * The websites as saved ([Setup.sites], [Profile.sites]), whether or not their rule applies now. Reading them needs this
  * opt-in, so a count, a tunnel or a protection can't go by them unseen: those go by [Sites.applied].
  */
-@RequiresOptIn("These are the websites as saved; what applies now is Sites.applied", RequiresOptIn.Level.WARNING)
+@RequiresOptIn("These are the websites as saved; what applies now is Sites.applied", RequiresOptIn.Level.ERROR)
 @Retention(AnnotationRetention.BINARY)
 @Target(AnnotationTarget.PROPERTY)
 annotation class SavedSites
@@ -29,13 +28,20 @@ object Sites {
     private const val LETTERS = "unbraid can't spell this name's letters the way browsers do. Use the form that starts with xn-- instead"
 
     /**
-     * Rules of the Public Suffix List, both its sections, in ASCII form: name endings handed out to unrelated owners ("co.uk",
-     * "github.io"); "*.x" makes every name one label under x such an ending, "!y" takes y back out of a "*." rule.
+     * The Public Suffix List's ICANN section, its rules of two labels or more in ASCII form: endings registries hand out to
+     * unrelated owners ("co.uk", "gov.au"); "*.x" makes every name one label under x such an ending, "!y" takes y back out
+     * of a "*." rule. Its last line gives the number of rules: a file that is missing, cut short or damaged reads as null,
+     * and then no new website is accepted ([refusal]).
      */
-    private val SHARED by lazy { Sites::class.java.getResourceAsStream("/shared_suffixes.txt")!!.bufferedReader().readLines().filter { it.isNotBlank() && !it.startsWith("//") }.toHashSet() }
+    private val SHARED by lazy { rules(runCatching { Sites::class.java.getResourceAsStream("/shared_suffixes.txt")!!.bufferedReader().readLines() }.getOrNull()) }
+
+    /** The rules in [lines] of that file, or null unless they are all there (as many as its last line says, and more than 5,000). */
+    internal fun rules(lines: List<String>?): Set<String>? =
+        lines?.filter { it.isNotBlank() && !it.startsWith("//") }?.toHashSet()?.takeIf { lines.lastOrNull() == "// RULES: ${it.size}" && it.size > 5000 }
+    private const val UNCHECKED = "unbraid can't check website names right now, so it can't add one. Reinstall unbraid to fix this"
 
     /** [name] is an ending many websites share, or holds a whole level of them ("*.kawasaki.jp" for kawasaki.jp), so a rule for it would cover them all. */
-    private fun shared(name: String) = name in SHARED || "*.$name" in SHARED || "*.${name.substringAfter('.')}" in SHARED && "!$name" !in SHARED
+    private fun shared(name: String, rules: Set<String>) = name in rules || "*.$name" in rules || "*.${name.substringAfter('.')}" in rules && "!$name" !in rules
 
     /**
      * The address in [raw] as a rule keeps it, from what people type or paste ("https://www.Example.com/page" →
@@ -50,7 +56,8 @@ object Sites {
         val (name, why) = read(raw)
         if (name == null) return why
         never(name)?.let { return "$name is $it, so unbraid can't give it a rule" }
-        return if (shared(name)) "$name is shared by many websites. Add one website under it instead" else null
+        val rules = SHARED ?: return UNCHECKED
+        return if (shared(name, rules)) "$name is a shared ending: many unrelated websites end in it, so one rule would cover them all. Add one website under it instead" else null
     }
 
     /** What [name] is when no website rule can ever work for it: no connection is ever made to it by name. */
@@ -115,31 +122,14 @@ object Sites {
     private val LETTERY = setOf(Character.UPPERCASE_LETTER, Character.LOWERCASE_LETTER, Character.TITLECASE_LETTER, Character.MODIFIER_LETTER, Character.OTHER_LETTER,
         Character.NON_SPACING_MARK, Character.COMBINING_SPACING_MARK, Character.DECIMAL_DIGIT_NUMBER, Character.LETTER_NUMBER).map { it.toInt() }.toSet()
 
-    /** A letter, mark or digit both rules write the same way, or a sign a name may hold beside certain letters ([contextual]). */
-    private fun letter(c: Int) = c < 0x80 || c in CONTEXT || Character.getType(c) in LETTERY && c !in DIFFERENT && IGNORABLE.none { c in it }
-
-    /** Signs a name may hold only beside certain letters ([contextual]): the Catalan middle dot, the Greek numeral sign, Hebrew geresh and gershayim, the Japanese middle dot. */
-    private val CONTEXT = setOf(0xb7, 0x375, 0x5f3, 0x5f4, 0x30fb)
-    private val KANA_KANJI = setOf(UnicodeScript.HIRAGANA, UnicodeScript.KATAKANA, UnicodeScript.HAN)
-
     /**
-     * Whether [label] keeps IDNA's contextual rules (RFC 5892), as registries do: a middle dot only between two l's
-     * ("col·legi"), the Greek numeral sign before a Greek letter, geresh and gershayim after a Hebrew letter, the Japanese
-     * middle dot in a label with kana or kanji ("カタカナ・テスト"), and Arabic-Indic digits of one kind only.
+     * A letter, mark or digit both rules write the same way, or a sign IDNA lets a name hold ([SIGNS]). Where such a sign
+     * may stand is the registries' rule (RFC 5892), not the browsers': a name with one is saved as the browser opens it.
      */
-    private fun contextual(label: String): Boolean {
-        val c = label.codePoints().toArray()
-        val script = { i: Int -> c.getOrNull(i)?.let(UnicodeScript::of) }
-        return c.indices.all { i ->
-            when (c[i]) {
-                0xb7 -> c.getOrNull(i - 1) == 'l'.code && c.getOrNull(i + 1) == 'l'.code
-                0x375 -> script(i + 1) == UnicodeScript.GREEK
-                0x5f3, 0x5f4 -> script(i - 1) == UnicodeScript.HEBREW
-                0x30fb -> c.any { UnicodeScript.of(it) in KANA_KANJI }
-                else -> true
-            }
-        } && !(c.any { it in 0x660..0x669 } && c.any { it in 0x6f0..0x6f9 })
-    }
+    private fun letter(c: Int) = c < 0x80 || c in SIGNS || Character.getType(c) in LETTERY && c !in DIFFERENT && IGNORABLE.none { c in it }
+
+    /** The Catalan middle dot, the Greek numeral sign, Hebrew geresh and gershayim, the Japanese middle dot ("カタカナ・テスト"). */
+    private val SIGNS = setOf(0xb7, 0x375, 0x5f3, 0x5f4, 0x30fb)
 
     /** The name in [raw] as a browser reads a web address, or the reason there is none. */
     private fun read(raw: String): Pair<String?, String> {
@@ -158,8 +148,9 @@ object Sites {
         // one letter not typed in that order are refused: browsers differ in the order they put them.
         if (!Normalizer.isNormalized(host, Normalizer.Form.NFC) && TWO_MARKS.containsMatchIn(Normalizer.normalize(host, Normalizer.Form.NFD))) return null to LETTERS
         var name = runCatching { IDN.toASCII(Normalizer.normalize(host, Normalizer.Form.NFC)).lowercase() }.getOrNull() ?: return null to if (host.all { it.code < 128 }) NOT_A_NAME else LETTERS
-        // Every leading "www." goes while a name is left, so what is kept reads back as itself.
-        while (name.startsWith("www.") && '.' in name.drop(4)) name = name.drop(4)
+        // Every leading "www." goes while a name is left, so what is kept reads back as itself; not when what is left is an
+        // ending many websites share: "www.gob.mx" is a website, "gob.mx" all of them.
+        while (name.startsWith("www.") && '.' in name.drop(4) && SHARED?.let { shared(name.drop(4), it) } == false) name = name.drop(4)
         val labels = name.split('.')
         // A last label that reads as a number (digits, or 0x and hex digits) makes it an IP address to a browser.
         val last = labels.last()
@@ -171,7 +162,7 @@ object Sites {
         // name or none.
         if ("xn--" in name) {
             val read = IDN.toUnicode(name)
-            if (!read.codePoints().allMatch { letter(it) } || !Normalizer.isNormalized(read, Normalizer.Form.NFC) || IDN.toASCII(read).lowercase() != name || !bidi(read.split('.')) || !read.split('.').all(::contextual)) return null to NOT_A_NAME
+            if (!read.codePoints().allMatch { letter(it) } || !Normalizer.isNormalized(read, Normalizer.Form.NFC) || IDN.toASCII(read).lowercase() != name || !bidi(read.split('.'))) return null to NOT_A_NAME
         }
         return name to ""
     }
@@ -199,41 +190,18 @@ object Sites {
         }
     }
 
-    /** Scripts a label may mix and still be shown in its own letters, as browsers allow: Latin with Chinese and Japanese, Chinese, or Korean characters. */
-    private val MIXES = listOf(setOf(UnicodeScript.LATIN, UnicodeScript.HAN, UnicodeScript.HIRAGANA, UnicodeScript.KATAKANA),
-        setOf(UnicodeScript.LATIN, UnicodeScript.HAN, UnicodeScript.BOPOMOFO), setOf(UnicodeScript.LATIN, UnicodeScript.HAN, UnicodeScript.HANGUL))
-    /** Letters of other scripts that look like Latin ones, with the Latin letter each looks like: what a search also reads them as. */
-    private val LOOKALIKE = ("асԁеһіјӏорԛѕԝхуѵѡԍαικνορτυχօսհոց" zip "acdehijlopqswxyvwgaikvoptuxouhng").toMap()
-
-    /** Scripts shown in their own letters under any ending: none of their letters passes for a Latin one. */
-    private val SHOWN = ("LATIN HAN HIRAGANA KATAKANA BOPOMOFO HANGUL ARABIC HEBREW THAANA SYRIAC DEVANAGARI BENGALI GURMUKHI GUJARATI ORIYA TAMIL TELUGU KANNADA " +
-        "MALAYALAM SINHALA THAI LAO TIBETAN MYANMAR KHMER GEORGIAN ETHIOPIC").split(' ').map(UnicodeScript::valueOf).toSet()
-    /** Scripts whose letters can spell a Latin word ("аррӏе"): shown in their own letters only under an ending of their countries or in their own script. */
-    private val LATINISH = mapOf(UnicodeScript.CYRILLIC to setOf("ru", "su", "ua", "by", "bg", "kz", "kg", "mk", "mn", "rs", "tj", "uz", "ba", "me", "eu"),
-        UnicodeScript.GREEK to setOf("gr", "cy", "eu"), UnicodeScript.ARMENIAN to setOf("am"))
-
     /** [name]'s labels in their own letters, or null when it has none ("xn--" labels that decode to nothing valid). */
     private fun decoded(name: String) = if ("xn--" !in name) null else runCatching { IDN.toUnicode(name) }.getOrNull()?.takeIf { it != name && clean(it) == name }
 
     /**
-     * [name] as people read it: an international name in its own letters ("xn--mnchen-3ya.de" → "münchen.de"). Only a
-     * reading that writes back to [name] itself, and, as browsers show it, only when no label mixes scripts, and a label
-     * in a script that can spell Latin words only under its own countries' endings ("xn--80a7ec7j.example" stays, not
-     * "ѵіѕа.example"; "пример.рф" shows): anything else stays in its ASCII form.
+     * [name] as people read it. An international name always shows both forms, its own letters and the ASCII one it is
+     * saved as ("münchen.de (xn--mnchen-3ya.de)"): letters of one script can pass for another's, and the ASCII form is
+     * the one that tells two names apart. A form that doesn't read back as [name] itself shows ASCII alone.
      */
-    fun shown(name: String): String = decoded(name)?.takeIf { d -> d.split('.').all { plain(it, d.substringAfterLast('.')) } } ?: name
+    fun shown(name: String): String = decoded(name)?.let { "$it ($name)" } ?: name
 
-    private fun scripts(label: String) = label.codePoints().toArray().map(UnicodeScript::of).filter { it != UnicodeScript.COMMON && it != UnicodeScript.INHERITED }.toSet()
-
-    private fun plain(label: String, end: String): Boolean {
-        val scripts = scripts(label)
-        if (scripts.size > 1) return MIXES.any { it.containsAll(scripts) }
-        val one = scripts.singleOrNull() ?: return true
-        return one in SHOWN || LATINISH[one]?.let { end in it || scripts(end) == scripts } == true
-    }
-
-    /** What a search of the list matches [name] by: the name, its own letters, and those letters read as the Latin ones they look like. */
-    fun readings(name: String): List<String> = listOfNotNull(name, decoded(name), decoded(name)?.map { LOOKALIKE[it] ?: it }?.joinToString(""))
+    /** What a search of the list matches [name] by: its ASCII form and its own letters. */
+    fun readings(name: String): List<String> = listOfNotNull(name, decoded(name))
 
     /** The website among [sites] that [host] belongs to (the name itself or one under it), the most specific one; null for none. */
     fun match(host: String, sites: Collection<String>): String? =

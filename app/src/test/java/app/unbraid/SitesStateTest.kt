@@ -37,18 +37,18 @@ class SitesStateTest {
     private val browser = "com.browser"
 
     /** One cell of the table: the setup with [name] on Italy and [more], what the row says, whether Italy is in use, where a fresh connection and one by a kept stand-in go. */
-    private fun cell(s: Setup, name: String, row: String, inUse: Boolean, fresh: String, kept: String, reported: String? = null, blocked: Set<String> = emptySet()) {
+    private fun cell(s: Setup, name: String, row: String, inUse: Boolean, fresh: String, kept: String, reported: String? = null, blocked: Set<String> = emptySet(), tunnel: Boolean = inUse) {
         assertEquals(name, row, siteState(s, name, reported))
-        assertEquals(name, inUse, s.activeRoutes(reported).any { it.id == "it" })
+        assertEquals(name, tunnel, s.activeRoutes.any { it.id == "it" })
         assertEquals(name, inUse, "it" in sitesBy(s, reported))
-        if (!s.home.tailscale && BLOCK !in s.sites.values) assertEquals(name, !inUse, s.directOnly) // nothing protected unless it applies
+        if (!s.home.tailscale && BLOCK !in s.sites.values) assertEquals(name, !tunnel, s.directOnly) // nothing protected unless it applies
         val (dns, route) = RoutingProbe.compiled(s, reported, blocked)
         assertEquals(name, fresh, RoutingProbe.connect(route, dns, browser, name))
         assertEquals(name, kept, RoutingProbe.connect(route, dns, browser, name, kept = "fake"))
         // The tunnel opens exactly while the website keeps it in use (and has one to open).
         val links = s.routes.associate { r -> Server("x #1", "x.nordvpn.com", "10.9.0.1", "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=", 10).let { r.id to WgLink(it, Nord.peer(it, KEY)) } }
         val config = Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links, "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", reported, blocked = blocked))).jsonObject
-        assertEquals(name, inUse && "it" !in blocked, config["endpoints"]!!.jsonArray.any { it.jsonObject["tag"]!!.jsonPrimitive.content == "r-it" })
+        assertEquals(name, tunnel && "it" !in blocked, config["endpoints"]!!.jsonArray.any { it.jsonObject["tag"]!!.jsonPrimitive.content == "r-it" })
     }
 
     @Test fun applied() = cell(base.copy(sites = mapOf("example.com" to "it")), "example.com", "Italy", true, "r-it", "r-it")
@@ -61,10 +61,13 @@ class SitesStateTest {
         cell(base.copy(home = Home(tailscale = true), sites = mapOf("nas.tail1.ts.net" to "it")), "nas.tail1.ts.net",
             "Not applied: Tailscale answers ts.net names while Reach your tailnet is on", false, "home-ts", "reject")
 
-    /** On Headscale only once Tailscale reports the domain the user allowed; before, the website applies and keeps its tunnel. */
+    /**
+     * On Headscale only once Tailscale reports the domain the user allowed; before, the website applies. Either way its
+     * route keeps its tunnel: tunnels go by the setup alone, so picking, clash checks and compiling never disagree.
+     */
     @Test fun answeredByAHeadscaleTailnet() {
         val s = base.copy(home = Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example"), sites = mapOf("box.corp.example" to "it"))
-        cell(s, "box.corp.example", "Not applied: your tailnet answers this name while Reach your tailnet is on", false, "home-ts", "reject", reported = "corp.example")
+        cell(s, "box.corp.example", "Not applied: your tailnet answers this name while Reach your tailnet is on", false, "home-ts", "reject", reported = "corp.example", tunnel = true)
         cell(s, "box.corp.example", "Italy", true, "r-it", "r-it")
         cell(s, "box.corp.example", "Italy", true, "r-it", "r-it", reported = "other.example")
         assertEquals("Direct · no apps elsewhere · 1 website, 1 not applied", summary(s, Profile("P", DIRECT, sites = s.sites), "corp.example"))
@@ -96,6 +99,10 @@ class SitesStateTest {
         val off = on.copy(prefs = on.prefs.copy(lan = false))
         assertTrue(LinkPicker.leavesDirect(on, off, off.activeRoutes.map { it.id }.toSet()))
         assertFalse(LinkPicker.leavesDirect(on, on, setOf("it")))
+        // The tailnet's domain alone changing does too: a Direct website a Headscale domain now answers.
+        val hs = base.copy(home = Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example"), routes = listOf(italy), defaultRoute = "it", sites = mapOf("box.corp.example" to DIRECT))
+        assertTrue(LinkPicker.leavesDirect(hs, hs, setOf("it"), oldSuffix = null, newSuffix = "corp.example"))
+        assertFalse(LinkPicker.leavesDirect(hs, hs, setOf("it"), oldSuffix = "corp.example", newSuffix = "corp.example"))
     }
 
     /**
@@ -125,6 +132,57 @@ class SitesStateTest {
         assertEquals("fake", RoutingProbe.lookup(dns, browser, "nas.tail1.ts.net", "A"))
         assertEquals("r-it", RoutingProbe.connect(route, dns, browser, "nas.tail1.ts.net"))
         assertEquals("Italy", siteState(s, "nas.tail1.ts.net", "tail1.ts.net"))
+    }
+
+    /**
+     * A website above a private zone (a Headscale domain, a local name) never takes that zone: its lookups go to the
+     * tailnet's or the network's resolver first, the tailnet's before the network's, and a stand-in address handed out
+     * for a name in it before is refused, not sent the parent's way. The rest of the parent keeps its route.
+     */
+    @Test fun aParentWebsiteNeverTakesAPrivateZoneUnderIt() {
+        val hs = { d: String -> Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = d) }
+        for (to in listOf("it", DIRECT)) {
+            val (dns, route) = RoutingProbe.compiled(base.copy(home = hs("tail.example.org"), sites = mapOf("example.org" to to)), "tail.example.org")
+            assertEquals("dns-tailnet", RoutingProbe.lookup(dns, browser, "wiki.tail.example.org", "A"))
+            assertEquals("dns-tailnet", RoutingProbe.lookup(dns, browser, "wiki.tail.example.org", "TXT"))
+            assertEquals("reject", RoutingProbe.connect(route, dns, browser, "wiki.tail.example.org", kept = "fake"))
+            val out = if (to == DIRECT) "direct" else "r-it"
+            assertEquals(out, RoutingProbe.connect(route, dns, browser, "www.example.org")); assertEquals(out, RoutingProbe.connect(route, dns, browser, "www.example.org", kept = "fake"))
+        }
+        // A Headscale domain inside a local name: the tailnet answers it, the network the rest.
+        val (dns, route) = RoutingProbe.compiled(base.copy(prefs = base.prefs.copy(lan = true), home = hs("corp.office.lan"), sites = mapOf("office.lan" to "it")), "corp.office.lan")
+        assertEquals("dns-tailnet", RoutingProbe.lookup(dns, browser, "wiki.corp.office.lan", "A"))
+        assertEquals("local", RoutingProbe.lookup(dns, browser, "printer.office.lan", "A"))
+        for (n in listOf("wiki.corp.office.lan", "printer.office.lan")) assertEquals(n, "reject", RoutingProbe.connect(route, dns, browser, n, kept = "fake"))
+    }
+
+    /** A blocked website under a local or tailnet name blocks in every state: its lookups and a stand-in address from before are refused. */
+    @Test fun aBlockedWebsiteBlocksInEveryState() {
+        val names = listOf("x.fritz.box", "nas.tail1.ts.net", "box.corp.example")
+        val hs = Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example")
+        for (lan in listOf(true, false)) for ((home, reported) in listOf(Home() to null, Home(tailscale = true) to "tail1.ts.net", Home(tailscale = true) to null, hs to "corp.example", hs to null)) {
+            val s = base.copy(prefs = base.prefs.copy(lan = lan), home = home, sites = names.associateWith { BLOCK })
+            val (dns, route) = RoutingProbe.compiled(s, reported)
+            for (n in names) for (x in listOf(n, "a.$n")) {
+                assertEquals("$x $lan $reported", "reject", RoutingProbe.lookup(dns, browser, x, "A"))
+                assertEquals("$x $lan $reported", "reject", RoutingProbe.connect(route, dns, browser, x, kept = "fake"))
+            }
+            for (n in names) assertEquals("Blocked, no traffic", siteState(s, n, reported))
+        }
+    }
+
+    /**
+     * Reach your tailnet on with Tailscale's own server: all of ts.net goes to the tailnet's resolver, as in 3.0.2, the
+     * user's own tailnet and the names of devices other tailnets share with it alike. So a rule for another tailnet's
+     * public (Funnel) name doesn't apply, and its row says so; the tailnet answers that name only if it knows it.
+     */
+    @Test fun aFunnelNameOfAnotherTailnetIsTheTailnets() {
+        val s = base.copy(home = Home(tailscale = true), sites = mapOf("service.tail-b.ts.net" to "it"))
+        val (dns, route) = RoutingProbe.compiled(s, "tail-a.ts.net")
+        assertEquals("dns-tailnet", RoutingProbe.lookup(dns, browser, "service.tail-b.ts.net", "A"))
+        assertEquals("reject", RoutingProbe.connect(route, dns, browser, "service.tail-b.ts.net", kept = "fake"))
+        assertEquals("Not applied: Tailscale answers ts.net names while Reach your tailnet is on", siteState(s, "service.tail-b.ts.net", "tail-a.ts.net"))
+        assertFalse(dns["rules"].toString().contains("service.tail-b.ts.net"))
     }
 
     private operator fun Setup.minus(site: String) = copy(sites = sites - site)

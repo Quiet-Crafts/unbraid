@@ -42,19 +42,22 @@ class SiteFlipTest {
             val kept = RoutingProbe.connect(routeB, dnsB, app, name, kept = had)
             val why = "$name: ${siteState(from.first, name, from.second)} -> ${siteState(to.first, name, to.second)}, kept $had"
             // A stand-in address names the website: refused, or where a fresh lookup goes. A plain address (the tailnet's
-            // or the network's, given while the rule didn't apply) names nothing: it lasts a second, so apps ask again.
+            // or the network's, given while the rule didn't apply) names nothing, so it follows the address rules until
+            // the app looks the name up again, as in 3.0.2: a limit of routing by name.
             if (had == "fake") assertTrue("$why went $kept, fresh $freshA / $freshB", kept in setOf("reject", freshA, freshB))
-            else assertTrue(why, had == "reject" || dnsA["rules"].toString().contains("\"rewrite_ttl\":1"))
         }
     }
 
-    /** The website applies, or a lookup rule answers its name first and its route opens no tunnel; both ways, for every flip. */
+    /**
+     * The website applies, or a lookup rule answers its name first; both ways, for every flip. Its route opens no tunnel
+     * then, except for a Headscale domain: tunnels go by the setup alone, never by the domain Tailscale reports.
+     */
     @Test fun eachFlipChangesWhatIsInUse() {
         for ((name, x, y) in flips) {
             assertEquals(name, mapOf(name to "it"), Sites.applied(x.first, reported = x.second).filterKeys { it == name })
             assertTrue(name, Sites.applied(y.first, reported = y.second).isEmpty() || Sites.applied(y.first, reported = y.second).values.all { it == BLOCK })
-            assertEquals(name, listOf("it"), x.first.activeRoutes(x.second).map { it.id })
-            assertEquals(name, emptyList<String>(), y.first.activeRoutes(y.second).map { it.id })
+            assertEquals(name, listOf("it"), x.first.activeRoutes.map { it.id })
+            assertEquals(name, if (y.second != null) listOf("it") else emptyList(), y.first.activeRoutes.map { it.id })
         }
     }
 }

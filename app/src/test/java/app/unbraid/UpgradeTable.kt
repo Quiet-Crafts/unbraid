@@ -24,6 +24,7 @@ object UpgradeTable {
         "example.com", "www.example.com", "api.example.com", "v2.api.example.com", "bank.example", "ads.example", "other.org",
         "host.tailnet.ts.net", "nas.tail1234.ts.net", "a.b.tail1234.ts.net", "box.corp.example", "corp.example",
         "printer.lan", "nas.local", "x.fritz.box", "router.home.arpa", "corp.internal", "1.0.0.10.in-addr.arpa", "foo.localhost", "x.0xff",
+        "wiki.corp.office.lan", "printer.office.lan", "wiki.tail.example.org", "www.example.org", "storage.googleapis.com", "raw.githubusercontent.com", "www.gob.mx",
     )
     val apps = listOf("org.browser", "com.chat")
 
@@ -54,7 +55,12 @@ object UpgradeTable {
         Triple("odd-headscale-unreported", setup(DIRECT, public + odd, headscale), null to emptySet()),
         Triple("odd-headscale-other-domain", setup(DIRECT, public + odd, headscale), "other.example" to emptySet()),
         Triple("tailnet-parent", setup(DIRECT, mapOf("ts.net" to "it", "corp.example" to "us", "home.arpa" to "it"), headscale), "corp.example" to emptySet()),
+        // A Headscale domain inside a saved local name, and one inside a saved public parent; platforms and a government
+        // ending 3.0.2 took as websites.
+        Triple("private-zone-in-parent", setup(DIRECT, platforms + mapOf("office.lan" to "it", "example.org" to "us"), headscale.copy(tsSuffixAllowed = "corp.office.lan")), "corp.office.lan" to emptySet()),
+        Triple("private-zone-in-parent-lan-off", setup("nl", platforms + mapOf("office.lan" to "it", "example.org" to "us"), headscale.copy(tsSuffixAllowed = "tail.example.org"), lan = false), "tail.example.org" to emptySet()),
     )
+    private val platforms get() = mapOf("googleapis.com" to "it", "githubusercontent.com" to DIRECT, "gob.mx" to "us")
 
     /** Every case's outcomes, one line each, prefixed by the case name. */
     fun lines() = cases.flatMap { (name, s, rest) -> RoutingProbe.outcomes(s, rest.first, names, apps, rest.second).map { "$name $it" } }

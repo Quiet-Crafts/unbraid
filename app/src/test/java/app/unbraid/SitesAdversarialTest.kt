@@ -123,7 +123,9 @@ class SitesAdversarialTest {
     )
 
     /** What a browser opens, as a rule keeps it: no trailing dot, no leading "www.". */
-    private fun kept(host: String): String { var n = host.trim('.'); while (n.startsWith("www.") && '.' in n.drop(4)) n = n.drop(4); return n }
+    private fun kept(host: String): String { var n = host.trim('.'); while (n.startsWith("www.") && '.' in n.drop(4) && !isShared(n.drop(4))) n = n.drop(4); return n }
+    private fun isShared(n: String) = Sites.refusal(n)?.contains("shared ending") == true
+    private fun shared(n: String) = "$n is a shared ending: many unrelated websites end in it, so one rule would cover them all. Add one website under it instead"
 
     /** Whatever is saved is the website the browser opens. Refusing is always allowed, saving another website never. */
     @Test fun neverAnotherWebsiteThanTheBrowserOpens() {
@@ -169,11 +171,9 @@ class SitesAdversarialTest {
             "com" to "Add the whole name, such as com.com",
             "a.localhost" to "a.localhost is this phone itself, so unbraid can't give it a rule",
             "1.0.0.10.in-addr.arpa" to "1.0.0.10.in-addr.arpa is a lookup of an address, not a website, so unbraid can't give it a rule",
-            "ts.net" to "ts.net is shared by many websites. Add one website under it instead", "k12.ca.us" to "k12.ca.us is shared by many websites. Add one website under it instead",
-            "x.sch.uk" to "x.sch.uk is shared by many websites. Add one website under it instead", "com.jm" to "com.jm is shared by many websites. Add one website under it instead",
+            "k12.ca.us" to shared("k12.ca.us"), "x.sch.uk" to shared("x.sch.uk"), "sch.uk" to shared("sch.uk"), "com.jm" to shared("com.jm"),
             "a".repeat(Sites.PASTE + 1) to "That is too long for an address. Paste the link alone",
-            "co.uk" to "co.uk is shared by many websites. Add one website under it instead", "www.co.uk" to "co.uk is shared by many websites. Add one website under it instead",
-            "github.io" to "github.io is shared by many websites. Add one website under it instead", "CO.UK." to "co.uk is shared by many websites. Add one website under it instead",
+            "co.uk" to shared("co.uk"), "CO.UK." to shared("co.uk"), "gob.mx" to shared("gob.mx"),
             "😀.com" to letters, "a\u202eb.com" to letters, "ex%61mple.com" to notName, "ex%2Ecom" to notName, "_dmarc.example.com" to notName, "a_b.com" to notName, "*.example.com" to notName, "-bad.com" to notName, "example..com" to notName,
             "ex ample.com" to notName, "a".repeat(64) + ".com" to notName, "a\u0000b.com" to notName, "https://example.com@" to notName, "//example.com" to notName, "" to notName,
         )) assertEquals(raw, why, Sites.refusal(raw))
@@ -189,21 +189,35 @@ class SitesAdversarialTest {
     }
 
     /**
-     * The shipped endings are exactly the Public Suffix List's rules of two labels or more, both sections, nothing left out
-     * and nothing added, under the list's own notice; and its "*." and "!" rules work: a rule for a level of shared
-     * endings ("kawasaki.jp") or for one of them is refused, a name the list takes back out ("city.kawasaki.jp") is not.
+     * The shipped endings are exactly the Public Suffix List's ICANN rules of two labels or more (exact, "*." and "!"
+     * rules), nothing left out and nothing added, under the list's own notice and counted on the last line; and its "*."
+     * and "!" rules work: a rule for a level of shared endings ("kawasaki.jp") or for one of them is refused, a name the
+     * list takes back out ("city.kawasaki.jp") is not. Platforms from the list's private section (github.io) can be added.
      */
-    @Test fun sharedEndingsAreTheWholeList() {
+    @Test fun sharedEndingsAreTheIcannSection() {
         val psl = java.util.zip.GZIPInputStream(javaClass.classLoader!!.getResourceAsStream("public_suffix_list.dat.gz")!!).bufferedReader().readText()
-        val rules = psl.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("//") && '.' in it }
+        val icann = psl.substringAfter("// ===BEGIN ICANN DOMAINS===").substringBefore("// ===END ICANN DOMAINS===")
+        val rules = icann.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("//") && '.' in it }
             .map { r -> Regex("^(\\*\\.|!)?(.*)$").find(r)!!.groupValues.let { it[1] + java.net.IDN.toASCII(it[2], java.net.IDN.ALLOW_UNASSIGNED).lowercase() } }.toSet()
         val text = javaClass.getResource("/shared_suffixes.txt")!!.readText()
         assertEquals(rules, text.lines().filter { it.isNotBlank() && !it.startsWith("//") }.toSet())
+        assertEquals("// RULES: ${rules.size}", text.trimEnd().lines().last())
+        assertTrue(rules.size > 5000)
         assertTrue(text.startsWith(psl.lines().take(3).joinToString("\n"))) // the list's MPL-2.0 notice, word for word
         assertTrue(Regex("VERSION: ${Regex("VERSION: (\\S+)").find(psl)!!.groupValues[1]}").containsMatchIn(text))
-        for (shared in listOf("catholic.edu.au", "onrender.com", "kawasaki.jp", "x.kawasaki.jp", "sch.uk", "x.sch.uk", "nom.br", "x.nom.br", "x.ck", "github.io", "ts.net", "co.uk", "k12.ca.us"))
-            assertEquals(shared, "$shared is shared by many websites. Add one website under it instead", Sites.refusal(shared))
-        for (own in listOf("city.kawasaki.jp", "www.ck", "y.x.kawasaki.jp", "y.x.sch.uk", "school.catholic.edu.au", "me.onrender.com", "kawasaki-city.jp")) assertNull(own, Sites.refusal(own))
+        for (s in listOf("catholic.edu.au", "kawasaki.jp", "x.kawasaki.jp", "sch.uk", "x.sch.uk", "nom.br", "x.nom.br", "x.ck", "co.uk", "k12.ca.us", "gob.mx", "police.uk", "nhs.uk", "asn.au"))
+            assertEquals(s, shared(s), Sites.refusal(s))
+        for (own in listOf("city.kawasaki.jp", "www.ck", "y.x.kawasaki.jp", "y.x.sch.uk", "school.catholic.edu.au", "kawasaki-city.jp",
+            "github.io", "githubusercontent.com", "googleapis.com", "onrender.com", "ts.net", "myshopify.com")) assertNull(own, Sites.refusal(own))
+        // "www." stays when what is left is a shared ending: the government portal at www.gob.mx is one website.
+        for ((raw, kept) in listOf("https://www.gob.mx/" to "www.gob.mx", "www.co.uk" to "www.co.uk", "www.www.gob.mx" to "www.gob.mx", "www.googleapis.com" to "googleapis.com", "www.x.ck" to "www.x.ck")) {
+            assertEquals(raw, kept, Sites.clean(raw)); assertNull(raw, Sites.refusal(raw))
+        }
+        // A file that is missing, cut short or damaged gives no rules at all, so no new website is taken unchecked.
+        val lines = text.lines().dropLastWhile { it.isEmpty() }
+        assertEquals(rules, Sites.rules(lines))
+        for (bad in listOf(null, emptyList(), lines.dropLast(1), lines.take(lines.size / 2) + lines.last(), lines.dropLast(2) + lines.last(), listOf("co.uk", "// RULES: 1")))
+            assertNull(Sites.rules(bad))
     }
 
     /** A paste is read whole or refused whole: a long one is never cut into another address. */
@@ -217,7 +231,7 @@ class SitesAdversarialTest {
 
     /** International names are shown in their own letters when that reads back as the saved name, and in ASCII otherwise; never a crash. */
     @Test fun anInternationalNameIsShownReadably() {
-        assertEquals("bücher.de", Sites.shown("xn--bcher-kva.de")); assertEquals("münchen.de", Sites.shown("xn--mnchen-3ya.de")); assertEquals("xn--e28h.com", Sites.shown("xn--e28h.com"))
+        assertEquals("bücher.de (xn--bcher-kva.de)", Sites.shown("xn--bcher-kva.de")); assertEquals("münchen.de (xn--mnchen-3ya.de)", Sites.shown("xn--mnchen-3ya.de")); assertEquals("xn--e28h.com", Sites.shown("xn--e28h.com"))
         assertEquals("example.com", Sites.shown("example.com"))
         // ß does not read back (the older rule writes it as "ss"), so the ASCII form stays.
         assertEquals("xn--strae-oqa.de", Sites.shown("xn--strae-oqa.de"))
@@ -226,15 +240,10 @@ class SitesAdversarialTest {
             val shown = Sites.shown(bad)
             assertTrue(bad, shown == bad || Sites.clean(shown) == Sites.clean(bad))
         }
-        // As browsers show them: a label that mixes scripts, or is made only of letters that look like Latin ones, stays in
-        // its ASCII form, so "аpple" with a Cyrillic а never passes for apple. One script, or Latin with Chinese, Japanese
-        // or Korean characters, reads in its own letters.
-        for (spoof in listOf("xn--pple-43d.example", "xn--l-7sba6dbr.com", "xn--80ak6aa92e.com", "xn--paypl-7ve.com", "xn--vxaj.com")) assertEquals(spoof, Sites.shown(spoof))
-        assertEquals("пример.рф", Sites.shown("xn--e1afmkfd.xn--p1ai")); assertEquals("ελληνικά.gr", Sites.shown("xn--hxargifdar.gr"))
-        assertEquals("日本語テキストabc.jp", Sites.shown("xn--abc-rj4b9bzdq6889hdocu19k.jp")); assertEquals("한국abc.kr", Sites.shown("xn--abc-lt8lk11n.kr"))
-        // Search finds such a name by its own letters and by the Latin ones they look like.
-        val spoofs = Setup(routes = listOf(Route("it", Location("nord", 106, "IT", "Italy"))), defaultRoute = DIRECT, sites = mapOf("xn--pple-43d.example" to "it", "apple.com" to "it"), version = VERSION)
-        assertEquals(listOf("apple.com", "xn--pple-43d.example"), shownSites(spoofs, "apple", null)); assertEquals(listOf("xn--pple-43d.example"), shownSites(spoofs, "аpple", null))
+        // Every script, mixed or not, shows its ASCII form beside it.
+        for (n in listOf("xn--l-7sba6dbr.com", "xn--paypl-7ve.com", "xn--vxaj.com", "xn--e1afmkfd.xn--p1ai", "xn--hxargifdar.gr", "xn--abc-rj4b9bzdq6889hdocu19k.jp", "xn--abc-lt8lk11n.kr"))
+            assertTrue(n, Sites.shown(n).endsWith(" ($n)") && !Sites.shown(n).startsWith("xn--"))
+        assertEquals("пример.рф (xn--e1afmkfd.xn--p1ai)", Sites.shown("xn--e1afmkfd.xn--p1ai"))
         // The list searches both forms, so a typed "bücher" finds it.
         val s = Setup(routes = listOf(Route("it", Location("nord", 106, "IT", "Italy"))), defaultRoute = DIRECT, sites = mapOf("xn--bcher-kva.de" to "it", "example.com" to "it"), version = VERSION)
         assertEquals(listOf("xn--bcher-kva.de"), shownSites(s, "bücher", null)); assertEquals(listOf("xn--bcher-kva.de"), shownSites(s, "xn--bcher", null))
@@ -276,9 +285,9 @@ class SitesAdversarialTest {
             if (name == null && why == null) bad += "no reason for ${raw.debugText()}"
             if (name != null) {
                 if (Sites.clean(name) != name) bad += "${raw.debugText()} saved as unstable $name"
-                if (name.length > 253 || name.split('.').size < 2 || name.startsWith("www.") && name.drop(4).contains('.')) bad += "${raw.debugText()} saved as odd $name"
+                if (name.length > 253 || name.split('.').size < 2 || name.startsWith("www.") && name.drop(4).contains('.') && !isShared(name.drop(4))) bad += "${raw.debugText()} saved as odd $name"
                 val shown = Sites.shown(name)
-                if (shown != name && Sites.clean(shown) != name) bad += "$name shown as $shown, which saves as ${Sites.clean(shown)}"
+                if (shown != name && (!shown.endsWith(" ($name)") || Sites.clean(shown.removeSuffix(" ($name)")) != name)) bad += "$name shown as $shown"
                 if (why == null && Sites.refusal(name) != null) bad += "${raw.debugText()} is taken but its saved form $name is refused"
             }
         }
@@ -286,9 +295,9 @@ class SitesAdversarialTest {
     }
 
     /**
-     * Registered-style names in many scripts are taken in both forms, written as browsers write them; the signs IDNA lets
-     * stand only beside certain letters are taken there (the Japanese middle dot among kana or kanji, the Catalan one
-     * between two l's, the Greek numeral sign, Hebrew gershayim) and refused elsewhere.
+     * Registered-style names in many scripts are taken in both forms, written as browsers write them, the signs IDNA
+     * lets stand beside certain letters included (the Japanese middle dot, the Catalan one, the Greek numeral sign,
+     * Hebrew gershayim); elsewhere such a sign is saved as a browser opens it, or refused.
      */
     @Test fun namesInEveryScriptAreTakenAsBrowsersWriteThem() {
         for ((raw, ascii) in listOf( // the ASCII forms are a browser's (WHATWG URL parser)
@@ -303,28 +312,34 @@ class SitesAdversarialTest {
         )) {
             assertEquals(raw, ascii, Sites.clean(raw)); assertNull(raw, Sites.refusal(raw))
             assertEquals(ascii, ascii, Sites.clean(ascii)); assertNull(ascii, Sites.refusal(ascii))
-            assertEquals(ascii, raw, Sites.shown(ascii))
+            assertEquals(ascii, "$raw ($ascii)", Sites.shown(ascii))
         }
-        // The same signs where IDNA doesn't let them stand: browsers would open these, no registry hands them out.
-        for (raw in listOf("a・b.jp", "・.jp", "l·a.cat", "a·l.cat", "·l.cat", "a͵b.gr", "͵.gr", "a״.co.il", "״ב.co.il", "١۱.example")) {
-            assertNull(raw, Sites.clean(raw))
-            runCatching { java.net.IDN.toASCII(raw).lowercase() }.getOrNull()?.let { assertNull(it, Sites.clean(it)) }
+        // The same signs where registries don't let them stand: saved as a browser opens them (WHATWG URL parser), or refused.
+        for ((raw, host) in listOf("a・b.jp" to "xn--ab-3n4a.jp", "・.jp" to "xn--vek.jp", "l·a.cat" to "xn--la-0ea.cat", "a·l.cat" to "xn--al-0ea.cat", "·l.cat" to "xn--l-fda.cat",
+            "a͵b.gr" to "xn--ab-63b.gr", "͵.gr" to "xn--wva.gr", "a״.co.il" to null, "״ב.co.il" to "xn--5db3e.co.il", "١۱.example" to null)) {
+            assertTrue(raw, Sites.clean(raw).let { it == null || it == host })
+            host?.let { assertTrue(it, Sites.clean(it).let { c -> c == null || c == host }) }
         }
     }
 
     /**
-     * A label in a script whose letters can spell a Latin word is shown in its own letters only under an ending of its
-     * countries or its own script, as browsers do; anywhere else it stays in ASCII, and a search still finds it by the
-     * Latin word it looks like.
+     * Every international name shows its ASCII form beside its own letters, whatever its script and ending: a look-alike
+     * ("ѵіѕа", "аррӏе", "сꙇѕсо" in Cyrillic) never shows alone, and a search finds a name by either form.
      */
-    @Test fun aLabelThatCanSpellALatinWordShowsOnlyAtHome() {
-        for (n in listOf("xn--80a7ec7j.example", "xn--80ak6aa92e.com", "xn--80ak6aa92e.example")) assertEquals(n, n, Sites.shown(n)) // ѵіѕа, аррӏе
-        assertEquals("ѵіѕа.ru", Sites.shown("xn--80a7ec7j.ru")); assertEquals("ѵіѕа.рф", Sites.shown("xn--80a7ec7j.xn--p1ai"))
-        assertEquals("παράδειγμα.ελ", Sites.shown("xn--hxajbheg2az3al.xn--qxam")); assertEquals("xn--hxajbheg2az3al.com", Sites.shown("xn--hxajbheg2az3al.com"))
-        assertEquals("մեկ.հայ", Sites.shown("xn--29aun.xn--y9a3aq")); assertEquals("xn--29aun.com", Sites.shown("xn--29aun.com"))
-        assertTrue(Sites.readings("xn--80a7ec7j.example").any { it.contains("visa") })
-        val s = Setup(routes = listOf(Route("it", Location("nord", 106, "IT", "Italy"))), defaultRoute = DIRECT, sites = mapOf("xn--80a7ec7j.example" to "it"), version = VERSION)
-        assertEquals(listOf("xn--80a7ec7j.example"), shownSites(s, "visa", null))
+    @Test fun anInternationalNameAlwaysShowsItsAsciiForm() {
+        // Letters newer than the older rule's tables ("сꙇѕсо", "аррӏе") don't read back: those show ASCII alone, and a
+        // search for the word they look like doesn't find them.
+        for (n in listOf("xn--n1afa3f3774h.example", "xn--80ak6aa92e.com")) {
+            assertEquals(n, n, Sites.shown(n))
+            val s = Setup(routes = listOf(Route("it", Location("nord", 106, "IT", "Italy"))), defaultRoute = DIRECT, sites = mapOf(n to "it", "cisco.example" to "it", "apple.com" to "it"), version = VERSION)
+            assertEquals(listOf("cisco.example"), shownSites(s, "cisco", null)); assertEquals(listOf(n), shownSites(s, n.take(8), null))
+        }
+        for ((n, own) in listOf("xn--80a7ec7j.example" to "ѵіѕа.example", "xn--80a7ec7j.ru" to "ѵіѕа.ru", "xn--hxajbheg2az3al.com" to "παράδειγμα.com", "xn--29aun.xn--y9a3aq" to "մեկ.հայ", "xn--pple-43d.example" to "аpple.example")) {
+            assertEquals(n, "$own ($n)", Sites.shown(n))
+            val s = Setup(routes = listOf(Route("it", Location("nord", 106, "IT", "Italy"))), defaultRoute = DIRECT, sites = mapOf(n to "it", "cisco.example" to "it"), version = VERSION)
+            assertEquals(n, listOf(n), shownSites(s, n.substringBefore('.'), null)); assertEquals(n, listOf(n), shownSites(s, own.substringBefore('.'), null))
+        }
+        assertEquals("example.com", Sites.shown("example.com"))
     }
 
     /** A restored backup's websites are checked for what any version could have saved, so a name an older version kept stays. */

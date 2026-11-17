@@ -36,7 +36,7 @@ object Report {
         val s = running ?: setup
         // Websites whose rule applies in what runs: a saved one a lookup rule answers first carries nothing.
         val sites = Sites.applied(s, reported = vpn.tsSuffix)
-        val used = s.activeRoutes(vpn.tsSuffix).map { it.id }.toSet()
+        val used = s.activeRoutes.map { it.id }.toSet()
         // On the default route: the apps that follow it plus those chosen for it.
         fun apps(id: String): String =
             if (id == s.defaultRoute) "the rest of the apps" + installed?.let { " (${(it - s.apps.size).coerceAtLeast(0) + s.apps.count { a -> a.value == id }})" }.orEmpty()
