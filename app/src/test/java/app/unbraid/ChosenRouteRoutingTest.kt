@@ -31,7 +31,7 @@ class ChosenRouteRoutingTest {
     private fun sealed(text: String) = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key) }.let { it.iv + it.doFinal(text.toByteArray()) }
 
     private fun compile(s: Setup, lockdown: Boolean = false) =
-        Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, emptyMap(), "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db"))).jsonObject
+        Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, emptyMap(), "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db"))).jsonObject.also { assertRefusesOtherBlocks(it) }
     private fun JsonObject.excluded() = this["inbounds"]!!.jsonArray[0].jsonObject["exclude_package"]!!.jsonArray.map { it.jsonPrimitive.content }
 
     /**

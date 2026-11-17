@@ -61,7 +61,7 @@ class SitesTest {
 
     private fun compile(s: Setup, blocked: Set<String> = emptySet()): JsonObject {
         val links = s.activeRoutes.filter { it.id !in blocked }.associate { it.id to WgLink(sv(it.id), Nord.peer(sv(it.id), wgKey)) }
-        return Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links, "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", blocked = blocked))).jsonObject
+        return Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links, "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", blocked = blocked))).jsonObject.also { assertRefusesOtherBlocks(it) }
     }
     private fun JsonObject.rules() = this["route"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
     private fun JsonObject.dns() = this["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }

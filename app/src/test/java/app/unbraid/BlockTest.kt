@@ -35,7 +35,7 @@ class BlockTest {
     )
     private fun compile(s: Setup, lockdown: Boolean = false): JsonObject {
         val links = s.activeRoutes.associate { it.id to WgLink(sv(it.id), Nord.peer(sv(it.id), wgKey)) }
-        return Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links, "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db"))).jsonObject
+        return Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links, "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db"))).jsonObject.also { assertRefusesOtherBlocks(it) }
     }
     private fun JsonObject.rules() = this["route"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
     private fun JsonObject.dns() = this["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }

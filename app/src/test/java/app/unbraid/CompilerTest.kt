@@ -62,7 +62,7 @@ class CompilerTest {
     private fun compile(s: Setup, lockdown: Boolean = false, links: Map<String, Link> = links(s), tsSuffix: String? = null, blocked: Set<String> = emptySet(), login: Boolean = false): JsonObject {
         val out = Compiler.compile(Compiler.Input(s, links - blocked, "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db", tsSuffix, blocked = blocked, tsLoginPending = login))
         File("build/compiled").apply { mkdirs() }.resolve("${s.hashCode()}-$lockdown-${blocked.sorted()}-$login.json").writeText(out)
-        return Json.parseToJsonElement(out).jsonObject
+        return Json.parseToJsonElement(out).jsonObject.also { assertRefusesOtherBlocks(it) }
     }
 
     private fun JsonObject.rules() = this["route"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
