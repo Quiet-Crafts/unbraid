@@ -64,7 +64,7 @@ class BackupAdversarialTest {
             listOf(leaves) to { it.copy(prefs = it.prefs.copy(filter = it.prefs.filter.copy(apps = emptyMap()))) },
             listOf("Apps can reach the local network again.") to { it.copy(prefs = it.prefs.copy(lan = true)) },
             listOf("1 app that is blocked now won't be.") to { it.copy(apps = it.apps - "org.example.game") },
-            listOf("1 website that is blocked now won't be.") to { it.copy(sites = it.sites - "tracker.example") },
+            listOf("1 website that is blocked now goes Direct.") to { it.copy(sites = it.sites - "tracker.example") },
             // Left outside unbraid: its blocked website and home tunnel go with it, said once as the app's.
             listOf("1 app goes from a VPN route to Direct.") to { it.copy(apps = it.apps + ("org.example.mail" to DIRECT)) },
             listOf("1 website goes from a VPN route to Direct.") to { it.copy(sites = it.sites + ("work.example" to DIRECT)) },
@@ -81,7 +81,7 @@ class BackupAdversarialTest {
             RestoreTraffic.notes(noFilter, noFilter.copy(opts = mapOf("nord" to mapOf("protect" to "off")))))
         assertEquals(listOf("The DNS filter is turned off.", "\"Box\" connects to 198.51.100.66 instead of 203.0.113.1.", "Your home WireGuard uses other DNS servers: 198.51.100.53.", leaves,
             "The default route goes from Netherlands to Direct.", "1 app and 1 website go from a VPN route to Direct.", "Part of the home network goes Direct instead of through the home tunnel.",
-            "Apps can reach the local network again.", "1 app that is blocked now won't be.", "1 website that is blocked now won't be."), sheet(kinds.fold(phone) { s, (_, change) -> change(s) }))
+            "Apps can reach the local network again.", "1 app that is blocked now goes Direct.", "1 website that is blocked now goes Direct."), sheet(kinds.fold(phone) { s, (_, change) -> change(s) }))
     }
 
     @Test fun weakOwnServersAreNamedUntilAccepted() {
@@ -202,7 +202,7 @@ class BackupAdversarialTest {
         for (p in listOf("一二三四五六七八", "八七六五四三二一", "壹贰叁肆伍陆柒捌", "甲乙丙丁戊己庚辛", "あいうえおかきく", "αβγδεζηθ", "абвгдежз", "ⅠⅡⅢⅣⅤⅥⅦⅧ", "가나다라마바사아", "一二三四五六七八九十"))
             assertFalse("$p ${Backup.strength(p)}", forKeys(p))
         // Decorated digits and letters count as the plain ones they stand for.
-        for (p in listOf("①②③④⑤⑥⑦⑧", "⑧⑦⑥⑤④③②①", "➀➁➂➃➄➅➆➇", "❶❷❸❹❺❻❼❽", "ⓐⓑⓒⓓⓔⓕⓖⓗ", "ａｂｃｄｅｆｇｈ", "¹²³⁴⁵⁶⁷⁸", "𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖", "⑴⑵⑶⑷⑸⑹⑺⑻", "①②③④⑤⑥⑦⑧⑨⑩⑪⑫"))
+        for (p in listOf("①②③④⑤⑥⑦⑧", "⑧⑦⑥⑤④③②①", "➀➁➂➃➄➅➆➇", "❶❷❸❹❺❻❼❽", "ⓐⓑⓒⓓⓔⓕⓖⓗ", "ａｂｃｄｅｆｇｈ", "¹²³⁴⁵⁶⁷⁸", "𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖", "⑴⑵⑶⑷⑸⑹⑺⑻", "①②③④⑤⑥⑦⑧⑨⑩⑪⑫", "①2③4⑤6⑦8", "ａbｃdｅfｇh", "①2③4⑤6⑦8ａbｃdｅfｇh"))
             assertFalse("$p ${Backup.strength(p)}", forKeys(p))
         // Han characters that count nothing still count.
         assertEquals(2, Backup.strength("龍一象山水火風雷木金土日月星雲花").first)

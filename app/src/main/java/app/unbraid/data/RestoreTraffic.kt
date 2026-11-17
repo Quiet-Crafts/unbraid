@@ -397,6 +397,8 @@ object RestoreTraffic {
             lookup -> Loss.Lookups
             else -> Loss.ToDirect
         }
+        // What could not leave and now leaves outside any VPN is both: a refusal lifted, and Direct.
+        if (!lookup && level(was) == 2 && now.exit == DIRECT_TAG) out += Loss.ToDirect
         if (level(was) == 2 || level(now) == 2) return out
         // The way the name's question went out.
         if (!lookup && was.via != null && was.via != DIRECT_TAG && now.via == DIRECT_TAG) out += Loss.Lookups
@@ -555,7 +557,7 @@ object RestoreTraffic {
                         for ((ai, a) in addresses.withIndex()) {
                             val d = if (ai == 0 || !t.hit) first else duo { walk(it, p.pkgs, n.name, a.ip, net, null) } ?: return null
                             if (d.losses.isEmpty() || (net == protos[0] && n.name == ownName && a === public)) continue
-                            d.losses.forEach { l -> say(who(n, a, d, own, pe, place, l), d, l) }
+                            d.losses.forEach { l -> if (!opensNearby(d, l)) say(who(n, a, d, own, pe, place, l), d, l) }
                         }
                     }
                     if (n.name != null && n.name != top && !p.ping) for (q in types) {
@@ -587,8 +589,13 @@ object RestoreTraffic {
         return part(a.was.out) == part(b.was.out) && part(a.now.out) == part(b.now.out)
     }
 
+    /** A refusal lifted to the local or home network by an address range: said as opened, not as gone Direct. */
+    private fun opensNearby(d: Duo, l: Loss) = l == Loss.ToDirect && Loss.Unblocked in d.losses && d.now.by == By.Address
+
     /** What loss [l] of a class other than an app's own traffic is said for ([RestoreTraffic] point 5); [place]: whose name a name is. */
-    private fun who(n: Name, a: Address?, d: Duo, own: Duo, pe: Set<Who>, place: (String, Boolean) -> Who, l: Loss): Set<Who> {
+    private fun who(n: Name, a: Address?, d: Duo, own: Duo, pe: Set<Who>, place: (String, Boolean) -> Who, loss: Loss): Set<Who> {
+        // A refusal lifted to Direct is said for what refused it, both ways.
+        val l = if (loss == Loss.ToDirect && Loss.Unblocked in d.losses) Loss.Unblocked else loss
         // Going as the app's own traffic goes, or as an app decided before anything else: the app's.
         if (alike(d, own, l)) return pe
         // Left out by Android or blocked now, the app's own rule decides all it does: the app's.
@@ -814,14 +821,19 @@ object RestoreTraffic {
         val applied = Sites.applied(current)
         val waits = { id: String? -> current.route(id)?.let { r -> r.keyless || current.servers.any { it.id == r.own && it.keyless } } == true }
         val opened = with(Loss.Unblocked)
-        if (Who.Default in opened) out += Note(if (waits(current.defaultRoute)) "The default route can't connect now, because its route waits for a server's config. After the restore its traffic goes out."
-            else "The default route can't connect now. After the restore its traffic goes out.", Loss.Unblocked, setOf(Who.Default))
+        // Said Direct where it then leaves outside any VPN.
+        val leavesDirect = { w: Who -> Loss.ToDirect in found.losses[w].orEmpty() }
+        val goes = if (leavesDirect(Who.Default)) "goes out Direct" else "goes out"
+        if (Who.Default in opened) out += Note(if (waits(current.defaultRoute)) "The default route can't connect now, because its route waits for a server's config. After the restore its traffic $goes."
+            else "The default route can't connect now. After the restore its traffic $goes.", Loss.Unblocked, setOf(Who.Default))
         val waiting = opened.filterTo(HashSet()) { w -> (w is Who.App && waits(current.routeOf(w.of))) || (w is Who.Site && waits(Sites.match(w.name, applied.keys)?.let(applied::get))) }
         val blockedApps = apps(opened).filterNot { it in waiting }
         val blockedSites = sites(opened).filterNot { it in waiting }
-        blockedApps.size.takeIf { it > 0 }?.let { out += Note(if (it == 1) "1 app that is blocked now won't be." else "$it apps that are blocked now won't be.", Loss.Unblocked, blockedApps.toSet()) }
-        blockedSites.size.takeIf { it > 0 }?.let { out += Note(if (it == 1) "1 website that is blocked now won't be." else "$it websites that are blocked now won't be.", Loss.Unblocked, blockedSites.toSet()) }
-        say(waiting, Loss.Unblocked) { many -> "that can't connect now, because ${if (many) "their routes wait" else "its route waits"} for a server's config, ${if (many) "go" else "goes"} out without it" }
+        for ((what, all) in listOf("app" to blockedApps, "website" to blockedSites)) for (d in listOf(true, false)) all.filter { leavesDirect(it) == d }.takeIf { it.isNotEmpty() }?.let { w ->
+            out += Note(if (w.size == 1) "1 $what that is blocked now ${if (d) "goes Direct" else "won't be"}." else "${w.size} ${what}s that are blocked now ${if (d) "go Direct" else "won't be"}.", Loss.Unblocked, w.toSet())
+        }
+        for (d in listOf(true, false)) say(waiting.filterTo(HashSet()) { leavesDirect(it) == d }, Loss.Unblocked) { many ->
+            "that can't connect now, because ${if (many) "their routes wait" else "its route waits"} for a server's config, ${if (many) "go" else "goes"} out${if (d) " Direct" else ""} without it" }
         say(opened.filterTo(HashSet()) { it == Who.NoApp || it == Who.SignIn }, Loss.Unblocked) { if (it) "are no longer refused" else "is no longer refused" }
         if (Who.Local in opened) out += Note("Blocked apps can reach the local network.", Loss.Unblocked, setOf(Who.Local))
         if (Who.Home in opened) out += Note("Part of the home network that is refused now won't be.", Loss.Unblocked, setOf(Who.Home))

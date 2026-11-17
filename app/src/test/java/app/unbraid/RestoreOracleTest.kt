@@ -190,6 +190,8 @@ class RestoreOracleTest {
         val l = mutableSetOf<Loss>()
         if (height(b.exit) < height(a.exit)) l += if (a.exit == RestoreTraffic.TCP_ONLY) { if (b.exit == "direct") Loss.Unblocked else Loss.Udp }
             else if (a.exit == REJECT) Loss.Unblocked else if (lookup) Loss.Lookups else Loss.ToDirect
+        // Refused before, out on the phone's own connection after: Direct too.
+        if (!lookup && height(a.exit) == 2 && b.exit == "direct") l += Loss.ToDirect
         if (height(a.exit) == 2 || height(b.exit) == 2) return l
         if (!lookup && a.via != null && a.via != "direct" && b.via == "direct") l += Loss.Lookups
         if (guard(b.resolver) < guard(a.resolver)) l += if (a.resolver == Resolver.Filter) Loss.Filter else Loss.ProviderBlocking
@@ -222,7 +224,8 @@ class RestoreOracleTest {
         else -> if (setOf(own.was.by, own.now.by, own.was.rby, own.now.rby).any { it == By.App || it == By.AppFirst }) kin(p).map { Who.App(it, p) }.toSet() + Who.App(p) else setOf(Who.Default)
     }
 
-    private fun who(name: String?, place: Who?, d: Duo, own: Duo, pe: Set<Who>, sites: Set<String>, l: Loss): Set<Who> {
+    private fun who(name: String?, place: Who?, d: Duo, own: Duo, pe: Set<Who>, sites: Set<String>, loss: Loss): Set<Who> {
+        val l = if (loss == Loss.ToDirect && Loss.Unblocked in d.losses) Loss.Unblocked else loss
         if (alike(d, own, l)) return pe
         if (d.now.by == By.AppFirst && d.now.out.exit == own.now.out.exit) return pe
         val names = { setOf(Sites.match(name!!, sites)?.let { Who.Site(it) } ?: Who.Local) }
@@ -272,7 +275,7 @@ class RestoreOracleTest {
                     for (n in listOf<String?>(null) + if (p == PING) emptyList() else names) for (ip in addresses) {
                         if (net != "udp" && n == ownName && ip == "203.0.113.80") continue
                         val d = duo(a, b, l) { it.connect(p, n, ip, net) }
-                        d.losses.forEach { x -> add(who(n, place(ip), d, own, pe, sites, x), d, x) }
+                        d.losses.forEach { x -> if (!(x == Loss.ToDirect && Loss.Unblocked in d.losses && d.now.by == By.Address)) add(who(n, place(ip), d, own, pe, sites, x), d, x) }
                     }
                 if (p != PING) for (q in listOf("TXT", "HTTPS")) {
                     val ownL = duo(a, b, l, true) { it.lookup(p, "free.test", q) }
@@ -366,8 +369,11 @@ class RestoreOracleTest {
             base.copy(apps = mapOf(appKeys[1] to "ss")) to base.copy(apps = mapOf(appKeys[1] to "w")),
             // An app sharing its user id goes with the app.
             base.copy() to base.copy(apps = mapOf(appKeys[0] to DIRECT)),
+            // A website that could not be reached, blocked or on a route waiting for its config, goes Direct.
+            base.copy(sites = mapOf("s.example" to BLOCK)) to base.copy(sites = mapOf("s.example" to DIRECT)),
+            base.copy(sites = mapOf("s.example" to "k1")) to base.copy(sites = mapOf("s.example" to DIRECT)),
         )
-        val want = listOf(Loss.Blocking, Loss.Filter, Loss.Lookups, Loss.Lookups, Loss.Udp, Loss.ToDirect)
+        val want = listOf(Loss.Blocking, Loss.Filter, Loss.Lookups, Loss.Lookups, Loss.Udp, Loss.ToDirect, Loss.ToDirect, Loss.ToDirect)
         for ((i, c) in cases.withIndex()) {
             assertTrue("case $i", agree(c.first, c.second, "case $i"))
             val got = RestoreTraffic.found(c.first, c.second, kin)!!

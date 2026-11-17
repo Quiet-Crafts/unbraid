@@ -242,14 +242,14 @@ class RestoreTrafficTest {
         val here = base.copy(apps = mapOf("org.b" to BLOCK, "org.c" to DIRECT))
         // org.c loses nothing while org.b stays blocked: the block refuses the whole user id.
         assertEquals(emptyList<String>(), notes(here, here.copy(apps = mapOf("org.b" to BLOCK)), kin))
-        assertEquals(listOf("2 apps that are blocked now won't be."), notes(here, here.copy(apps = mapOf("org.c" to DIRECT)), kin))
+        assertEquals(listOf("2 apps that are blocked now go Direct."), notes(here, here.copy(apps = mapOf("org.c" to DIRECT)), kin))
         // Without knowing they share one, only org.b would seem to open.
         assertEquals(listOf("1 app that is blocked now won't be."), notes(here, here.copy(apps = mapOf("org.c" to DIRECT))))
     }
 
     @Test fun trafficRefusedNowThatWouldGoOutIsSaid() {
         val here = base.copy(apps = mapOf("org.a" to "k1"), sites = mapOf("example.com" to "k1"))
-        assertEquals(listOf("1 app and 1 website that can't connect now, because their routes wait for a server's config, go out without it."),
+        assertEquals(listOf("1 app and 1 website that can't connect now, because their routes wait for a server's config, go out Direct without it."),
             notes(here, here.copy(apps = mapOf("org.a" to DIRECT), sites = mapOf("example.com" to DIRECT))))
         val def = base.copy(defaultRoute = "k1")
         assertEquals(listOf("The default route can't connect now, because its route waits for a server's config. After the restore its traffic goes out."), notes(def, def.copy(defaultRoute = "nl")))
@@ -298,7 +298,7 @@ class RestoreTrafficTest {
         // a.example goes Direct as the default does: said once, for the default. Its own rule picks who answers it,
         // Quad9 for Direct traffic that passes through, which blocks less than Nord's blocking now: said for it.
         assertEquals(listOf("The default route goes from Netherlands to Direct.", "1 app goes from a VPN route to Direct.", "Part of the home network goes Direct instead of through the home tunnel.",
-            "1 app that is blocked now won't be.", "1 website that is blocked now won't be.", "1 website gets DNS blocking that blocks fewer kinds of sites than now."), said)
+            "1 app that is blocked now goes Direct.", "1 website that is blocked now goes Direct.", "1 website gets DNS blocking that blocks fewer kinds of sites than now."), said)
         assertEquals(listOf("1 website goes from a VPN route to Direct."), notes(here, here.copy(sites = here.sites + ("a.example" to DIRECT))))
         val provider = here.copy(apps = emptyMap(), sites = emptyMap(), prefs = Prefs())
         assertEquals(listOf("The default route loses the provider's ad and tracker blocking it has now."), notes(provider, provider.copy(opts = mapOf("nord" to mapOf("protect" to "off")))))
@@ -448,6 +448,19 @@ class RestoreTrafficTest {
         assertTrue(said.toString(), "Traffic Android can't tie to an app is no longer refused." in said)
     }
 
+    /** What could not leave before and leaves Direct after is said as going Direct, not only as no longer refused. */
+    @Test fun somethingUnreachableThatGoesDirectIsSaidSo() {
+        val blocked = base.copy(sites = mapOf("bank.example" to BLOCK))
+        assertEquals(listOf("1 website that is blocked now goes Direct."), notes(blocked, blocked.copy(sites = mapOf("bank.example" to DIRECT))))
+        assertEquals(listOf("1 website that is blocked now won't be."), notes(blocked, blocked.copy(sites = mapOf("bank.example" to "m1"))))
+        val waiting = base.copy(sites = mapOf("bank.example" to "k1"))
+        assertEquals(listOf("1 website that can't connect now, because its route waits for a server's config, goes out Direct without it."),
+            notes(waiting, waiting.copy(sites = mapOf("bank.example" to DIRECT))))
+        val def = base.copy(defaultRoute = "k1")
+        assertEquals(listOf("The default route can't connect now, because its route waits for a server's config. After the restore its traffic goes out Direct."),
+            notes(def, def.copy(defaultRoute = DIRECT)))
+    }
+
     private val headscale = Home(tailscale = true, tsControlUrl = "https://hs.example.com", tsSuffixAllowed = "corp.example")
 
     /** Tailscale's states are inputs the check walks, every one of them, not read from the running VPN. */
@@ -483,8 +496,10 @@ class RestoreTrafficTest {
         val timed = { s: Setup, budget: RestoreTraffic.Budget -> val t = System.nanoTime(); val said = RestoreTraffic.check(s, s.copy(defaultRoute = DIRECT, onNet = mapOf(app.unbraid.data.WIFI to "P3"),
             profiles = profiles.map { it.copy(defaultRoute = DIRECT) }), budget = budget); said to (System.nanoTime() - t) / 1_000_000 }
         // A thousand home ranges after every one of 500 app groups: too large to hold, said at once.
-        val (huge, hugeMs) = timed(hostile(1000), RestoreTraffic.Budget())
-        assertTrue("$hugeMs ms", hugeMs < 2000 && RestoreTraffic.CUT == huge.last().text)
+        var built = 0
+        val (huge, hugeMs) = timed(hostile(1000), RestoreTraffic.Budget { built++ })
+        // Never built: nothing is paid for, beyond the comparisons' first look.
+        assertTrue("$hugeMs ms, $built", hugeMs < 2000 && RestoreTraffic.CUT == huge.last().text && built == 0)
         // The largest that is held: every situation, waiting routes, profiles and networks.
         val big = hostile(150)
         assertTrue(RestoreTraffic.size(big) <= RestoreTraffic.MAX_ENTRIES)
