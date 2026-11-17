@@ -148,8 +148,8 @@ object AutoSwitch {
             }
         }
         is Event.Commit -> {
-            val here = s.here
-            val ok = s.watched && s.pending == e.d && here?.id == e.d.net && here.kind?.let { e.rules[it] } == e.d.profile && !e.shown
+            // Still pending means still the VPN on and the same stay on its network: leaving it or stopping voids it.
+            val ok = s.pending == e.d && s.here?.kind?.let { e.rules[it] } == e.d.profile && !e.shown
             // Not saved: the decision is dropped and the next settle decides again.
             Out(if (ok) s.copy(acted = e.d.net to e.rules.toMap(), pending = null) else if (s.pending == e.d) s.copy(pending = null) else s, save = ok)
         }

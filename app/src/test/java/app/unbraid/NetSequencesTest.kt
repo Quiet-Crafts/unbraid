@@ -256,6 +256,9 @@ class NetSequencesTest {
             assertFalse(commit(d, house, false))
             assertEquals("House", decide(home, house))
         }
+        // ... and another profile made under the old name, with the rule set to it, before the save: the decision was for
+        // the renamed profile, so it doesn't switch to the new one.
+        AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; renamed("Home", "House"); assertFalse(commit(d, rules, false)) }
         // A decision made again for the same network and profile is another one: the older save is not it.
         AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; seen(cell); seen(home); val again = settle(home, rules)!!; assertFalse(commit(d, rules, false)); assertTrue(commit(again, rules, false)) }
     }
@@ -343,12 +346,15 @@ class NetSequencesTest {
                 9 -> if (!known) { known = true; if (on) run.seen(here) }
                 10 -> if (on && known) run.seen(here) // a callback that changes nothing
                 11 -> {
-                    val old = names.random(rnd); val new = "$old'"
+                    val old = names.random(rnd); val new = "$old'".takeIf { it !in names } ?: return@repeat
                     names[names.indexOf(old)] = new
                     rules.replaceAll { _, v -> if (v == old) new else v }
                     done = done?.let { (st, r) -> st to r.mapValues { (_, v) -> if (v == old) new else v } }
                     live.filter { it.first.profile == old }.forEach { live.remove(it); void += it.first }
                     run.renamed(old, new)
+                    // Sometimes another profile is made under the old name, and a rule may name it: a decision for the
+                    // renamed one is not for it.
+                    if (rnd.nextBoolean()) { names += old; if (rnd.nextBoolean()) rules[rnd.nextKind()] = old }
                 }
                 12 -> shown = !shown
                 13, 14 -> if (live.isNotEmpty() || void.isNotEmpty()) {
