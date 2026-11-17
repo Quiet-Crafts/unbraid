@@ -73,10 +73,11 @@ object AutoSwitch {
         /** The monitor runs (the VPN is on), so [here] is known. */
         val watched: Boolean = false,
         val here: Net? = null,
-        /** The network and the profile its rule named when it was last decided or picked on. */
+        /**
+         * The network and the profile its rule named when it was last decided or picked on. A hand pick holds because it
+         * sets this too: only another network, or a new rule for this one, differs from it.
+         */
         val acted: Pair<Long, String?>? = null,
-        /** The network a hand pick was made on: it holds there. */
-        val picked: Long? = null,
         /** Counts hand picks: a decision made before the latest pick is not saved. */
         val picks: Int = 0,
     )
@@ -106,13 +107,13 @@ object AutoSwitch {
         is Event.Seen -> {
             // Android's handle 0 names no network.
             val n = e.net?.takeIf { it.id != 0L }
-            Out(State(true, n, s.acted?.takeIf { it.first == n?.id }, s.picked?.takeIf { it == n?.id }, s.picks))
+            Out(State(true, n, s.acted?.takeIf { it.first == n?.id }, s.picks))
         }
         Event.Unwatched -> Out(s.copy(watched = false, here = null))
         is Event.Picked -> {
             // Picked with no network known, it is for none: the next network's rule applies.
             val at = (if (s.watched) s.here else e.own)?.takeIf { it.id != 0L }
-            Out(s.copy(picked = at?.id, acted = at?.let { it.id to e.rules[it.kind] }, picks = s.picks + 1))
+            Out(s.copy(acted = at?.let { it.id to e.rules[it.kind] }, picks = s.picks + 1))
         }
         // What was decided follows a rename, so it is no change.
         is Event.Renamed -> Out(s.copy(acted = s.acted?.let { (n, p) -> n to (if (p == e.old) e.new else p) }))
@@ -122,7 +123,7 @@ object AutoSwitch {
             when {
                 !s.watched || here != e.net -> Out(s) // settled on a network already left
                 s.acted == now -> Out(s) // decided already, or a pick holds: only a new rule for this network applies over it
-                else -> Out(s.copy(acted = now, picked = null), now?.second?.let { Decision(here.id, it, s.picks) })
+                else -> Out(s.copy(acted = now), now?.second?.let { Decision(here.id, it, s.picks) })
             }
         }
         is Event.Commit -> {

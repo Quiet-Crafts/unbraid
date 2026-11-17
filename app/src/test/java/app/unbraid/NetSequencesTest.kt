@@ -203,7 +203,7 @@ class NetSequencesTest {
         // A handle used again for another network later: the old pick doesn't come back with it.
         AutoSwitch.Run().run { seen(home); decide(home, rules); pick(rules); seen(cell); seen(Net(WIFI, 1)); assertEquals("Home", decide(Net(WIFI, 1), rules)) }
         // Handle 0 names no network: no pick belongs to it, and nothing is decided on it.
-        AutoSwitch.Run().run { seen(Net(WIFI, 0)); assertNull(state.here); pick(rules); assertNull(state.picked); assertNull(settle(Net(WIFI, 0), rules)) }
+        AutoSwitch.Run().run { seen(Net(WIFI, 0)); assertNull(state.here); pick(rules); assertNull(state.acted); assertNull(settle(Net(WIFI, 0), rules)) }
         // The VPN goes off during the write: nothing is saved; on again on the same network, the rule applies then.
         AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; unwatched(); assertFalse(commit(d, rules, false)); seen(home); assertEquals("Home", decide(home, rules)) }
         // The app comes on screen during the write: not saved; once it is off screen the same switch is decided again.
