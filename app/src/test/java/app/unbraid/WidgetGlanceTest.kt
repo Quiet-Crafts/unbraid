@@ -129,27 +129,6 @@ class WidgetGlanceTest {
         assertTrue(ts(runsB, saved(a)).let { !it.working && !it.failing }) // edited back to A, not applied yet
     }
 
-    /**
-     * With no engine running, the widgets say one thing: apps are offline. No Tailscale "connected" from the engine that
-     * stopped, no route "not answering" or "not connected" from checks that no longer run, no count, and TalkBack says
-     * the same.
-     */
-    @Test fun anEngineThatStoppedIsOneOutageNotManyRouteFailures() {
-        val ts = setup.copy(routes = setup.routes + Route("ts", tsExit = "100.64.0.9", tsName = "nas"), apps = setup.apps + ("f" to "ts"))
-        val nodes = listOf(app.unbraid.vpn.TsNode("nas", "100.64.0.9", true))
-        val up = VpnState(Phase.On, servers = servers + ("ts" to Server("nas", "100.64.0.9", "", "", 0)), tsState = "Running", tsExitNodes = nodes, passed = passed(ts, "nl", "us", "it", "br"))
-        assertEquals(Glance.Ts.Up, glance(up, ts, NET).ts)
-        val g = glance(up.copy(down = true, servers = servers - "br"), ts, NET)
-        assertTrue(g.stopped)
-        assertEquals(Glance.Ts.Idle, g.ts)
-        val rows = listOfNotNull(g.default) + g.others
-        assertTrue(rows.filter { !it.direct }.all { it.failing && !it.working && !it.missing })
-        assertEquals(0, g.missing)
-        assertEquals(", the connection engine stopped, apps on the VPN are offline", g.spoken)
-        // Back up: the engine's own state again.
-        assertFalse(glance(up, ts, NET).stopped)
-    }
-
     /** A pass is for the route as it was checked: saved since with another server, or with its check off, it is unknown again. */
     @Test fun aPassHoldsOnlyForTheRouteAsChecked() {
         val v = VpnState(Phase.On, servers = servers, passed = all)
