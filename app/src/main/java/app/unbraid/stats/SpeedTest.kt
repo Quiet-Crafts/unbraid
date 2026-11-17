@@ -119,6 +119,7 @@ object SpeedTest {
         var flowed = false // data has come from the test server: only then does the test use up one of the day's
         val test = Runnable {
             try {
+                if (moved()) throw Moved() // before any of its own traffic, which would go through another engine
                 val located = Ndt7.locate(tag, country)
                 if (stop()) return@Runnable
                 if (moved()) throw Moved()
@@ -163,6 +164,7 @@ object SpeedTest {
         if (node == null) { if (tag == Compiler.TS_TAG) tsq.execute { if (stop()) return@execute; if (Unbraid.store.tsTestFrom != null) switchBack(); Thread(test, "speedtest").start() } else Thread(test, "speedtest").start() }
         else tsq.execute {
             if (stop()) return@execute // cancelled before its turn: switch nothing
+            if (moved()) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; return@execute }
             // Switching is a blocking call; give Tailscale a moment to reach the new node before measuring.
             // The routed node's stable ID (the switch back needs one), noted with the route's setting it belongs to.
             if (Unbraid.store.tsTestFrom == null) Unbraid.store.tsTestFrom = Unbraid.store.setup.value.tsExit?.let { r -> restoreTo(r, null, UnbraidVpn.state.value.tsExitNodes)?.let { "$r\n$it" } }.orEmpty()
@@ -371,7 +373,8 @@ object SpeedTest {
 
     /** The exit a running test measures through tunnel [tag], so its traffic is counted there; null = none. */
     fun exitOn(tag: String?): String? = if (!testing) null
-        else _run.value?.exit?.takeIf { e -> tag == if (e.startsWith(NODE)) Compiler.TS_TAG else UnbraidVpn.tags[e] }
+        else nodeExitOn(tag) // a node only on the engine it switched
+            ?: _run.value?.exit?.takeIf { e -> !e.startsWith(NODE) && tag == UnbraidVpn.tags[e] }
             ?: _all.value?.legs?.firstOrNull { UnbraidVpn.tags[it.exit] == tag }?.exit
 
     /**
