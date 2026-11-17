@@ -33,6 +33,8 @@ object SpeedTest {
 
     /** The allowance ran out when the first data arrived (never while one test runs alone; a safeguard). */
     private class DayLimit : Exception()
+    /** The engine restarted during a node test ([Run.engine]). */
+    private class Moved : Exception()
 
     /** What a failed single test says: before any data flowed the test server was out of reach, after it the test broke off. */
     internal fun failText(flowed: Boolean) = if (flowed) "The test couldn't finish. Check the connection and try again." else NO_SERVER
@@ -57,6 +59,8 @@ object SpeedTest {
     data class Run(
         val exit: String, val phase: Phase = Phase.Preparing, val now: Long = 0, val down: Long? = null, val up: Long? = null,
         val ping: Ndt7.Ping? = null, val elapsedMs: Long = 0, val server: Ndt7.Server? = null, val missing: String? = null, val error: String? = null,
+        /** The engine start ([app.unbraid.vpn.VpnState.engine]) a Tailscale node test switched; a restart puts the configured node back. */
+        val engine: Int = 0,
     )
 
     /** Ten seconds each way. */
@@ -106,14 +110,18 @@ object SpeedTest {
         // An engine restart (a reload, or a move to new fake IPs) puts Tailscale back on its configured exit node.
         val engine = UnbraidVpn.state.value.engine
         val recordAs = Stats.note(exit, setup)
-        val mine = synchronized(lock) { _run.value = Run(exit); ++attempt }
+        val mine = synchronized(lock) { _run.value = Run(exit, engine = engine); ++attempt }
         val stop = { attempt != mine }
+        // A tested node after an engine restart: what goes through Tailscale since leaves by the configured node.
+        val moved = { node != null && UnbraidVpn.state.value.engine != engine }
+        val halt = { stop() || moved() }
         val set = { f: (Run) -> Run -> synchronized(lock) { if (!stop()) _run.value?.let { _run.value = f(it) } } }
         var flowed = false // data has come from the test server: only then does the test use up one of the day's
         val test = Runnable {
             try {
                 val located = Ndt7.locate(tag, country)
                 if (stop()) return@Runnable
+                if (moved()) throw Moved()
                 if (located == null) {
                     // With no country to name there is nothing for "missing" to say: say that no server answered.
                     val named = missingCountry(anywhere, route?.loc?.country, country)
@@ -123,18 +131,19 @@ object SpeedTest {
                 set { it.copy(server = located) }
                 val ping = Ndt7.ping(tag, located)
                 if (stop()) return@Runnable
+                if (moved()) throw Moved()
                 set { it.copy(ping = ping, phase = Phase.Download) }
                 val t0 = SystemClock.elapsedRealtime()
                 val elapsed = { SystemClock.elapsedRealtime() - t0 }
-                val (server, down) = anyOf(located) { s -> Ndt7.download(tag, s.download, stop, firstData = { if (!flowed) { flowed = true; if (!reserve(1, mine) && !stop()) throw DayLimit() } }) { bps -> set { it.copy(now = bps, elapsedMs = elapsed()) } } }
+                val (server, down) = anyOf(located) { s -> Ndt7.download(tag, s.download, halt, firstData = { if (!flowed) { if (moved()) throw Moved(); flowed = true; if (!reserve(1, mine) && !stop()) throw DayLimit() } }) { bps -> set { it.copy(now = bps, elapsedMs = elapsed()) } } }
                 if (stop()) return@Runnable
+                if (moved()) throw Moved()
                 set { it.copy(phase = Phase.Upload, down = down, now = 0, server = server, ping = it.ping.takeIf { server == located }) }
-                val up = Ndt7.upload(tag, server.upload, stop) { bps -> set { it.copy(now = bps, elapsedMs = elapsed()) } }
+                val up = Ndt7.upload(tag, server.upload, halt) { bps -> set { it.copy(now = bps, elapsedMs = elapsed()) } }
                 if (stop()) return@Runnable
                 // Moved to another provider or server meanwhile: the numbers belong to neither.
                 if (Stats.idOf(exit, UnbraidVpn.running ?: setup) != recordAs) { set { it.copy(phase = Phase.Failed, error = "The route changed during the test. Try again.") }; return@Runnable }
-                // A tested node after an engine restart: what was measured since was the configured one.
-                if (node != null && UnbraidVpn.state.value.engine != engine) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; return@Runnable }
+                if (moved()) throw Moved()
                 set { it.copy(phase = Phase.Done, up = up, now = 0, elapsedMs = MAX_SECONDS * 1000L) }
                 val done = _run.value ?: return@Runnable
                 Stats.saveTests(listOf(Stats.Test(System.currentTimeMillis(), recordAs, via, name, ip, down, up, done.ping?.median ?: 0, 0, 0)), epoch)
@@ -142,6 +151,8 @@ object SpeedTest {
                 set { it.copy(phase = Phase.Failed, error = "M-Lab is limiting tests from this exit's address right now (VPN servers share theirs). Try again later.") }
             } catch (e: DayLimit) {
                 set { it.copy(phase = Phase.Failed, error = DAY_LIMIT) }
+            } catch (e: Moved) {
+                set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }
             } catch (e: Exception) {
                 set { it.copy(phase = Phase.Failed, error = failText(flowed)) }
             } finally {
@@ -365,13 +376,14 @@ object SpeedTest {
 
     /**
      * The tested node's exit id while a Tailscale node test runs and [tag] is Tailscale's tunnel: whatever goes through
-     * it then leaves by the tested node, the apps on the Tailscale route included, so it is counted there.
+     * it then leaves by the tested node, the apps on the Tailscale route included, so it is counted there. Only on the
+     * engine the test switched ([engine]): a restart puts Tailscale back on its configured node.
      */
-    internal fun nodeExit(run: Run?, tag: String?): String? =
-        run?.takeIf { it.phase.busy && it.exit.startsWith(NODE) && tag == Compiler.TS_TAG }?.exit
+    internal fun nodeExit(run: Run?, tag: String?, engine: Int): String? =
+        run?.takeIf { it.phase.busy && it.exit.startsWith(NODE) && tag == Compiler.TS_TAG && it.engine == engine }?.exit
 
-    /** [nodeExit] for the running test. */
-    fun nodeExitOn(tag: String?): String? = nodeExit(_run.value, tag)
+    /** [nodeExit] for the running test and engine. */
+    fun nodeExitOn(tag: String?): String? = nodeExit(_run.value, tag, UnbraidVpn.state.value.engine)
 
     private val Phase?.busy get() = this == Phase.Preparing || this == Phase.Download || this == Phase.Upload
 

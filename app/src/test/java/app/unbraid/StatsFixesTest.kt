@@ -47,15 +47,19 @@ class StatsFixesTest {
         assertNull(SpeedTest.missingCountry(false, "", null))
     }
 
-    /** While another Tailscale node is tested, the apps on Tailscale's tunnel are counted to that node too. */
+    /**
+     * While another Tailscale node is tested, the apps on Tailscale's tunnel are counted to that node too, but only on
+     * the engine the test switched: a restart (a reload, a move to new fake IPs) puts the configured node in place again.
+     */
     @Test fun nodeTestTrafficIsCountedToTheTestedNode() {
         val tag = app.unbraid.vpn.Compiler.TS_TAG
-        val node = SpeedTest.Run(SpeedTest.NODE + "100.64.0.5", SpeedTest.Phase.Download)
-        assertEquals("ts:100.64.0.5", SpeedTest.nodeExit(node, tag))
-        assertNull(SpeedTest.nodeExit(node, "direct")) // other tunnels are not Tailscale's
-        assertNull(SpeedTest.nodeExit(node.copy(phase = SpeedTest.Phase.Done), tag)) // test over
-        assertNull(SpeedTest.nodeExit(SpeedTest.Run("r1", SpeedTest.Phase.Download), tag)) // a route test, not a node test
-        assertNull(SpeedTest.nodeExit(null, tag))
+        val node = SpeedTest.Run(SpeedTest.NODE + "100.64.0.5", SpeedTest.Phase.Download, engine = 3)
+        assertEquals("ts:100.64.0.5", SpeedTest.nodeExit(node, tag, 3))
+        assertNull(SpeedTest.nodeExit(node, tag, 4)) // the engine restarted: Tailscale is on its configured node again
+        assertNull(SpeedTest.nodeExit(node, "direct", 3)) // other tunnels are not Tailscale's
+        assertNull(SpeedTest.nodeExit(node.copy(phase = SpeedTest.Phase.Done), tag, 3)) // test over
+        assertNull(SpeedTest.nodeExit(SpeedTest.Run("r1", SpeedTest.Phase.Download, engine = 3), tag, 3)) // a route test, not a node test
+        assertNull(SpeedTest.nodeExit(null, tag, 3))
     }
 
     /** 6 GB through one exit and 2 GB direct: the exit is 75% everywhere; shares round to the nearest percent. */
