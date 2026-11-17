@@ -38,8 +38,6 @@ object RestoreTraffic {
     const val OTHER = "app.unbraid.check.other"
     const val OTHER_NAME = "unbraid-check.example"
     private const val PUBLIC = "203.0.113.80"
-    /** What the fake resolver hands out: an address in the block the configs are compiled with. */
-    private const val FAKE = "198.18.0.5"
     private const val LAN_ADDRESS = "192.168.1.20"
     private const val TAILNET_ADDRESS = "100.100.100.101"
     /** The most walks one comparison makes: every app, website and address is walked at least once whatever this says. */
@@ -52,6 +50,8 @@ object RestoreTraffic {
         val dnsRules = dns.list("rules")
         val dnsFinal = dns.str("final") ?: "local"
         val servers = dns.list("servers").associateBy { it.str("tag").orEmpty() }
+        /** What the fake resolver hands out: an address in the range this config's lookups get, wherever the pool stands. */
+        val fake = servers["fake"]?.str("inet4_range")?.let(Compiler::ipv4)?.first?.let { a -> (3 downTo 0).joinToString(".") { ((a + 5) shr (it * 8) and 255).toString() } } ?: "198.18.0.5"
         val rules = o.obj("route").list("rules")
         val final = o.obj("route").str("final") ?: DIRECT_TAG
         val resolver = o.obj("route").str("default_domain_resolver") ?: "local"
@@ -111,7 +111,7 @@ object RestoreTraffic {
             val server = r?.str("server") ?: if (r == null) c.dnsFinal else null
             when {
                 r?.str("action") == "reject" -> return Outcome(REJECT)
-                server == "fake" -> ip = FAKE
+                server == "fake" -> ip = c.fake
                 server != null -> { resolver = server; host = null; ip = if (server == "dns-tailnet") TAILNET_ADDRESS else LAN_ADDRESS }
                 else -> return null
             }

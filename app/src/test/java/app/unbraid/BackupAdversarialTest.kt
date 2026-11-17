@@ -265,9 +265,12 @@ class BackupAdversarialTest {
         val tail = "Xk9#mQ2\$vL7@pR4!"
         assertEquals(Backup.strength("0$tail"), Backup.strength("0".repeat(300) + tail))
         assertEquals(2, Backup.strength("0".repeat(5000) + tail).first)
-        val t = System.nanoTime()
-        Backup.strength("correct horse ".repeat(20_000))
-        assertTrue((System.nanoTime() - t) < 1_000_000_000)
+        // Long texts are judged quickly, the meter's worst shapes too: repeats, two letters at random, every character once.
+        for (p in listOf("correct horse ".repeat(20_000), String(CharArray(5000) { if (g.nextBoolean()) 'a' else 'b' }), String(CharArray(5000) { (33 + g.nextInt(94)).toChar() }))) {
+            val t = System.nanoTime()
+            Backup.strength(p)
+            assertTrue("${p.take(20)}: ${(System.nanoTime() - t) / 1_000_000} ms", (System.nanoTime() - t) < 500_000_000)
+        }
         assertEquals(emptyList<String>(), wrong)
     }
 }

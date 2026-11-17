@@ -326,6 +326,14 @@ class RestoreTrafficTest {
         assertTrue("$ms ms", ms < 3000)
     }
 
+    /** The walk takes its stand-in address from the config, so it follows the engine wherever its address pool stands. */
+    @Test fun theWalkFollowsTheFakeAddressBlock() = app.unbraid.vpn.Compiler.FAKE_RANGES.indices.forEach { b ->
+        val s = base.copy(apps = mapOf("org.w" to "w"))
+        val links = mapOf("nl" to app.unbraid.data.WgLink(app.unbraid.data.Server("x", "198.51.100.1", "198.51.100.1", wg(2).publicKey, 0), wg(2)), "w" to app.unbraid.data.WgLink(app.unbraid.data.Server("w", "203.0.113.1", "", wg(1).publicKey, 0), wg(1)))
+        val c = RestoreTraffic.Config(app.unbraid.vpn.Compiler.compile(app.unbraid.vpn.Compiler.Input(s, links, "app.unbraid", false, "", "", fakeBlock = b)), s, emptySet())
+        assertEquals("block $b", "r-w", RestoreTraffic.connect(c, setOf("org.w"), OTHER_NAME)!!.exit)
+    }
+
     @Test fun aRestoreOverTheSameSetupSaysNothing() {
         val s = base.copy(apps = mapOf("org.a" to "w", "org.b" to BLOCK), sites = mapOf("example.com" to DIRECT), prefs = Prefs(filter = Filter("quad9", routes = true, directApps = true)),
             home = Home(wg = wg(7, allowed = "10.20.0.0/16").copy(name = "Home")))
