@@ -53,32 +53,35 @@ class BackupAdversarialTest {
         return RestoreTraffic.notes(phone, phone.restoredFrom(c.setup, null, 0, c.keys)!!)
     }
 
+    /** Each weakening alone gives exactly its sentences, nothing missing and nothing more; together, counts join and nothing is lost. */
     @Test fun eachWeakeningAloneAndAllTogetherIsSaid() {
         assertEquals(emptyList<String>(), sheet(phone))
-        val kinds = listOf<Pair<String, (Setup) -> Setup>>(
-            "The default route goes from Netherlands to Direct." to { it.copy(defaultRoute = DIRECT) },
-            "The DNS filter is turned off." to { it.copy(prefs = it.prefs.copy(filter = Filter())) },
-            "1 app loses the DNS filter." to { it.copy(prefs = it.prefs.copy(filter = it.prefs.filter.copy(apps = emptyMap()))) },
-            "Apps can reach the local network again." to { it.copy(prefs = it.prefs.copy(lan = true)) },
-            "1 app that is blocked now won't be." to { it.copy(apps = it.apps - "org.example.game") },
-            "1 website that is blocked now won't be." to { it.copy(sites = it.sites - "tracker.example") },
-            "1 app goes from a VPN route to Direct." to { it.copy(apps = it.apps + ("org.example.mail" to DIRECT)) },
-            "1 website goes from a VPN route to Direct." to { it.copy(sites = it.sites + ("work.example" to DIRECT)) },
-            "\"Box\" connects to 198.51.100.66 instead of 203.0.113.1." to { s -> wg.copy(endpoint = "198.51.100.66:51820").let { e -> s.copy(servers = listOf(OwnServer("s", wg = e)), routes = s.routes.map { if (it.id == "w") it.copy(wg = e) else it }) } },
-            "Your home WireGuard uses other DNS servers: 198.51.100.53." to { it.copy(home = it.home.copy(wg = it.home.wg!!.copy(dns = listOf("198.51.100.53")))) },
+        val leaves = "1 app on Direct no longer passes through unbraid, so the DNS filter, website rules and the home tunnel don't reach it."
+        val kinds = listOf<Pair<List<String>, (Setup) -> Setup>>(
+            listOf("The default route goes from Netherlands to Direct.") to { it.copy(defaultRoute = DIRECT) },
+            // The bank app on Direct passed through unbraid only for the filter: without it, it leaves unbraid, its website and home rules too.
+            listOf("The DNS filter is turned off.", leaves) to { it.copy(prefs = it.prefs.copy(filter = Filter())) },
+            listOf(leaves) to { it.copy(prefs = it.prefs.copy(filter = it.prefs.filter.copy(apps = emptyMap()))) },
+            listOf("Apps can reach the local network again.") to { it.copy(prefs = it.prefs.copy(lan = true)) },
+            listOf("1 app that is blocked now won't be.") to { it.copy(apps = it.apps - "org.example.game") },
+            listOf("1 website that is blocked now won't be.") to { it.copy(sites = it.sites - "tracker.example") },
+            // Left outside unbraid: its blocked website and home tunnel go with it, said once as the app's.
+            listOf("1 app goes from a VPN route to Direct.") to { it.copy(apps = it.apps + ("org.example.mail" to DIRECT)) },
+            listOf("1 website goes from a VPN route to Direct.") to { it.copy(sites = it.sites + ("work.example" to DIRECT)) },
+            listOf("\"Box\" connects to 198.51.100.66 instead of 203.0.113.1.") to { s -> wg.copy(endpoint = "198.51.100.66:51820").let { e -> s.copy(servers = listOf(OwnServer("s", wg = e)), routes = s.routes.map { if (it.id == "w") it.copy(wg = e) else it }) } },
+            listOf("Your home WireGuard uses other DNS servers: 198.51.100.53.") to { it.copy(home = it.home.copy(wg = it.home.wg!!.copy(dns = listOf("198.51.100.53")))) },
             // With the local network closed the rest of a home range goes through the VPN, not Direct: open here.
-            "Part of the home network goes Direct instead of through the home tunnel." to { it.copy(prefs = it.prefs.copy(lan = true), home = it.home.copy(wg = it.home.wg!!.copy(allowedIps = listOf("192.168.50.0/25")))) },
+            listOf("Part of the home network goes Direct instead of through the home tunnel.", "Apps can reach the local network again.") to
+                { it.copy(prefs = it.prefs.copy(lan = true), home = it.home.copy(wg = it.home.wg!!.copy(allowedIps = listOf("192.168.50.0/25")))) },
         )
-        for ((said, change) in kinds) assertTrue("$said in ${sheet(change(phone))}", said in sheet(change(phone)))
+        for ((said, change) in kinds) assertEquals(said, sheet(change(phone)))
         // The provider's own blocking: said once the filter no longer stands in for it.
         val noFilter = phone.copy(prefs = phone.prefs.copy(filter = Filter()))
         assertEquals(listOf("The default route loses the provider's ad and tracker blocking it has now."),
             RestoreTraffic.notes(noFilter, noFilter.copy(opts = mapOf("nord" to mapOf("protect" to "off")))))
-        val all = kinds.fold(phone) { s, (_, change) -> change(s) }
-        val together = sheet(all)
-        // Together, counts join ("1 app and 1 website go…") and a filter turned off is said once for all.
-        for ((said, _) in kinds.filter { it.first != "1 app loses the DNS filter." && !it.first.startsWith("1 app goes") && !it.first.startsWith("1 website goes") }) assertTrue("$said in $together", said in together)
-        assertTrue(together.toString(), "1 app and 1 website go from a VPN route to Direct." in together)
+        assertEquals(listOf("The DNS filter is turned off.", "\"Box\" connects to 198.51.100.66 instead of 203.0.113.1.", "Your home WireGuard uses other DNS servers: 198.51.100.53.", leaves,
+            "The default route goes from Netherlands to Direct.", "1 app and 1 website go from a VPN route to Direct.", "Part of the home network goes Direct instead of through the home tunnel.",
+            "Apps can reach the local network again.", "1 app that is blocked now won't be.", "1 website that is blocked now won't be."), sheet(kinds.fold(phone) { s, (_, change) -> change(s) }))
     }
 
     @Test fun weakOwnServersAreNamedUntilAccepted() {
@@ -142,6 +145,52 @@ class BackupAdversarialTest {
         assertEquals(c.setup.routes.size, r.routes.size)
         assertEquals("se", r.profiles.single { it.name == PREVIOUS }.defaultRoute)
         Backup.valid(r)
+    }
+
+    /** Keeping the setup in use beside a backup of this very phone keeps the pin this phone trusts, address and key. */
+    @Test fun keepingASharedPinnedRouteKeepsThisPhonesPin() {
+        val here = Setup(routes = listOf(Route("se", Location("mullvad", countryCode = "SE", country = "Sweden", pinned = evil))), defaultRoute = "se", version = VERSION)
+        val c = Backup.read(Backup.export(here, "3.0.2", 0))
+        val kept = here.restoredFrom(c.setup, PREVIOUS, 0)!!
+        assertEquals(listOf("se"), kept.routes.map { it.id })
+        assertEquals(evil, kept.route("se")!!.loc.pinned)
+        assertEquals("se", kept.profiles.single { it.name == PREVIOUS }.defaultRoute)
+        // Without keeping, the file's name and host only, as before.
+        assertEquals("", here.restoredFrom(c.setup, null, 0)!!.route("se")!!.loc.pinned!!.ip)
+    }
+
+    /** The filter's own app choices count as app choices; a Tailscale exit is an address; file text never brings invisible characters. */
+    @Test fun fileTextIsBoundedWhereverItIsShown() {
+        val tooMany = phone.copy(prefs = phone.prefs.copy(filter = phone.prefs.filter.copy(apps = (0..Backup.MAX_APPS).associate { "a.b$it" to true })))
+        assertEquals(Reason.Invalid, reason { Backup.read(Backup.export(tooMany, "3.0.2", 0)) })
+        assertEquals(Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(prefs = phone.prefs.copy(filter = phone.prefs.filter.copy(apps = mapOf("not a package" to true)))), "3.0.2", 0)) })
+        val ts = { exit: String -> phone.copy(routes = phone.routes + Route("t", tsExit = exit)) }
+        for (ok in listOf("100.101.102.103", "fd7a:115c:a1e0::1")) Backup.read(Backup.export(ts(ok), "3.0.2", 0))
+        for (bad in listOf("100.64.0.1‮", "‮100.64.0.1", "node.example", "100.64.0.0/10", "1.2.3")) assertEquals(bad, Reason.Invalid, reason { Backup.read(Backup.export(ts(bad), "3.0.2", 0)) })
+        // Zero-width and other formatting characters in a name are refused; the joiners emoji are made of are not.
+        for (n in listOf("Box​", "Box⁠x", "Box﻿", "Box x")) assertEquals(n, Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", n))), "3.0.2", 0)) })
+        Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", "Team 👩‍💻"))), "3.0.2", 0))
+        // An error that names a server from the file shows it without its direction marks or line breaks.
+        val damaged = Backup.export(phone.copy(servers = phone.servers + OwnServer("k", wg = wg.copy(name = "‮evil\nname", privateKey = ""), keyless = true)), "3.0.2", 0)
+        val e = try { Backup.read(damaged); null } catch (x: Backup.Failed) { x }!!
+        assertTrue(e.message!!, e.message!!.none { it == '‮' || it == '\n' })
+    }
+
+    /** A website an older version saved, that the stricter reader of today refuses, keeps the backup restorable: it stays as this phone keeps it. */
+    @Test fun anOlderWebsiteNameKeepsTheBackupRestorable() {
+        val old = phone.copy(sites = phone.sites + ("x.0xff" to "nl"), profiles = listOf(Profile("Work", "nl", sites = mapOf("y.0x1f" to DIRECT))))
+        val c = Backup.read(Backup.export(old, "3.0.2", 0))
+        assertEquals("nl", c.setup.sites["x.0xff"])
+        assertEquals(DIRECT, c.setup.profiles.single().sites["y.0x1f"])
+        for (bad in listOf("Example.com", "x..com", "-x.com", "x.123", "com", "a b.com")) assertEquals(bad, Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(sites = mapOf(bad to "nl")), "3.0.2", 0)) })
+    }
+
+    /** Counting in another script is a pattern too: one through eight in Chinese numerals is not a hard passphrase. */
+    @Test fun countingInAnyScriptIsAPattern() {
+        for (p in listOf("一二三四五六七八", "八七六五四三二一", "壹贰叁肆伍陆柒捌", "甲乙丙丁戊己庚辛", "あいうえおかきく", "αβγδεζηθ", "абвгдежз", "ⅠⅡⅢⅣⅤⅥⅦⅧ", "가나다라마바사아", "一二三四五六七八九十"))
+            assertFalse("$p ${Backup.strength(p)}", forKeys(p))
+        // Han characters that count nothing still count.
+        assertEquals(2, Backup.strength("龍一象山水火風雷木金土日月星雲花").first)
     }
 
     @Test fun aMacBackupIsNamed() {

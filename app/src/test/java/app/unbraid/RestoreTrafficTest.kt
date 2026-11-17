@@ -11,8 +11,6 @@ import app.unbraid.data.OwnServer
 import app.unbraid.data.Prefs
 import app.unbraid.data.RestoreTraffic
 import app.unbraid.data.RestoreTraffic.Loss
-import app.unbraid.data.RestoreTraffic.OTHER
-import app.unbraid.data.RestoreTraffic.OTHER_NAME
 import app.unbraid.data.RestoreTraffic.Outcome
 import app.unbraid.data.RestoreTraffic.REJECT
 import app.unbraid.data.RestoreTraffic.Resolver
@@ -32,6 +30,8 @@ import java.util.Random
 
 /** What a restore makes weaker, asked of the compiled configs: the walk against the compiler, the traps of earlier designs, and random pairs against an independent model. */
 class RestoreTrafficTest {
+    private val OTHER = "org.example.other"
+    private val OTHER_NAME = "unbraid-check.example"
     private fun wg(n: Int, allowed: String = "0.0.0.0/0", dns: String? = null) = WgConf.parse("[Interface]\nPrivateKey = ${('A' + n).toString().repeat(42)}E=\nAddress = 10.0.$n.2/32\n" +
         (dns?.let { "DNS = $it\n" } ?: "") + "[Peer]\nPublicKey = ${('B' + n).toString().repeat(42)}E=\nEndpoint = 203.0.113.$n:51820\nAllowedIPs = $allowed\n", "Box $n")
     private val nl = Route("nl", Location("nord", 153, "NL", "Netherlands"))
@@ -258,8 +258,6 @@ class RestoreTrafficTest {
         // Cut at its far end only: the first address stays covered.
         val far = here.copy(home = Home(wg = here.home.wg!!.copy(allowedIps = listOf("10.0.0.0/9"))))
         assertTrue(notes(here, far).contains("Part of the home network goes Direct instead of through the home tunnel."))
-        assertEquals(listOf("10.0.0.1", "10.255.255.254"), RestoreTraffic.edges("10.0.0.0/8"))
-        assertEquals(listOf("10.0.0.7"), RestoreTraffic.edges("10.0.0.7/32"))
         // Wider says nothing.
         assertTrue(notes(narrower, here).none { it.startsWith("Part of") })
     }
@@ -294,8 +292,8 @@ class RestoreTrafficTest {
             home = Home(wg = here.home.wg!!.copy(allowedIps = listOf("10.20.0.0/24"))))
         val said = notes(here, next)
         // a.example goes Direct as the default does: said once, for the default.
-        assertEquals(listOf("The default route goes from Netherlands to Direct.", "1 app goes from a VPN route to Direct.", "1 app that is blocked now won't be.",
-            "1 website that is blocked now won't be.", "Part of the home network goes Direct instead of through the home tunnel."), said)
+        assertEquals(listOf("The default route goes from Netherlands to Direct.", "1 app goes from a VPN route to Direct.", "Part of the home network goes Direct instead of through the home tunnel.",
+            "1 app that is blocked now won't be.", "1 website that is blocked now won't be."), said)
         assertEquals(listOf("1 website goes from a VPN route to Direct."), notes(here, here.copy(sites = here.sites + ("a.example" to DIRECT))))
         val provider = here.copy(apps = emptyMap(), sites = emptyMap(), prefs = Prefs())
         assertEquals(listOf("The default route loses the provider's ad and tracker blocking it has now."), notes(provider, provider.copy(opts = mapOf("nord" to mapOf("protect" to "off")))))
@@ -330,7 +328,7 @@ class RestoreTrafficTest {
     @Test fun theWalkFollowsTheFakeAddressBlock() = app.unbraid.vpn.Compiler.FAKE_RANGES.indices.forEach { b ->
         val s = base.copy(apps = mapOf("org.w" to "w"))
         val links = mapOf("nl" to app.unbraid.data.WgLink(app.unbraid.data.Server("x", "198.51.100.1", "198.51.100.1", wg(2).publicKey, 0), wg(2)), "w" to app.unbraid.data.WgLink(app.unbraid.data.Server("w", "203.0.113.1", "", wg(1).publicKey, 0), wg(1)))
-        val c = RestoreTraffic.Config(app.unbraid.vpn.Compiler.compile(app.unbraid.vpn.Compiler.Input(s, links, "app.unbraid", false, "", "", fakeBlock = b)), s, emptySet())
+        val c = RestoreTraffic.Config(app.unbraid.vpn.Compiler.compile(app.unbraid.vpn.Compiler.Input(s, links, "app.unbraid", false, "", "", fakeBlock = b)), s)
         assertEquals("block $b", "r-w", RestoreTraffic.connect(c, setOf("org.w"), OTHER_NAME)!!.exit)
     }
 
@@ -345,4 +343,71 @@ class RestoreTrafficTest {
         assertNotNull(RestoreTraffic.compile(s, { emptySet() }))
     }
 
+    // ---- probes, lockdown, ranges, profiles and the budget, one trap each ----
+
+    /** A website or app named like a made-up probe can't stand in for the default route: the probes are chosen against every rule. */
+    @Test fun aRuleCanNotCaptureTheProbes() {
+        val next = base.copy(defaultRoute = DIRECT, sites = mapOf("unbraid-check.example" to "nl"), apps = mapOf("app.unbraid.check.other" to "nl"))
+        assertEquals(listOf("The default route goes from Netherlands to Direct."), notes(base, next))
+    }
+
+    /** Under Android's lockdown a Direct app stays inside unbraid, where websites' routes reach it: a website's loss there is said. */
+    @Test fun aLossUnderLockdownIsSaid() {
+        val here = base.copy(apps = mapOf("org.browser" to DIRECT), sites = mapOf("work.example" to "nl"))
+        assertEquals(listOf("1 website goes from a VPN route to Direct."), notes(here, here.copy(sites = emptyMap())))
+        // Blocked apps' local network: only said when it opens, not when the local network stays closed anyway.
+        val closed = base.copy(apps = mapOf("org.game" to BLOCK), prefs = Prefs(lan = false, blockLan = true))
+        assertEquals(emptyList<String>(), notes(closed, closed.copy(prefs = Prefs(lan = false, blockLan = false))))
+        val open = closed.copy(prefs = Prefs(lan = true, blockLan = true))
+        assertEquals(listOf("Blocked apps can reach the local network."), notes(open, open.copy(prefs = Prefs(lan = true, blockLan = false))))
+    }
+
+    /** A hole in the middle of a home range: one address between every two range boundaries is walked. */
+    @Test fun aHoleInAHomeRangeIsSaid() {
+        val here = base.copy(home = Home(wg = wg(7, allowed = "10.0.0.0/8").copy(name = "Home")))
+        val split = here.copy(home = Home(wg = here.home.wg!!.copy(allowedIps = listOf("10.0.0.0/9", "10.192.0.0/10"))))
+        assertEquals(listOf("Part of the home network goes Direct instead of through the home tunnel."), notes(here, split))
+        assertEquals(emptyList<String>(), notes(split, here))
+    }
+
+    /** A website with a route of its own that goes Direct with the default is said for itself, not folded into the default. */
+    @Test fun aWebsiteLeavingItsOwnRouteWithTheDefaultIsSaid() {
+        val here = base.copy(sites = mapOf("bank.example" to "m1"))
+        assertEquals(listOf("The default route goes from Netherlands to Direct.", "1 website goes from a VPN route to Direct."),
+            notes(here, here.copy(defaultRoute = DIRECT, sites = mapOf("bank.example" to DIRECT))))
+    }
+
+    /** A restored profile the rules switch to on a kind of network runs without anyone choosing it: judged too, through a real file. */
+    @Test fun aProfileTheRestoredRulesSwitchToIsJudged() {
+        val here = base.copy(apps = mapOf("org.bank" to "nl"))
+        val backup = here.copy(profiles = listOf(app.unbraid.data.Profile("Mobile", DIRECT, mapOf("org.bank" to DIRECT))), onNet = mapOf(app.unbraid.data.MOBILE to "Mobile"))
+        val c = Backup.read(Backup.export(backup, "3.0.2", 0))
+        assertEquals(listOf("On mobile data unbraid switches to the profile Mobile by itself. Compared with now there:", "The default route goes from Netherlands to Direct.", "1 app goes from a VPN route to Direct."),
+            notes(here, here.restoredFrom(c.setup, null, 0, c.keys)!!))
+        // The same rule on this phone already: nothing changes there.
+        assertEquals(emptyList<String>(), notes(backup, backup.restoredFrom(c.setup, null, 0, c.keys)!!))
+        // A rule this phone has that the backup drops: on that network the phone stays on the restored setup.
+        val phone = base.copy(defaultRoute = DIRECT, profiles = listOf(app.unbraid.data.Profile("Mobile", "nl")), onNet = mapOf(app.unbraid.data.MOBILE to "Mobile"))
+        assertEquals(listOf("On mobile data unbraid no longer switches to the profile Mobile by itself. Compared with now there:", "The default route goes from Netherlands to Direct."),
+            notes(phone, phone.copy(profiles = emptyList(), onNet = emptyMap())))
+    }
+
+    /** A setup too large to walk every app against every website says so; one within the budget is walked whole. */
+    @Test fun aCutCheckIsSaidAndTheBudgetCoversARealSetup() {
+        val servers = (0 until 200).map { OwnServer("s$it", wg = wg(1).copy(endpoint = "203.0.113.${it % 250}:${51000 + it}", publicKey = ('C' + it % 20).toString().repeat(42) + "E=", privateKey = ('D' + it % 20).toString().repeat(41) + "${it % 10}E=")) }
+        val routes = servers.map { Route("r" + it.id, wg = it.wg, own = it.id) }
+        val here = base.copy(defaultRoute = DIRECT, routes = base.routes + routes, servers = base.servers + servers, apps = routes.withIndex().associate { (i, r) -> "org.example.a$i" to r.id },
+            sites = (0 until 49).associate { "s$it.example" to DIRECT })
+        val t = System.nanoTime()
+        val said = notes(here, here.copy(sites = here.sites + ("work.example" to DIRECT)))
+        println("RESTORE-CHECK 200 exits, 50 websites: ${(System.nanoTime() - t) / 1_000_000} ms, $said")
+        assertEquals(listOf("1 website goes from a VPN route to Direct."), said)
+        assertEquals(false, RestoreTraffic.found(here, here.copy(sites = here.sites + ("work.example" to DIRECT)))!!.cut)
+        // Every website on an exit of its own and every app on another: too many pairs, and the sheet says the check was cut.
+        val apart = here.copy(sites = (0 until 49).associate { "s$it.example" to routes[it].id }, apps = (0 until 5000).associate { "org.example.a$it" to routes[it % 200].id })
+        val t2 = System.nanoTime()
+        val cut = notes(apart, apart.copy(sites = apart.sites + ("work.example" to DIRECT)))
+        println("RESTORE-CHECK 200 exits, 49 websites apart, 5000 apps: ${(System.nanoTime() - t2) / 1_000_000} ms, $cut")
+        assertEquals(listOf("1 website goes from a VPN route to Direct.", RestoreTraffic.CUT), cut)
+    }
 }

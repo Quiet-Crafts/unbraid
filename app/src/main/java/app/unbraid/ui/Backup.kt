@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -76,6 +77,58 @@ fun passProblem(pass: String, again: String, keys: Boolean): String? = when {
 fun keysSwitch(secrets: Boolean, on: Boolean): Pair<Boolean, String> = secrets to when { !secrets -> KEYS_NONE; on -> KEYS_ON; else -> KEYS_OFF }
 
 /**
+ * When Restore may be tapped, apart from Android so it can be tested: a check counts only for the very backup it was
+ * made for, the setup here and the keep choice; weak servers are accepted for one backup only. A newer check, another
+ * backup or another choice drops what came before.
+ */
+class RestoreGate {
+    /** What the confirm sheet says of a backup: its sentences, its weak servers, whether the setup here can be kept, and own servers left without config. */
+    class Result(val notes: List<String>, val weak: List<String>, val keepable: Boolean, val missing: Int)
+    /** One check asked: of [backup] over [here], keeping the setup here as a profile or not. */
+    class Ask(val here: Setup, val backup: Backup.Contents, val keep: Boolean)
+
+    private var backup: Backup.Contents? = null
+    private var asked: Ask? = null
+    var result: Result? = null
+        private set
+    private var accepted: Backup.Contents? = null
+
+    /** Backup [c] opened (or none): nothing checked or accepted for another one carries over. */
+    fun open(c: Backup.Contents?) { backup = c; asked = null; result = null; accepted = null }
+
+    /** The check to start for [here] and [keep]; null when one for them is under way or in. */
+    fun ask(here: Setup, keep: Boolean): Ask? {
+        val c = backup ?: return null
+        if (asked?.let { it.here == here && it.backup === c && it.keep == keep } == true) return null
+        return Ask(here, c, keep).also { asked = it; result = null }
+    }
+
+    /** [r] for check [a]; dropped unless [a] is still the one asked. */
+    fun answer(a: Ask, r: Result) { if (asked === a) result = r }
+
+    /** Weak servers accepted, for the backup open now only. */
+    var acceptWeak: Boolean
+        get() = accepted != null && accepted === backup
+        set(v) { accepted = if (v) backup else null }
+
+    fun ready(here: Setup, keep: Boolean): Boolean {
+        val r = result ?: return false
+        return asked?.let { it.here == here && it.backup === backup && it.keep == keep } == true && (r.weak.isEmpty() || acceptWeak)
+    }
+
+    companion object {
+        /** Works [a] out: slow for a large setup, never on the main thread. [kin]: the apps sharing a user id with an app. */
+        fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }): Result {
+            val c = a.backup
+            val plain = a.here.restoredFrom(c.setup, null, 0, c.keys)!!
+            val keepable = !a.here.untouched && a.here.restoredFrom(c.setup, PREVIOUS, 0, c.keys) != null
+            val next = if (a.keep && keepable) a.here.restoredFrom(c.setup, PREVIOUS, 0, c.keys)!! else plain
+            return Result(RestoreTraffic.notes(a.here, next, kin), Backup.weak(plain, a.here), keepable, plain.servers.count { it.keyless })
+        }
+    }
+}
+
+/**
  * Back up and restore, held by [Ui] so a rotation keeps every step. In memory only: the passphrase, the file and what
  * it opens to never reach the disk, the clipboard or the log.
  */
@@ -99,13 +152,22 @@ class BackupFlow(private val ui: Ui) {
     private var file: ByteArray? = null
     var opened by mutableStateOf<Backup.Contents?>(null)
         private set
-    /** What restoring [opened] over the setup it was worked out for makes weaker ([RestoreTraffic.notes]); null while it is worked out. */
-    var notes by mutableStateOf<List<String>?>(null)
-        private set
-    private var judged: Pair<Setup, Backup.Contents>? = null
     private var judging: Job? = null
+    private val gate = RestoreGate()
+    /** Bumped on every change of [gate], so the sheet follows it. */
+    private var seen by mutableIntStateOf(0)
+    /** What restoring [opened] makes weaker ([RestoreTraffic.notes]); null while it is worked out. */
+    val notes: List<String>? get() = seen.let { gate.result?.notes }
+    /** Servers in [opened] an import would warn about, not already on this phone ([Backup.weak]); worked out with [notes]. */
+    val weak: List<String> get() = seen.let { gate.result?.weak.orEmpty() }
+    /** Whether the setup here can be kept as a profile beside [opened]'s; null while it is worked out. */
+    val keepable: Boolean? get() = seen.let { gate.result?.keepable }
+    /** Own servers [opened] leaves without their config here: the ones this phone doesn't already have. */
+    val missing: Int get() = seen.let { gate.result?.missing ?: 0 }
     /** The user accepts the weak security of servers in [opened] ([Backup.weak]): Restore waits for it. */
-    var acceptWeak by mutableStateOf(false)
+    var acceptWeak: Boolean
+        get() = seen.let { gate.acceptWeak }
+        set(v) { gate.acceptWeak = v; seen++ }
     /** Set by [BackupHost]: the document pickers. */
     internal var pickSave: (String) -> Unit = {}
     internal var pickOpen: () -> Unit = {}
@@ -114,37 +176,32 @@ class BackupFlow(private val ui: Ui) {
     fun close() { if (!busy) { step = null; pass = ""; pass2 = ""; file = null; opened(null); message = null; keep = true; keys = false } }
 
     /** A new backup shown (or none): nothing worked out or accepted for another one carries over. */
-    private fun opened(c: Backup.Contents?) { opened = c; notes = null; weak = emptyList(); judged = null; judging?.cancel(); judging = null; acceptWeak = false }
+    private fun opened(c: Backup.Contents?) { opened = c; judging?.cancel(); judging = null; gate.open(c); seen++ }
 
     /**
-     * Works out, away from the main thread, what restoring [opened] over [here] makes weaker; a result for a setup or
-     * backup that changed meanwhile is dropped. Apps that share their user id with another are told to the walk, as
-     * Android and the engine decide by user id.
+     * Works out, away from the main thread, what restoring [opened] over [here] with the keep choice makes weaker, and
+     * what the confirm sheet says of it; a result for a setup, backup or choice that changed meanwhile is dropped. Apps
+     * that share their user id with another are told to the walk, as Android and the engine decide by user id.
      */
     fun judge(here: Setup) {
-        val c = opened ?: return
-        if (judged?.let { it.first == here && it.second === c } == true) return
-        judged = here to c; notes = null; judging?.cancel()
+        val ask = gate.ask(here, keep) ?: return
+        seen++
+        judging?.cancel()
         val pm = app.packageManager
         judging = ui.viewModelScope.launch {
-            val found = withContext(Dispatchers.Default) {
-                val next = here.restoredFrom(c.setup, null, 0, c.keys) ?: return@withContext null
+            val r = withContext(Dispatchers.Default) {
                 // The installed apps by user id, read once.
                 val all = runCatching { pm.getInstalledApplications(0) }.getOrDefault(emptyList())
                 val uid = all.associate { it.packageName to it.uid }
                 val byUid = all.groupBy({ it.uid }, { it.packageName })
-                Backup.weak(next, here) to RestoreTraffic.notes(here, next) { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }
+                RestoreGate.check(ask) { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }
             }
-            if (judged?.let { it.first === here && it.second === c } == true) { weak = found?.first.orEmpty(); notes = found?.second ?: listOf(RestoreTraffic.UNKNOWN) }
+            gate.answer(ask, r); seen++
         }
     }
 
-    /** Servers in [opened] an import would warn about, not already on this phone ([Backup.weak]); worked out with [notes]. */
-    var weak by mutableStateOf(emptyList<String>())
-        private set
-
-    /** Restore may go: the check is in for this backup and this setup, and weak servers are accepted. */
-    fun ready(here: Setup) = notes != null && judged?.let { it.first == here && it.second === opened } == true && (acceptWeak || weak.isEmpty())
+    /** Restore may go: the check is in for this backup, this setup and this keep choice, and weak servers are accepted. */
+    fun ready(here: Setup) = seen.let { gate.ready(here, keep) }
 
     fun startSave() { close(); step = "save" }
 
@@ -207,26 +264,19 @@ class BackupFlow(private val ui: Ui) {
         ui.viewModelScope.launch {
             val r = withContext(Dispatchers.Default) { runCatching { Backup.open(b, p).let { plain -> try { Backup.read(plain) } finally { plain.fill(0) } } } }
             busy = false
-            r.onSuccess { opened(it); pass = ""; step = "confirm"; keep = canKeep(Unbraid.store.setup.value) }
+            r.onSuccess { opened(it); pass = ""; step = "confirm"; keep = true }
                 .onFailure { e -> message = (e as? Backup.Failed)?.message ?: Backup.Reason.Damaged.text; if ((e as? Backup.Failed)?.reason != Backup.Reason.Passphrase) { step = "done"; ok = false } }
         }
     }
-
-    /** Whether the setup here can be kept as a profile beside [opened]'s. */
-    fun canKeep(here: Setup) = opened?.let { !here.untouched && here.restoredFrom(it.setup, PREVIOUS, 0, it.keys) != null } == true
-
-    /** Own servers [opened] leaves without their config here: the ones this phone doesn't already have. */
-    fun needKeys(here: Setup) = opened?.let { c -> here.restoredFrom(c.setup, null, 0, c.keys)?.servers?.count { it.keyless } } ?: 0
 
     /** Replaces the setup with [opened]'s, all at once; the VPN, if on, reconnects with it. */
     fun apply() {
         val c = opened ?: return
         val here = Unbraid.store.setup.value
-        // Only over the setup the sheet's check was made for, and with weak servers accepted.
+        // Only over the setup and keep choice the sheet's check was made for, and with weak servers accepted.
         if (!ready(here)) return
         var target: Setup? = null
-        val keepAs = PREVIOUS.takeIf { keep }
-        if (here.restoredFrom(c.setup, keepAs, 0, c.keys) == null) { finish(false, KEEP_NO_ROOM); return }
+        val keepAs = PREVIOUS.takeIf { keep && keepable == true }
         // Counted first: the running engine's setup is gone once the store changes, so a refused reload must stop the VPN.
         UnbraidVpn.restores.incrementAndGet()
         var moved = false
@@ -323,7 +373,7 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
     val b = c.setup
     val date = java.time.Instant.ofEpochMilli(c.created).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
         .format(java.time.format.DateTimeFormatter.ofPattern("d MMMM yyyy", java.util.Locale.UK))
-    val canKeep = flow.canKeep(here)
+    val canKeep = flow.keepable == true
     Text("Restore this backup?", style = Type.title)
     Text("Saved on $date${c.app.takeIf { it.isNotEmpty() }?.let { " by unbraid $it" }.orEmpty()}: ${count(b.routes.size, "route")}, " +
         "${count(b.apps.size, "app choice")}, ${websites(b)}${count(b.profiles.size, "profile")}, ${count(b.servers.size, "own server")}.", style = Type.sub)
@@ -331,11 +381,11 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
     if (!here.untouched) Text(if (canKeep && flow.keep) "It replaces your profiles, favourites and settings on this phone." else "It replaces what is on this phone now: ${count(here.routes.size, "route")}, " +
         "${count(here.apps.size, "app choice")}, ${websites(here)}${count(here.profiles.size, "profile")}, ${count(here.servers.size, "own server")}, your favourites and settings.", style = Type.sub)
     Text("Your provider sign-ins and Tailscale stay as they are." + (flow.signIns(b)?.let { " Routes on $it stay blocked until you sign in." } ?: ""), style = Type.caption, color = Ink.dim)
-    val missing = flow.needKeys(here)
+    val missing = flow.missing
     if (missing > 0) Text("Saved without server keys: ${count(missing, "own server")} will need ${if (missing == 1) "its" else "their"} config added again. Until then, ${if (missing == 1) "its" else "their"} apps stay offline.", style = Type.caption, color = Ink.bad)
     if (here.home.wg != null && !(c.keys && b.home.wg == here.home.wg)) Text(homeNote(c.keys, b.home.wg != null), style = Type.caption, color = if (c.keys && b.home.wg == null) Ink.bad else Ink.dim)
-    // What gets less protected, worked out for this backup and this setup; Restore waits for it.
-    LaunchedEffect(c, here) { flow.judge(here) }
+    // What gets less protected, worked out for this backup, this setup and the keep choice; Restore waits for it.
+    LaunchedEffect(c, here, flow.keep) { flow.judge(here) }
     val notes = flow.notes
     if (notes == null) Text("Checking what the restore changes…", style = Type.caption, color = Ink.dim)
     else if (notes.isNotEmpty()) Text(notes.joinToString("\n"), style = Type.caption, color = Ink.bad)
