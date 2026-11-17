@@ -138,7 +138,7 @@ object Backup {
      * - a common password counts as one character;
      * - in what is left, a character adds nothing when it repeats the one before, starts a stretch of two or more that
      *   already appeared (and the number right after such a stretch of three or more: "pass1pass2"), or continues a
-     *   walk: a step to a neighbouring letter or digit (abc, 321, in any script's digits) or key (qaz, asd; a shifted
+     *   walk: a step to a neighbouring letter, digit or numeral in its counting order (abc, 321, αβγ, 一二三, in any script) or key (qaz, asd; a shifted
      *   digit is its key), after such a step, or the same with every other character (q1w2e3).
      * Runs of one character count once before anything else, then up to 4,096 characters are looked at, so a long
      * repeat at the start doesn't hide what follows. Hard: four or more different words of three characters or more
@@ -207,6 +207,20 @@ object Backup {
         }
     }
 
+    private fun letter(c: Int) = Character.isLetter(c) || Character.getType(c) == Character.LETTER_NUMBER.toInt()
+
+    /**
+     * Counting sequences whose neighbours aren't neighbours in Unicode: Chinese and Japanese numerals (一二三, 壹贰叁),
+     * the stems and branches, the kana and Hangul orders, the Hebrew and Arabic alphabets. A step between neighbours is a
+     * walk, as 123 or abc is.
+     */
+    private val COUNTED: Set<String> = buildSet {
+        for (s in listOf("〇一二三四五六七八九十", "零一二三四五六七八九十百千万", "壹贰叁肆伍陆柒捌玖拾", "壹貳參肆伍陸柒捌玖拾", "甲乙丙丁戊己庚辛壬癸", "子丑寅卯辰巳午未申酉戌亥",
+            "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん", "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン",
+            "가나다라마바사아자차카타파하", "ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ", "אבגדהוזחטיכלמנסעפצקרשת", "ابتثجحخدذرزسشصضطظعغفقكلمنهوي"))
+            for (i in 0 until s.length - 1) { add("${s[i]}${s[i + 1]}"); add("${s[i + 1]}${s[i]}") }
+    }
+
     /** The characters of [s] that add to a guess ([strength]). */
     private fun guessable(s: List<String>): List<String> {
         val c = s.fold(mutableListOf<String>()) { a, x -> if (a.lastOrNull() != x && a.size < 4096) a.add(x); a }
@@ -214,6 +228,10 @@ object Backup {
         val key = { x: String -> "!@#$%^&*()".indexOf(x).takeIf { x.length == 1 && it >= 0 }?.let { "1234567890"[it].toString() } ?: x }
         val step = step@{ a: String, b: String ->
             if (digit(a) && digit(b)) return@step Math.abs(Character.digit(a.codePointAt(0), 10) - Character.digit(b.codePointAt(0), 10)) == 1
+            if ("$a$b" in COUNTED) return@step true
+            // Neighbouring letters or numerals of one alphabet (αβγ, абв, Ⅰ Ⅱ Ⅲ), whatever the script.
+            val (u, v) = a.codePointAt(0) to b.codePointAt(0)
+            if (a.codePointCount(0, a.length) == 1 && b.codePointCount(0, b.length) == 1 && Math.abs(u - v) == 1 && letter(u) && letter(v)) return@step true
             val x = key(a); val y = key(b)
             x.length == 1 && y.length == 1 && x[0].code < 128 && y[0].code < 128 && x[0].isLetterOrDigit() && y[0].isLetterOrDigit() && (Math.abs(x[0] - y[0]) == 1 || "$x$y" in KEYBOARD)
         }
@@ -317,11 +335,26 @@ object Backup {
     private val ID = Regex("[A-Za-z0-9._-]{1,64}")
     private val PKG = Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")
 
-    private fun bad(what: String): Nothing = fail(Reason.Invalid, what)
+    /** Why a file can't be restored; a name from the file in it is shown as [safe] makes it. */
+    private fun bad(what: String): Nothing = fail(Reason.Invalid, safe(what, 300))
     private fun need(ok: Boolean, what: String) { if (!ok) bad(what) }
 
-    /** A name as the importers leave it: no control or direction characters, not padded. */
-    private fun plainName(n: String) = n.isNotBlank() && n.length <= 256 && Manual.cleanName(n, 256) == n
+    /** Formatting characters that only join or keep apart the letters around them, as in emoji and some scripts. */
+    private fun joiner(c: Char) = c == '‌' || c == '‍'
+    private fun format(c: Char) = Character.getType(c).let { it == Character.FORMAT.toInt() || it == Character.LINE_SEPARATOR.toInt() || it == Character.PARAGRAPH_SEPARATOR.toInt() } && !joiner(c)
+
+    /** Text from a file as an error may show it: no control, direction or other invisible formatting characters, at most [n] characters. */
+    private fun safe(s: String, n: Int = 40) = s.filterNot { it.isISOControl() || format(it) }.takeGraphemes(n)
+
+    /** A name as the importers leave it: no control, direction or other invisible formatting characters, not padded. */
+    private fun plainName(n: String) = n.isNotBlank() && n.length <= 256 && Manual.cleanName(n, 256) == n && n.none(::format)
+
+    /** A Tailscale exit node as unbraid saves it: its tailnet address, IPv4 or IPv6. */
+    private fun tsAddress(a: String) = app.unbraid.vpn.Compiler.ipv4(a)?.second == 32 && '/' !in a || (a.length <= 39 && a.count { it == ':' } in 2..7 && a.all { it == ':' || it.isDigit() || it.lowercaseChar() in 'a'..'f' })
+
+    /** A website as unbraid keeps it: as [Sites.clean] writes it, or as an older version saved it (labels of letters, digits and hyphens, the last not all digits). */
+    private val LABEL = Regex("[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+    private fun savedSite(k: String) = Sites.clean(k) == k || k.split('.').let { l -> k.length <= 253 && l.size >= 2 && l.all(LABEL::matches) && !l.last().all(Char::isDigit) }
 
     /** A place's texts, shown as route names in the app and on widgets: each empty or a plain name. */
     private fun plainPlace(l: Location) = listOfNotNull(l.provider, l.countryCode, l.country, l.city, l.region, l.group, l.protocol,
@@ -345,7 +378,7 @@ object Backup {
             val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.tsExit).size
             need(n <= 1, "a route has more than one exit")
             if (n == 0) need(Providers.get(r.loc.provider) != null, "a route uses a provider this unbraid doesn't know")
-            r.tsExit?.let { need(it.length <= 253 && it.none(Char::isISOControl) && r.tsName.let { n -> n == null || plainName(n) }, "a Tailscale route is damaged") }
+            r.tsExit?.let { need(tsAddress(it) && r.tsName.let { n -> n == null || plainName(n) }, "a Tailscale route is damaged") }
             need(plainPlace(r.loc), "a route's place is damaged")
             // A route saved without keys gets them back only through its own server, which must be saved without them too.
             val own = s.servers.firstOrNull { it.id == r.own }
@@ -357,9 +390,12 @@ object Backup {
         // An app or a website may be on Block; a default route never is.
         val ok = { id: String -> builtIn(id) || s.route(id) != null }
         val pkgs = { m: Map<String, String> -> m.keys.all { it.length <= 255 && PKG.matches(it) } }
-        val sites = { m: Map<String, String> -> m.size <= Sites.MAX && m.all { (site, id) -> Sites.clean(site) == site && ok(id) } }
+        // A website an older version kept stays as this phone keeps it: one name the browser can't open never costs the whole backup.
+        val sites = { m: Map<String, String> -> m.size <= Sites.MAX && m.all { (site, id) -> savedSite(site) && ok(id) } }
         need(s.defaultRoute != BLOCK && s.profiles.none { it.defaultRoute == BLOCK }, "a default route can't be Block")
         need(s.defaultRoute.let(ok) && s.apps.values.all(ok) && s.added.all(ok) && pkgs(s.apps), "an app or the default route names a route that isn't there")
+        // The filter's own choices per app are app choices too: as many at most, and package names.
+        need(s.prefs.filter.apps.size <= MAX_APPS && s.prefs.filter.apps.keys.all { it.length <= 255 && PKG.matches(it) }, "the Protection filter's app choices are damaged")
         need(sites(s.sites), "a website's route is damaged")
         need(s.onNet.all { (kind, name) -> kind in NET_KINDS && s.profiles.any { it.name == name } }, "a profile to switch to isn't there")
         s.profiles.forEach { p ->
@@ -402,7 +438,7 @@ object Backup {
                 (ss.plugin?.length ?: 0) <= 64 && (ss.server + ss.method + ss.plugin.orEmpty()).none(Char::isISOControl)
             else -> false
         }
-        need(ok, "own server ${name.take(40)} is damaged")
+        need(ok, "own server ${safe(name)} is damaged")
     }
 
     /** Checks an own server's config as an import would; its reason names the server, never a key or a password. */
@@ -412,7 +448,7 @@ object Backup {
             ovpn?.let { require(plainName(it.name) && it.config.length <= 256 * 1024 && it.username.length <= 1024 && it.password.length <= 1024) { "it is damaged" }; Manual.parseOvpn(it.config, it.name, it.username, it.password) }
             ss?.let { require(plainName(it.name) && Manual.parseSs(Manual.ssLink(it), it.name) == it) { "its Shadowsocks settings are damaged" } }
         }.exceptionOrNull() ?: return
-        bad("own server ${name.take(40)}: ${(why.message ?: "it is damaged").replaceFirstChar(Char::lowercase).removeSuffix(".")}")
+        bad("own server ${safe(name)}: ${(why.message ?: "it is damaged").replaceFirstChar(Char::lowercase).removeSuffix(".")}")
     }
 }
 
@@ -436,8 +472,9 @@ const val WAIT_MS = 30 * 86_400_000L
 fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true): Setup? {
     // Saved without keys: an own server this phone still has gets its config back here, and the home peer stays as it is.
     // A route that had no own server here got one made up in the file: this phone's route of that name gives it back.
+    val byOwn = backup.routes.groupBy { it.own }
     val full = backup.servers.filter { it.keyless }.mapNotNull { k ->
-        (servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) } ?: backup.routes.filter { it.own == k.id }.firstNotNullOfOrNull { x ->
+        (servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) } ?: byOwn[k.id].orEmpty().firstNotNullOfOrNull { x ->
             route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf(k::sameAs)
         })?.let { k.id to it }
     }.toMap()
@@ -467,14 +504,18 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     }
     val routeIds = r.routes.map { it.id }.toMutableSet()
     val rt = HashMap<String, String>()
+    val pins = HashMap<String, Location>()
     val addRoutes = used.mapNotNull { x ->
         val c = x.copy(own = x.own?.let { sv[it] ?: it })
         val there = r.route(x.id)
         // The same route as the file holds it ([Backup.named]); one tied here to no own server is the same as the file's tied one.
         val same = there != null && c.copy(loc = Backup.bare(c.loc)).let { f -> there == f || (f.own == null && there.copy(own = null) == f) }
-        val id = if (there == null) x.id else if (same) { rt[x.id] = x.id; return@mapNotNull null } else fresh("r", routeIds)
+        // Shared, it keeps the pin this phone trusts (address and key from the provider's list), not the file's name alone.
+        if (same) { rt[x.id] = x.id; if (c.loc != there!!.loc) pins[x.id] = c.loc; return@mapNotNull null }
+        val id = if (there == null) x.id else fresh("r", routeIds)
         rt[x.id] = id; routeIds += id; c.copy(id = id)
     }
+    if (pins.isNotEmpty()) r = r.copy(routes = r.routes.map { x -> pins[x.id]?.let { x.copy(loc = it) } ?: x })
     val m = { id: String -> rt[id] ?: id }
     // The first profile: every route shown until now stays listed, as when the first profile is saved ([Setup.saveAs]).
     if (r.profiles.isEmpty()) r = r.copy(added = (r.added + (r.routes.map { it.id } - (setOf(r.defaultRoute) + r.apps.values + r.sites.values + r.added))).distinct())
