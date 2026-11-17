@@ -1,15 +1,21 @@
-Changes to sing-box v1.14.4 (GNU GPL v3.0 or later), made by the unbraid authors, last on 2026-11-17:
+Changes to sing-box v1.14.4 (GNU GPL v3.0 or later), made by the unbraid authors, last on 2026-11-18:
 a stand-in (fake) address is never handed to a second name while the range is unchanged: once the range is used
 up, lookups of new names are answered with a server failure instead, an address that still names a domain is
 skipped even when the saved position is older (a start moves past such addresses), and libbox tells how many
-addresses can still be handed out (FakeIPRemaining), so the app can move to a fresh range in time. Any trouble
-with the cache (a failed fake-IP read or write, a database failure, a checkpoint missing, of another range or older
-than the range's names) stops the table handing out addresses for the rest of its life (the count is then 0), and a
-cache file holding fake-IP names is never replaced by an empty one: found damaged at open, the start fails.
+addresses can still be handed out (FakeIPRemaining), so the app can move to a fresh range in time.
+
+What is promised, and against what: within one table (one range in one cache file's life) an address is never
+given to a second name. This holds across crashes (each name is committed before its address is handed out, and the
+database commits atomically) and across every error the database reports (a failed read or write, a failed
+transaction, a panic): the table then hands out nothing more, FakeIPRemaining is 0, no checkpoint survives, and a
+cache file holding fake-IP names is never replaced by an empty one (found damaged at open, the start fails). The app
+then moves to a new range with a deleted file. A cache file changed or corrupted without any reported error is out
+of scope: it is the app's own private file, and the app deletes it at every connect, app start and range move.
+The root zone (".") is answered with no address, as it has no name to save.
 Applied by tools/build-libbox.sh; git apply skips these lines.
 
 diff --git a/dns/transport/fakeip/fakeip.go b/dns/transport/fakeip/fakeip.go
-index 03daeff..eecb92b 100644
+index 03daeff..4d21e23 100644
 --- a/dns/transport/fakeip/fakeip.go
 +++ b/dns/transport/fakeip/fakeip.go
 @@ -2,6 +2,7 @@ package fakeip
@@ -20,9 +26,14 @@ index 03daeff..eecb92b 100644
  	"net/netip"
  
  	"github.com/sagernet/sing-box/adapter"
-@@ -73,6 +74,11 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
+@@ -72,7 +73,16 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
+ 	if len(domain) > 255 {
  		return nil, E.New("domain name too long for fakeip")
  	}
++	if domain == "" {
++		// The root zone has no address. Its empty name can't be saved, and a failed save stops the whole table.
++		return dns.FixedResponseStatus(message, mDNS.RcodeSuccess), nil
++	}
  	address, err := t.store.Create(domain, question.Qtype == mDNS.TypeAAAA)
 +	if errors.Is(err, ErrExhausted) {
 +		// Answered at once (and never cached): with an error instead, a hijacked lookup would get no answer and the
@@ -33,7 +44,7 @@ index 03daeff..eecb92b 100644
  		return nil, err
  	}
 diff --git a/dns/transport/fakeip/store.go b/dns/transport/fakeip/store.go
-index b7c51df..932d837 100644
+index b7c51df..42f094d 100644
 --- a/dns/transport/fakeip/store.go
 +++ b/dns/transport/fakeip/store.go
 @@ -2,8 +2,11 @@ package fakeip
@@ -48,7 +59,7 @@ index b7c51df..932d837 100644
  
  	"github.com/sagernet/sing-box/adapter"
  	E "github.com/sagernet/sing/common/exceptions"
-@@ -13,6 +16,57 @@ import (
+@@ -13,6 +16,59 @@ import (
  
  var _ adapter.FakeIPStore = (*Store)(nil)
  
@@ -102,11 +113,13 @@ index b7c51df..932d837 100644
 +// makes the store unsure for the rest of its life: it hands out nothing more (new names get a server failure),
 +// Remaining is 0, names it can still read keep their addresses, and it saves no checkpoint, so a later start on the
 +// same range finds names without one and is unsure as well. The only way out is a new table on a new range, which the
-+// app moves to when Remaining runs low or reaches 0.
++// app moves to when Remaining runs low or reaches 0. This holds across crashes (a name is committed before its address
++// is handed out, and commits are atomic) and every error the database reports; a cache file changed without a reported
++// error is out of scope (the app's own private file, deleted at every connect and range move).
  type Store struct {
  	ctx        context.Context
  	logger     logger.Logger
-@@ -25,6 +79,9 @@ type Store struct {
+@@ -25,6 +81,9 @@ type Store struct {
  	addressAccess sync.Mutex
  	inet4Current  netip.Addr
  	inet6Current  netip.Addr
@@ -116,7 +129,7 @@ index b7c51df..932d837 100644
  }
  
  func NewStore(ctx context.Context, logger logger.Logger, inet4Range netip.Prefix, inet6Range netip.Prefix) *Store {
-@@ -79,21 +136,75 @@ func (s *Store) Start() error {
+@@ -79,21 +138,78 @@ func (s *Store) Start() error {
  		if s.inet6Range.IsValid() {
  			s.inet6Current = s.inet6Range.Addr().Next()
  		}
@@ -188,12 +201,37 @@ index b7c51df..932d837 100644
  	s.addressAccess.Lock()
 +	if s.troubled() {
 +		s.addressAccess.Unlock()
++		// No checkpoint, and one saved before the trouble is taken away (reading it removes it): a later start on this
++		// range then finds names without one, and is unsure too.
++		s.storage.FakeIPMetadata()
 +		return nil
 +	}
  	metadata := &adapter.FakeIPMetadata{
  		Inet4Range:   s.inet4Range,
  		Inet6Range:   s.inet6Range,
-@@ -117,31 +228,41 @@ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
+@@ -104,8 +220,15 @@ func (s *Store) Close() error {
+ 	return s.storage.FakeIPSaveMetadata(metadata)
+ }
+ 
++// load is the address storage holds for domain, if it is of this store's range: one of another range (left by a
++// reset that failed) names nothing here.
++func (s *Store) load(domain string, isIPv6 bool) (netip.Addr, bool) {
++	address, loaded := s.storage.FakeIPLoadDomain(domain, isIPv6)
++	return address, loaded && s.Contains(address)
++}
++
+ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
+-	if address, loaded := s.storage.FakeIPLoadDomain(domain, isIPv6); loaded {
++	if address, loaded := s.load(domain, isIPv6); loaded {
+ 		return address, nil
+ 	}
+ 
+@@ -113,35 +236,45 @@ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
+ 	defer s.addressAccess.Unlock()
+ 
+ 	// Double-check after acquiring lock
+-	if address, loaded := s.storage.FakeIPLoadDomain(domain, isIPv6); loaded {
++	if address, loaded := s.load(domain, isIPv6); loaded {
  		return address, nil
  	}
  
@@ -256,10 +294,10 @@ index b7c51df..932d837 100644
  		Inet4Range:   s.inet4Range,
 diff --git a/dns/transport/fakeip/store_test.go b/dns/transport/fakeip/store_test.go
 new file mode 100644
-index 0000000..ab2e8d7
+index 0000000..84b1b45
 --- /dev/null
 +++ b/dns/transport/fakeip/store_test.go
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,517 @@
 +package fakeip
 +
 +import (
@@ -278,6 +316,8 @@ index 0000000..ab2e8d7
 +	"github.com/sagernet/sing-box/option"
 +	"github.com/sagernet/sing/common/logger"
 +	"github.com/sagernet/sing/service"
++
++	mDNS "github.com/miekg/dns"
 +)
 +
 +func TestStoreNeverReusesAnAddress(t *testing.T) {
@@ -696,6 +736,85 @@ index 0000000..ab2e8d7
 +	}
 +	_ = held
 +}
++
++// A lookup of the root zone (".") reaches fake-IP through a catch-all address rule. It has no name to save, and must
++// neither get a stand-in address nor stop the table for every other name.
++func TestTheRootZoneGetsNoAddressAndStopsNothing(t *testing.T) {
++	store, _, stop := mustStart(t, t.TempDir()+"/cache.db", rangeA)
++	defer stop()
++	transport := &Transport{store: store, inet4Enabled: true}
++	message := new(mDNS.Msg)
++	message.SetQuestion(".", mDNS.TypeA)
++	response, err := transport.Exchange(context.Background(), message)
++	if err != nil || response.Rcode != mDNS.RcodeSuccess || len(response.Answer) != 0 {
++		t.Fatalf("root zone: %v (%v), want an empty success", response, err)
++	}
++	if left := Remaining(); left != 13 {
++		t.Fatalf("remaining %d after a root-zone lookup, want 13", left)
++	}
++	handOut(t, store, "a.example")
++}
++
++// A save that fails while the database still works.
++type failingSave struct {
++	*cachefile.CacheFile
++	fail, failed bool
++}
++
++func (c *failingSave) FakeIPStore(address netip.Addr, domain string) error {
++	if c.fail {
++		c.failed = true
++		return errors.New("disk full")
++	}
++	return c.CacheFile.FakeIPStore(address, domain)
++}
++
++func (c *failingSave) FakeIPTrouble() bool { return c.failed || c.CacheFile.FakeIPTrouble() }
++
++// The checkpoint saved before the trouble is taken away at close: the next start on the range is unsure too, instead
++// of carrying on from it.
++func TestTroubleTakesTheCheckpointAway(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	store, cache, stop, err := startOnCache(t, path, rangeA, func(c *cachefile.CacheFile) adapter.CacheFile { return &failingSave{CacheFile: c} })
++	if err != nil {
++		t.Fatal(err)
++	}
++	held := handOut(t, store, "a.example", "b.example")
++	// As the background save does: an exact checkpoint, then a save that fails.
++	if err := cache.FakeIPSaveMetadata(&adapter.FakeIPMetadata{Inet4Range: rangeA, Inet4Current: held["b.example"]}); err != nil {
++		t.Fatal(err)
++	}
++	store.storage.(*failingSave).fail = true
++	if _, err := store.Create("c.example", false); err == nil {
++		t.Fatal("c.example given an address whose name wasn't saved")
++	}
++	stop()
++	store, _, stop = mustStart(t, path, rangeA)
++	defer stop()
++	assertUnsure(t, store, held)
++}
++
++// A reset that fails when the range changes.
++type failingReset struct{ *cachefile.CacheFile }
++
++func (c *failingReset) FakeIPReset() error  { return errors.New("disk full") }
++func (c *failingReset) FakeIPTrouble() bool { return true }
++
++// A name the cache still holds with an address of another range is not answered with that address.
++func TestANameIsNeverAnsweredWithAnotherRangesAddress(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	store, _, stop := mustStart(t, path, rangeA)
++	handOut(t, store, "a.example")
++	stop()
++	store, _, stop, err := startOnCache(t, path, rangeB, func(c *cachefile.CacheFile) adapter.CacheFile { return &failingReset{c} })
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer stop()
++	if address, err := store.Create("a.example", false); err != ErrExhausted {
++		t.Fatalf("a.example given %s (%v) on the next range, want ErrExhausted", address, err)
++	}
++}
 diff --git a/experimental/cachefile/cache.go b/experimental/cachefile/cache.go
 index 3cbec73..1510019 100644
 --- a/experimental/cachefile/cache.go
@@ -758,7 +877,7 @@ index 3cbec73..1510019 100644
  	failedDB.Close()
  	filemanager.Remove(c.ctx, c.path)
 diff --git a/experimental/cachefile/fakeip.go b/experimental/cachefile/fakeip.go
-index 814c204..0b42131 100644
+index 814c204..07cfe1f 100644
 --- a/experimental/cachefile/fakeip.go
 +++ b/experimental/cachefile/fakeip.go
 @@ -1,6 +1,7 @@
@@ -789,7 +908,7 @@ index 814c204..0b42131 100644
  func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
  	var metadata adapter.FakeIPMetadata
  	err := c.batch(func(tx *bbolt.Tx) error {
-@@ -39,6 +53,10 @@ func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
+@@ -39,13 +53,17 @@ func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
  		return metadata.UnmarshalBinary(metadataBinary)
  	})
  	if err != nil {
@@ -800,16 +919,59 @@ index 814c204..0b42131 100644
  		return nil
  	}
  	return &metadata
-@@ -77,7 +95,7 @@ func (c *CacheFile) FakeIPSaveMetadataAsync(metadata *adapter.FakeIPMetadata) {
  }
  
+ func (c *CacheFile) FakeIPSaveMetadata(metadata *adapter.FakeIPMetadata) error {
+-	return c.batch(func(tx *bbolt.Tx) error {
++	return c.fakeIPFailed(c.batch(func(tx *bbolt.Tx) error {
+ 		bucket, err := tx.CreateBucketIfNotExists(bucketFakeIP)
+ 		if err != nil {
+ 			return err
+@@ -55,7 +73,7 @@ func (c *CacheFile) FakeIPSaveMetadata(metadata *adapter.FakeIPMetadata) error {
+ 			return err
+ 		}
+ 		return bucket.Put(keyMetadata, metadataBinary)
+-	})
++	}))
+ }
+ 
+ func (c *CacheFile) FakeIPSaveMetadataAsync(metadata *adapter.FakeIPMetadata) {
+@@ -63,21 +81,25 @@ func (c *CacheFile) FakeIPSaveMetadataAsync(metadata *adapter.FakeIPMetadata) {
+ 	defer c.saveMetadataAccess.Unlock()
+ 	c.saveMetadata = metadata
+ 	if c.saveMetadataTimer == nil {
+-		c.saveMetadataTimer = time.AfterFunc(C.FakeIPMetadataSaveInterval, func() {
+-			c.saveMetadataAccess.Lock()
+-			savedMetadata := c.saveMetadata
+-			c.saveMetadataAccess.Unlock()
+-			if savedMetadata != nil {
+-				_ = c.FakeIPSaveMetadata(savedMetadata)
+-			}
+-		})
++		c.saveMetadataTimer = time.AfterFunc(C.FakeIPMetadataSaveInterval, c.saveMetadataLater)
+ 	} else {
+ 		c.saveMetadataTimer.Reset(C.FakeIPMetadataSaveInterval)
+ 	}
+ }
+ 
++// saveMetadataLater saves the newest checkpoint asked for, unless fake-IP trouble came since: after trouble no
++// checkpoint is saved (see FakeIPTrouble).
++func (c *CacheFile) saveMetadataLater() {
++	c.saveMetadataAccess.Lock()
++	savedMetadata := c.saveMetadata
++	c.saveMetadataAccess.Unlock()
++	if savedMetadata != nil && !c.FakeIPTrouble() {
++		_ = c.FakeIPSaveMetadata(savedMetadata)
++	}
++}
++
  func (c *CacheFile) FakeIPStore(address netip.Addr, domain string) error {
 -	return c.batch(func(tx *bbolt.Tx) error {
 +	return c.fakeIPFailed(c.batch(func(tx *bbolt.Tx) error {
  		bucket, err := tx.CreateBucketIfNotExists(bucketFakeIP)
  		if err != nil {
  			return err
-@@ -101,7 +119,7 @@ func (c *CacheFile) FakeIPStore(address netip.Addr, domain string) error {
+@@ -101,7 +123,7 @@ func (c *CacheFile) FakeIPStore(address netip.Addr, domain string) error {
  			}
  		}
  		return bucket.Put([]byte(domain), address.AsSlice())
@@ -818,7 +980,7 @@ index 814c204..0b42131 100644
  }
  
  func (c *CacheFile) FakeIPStoreAsync(address netip.Addr, domain string, logger logger.Logger) {
-@@ -144,14 +162,14 @@ func (c *CacheFile) FakeIPLoad(address netip.Addr) (string, bool) {
+@@ -144,14 +166,14 @@ func (c *CacheFile) FakeIPLoad(address netip.Addr) (string, bool) {
  		return cachedDomain, true
  	}
  	var domain string
@@ -835,7 +997,7 @@ index 814c204..0b42131 100644
  	return domain, domain != ""
  }
  
-@@ -171,7 +189,7 @@ func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bo
+@@ -171,7 +193,7 @@ func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bo
  		return cachedAddress, true
  	}
  	var address netip.Addr
@@ -844,7 +1006,7 @@ index 814c204..0b42131 100644
  		var bucket *bbolt.Bucket
  		if isIPv6 {
  			bucket = tx.Bucket(bucketFakeIPDomain6)
-@@ -183,12 +201,12 @@ func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bo
+@@ -183,12 +205,12 @@ func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bo
  		}
  		address = M.AddrFromIP(bucket.Get([]byte(domain)))
  		return nil
@@ -859,7 +1021,7 @@ index 814c204..0b42131 100644
  		for _, bucketName := range [][]byte{bucketFakeIP, bucketFakeIPDomain4, bucketFakeIPDomain6} {
  			if tx.Bucket(bucketName) == nil {
  				continue
-@@ -199,5 +217,5 @@ func (c *CacheFile) FakeIPReset() error {
+@@ -199,5 +221,5 @@ func (c *CacheFile) FakeIPReset() error {
  			}
  		}
  		return nil
@@ -868,10 +1030,10 @@ index 814c204..0b42131 100644
  }
 diff --git a/experimental/cachefile/fakeip_test.go b/experimental/cachefile/fakeip_test.go
 new file mode 100644
-index 0000000..c19cd11
+index 0000000..11aebbc
 --- /dev/null
 +++ b/experimental/cachefile/fakeip_test.go
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,128 @@
 +package cachefile
 +
 +import (
@@ -881,6 +1043,7 @@ index 0000000..c19cd11
 +	"os"
 +	"testing"
 +
++	"github.com/sagernet/sing-box/adapter"
 +	"github.com/sagernet/sing-box/option"
 +	"github.com/sagernet/sing/common/logger"
 +)
@@ -902,6 +1065,9 @@ index 0000000..c19cd11
 +		"name":       func(c *CacheFile) { c.FakeIPLoadDomain("a.example", false) },
 +		"save":       func(c *CacheFile) { c.FakeIPStore(address, "a.example") },
 +		"reset":      func(c *CacheFile) { c.FakeIPReset() },
++		"checkpoint save": func(c *CacheFile) {
++			c.FakeIPSaveMetadata(&adapter.FakeIPMetadata{Inet4Range: netip.MustParsePrefix("198.18.0.0/28"), Inet4Current: address})
++		},
 +	} {
 +		cache := open(t, t.TempDir()+"/cache.db")
 +		if f(cache); cache.FakeIPTrouble() {
@@ -911,6 +1077,22 @@ index 0000000..c19cd11
 +		if f(cache); !cache.FakeIPTrouble() {
 +			t.Fatalf("%s: a failure not noted as trouble", name)
 +		}
++	}
++}
++
++// A background save asked for before trouble saves nothing once trouble came: after it no checkpoint is saved.
++func TestNoLateCheckpointAfterTrouble(t *testing.T) {
++	cache := open(t, t.TempDir()+"/cache.db")
++	defer cache.database().Close()
++	cache.saveMetadata = &adapter.FakeIPMetadata{Inet4Range: netip.MustParsePrefix("198.18.0.0/28"), Inet4Current: netip.MustParseAddr("198.18.0.2")}
++	cache.saveMetadataLater()
++	if cache.FakeIPMetadata() == nil {
++		t.Fatal("a late save without trouble saved nothing")
++	}
++	cache.fakeIPTrouble.Store(true)
++	cache.saveMetadataLater()
++	if cache.FakeIPMetadata() != nil {
++		t.Fatal("a late save after trouble saved a checkpoint")
 +	}
 +}
 +
