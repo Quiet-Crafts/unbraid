@@ -236,7 +236,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     val shown by ui.shown.collectAsStateWithLifecycle()
     val lit = on && draft == null
     val byRoute = remember(shown) { shown.apps.entries.groupBy({ it.value }, { it.key }) }
-    val sitesBy = remember(shown) { shown.sites.entries.groupBy({ it.value }, { it.key }).mapValues { it.value.sorted() } }
+    val sitesBy = remember(shown, vpn.tsSuffix) { sitesBy(shown, vpn.tsSuffix) }
     val live = if (lit) vpn.servers else emptyMap()
     // A profile lists its own routes, and routes nothing uses yet (one just added), never another profile's.
     val hidden = remember(setup, draft) { setup.hiddenRoutes(draft) }
@@ -456,7 +456,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     ) { sheet = id } }
                 }
                 // Nothing set apart yet: say what that means instead of leaving the page empty.
-                if (shown.apps.values.all { it == shown.defaultRoute } && shown.sites.isEmpty() && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
+                if (shown.apps.values.all { it == shown.defaultRoute } && sitesBy.isEmpty() && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
                     Text("All apps use the default route. Tap + to send some apps through another route.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp))
                 }
                 if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {

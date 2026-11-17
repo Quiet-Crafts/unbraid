@@ -59,9 +59,9 @@ class SitesTest {
         sites = mapOf("example.com" to "it", "api.example.com" to "us", "bank.example" to DIRECT), version = VERSION,
     )
 
-    private fun compile(s: Setup, blocked: Set<String> = emptySet()): JsonObject {
+    private fun compile(s: Setup, blocked: Set<String> = emptySet(), tsSuffix: String? = null): JsonObject {
         val links = s.activeRoutes.filter { it.id !in blocked }.associate { it.id to WgLink(sv(it.id), Nord.peer(sv(it.id), wgKey)) }
-        return Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links, "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", blocked = blocked))).jsonObject.also { assertRefusesOtherBlocks(it) }
+        return Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links, "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", tsSuffix, blocked = blocked))).jsonObject.also { assertRefusesOtherBlocks(it) }
     }
     private fun JsonObject.rules() = this["route"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
     private fun JsonObject.dns() = this["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
@@ -163,24 +163,68 @@ class SitesTest {
         assertTrue(compile(setup.copy(sites = emptyMap())).dns().none { it.strings("query_type") == listOf("HTTPS", "SVCB") })
     }
 
-    /** A route or Direct for a name on the own network or in the tailnet gets no rule; a block of one stays a block; the tailnet's domain is the allowed one. */
-    @Test fun aNameOnTheOwnNetworkGetsNoRule() {
+    /**
+     * A route or Direct for a name the tailnet's or the local network's lookup rule answers first gets no rule, exactly
+     * while that rule is on; a block of one stays a block. The same names apply as ordinary websites otherwise.
+     */
+    @Test fun aNameAnsweredByAnEarlierLookupRuleGetsNoRule() {
         val home = app.unbraid.data.Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example")
-        val s = setup.copy(home = home, sites = mapOf("printer.lan" to "it", "box.corp.example" to "it", "nas.ts.net" to app.unbraid.data.BLOCK, "x.fritz.box" to DIRECT, "example.com" to "it", "other.example" to "it"))
-        assertEquals(mapOf("nas.ts.net" to app.unbraid.data.BLOCK, "example.com" to "it", "other.example" to "it"), Sites.applied(s))
-        val c = compile(s)
+        val sites = mapOf("printer.lan" to "it", "box.corp.example" to "it", "nas.ts.net" to app.unbraid.data.BLOCK, "x.fritz.box" to DIRECT, "example.com" to "it", "host.tail9.ts.net" to "it")
+        val s = setup.copy(home = home, sites = sites)
+        // Headscale: its own domain is the tailnet's once Tailscale reports it, ts.net is anyone's (a Funnel site, say).
+        assertEquals(mapOf("nas.ts.net" to app.unbraid.data.BLOCK, "example.com" to "it", "host.tail9.ts.net" to "it"), Sites.applied(s, reported = "corp.example"))
+        // Before it reports that domain (or reports another), the tailnet's lookup rule isn't there: the website applies,
+        // and its route stays in use, so the compiler never names a route without a tunnel.
+        assertEquals(sites - "printer.lan" - "x.fritz.box", Sites.applied(s)); assertEquals(sites - "printer.lan" - "x.fritz.box", Sites.applied(s, reported = "other.example"))
+        assertTrue(compile(s).rules().any { it.strings("domain")?.contains("box.corp.example") == true && it.text("outbound") == "r-it" })
+        val c = compile(s, tsSuffix = "corp.example")
         val named = c.rules().filter { it["domain"] != null && it["outbound"] != null }.flatMap { it.strings("domain")!! }
-        assertEquals(listOf("example.com", "other.example"), named.sorted())
+        assertEquals(listOf("example.com", "host.tail9.ts.net"), named.sorted())
         assertEquals(listOf("nas.ts.net"), c.rules().filter { it.text("action") == "reject" && it["domain"] != null }.flatMap { it.strings("domain")!! })
         assertTrue(c.dns().none { it.strings("domain")?.any { d -> d == "printer.lan" || d == "box.corp.example" || d == "x.fritz.box" } == true })
-        // Without Tailscale there is no tailnet: the same name is an ordinary website. With the official server only ts.net counts.
-        assertEquals(mapOf("box.corp.example" to "it"), Sites.applied(setup.copy(sites = mapOf("box.corp.example" to "it"), home = home.copy(tailscale = false))))
-        assertEquals(null, Sites.tailnet(setup.copy(home = home.copy(tsControlUrl = null))))
-        assertEquals("corp.example", Sites.tailnet(s))
-        // The rows say so, in the screen's words.
-        assertEquals("Not applied: it is a name on your own network", siteState(s, "printer.lan"))
-        assertEquals("Not applied: it is a name in your tailnet", siteState(s, "box.corp.example"))
-        assertEquals("Blocked, no traffic", siteState(s, "nas.ts.net")); assertEquals("Italy", siteState(s, "example.com"))
+        // Tailscale's own server: all of ts.net is the tailnet's. Reach your tailnet off, or the local network not bypassing the VPN: every one applies.
+        assertEquals(setOf("nas.ts.net", "example.com", "box.corp.example"), Sites.applied(s.copy(home = home.copy(tsControlUrl = null))).keys)
+        assertEquals(sites.keys - "printer.lan" - "x.fritz.box", Sites.applied(s.copy(home = home.copy(tailscale = false))).keys)
+        assertEquals(sites, Sites.applied(s.copy(home = home.copy(tailscale = false), prefs = s.prefs.copy(lan = false))))
+        // The rows say why, in the screen's words.
+        assertEquals("Not applied: your network answers this name while Local network bypasses the VPN is on", siteState(s, "printer.lan"))
+        assertEquals("Not applied: your tailnet answers this name while Reach your tailnet is on", siteState(s, "box.corp.example", "corp.example"))
+        assertEquals("Italy", siteState(s, "box.corp.example"))
+        assertEquals("Not applied: Tailscale answers ts.net names while Reach your tailnet is on", siteState(s.copy(home = home.copy(tsControlUrl = null)), "host.tail9.ts.net"))
+        assertEquals("Blocked, no traffic", siteState(s, "nas.ts.net")); assertEquals("Italy", siteState(s, "example.com")); assertEquals("Italy", siteState(s, "host.tail9.ts.net"))
+        // Adding one now says it won't apply, unless it is blocked.
+        assertEquals("Covers nas.lan and every address under it. Not applied now: your network answers this name while Local network bypasses the VPN is on", app.unbraid.ui.siteHint(s, "nas.lan", "it"))
+        assertEquals("Covers nas.lan and every address under it", app.unbraid.ui.siteHint(s, "nas.lan", app.unbraid.data.BLOCK))
+    }
+
+    /** A name an older version saved that today's reader refuses is listed, marked, routed as before and removable. */
+    @Test fun aNameSavedByAnOlderVersionStaysUsable() {
+        val old = listOf("x.0xff", "xn--ax-iuk.com") // a number as the last label; a Hangul filler browsers drop
+        val s = setup.copy(sites = old.associateWith { "it" })
+        for (n in old) {
+            assertNull(n, Sites.clean(n)); assertEquals(n, Sites.shown(n)); assertTrue(n, n in Sites.readings(n))
+            assertEquals("Italy · not an address browsers open", siteState(s, n))
+        }
+        assertEquals(old, shownSites(s, "", null)); assertEquals(old.toSet(), Sites.applied(s).keys)
+        assertTrue(compile(s).rules().any { it.strings("domain")?.containsAll(old) == true && it.text("outbound") == "r-it" })
+        assertEquals(listOf("xn--ax-iuk.com"), s.site(null, "x.0xff", null).sites.keys.toList())
+    }
+
+    /** A website that doesn't apply opens no tunnel, protects nothing, and is in no count of what a route carries. */
+    @Test fun aWebsiteNotAppliedIsNotInUse() {
+        val s = setup.copy(defaultRoute = DIRECT, apps = emptyMap(), sites = mapOf("printer.lan" to "it"))
+        assertTrue(Sites.applied(s).isEmpty())
+        assertEquals(emptyList<String>(), s.activeRoutes.map { it.id })
+        assertTrue(s.directOnly)
+        assertFalse(app.unbraid.vpn.glance(app.unbraid.vpn.VpnState(app.unbraid.vpn.VpnState.Phase.On), s).protects)
+        assertEquals(emptyMap<String, List<String>>(), app.unbraid.ui.sitesBy(s))
+        assertEquals("Direct · no apps elsewhere · 1 website, 1 not applied", summary(s, Profile("P", DIRECT, sites = s.sites)))
+        assertTrue(compile(s).rules().none { it["domain"] != null })
+        // The same website where it applies: on Italy, with a tunnel, and counted.
+        val on = s.copy(prefs = s.prefs.copy(lan = false))
+        assertEquals(listOf("it"), on.activeRoutes.map { it.id }); assertFalse(on.directOnly)
+        assertEquals(mapOf("it" to listOf("printer.lan")), app.unbraid.ui.sitesBy(on))
+        assertEquals("Direct · no apps elsewhere · 1 website", summary(on, Profile("P", DIRECT, sites = on.sites)))
     }
 
     @Test fun profilesCarryTheirWebsites() {

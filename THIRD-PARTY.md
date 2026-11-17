@@ -25,6 +25,7 @@ app in `app/src/main/assets/notices.txt`. `tools/notices.sh` regenerates that fi
 | [gluetun](https://github.com/qdm12/gluetun) | ExpressVPN OpenVPN profile and provider notes | MIT |
 | [PIA manual-connections](https://github.com/pia-foss/manual-connections) | Sign-in and region steps for Private Internet Access | MIT |
 | PIA certificate authority (`pia_ca_rsa_4096.crt`) | Pinning TLS to PIA's WireGuard servers | MIT, from PIA manual-connections |
+| [Public Suffix List](https://publicsuffix.org), part of its ICANN section (`shared_suffixes.txt`) | Refusing a website name that many websites share, such as co.uk | MPL-2.0 |
 
 ## Google Play build only
 

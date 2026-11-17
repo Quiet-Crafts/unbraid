@@ -35,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -62,20 +63,36 @@ import app.unbraid.data.Sites
 /** The website tile that takes a website's own route away. */
 internal const val NO_ROUTE = "none"
 
-/** Where website [site] goes, for its row and for TalkBack. */
-internal fun siteState(s: Setup, site: String): String {
+/**
+ * Where website [site] goes, for its row and for TalkBack, with the tailnet domain Tailscale [reported]. An address saved
+ * by an older version that no browser opens says so.
+ */
+internal fun siteState(s: Setup, site: String, reported: String? = null): String {
     val id = s.sites[site]
-    val own = Sites.ownNetwork(site, Sites.tailnet(s))
     // Block reaches every address under a blocked website, whatever route one of them has.
     val over = s.sites.filter { (parent, to) -> to == BLOCK && site.endsWith(".$parent") }.keys.minOrNull()
+    val off = Sites.overridden(site, s, reported)
     return when {
         id == BLOCK -> "Blocked, no traffic"
         over != null -> "Blocked: it is under $over"
-        own != null -> "Not applied: it is $own"
+        off != null -> "Not applied: $off"
         id == DIRECT -> "Direct, skips the VPN"
         else -> s.route(id)?.name ?: "A route that no longer exists"
-    }
+    } + if (Sites.clean(site) != site) " · not an address browsers open" else ""
 }
+
+/** The website rows of a Routes page: each route's websites whose rule applies, A to Z. */
+internal fun sitesBy(s: Setup, reported: String? = null) = Sites.applied(s, reported = reported).entries.groupBy({ it.value }, { it.key }).mapValues { it.value.sorted() }
+
+/** A profile's websites in a summary (" · 3 websites"), with how many of them don't apply now; empty for none. */
+internal fun websitesText(s: Setup, sites: Map<String, String>): String {
+    val off = sites.size - Sites.applied(s, sites).size
+    return if (sites.isEmpty()) "" else (if (sites.size == 1) " · 1 website" else " · ${sites.size} websites") + if (off > 0) ", $off not applied" else ""
+}
+
+/** Said in the Add website sheet under the address: what the rule covers, and why it won't apply now when a lookup rule comes first. */
+internal fun siteHint(s: Setup, site: String, to: String) =
+    "Covers ${Sites.shown(site)} and every address under it" + (Sites.overridden(site, s)?.takeIf { to != BLOCK }?.let { ". Not applied now: $it" } ?: "")
 
 /** [name] cut in the middle when it is too long for two lines of a row, so its start and its end both show. */
 internal fun shortName(name: String) = if (name.length <= 56) name else name.take(26) + "…" + name.takeLast(26)
@@ -88,7 +105,7 @@ internal fun siteNote(id: String) = when (id) {
 }
 
 /** Why [raw] can't be added as a website of [s], or null when it can (or nothing is typed yet). */
-internal fun siteError(s: Setup, raw: String): String? = if (raw.isBlank()) null else Sites.refusal(raw, Sites.tailnet(s)) ?: when {
+internal fun siteError(s: Setup, raw: String): String? = if (raw.isBlank()) null else Sites.refusal(raw) ?: when {
     Sites.clean(raw) in s.sites -> "This website is already on the list"
     s.sites.size >= Sites.MAX -> "A profile holds up to ${Sites.MAX} websites"
     else -> null
@@ -104,7 +121,7 @@ internal fun sitesNote(outside: Boolean) = "A website's route beats its app's, a
  */
 internal fun shownSites(s: Setup, query: String, filter: String?): List<String> {
     val rank = (s.routes.sortedBy { it.name.lowercase() }.map { it.id } + DIRECT + BLOCK).filter { it != s.defaultRoute }.withIndex().associate { (i, id) -> id to i }
-    return s.sites.filter { (site, id) -> (filter == null || id == filter) && (query.isEmpty() || site.contains(query, true) || Sites.shown(site).contains(query, true)) }.keys
+    return s.sites.filter { (site, id) -> (filter == null || id == filter) && (query.isEmpty() || Sites.readings(site).any { it.contains(query, true) }) }.keys
         .sortedWith(compareBy({ rank[s.sites[it]] ?: Int.MAX_VALUE }, { it }))
 }
 
@@ -163,11 +180,12 @@ private fun SiteRow(ui: Ui, site: String, setup: Setup, offered: List<Route>, ex
     val motion = MaterialTheme.motionScheme
     val id = setup.sites[site].orEmpty()
     val route = setup.route(id)
+    val state = siteState(setup, site, ui.vpn.collectAsStateWithLifecycle().value.tsSuffix)
     val ground by animateColorAsState(if (expanded) Ink.surface else Color.Transparent, motion.fastEffectsSpec(), label = "row")
     Column(Modifier.padding(horizontal = 8.dp).fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(ground)) {
         Row(
             Modifier.fillMaxWidth().heightIn(min = 60.dp).tap(onToggle, if (expanded) "Close" else "Choose a route")
-                .semantics { stateDescription = siteState(setup, site) + if (expanded) ", open" else "" }.padding(horizontal = 14.dp, vertical = 10.dp),
+                .semantics { stateDescription = state + if (expanded) ", open" else "" }.padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Box(Modifier.size(40.dp).clip(RoundedCornerShape(14.dp)).background(Ink.surfaceTop), contentAlignment = Alignment.Center) { Icon(Icons.link, null, Modifier.size(22.dp), tint = Ink.text) }
@@ -176,7 +194,7 @@ private fun SiteRow(ui: Ui, site: String, setup: Setup, offered: List<Route>, ex
                 val name = Sites.shown(site)
                 Text(if (expanded) name else shortName(name), style = Type.body, color = Ink.text, maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.semantics { contentDescription = name })
-                Text(siteState(setup, site), style = Type.caption, color = if (!builtIn(id) && route == null) Ink.bad else Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(state, style = Type.caption, color = if (!builtIn(id) && route == null) Ink.bad else Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             RouteMark(route?.code ?: "··", route?.let { Ink.route(it.hue) } ?: if (id == BLOCK) Ink.bad else Ink.direct, Modifier.clearAndSetSemantics {}, direct = id == DIRECT, block = id == BLOCK)
         }
@@ -213,12 +231,12 @@ internal fun SiteSheet(setup: Setup, offered: List<Route>, onAdd: (String, Strin
             }
             Column(Modifier.padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedTextField(
-                    raw, { raw = it.take(300) }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Address", style = Type.caption) },
+                    raw, { raw = it.take(Sites.PASTE + 1) }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Address", style = Type.caption) },
                     placeholder = { Text("example.com", style = Type.body, color = Ink.dim) }, textStyle = Type.body, isError = error != null, colors = inkFieldColors(), shape = RoundedCornerShape(16.dp),
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { add() }),
                 )
-                Text(error ?: site?.let { "Covers ${Sites.shown(it)} and every address under it" } ?: "Type the address or paste a link", style = Type.caption, color = if (error != null) Ink.bad else Ink.dim, modifier = Modifier.padding(horizontal = 4.dp))
+                Text(error ?: site?.let { siteHint(setup, it, to) } ?: "Type the address or paste a link", style = Type.caption, color = if (error != null) Ink.bad else Ink.dim, modifier = Modifier.padding(horizontal = 4.dp))
             }
             Text("GOES THROUGH", style = Type.overline, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp))
             Box(Modifier.padding(start = 10.dp)) { RouteTiles(routeTiles(setup, offered), to, siteNote(to), indent = false) { to = it } }

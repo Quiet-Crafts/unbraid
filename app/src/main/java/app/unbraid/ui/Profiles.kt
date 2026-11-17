@@ -271,7 +271,7 @@ fun summary(s: Setup, p: Profile): String {
     if (!p.ready) return "Empty · no default route yet"
     val default = if (p.defaultRoute == DIRECT) "Direct" else s.route(p.defaultRoute)?.name ?: "Default route no longer exists"
     return "$default · ${if (n == 0) "no apps elsewhere" else if (n == 1) "1 app elsewhere" else "$n apps elsewhere"}" +
-        when (p.sites.size) { 0 -> ""; 1 -> " · 1 website"; else -> " · ${p.sites.size} websites" }
+        websitesText(s, p.sites)
 }
 
 /**
