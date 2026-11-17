@@ -39,7 +39,7 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
         )
     }
 
-    fun stop() { handler.removeCallbacks(lose); runCatching { cm.unregisterNetworkCallback(this) }; AutoSwitch.net.value = null }
+    fun stop() { handler.removeCallbacks(lose); runCatching { cm.unregisterNetworkCallback(this) }; AutoSwitch.unwatched() }
 
     fun quit() { stop(); thread.quitSafely() }
 
@@ -56,21 +56,23 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     // Every update the engine sees as a new interface closes all connections, so only real changes go through:
     // a loss waits briefly for the network to come back, and link changes on the same interface are ignored.
     @Volatile private var lost: Network? = null
-    private val lose = Runnable { if (network == lost) { network = null; AutoSwitch.net.value = null; push() } }
+    private val lose = Runnable { if (network == lost) { network = null; AutoSwitch.seen(null); push() } }
     private val pusher = InterfacePush {
         val name = network?.let { cm.getLinkProperties(it)?.interfaceName }
         val index = name?.let { runCatching { NetworkInterface.getByName(it)?.index }.getOrNull() }
         if (name == null || index == null) "" to -1 else name to index
     }
 
-    override fun onAvailable(n: Network) { handler.removeCallbacks(lose); network = n; push() }
+    // The switch by network learns of a new network in the same step as everything else here, so a pick made meanwhile
+    // can't be noted for the network the phone just left. Without its capabilities yet, its kind isn't known: no network.
+    override fun onAvailable(n: Network) { handler.removeCallbacks(lose); network = n; AutoSwitch.seen(cm.getNetworkCapabilities(n)?.let { net(n, it) }); push() }
     override fun onLinkPropertiesChanged(n: Network, lp: LinkProperties) { if (n == network) push() }
     override fun onLost(n: Network) { if (n == network) { lost = n; handler.postDelayed(lose, 3_000) } }
     // The VPN itself is never metered (Android would warn about every app); a combined speed test asks first on a metered one.
     override fun onCapabilitiesChanged(n: Network, caps: NetworkCapabilities) {
         if (n != network) return
         UnbraidVpn.metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
-        AutoSwitch.net.value = net(n, caps)
+        AutoSwitch.seen(net(n, caps))
     }
 
     /** Not [force]d: a real move to another network, which may fix blocked routes ([onChange]). */
@@ -81,9 +83,10 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     }
 }
 
-/** Network [n] for the profile set to follow it: Wi-Fi or mobile data (a cable counts as Wi-Fi), and this connection to it. */
-private fun net(n: Network, caps: NetworkCapabilities) =
-    AutoSwitch.Net(if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) app.unbraid.data.MOBILE else app.unbraid.data.WIFI, n.networkHandle)
+/** Network [n] for the profile set to follow it: Wi-Fi or mobile data (a cable counts as Wi-Fi), and this connection to it; null for handle 0, which names none. */
+private fun net(n: Network, caps: NetworkCapabilities) = n.networkHandle.takeIf { it != 0L }?.let {
+    AutoSwitch.Net(if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) app.unbraid.data.MOBILE else app.unbraid.data.WIFI, it)
+}
 
 /** The phone's own network now, never a VPN; null with none. unbraid itself is left outside its VPN, so this holds while connected too. */
 fun underlying(cm: ConnectivityManager): AutoSwitch.Net? = runCatching {

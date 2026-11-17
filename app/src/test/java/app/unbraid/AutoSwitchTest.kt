@@ -13,6 +13,7 @@ import app.unbraid.data.WIFI
 import app.unbraid.ui.onNetSub
 import app.unbraid.vpn.AutoSwitch
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -39,13 +40,32 @@ class AutoSwitchTest {
     @Test fun aProfilePickedByHandStays() {
         val wifi = AutoSwitch.Net(WIFI, 100)
         val run = AutoSwitch.Run()
-        assertEquals("Home", run.settle(wifi, setup.onNet))
-        run.pick(wifi, setup.onNet) // Trip, by hand
+        run.seen(wifi)
+        assertEquals("Home", run.settle(wifi, setup.onNet)?.profile)
+        run.pick(setup.onNet) // Trip, by hand
         assertNull(run.settle(wifi, setup.onNet))
         assertNull(run.settle(wifi, setup.onNet + (MOBILE to "Home"))) // the other network's rule: nothing here
-        assertEquals("Trip", run.settle(wifi, setup.onNet + (WIFI to "Trip"))) // a new rule for this network applies over it
-        run.pick(wifi, setup.onNet + (WIFI to "Trip"))
-        assertEquals("Trip", run.settle(AutoSwitch.Net(WIFI, 101), setup.onNet + (WIFI to "Trip"))) // another Wi-Fi: its rule
+        assertEquals("Trip", run.settle(wifi, setup.onNet + (WIFI to "Trip"))?.profile) // a new rule for this network applies over it
+        run.pick(setup.onNet + (WIFI to "Trip"))
+        val other = AutoSwitch.Net(WIFI, 101)
+        run.seen(other)
+        assertEquals("Trip", run.settle(other, setup.onNet + (WIFI to "Trip"))?.profile) // another Wi-Fi: its rule
+    }
+
+    /** The Not switched card names its profile by the rule that chose it: renamed, deleted, switched to or left, it goes. */
+    @Test fun theNotSwitchedCardHoldsOnlyForItsOwnProfile() {
+        val wifi = AutoSwitch.Net(WIFI, 100)
+        val ns = AutoSwitch.NotSwitched("Trip", MOBILE, wifi.id, "Not switched to Trip: …")
+        assertTrue(ns.holds(setup, wifi))
+        assertTrue(ns.holds(setup, null)) // the network not known now: still shown
+        assertFalse(ns.holds(setup, AutoSwitch.Net(MOBILE, 101))) // the phone left that network
+        assertFalse(ns.holds(setup.copy(profile = "Trip"), wifi)) // switched to
+        assertFalse(ns.holds(setup.forget("Trip"), wifi)) // deleted
+        // Renamed, then another profile made under the old name: the card doesn't act on that one.
+        val renamed = setup.rename("Trip", "Work")
+        assertFalse(ns.holds(renamed, wifi))
+        assertFalse(ns.holds(renamed.copy(profiles = renamed.profiles + Profile("Trip", "nl")), wifi))
+        assertFalse(ns.holds(setup.copy(onNet = mapOf(MOBILE to "Home")), wifi)) // its rule now names another profile
     }
 
     @Test fun aSwitchThatCantHappenSaysWhy() {

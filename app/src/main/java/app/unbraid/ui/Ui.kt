@@ -911,6 +911,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** Shows profile [name] without using it: nothing reconnects until [useProfile]. */
     fun view(name: String?) { viewing.value = name?.takeIf { it != setup.value.profile } }
 
+    /** Profile [name]'s tab tapped: the one in use is picked again (it holds on this network, [useProfile]); another is shown. */
+    fun choose(name: String) { if (name == setup.value.profile) useProfile(name) else view(name) }
+
     // ---- profiles ----
 
     /** Set by a profile shortcut: the activity on screen shows Routes (where the profile is shown, to be used). */
