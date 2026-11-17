@@ -53,32 +53,35 @@ class BackupAdversarialTest {
         return RestoreTraffic.notes(phone, phone.restoredFrom(c.setup, null, 0, c.keys)!!)
     }
 
+    /** Each weakening alone gives exactly its sentences, nothing missing and nothing more; together, counts join and nothing is lost. */
     @Test fun eachWeakeningAloneAndAllTogetherIsSaid() {
         assertEquals(emptyList<String>(), sheet(phone))
-        val kinds = listOf<Pair<String, (Setup) -> Setup>>(
-            "The default route goes from Netherlands to Direct." to { it.copy(defaultRoute = DIRECT) },
-            "The DNS filter is turned off." to { it.copy(prefs = it.prefs.copy(filter = Filter())) },
-            "1 app loses the DNS filter." to { it.copy(prefs = it.prefs.copy(filter = it.prefs.filter.copy(apps = emptyMap()))) },
-            "Apps can reach the local network again." to { it.copy(prefs = it.prefs.copy(lan = true)) },
-            "1 app that is blocked now won't be." to { it.copy(apps = it.apps - "org.example.game") },
-            "1 website that is blocked now won't be." to { it.copy(sites = it.sites - "tracker.example") },
-            "1 app goes from a VPN route to Direct." to { it.copy(apps = it.apps + ("org.example.mail" to DIRECT)) },
-            "1 website goes from a VPN route to Direct." to { it.copy(sites = it.sites + ("work.example" to DIRECT)) },
-            "\"Box\" connects to 198.51.100.66 instead of 203.0.113.1." to { s -> wg.copy(endpoint = "198.51.100.66:51820").let { e -> s.copy(servers = listOf(OwnServer("s", wg = e)), routes = s.routes.map { if (it.id == "w") it.copy(wg = e) else it }) } },
-            "Your home WireGuard uses other DNS servers: 198.51.100.53." to { it.copy(home = it.home.copy(wg = it.home.wg!!.copy(dns = listOf("198.51.100.53")))) },
+        val leaves = "1 app on Direct no longer passes through unbraid, so the DNS filter, website rules and the home tunnel don't reach it."
+        val kinds = listOf<Pair<List<String>, (Setup) -> Setup>>(
+            listOf("The default route goes from Netherlands to Direct.") to { it.copy(defaultRoute = DIRECT) },
+            // The bank app on Direct passed through unbraid only for the filter: without it, it leaves unbraid, its website and home rules too.
+            listOf("The DNS filter is turned off.", leaves) to { it.copy(prefs = it.prefs.copy(filter = Filter())) },
+            listOf(leaves) to { it.copy(prefs = it.prefs.copy(filter = it.prefs.filter.copy(apps = emptyMap()))) },
+            listOf("Apps can reach the local network again.") to { it.copy(prefs = it.prefs.copy(lan = true)) },
+            listOf("1 app that is blocked now won't be.") to { it.copy(apps = it.apps - "org.example.game") },
+            listOf("1 website that is blocked now won't be.") to { it.copy(sites = it.sites - "tracker.example") },
+            // Left outside unbraid: its blocked website and home tunnel go with it, said once as the app's.
+            listOf("1 app goes from a VPN route to Direct.") to { it.copy(apps = it.apps + ("org.example.mail" to DIRECT)) },
+            listOf("1 website goes from a VPN route to Direct.") to { it.copy(sites = it.sites + ("work.example" to DIRECT)) },
+            listOf("\"Box\" connects to 198.51.100.66 instead of 203.0.113.1.") to { s -> wg.copy(endpoint = "198.51.100.66:51820").let { e -> s.copy(servers = listOf(OwnServer("s", wg = e)), routes = s.routes.map { if (it.id == "w") it.copy(wg = e) else it }) } },
+            listOf("Your home WireGuard uses other DNS servers: 198.51.100.53.") to { it.copy(home = it.home.copy(wg = it.home.wg!!.copy(dns = listOf("198.51.100.53")))) },
             // With the local network closed the rest of a home range goes through the VPN, not Direct: open here.
-            "Part of the home network goes Direct instead of through the home tunnel." to { it.copy(prefs = it.prefs.copy(lan = true), home = it.home.copy(wg = it.home.wg!!.copy(allowedIps = listOf("192.168.50.0/25")))) },
+            listOf("Part of the home network goes Direct instead of through the home tunnel.", "Apps can reach the local network again.") to
+                { it.copy(prefs = it.prefs.copy(lan = true), home = it.home.copy(wg = it.home.wg!!.copy(allowedIps = listOf("192.168.50.0/25")))) },
         )
-        for ((said, change) in kinds) assertTrue("$said in ${sheet(change(phone))}", said in sheet(change(phone)))
+        for ((said, change) in kinds) assertEquals(said, sheet(change(phone)))
         // The provider's own blocking: said once the filter no longer stands in for it.
         val noFilter = phone.copy(prefs = phone.prefs.copy(filter = Filter()))
         assertEquals(listOf("The default route loses the provider's ad and tracker blocking it has now."),
             RestoreTraffic.notes(noFilter, noFilter.copy(opts = mapOf("nord" to mapOf("protect" to "off")))))
-        val all = kinds.fold(phone) { s, (_, change) -> change(s) }
-        val together = sheet(all)
-        // Together, counts join ("1 app and 1 website go…") and a filter turned off is said once for all.
-        for ((said, _) in kinds.filter { it.first != "1 app loses the DNS filter." && !it.first.startsWith("1 app goes") && !it.first.startsWith("1 website goes") }) assertTrue("$said in $together", said in together)
-        assertTrue(together.toString(), "1 app and 1 website go from a VPN route to Direct." in together)
+        assertEquals(listOf("The DNS filter is turned off.", "\"Box\" connects to 198.51.100.66 instead of 203.0.113.1.", "Your home WireGuard uses other DNS servers: 198.51.100.53.", leaves,
+            "The default route goes from Netherlands to Direct.", "1 app and 1 website go from a VPN route to Direct.", "Part of the home network goes Direct instead of through the home tunnel.",
+            "Apps can reach the local network again.", "1 app that is blocked now won't be.", "1 website that is blocked now won't be."), sheet(kinds.fold(phone) { s, (_, change) -> change(s) }))
     }
 
     @Test fun weakOwnServersAreNamedUntilAccepted() {
