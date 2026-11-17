@@ -109,7 +109,7 @@ class WidgetSequencesTest {
     /** A Tailscale exit works only while Tailscale runs and reports its device online; offline, it fails; unreported, it isn't known. */
     @Test fun aTailscaleExitNeedsItsDeviceOnline() {
         val s = setup.copy(routes = setup.routes + Route("ts", tsExit = "100.64.0.9", tsName = "nas"), apps = mapOf("a" to "ts"))
-        val v = VpnState(Phase.On, servers = mapOf("nl" to srv, "ts" to srv), tsState = "Running")
+        val v = VpnState(Phase.On, servers = mapOf("nl" to srv, "ts" to Server("nas", "100.64.0.9", "", "", 0)), tsState = "Running")
         fun ts(v: VpnState, net: Long? = 9) = glance(v, s, net).others.single { it.code == "TS" }
         assertTrue(ts(v.copy(tsExitNodes = listOf(TsNode("nas", "100.64.0.9", true)))).working)
         assertTrue(ts(v.copy(tsExitNodes = listOf(TsNode("nas", "100.64.0.9", false)))).let { it.failing && !it.working })
