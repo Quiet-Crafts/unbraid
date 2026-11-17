@@ -387,10 +387,10 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         Notice(Icons.error, Ink.bad, "Couldn't switch to ${f.to}.${f.kept?.let { " $it is still in use." }.orEmpty()}", "Try again", dismiss = { ui.switchFailed.value = null }, live = true) { switchTo(f.to) }
                     }
                 }
-                // The last switch by network that didn't happen, also when its notice was off or replaced.
-                notSwitched?.let { (to, why) ->
+                // The last switch by network that didn't happen, also when its notice was off or replaced, while it still holds.
+                notSwitched?.takeIf { it.holds(setup, null) }?.let { ns ->
                     item(key = "notSwitched") {
-                        Notice(Icons.error, Ink.bad, why, "Switch", dismiss = { app.unbraid.vpn.AutoSwitch.notSwitched.value = null }, live = true) { switchTo(to) }
+                        Notice(Icons.error, Ink.bad, ns.why, "Switch", dismiss = { app.unbraid.vpn.AutoSwitch.notSwitched.value = null }, live = true) { switchTo(ns.profile) }
                     }
                 }
                 item(key = "profileLabel") {
@@ -403,7 +403,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     if (setup.profiles.isEmpty()) Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = Gutter - 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("Save this setup to switch back to it in one tap.", style = Type.sub, color = Ink.dim, modifier = Modifier.weight(1f))
                         Secondary("Save", { addProfile(false) }, color = Ink.text)
-                    } else ProfileStrip(setup, switching, draft) { ui.view(it) }
+                    } else ProfileStrip(setup, switching, draft) { ui.choose(it) }
                 }
                 // Shown, not in use: nothing reconnects until Use.
                 draft?.let { d ->
