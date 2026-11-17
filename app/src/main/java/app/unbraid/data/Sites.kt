@@ -3,7 +3,6 @@
 package app.unbraid.data
 
 import app.unbraid.vpn.Compiler
-import java.lang.Character.UnicodeScript
 import java.net.IDN
 import java.text.Normalizer
 
@@ -123,31 +122,14 @@ object Sites {
     private val LETTERY = setOf(Character.UPPERCASE_LETTER, Character.LOWERCASE_LETTER, Character.TITLECASE_LETTER, Character.MODIFIER_LETTER, Character.OTHER_LETTER,
         Character.NON_SPACING_MARK, Character.COMBINING_SPACING_MARK, Character.DECIMAL_DIGIT_NUMBER, Character.LETTER_NUMBER).map { it.toInt() }.toSet()
 
-    /** A letter, mark or digit both rules write the same way, or a sign a name may hold beside certain letters ([contextual]). */
-    private fun letter(c: Int) = c < 0x80 || c in CONTEXT || Character.getType(c) in LETTERY && c !in DIFFERENT && IGNORABLE.none { c in it }
-
-    /** Signs a name may hold only beside certain letters ([contextual]): the Catalan middle dot, the Greek numeral sign, Hebrew geresh and gershayim, the Japanese middle dot. */
-    private val CONTEXT = setOf(0xb7, 0x375, 0x5f3, 0x5f4, 0x30fb)
-    private val KANA_KANJI = setOf(UnicodeScript.HIRAGANA, UnicodeScript.KATAKANA, UnicodeScript.HAN)
-
     /**
-     * Whether [label] keeps IDNA's contextual rules (RFC 5892), as registries do: a middle dot only between two l's
-     * ("col·legi"), the Greek numeral sign before a Greek letter, geresh and gershayim after a Hebrew letter, the Japanese
-     * middle dot in a label with kana or kanji ("カタカナ・テスト"), and Arabic-Indic digits of one kind only.
+     * A letter, mark or digit both rules write the same way, or a sign IDNA lets a name hold ([SIGNS]). Where such a sign
+     * may stand is the registries' rule (RFC 5892), not the browsers': a name with one is saved as the browser opens it.
      */
-    private fun contextual(label: String): Boolean {
-        val c = label.codePoints().toArray()
-        val script = { i: Int -> c.getOrNull(i)?.let(UnicodeScript::of) }
-        return c.indices.all { i ->
-            when (c[i]) {
-                0xb7 -> c.getOrNull(i - 1) == 'l'.code && c.getOrNull(i + 1) == 'l'.code
-                0x375 -> script(i + 1) == UnicodeScript.GREEK
-                0x5f3, 0x5f4 -> script(i - 1) == UnicodeScript.HEBREW
-                0x30fb -> c.any { UnicodeScript.of(it) in KANA_KANJI }
-                else -> true
-            }
-        } && !(c.any { it in 0x660..0x669 } && c.any { it in 0x6f0..0x6f9 })
-    }
+    private fun letter(c: Int) = c < 0x80 || c in SIGNS || Character.getType(c) in LETTERY && c !in DIFFERENT && IGNORABLE.none { c in it }
+
+    /** The Catalan middle dot, the Greek numeral sign, Hebrew geresh and gershayim, the Japanese middle dot ("カタカナ・テスト"). */
+    private val SIGNS = setOf(0xb7, 0x375, 0x5f3, 0x5f4, 0x30fb)
 
     /** The name in [raw] as a browser reads a web address, or the reason there is none. */
     private fun read(raw: String): Pair<String?, String> {
@@ -180,7 +162,7 @@ object Sites {
         // name or none.
         if ("xn--" in name) {
             val read = IDN.toUnicode(name)
-            if (!read.codePoints().allMatch { letter(it) } || !Normalizer.isNormalized(read, Normalizer.Form.NFC) || IDN.toASCII(read).lowercase() != name || !bidi(read.split('.')) || !read.split('.').all(::contextual)) return null to NOT_A_NAME
+            if (!read.codePoints().allMatch { letter(it) } || !Normalizer.isNormalized(read, Normalizer.Form.NFC) || IDN.toASCII(read).lowercase() != name || !bidi(read.split('.'))) return null to NOT_A_NAME
         }
         return name to ""
     }

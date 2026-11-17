@@ -295,9 +295,9 @@ class SitesAdversarialTest {
     }
 
     /**
-     * Registered-style names in many scripts are taken in both forms, written as browsers write them; the signs IDNA lets
-     * stand only beside certain letters are taken there (the Japanese middle dot among kana or kanji, the Catalan one
-     * between two l's, the Greek numeral sign, Hebrew gershayim) and refused elsewhere.
+     * Registered-style names in many scripts are taken in both forms, written as browsers write them, the signs IDNA
+     * lets stand beside certain letters included (the Japanese middle dot, the Catalan one, the Greek numeral sign,
+     * Hebrew gershayim); elsewhere such a sign is saved as a browser opens it, or refused.
      */
     @Test fun namesInEveryScriptAreTakenAsBrowsersWriteThem() {
         for ((raw, ascii) in listOf( // the ASCII forms are a browser's (WHATWG URL parser)
@@ -314,10 +314,11 @@ class SitesAdversarialTest {
             assertEquals(ascii, ascii, Sites.clean(ascii)); assertNull(ascii, Sites.refusal(ascii))
             assertEquals(ascii, "$raw ($ascii)", Sites.shown(ascii))
         }
-        // The same signs where IDNA doesn't let them stand: browsers would open these, no registry hands them out.
-        for (raw in listOf("a・b.jp", "・.jp", "l·a.cat", "a·l.cat", "·l.cat", "a͵b.gr", "͵.gr", "a״.co.il", "״ב.co.il", "١۱.example")) {
-            assertNull(raw, Sites.clean(raw))
-            runCatching { java.net.IDN.toASCII(raw).lowercase() }.getOrNull()?.let { assertNull(it, Sites.clean(it)) }
+        // The same signs where registries don't let them stand: saved as a browser opens them (WHATWG URL parser), or refused.
+        for ((raw, host) in listOf("a・b.jp" to "xn--ab-3n4a.jp", "・.jp" to "xn--vek.jp", "l·a.cat" to "xn--la-0ea.cat", "a·l.cat" to "xn--al-0ea.cat", "·l.cat" to "xn--l-fda.cat",
+            "a͵b.gr" to "xn--ab-63b.gr", "͵.gr" to "xn--wva.gr", "a״.co.il" to null, "״ב.co.il" to "xn--5db3e.co.il", "١۱.example" to null)) {
+            assertTrue(raw, Sites.clean(raw).let { it == null || it == host })
+            host?.let { assertTrue(it, Sites.clean(it).let { c -> c == null || c == host }) }
         }
     }
 
