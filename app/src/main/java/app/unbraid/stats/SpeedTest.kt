@@ -103,6 +103,8 @@ object SpeedTest {
         // Provider routes know their country; imported servers and Tailscale nodes are located by their address alone.
         val country = route?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()?.takeIf { !anywhere }
         val epoch = Stats.epoch
+        // An engine restart (a reload, or a move to new fake IPs) puts Tailscale back on its configured exit node.
+        val engine = UnbraidVpn.state.value.engine
         val recordAs = Stats.note(exit, setup)
         val mine = synchronized(lock) { _run.value = Run(exit); ++attempt }
         val stop = { attempt != mine }
@@ -131,6 +133,8 @@ object SpeedTest {
                 if (stop()) return@Runnable
                 // Moved to another provider or server meanwhile: the numbers belong to neither.
                 if (Stats.idOf(exit, UnbraidVpn.running ?: setup) != recordAs) { set { it.copy(phase = Phase.Failed, error = "The route changed during the test. Try again.") }; return@Runnable }
+                // A tested node after an engine restart: what was measured since was the configured one.
+                if (node != null && UnbraidVpn.state.value.engine != engine) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; return@Runnable }
                 set { it.copy(phase = Phase.Done, up = up, now = 0, elapsedMs = MAX_SECONDS * 1000L) }
                 val done = _run.value ?: return@Runnable
                 Stats.saveTests(listOf(Stats.Test(System.currentTimeMillis(), recordAs, via, name, ip, down, up, done.ping?.median ?: 0, 0, 0)), epoch)
