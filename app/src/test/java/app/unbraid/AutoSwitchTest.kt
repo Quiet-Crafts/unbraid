@@ -54,11 +54,15 @@ class AutoSwitchTest {
 
     /** The Not switched card names its profile by the rule that chose it: renamed, deleted, switched to or left, it goes. */
     @Test fun theNotSwitchedCardHoldsOnlyForItsOwnProfile() {
-        val wifi = AutoSwitch.Net(WIFI, 100)
-        val ns = AutoSwitch.NotSwitched("Trip", MOBILE, wifi.id, "Not switched to Trip: …")
+        val wifi = AutoSwitch.State(true, AutoSwitch.Net(WIFI, 100))
+        val ns = AutoSwitch.NotSwitched("Trip", MOBILE, 100, "Not switched to Trip: …")
         assertTrue(ns.holds(setup, wifi))
-        assertTrue(ns.holds(setup, null)) // the network not known now: still shown
-        assertFalse(ns.holds(setup, AutoSwitch.Net(MOBILE, 101))) // the phone left that network
+        assertTrue(ns.holds(setup, wifi.copy(here = AutoSwitch.Net(null, 100)))) // the same network, its kind not reported again yet
+        assertTrue(ns.holds(setup, AutoSwitch.State())) // nothing watches the network (the VPN off): not known, still shown
+        assertFalse(ns.holds(setup, AutoSwitch.State(true, AutoSwitch.Net(MOBILE, 101)))) // the phone left that network
+        // That network seen lost (airplane mode): left, so the card goes, though no other network came.
+        assertFalse(ns.holds(setup, AutoSwitch.step(wifi, AutoSwitch.Event.Lost(100)).state))
+        assertTrue(ns.holds(setup, AutoSwitch.step(wifi, AutoSwitch.Event.Lost(99)).state)) // another network lost: no change
         assertFalse(ns.holds(setup.copy(profile = "Trip"), wifi)) // switched to
         assertFalse(ns.holds(setup.forget("Trip"), wifi)) // deleted
         // Renamed, then another profile made under the old name: the card doesn't act on that one.

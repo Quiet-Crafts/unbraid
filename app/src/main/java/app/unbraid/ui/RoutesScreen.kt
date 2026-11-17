@@ -226,6 +226,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     val switching by ui.switching.collectAsStateWithLifecycle()
     val failed by ui.switchFailed.collectAsStateWithLifecycle()
     val notSwitched by app.unbraid.vpn.AutoSwitch.notSwitched.collectAsStateWithLifecycle()
+    val netModel by app.unbraid.vpn.AutoSwitch.model.collectAsStateWithLifecycle()
     val switchTo = rememberProfileSwitch(ui)
     val addProfile = { empty: Boolean -> if (setup.profiles.size < MAX_PROFILES) { full = false; sheetEmpty = empty; profileSheet = "" } else full = true }
     var newName by rememberSaveable { mutableStateOf("") }
@@ -388,9 +389,10 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     }
                 }
                 // The last switch by network that didn't happen, also when its notice was off or replaced, while it still holds.
-                notSwitched?.takeIf { it.holds(setup, null) }?.let { ns ->
+                // Checked again on the tap: the phone may have left that network since the page was drawn.
+                notSwitched?.takeIf { it.holds(setup, netModel) }?.let { ns ->
                     item(key = "notSwitched") {
-                        Notice(Icons.error, Ink.bad, ns.why, "Switch", dismiss = { app.unbraid.vpn.AutoSwitch.notSwitched.value = null }, live = true) { switchTo(ns.profile) }
+                        Notice(Icons.error, Ink.bad, ns.why, "Switch", dismiss = { app.unbraid.vpn.AutoSwitch.notSwitched.value = null }, live = true) { if (ns.holds(ui.setup.value, app.unbraid.vpn.AutoSwitch.model.value)) switchTo(ns.profile) }
                     }
                 }
                 item(key = "profileLabel") {

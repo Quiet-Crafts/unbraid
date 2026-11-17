@@ -64,10 +64,12 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     }
 
     // The switch by network learns of a new network in the same step as everything else here, so a pick made meanwhile
-    // can't be noted for the network the phone just left. Without its capabilities yet, its kind isn't known: no network.
-    override fun onAvailable(n: Network) { handler.removeCallbacks(lose); network = n; AutoSwitch.seen(cm.getNetworkCapabilities(n)?.let { net(n, it) }); push() }
+    // can't be noted for the network the phone just left. Without its capabilities yet, it is this network of a kind not
+    // known yet (they follow in onCapabilitiesChanged).
+    override fun onAvailable(n: Network) { handler.removeCallbacks(lose); network = n; AutoSwitch.seen(net(n, cm.getNetworkCapabilities(n))); push() }
     override fun onLinkPropertiesChanged(n: Network, lp: LinkProperties) { if (n == network) push() }
-    override fun onLost(n: Network) { if (n == network) { lost = n; handler.postDelayed(lose, 3_000) } }
+    // Only the engine waits for a lost network to come back; for the switch by network the phone has left it.
+    override fun onLost(n: Network) { if (n == network) { lost = n; AutoSwitch.lost(n.networkHandle); handler.postDelayed(lose, 3_000) } }
     // The VPN itself is never metered (Android would warn about every app); a combined speed test asks first on a metered one.
     override fun onCapabilitiesChanged(n: Network, caps: NetworkCapabilities) {
         if (n != network) return
@@ -83,9 +85,12 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     }
 }
 
-/** Network [n] for the profile set to follow it: Wi-Fi or mobile data (a cable counts as Wi-Fi), and this connection to it; null for handle 0, which names none. */
-private fun net(n: Network, caps: NetworkCapabilities) = n.networkHandle.takeIf { it != 0L }?.let {
-    AutoSwitch.Net(if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) app.unbraid.data.MOBILE else app.unbraid.data.WIFI, it)
+/**
+ * Network [n] for the profile set to follow it: Wi-Fi or mobile data (a cable counts as Wi-Fi; no [caps] yet: not
+ * known), and this connection to it; null for handle 0, which names none.
+ */
+private fun net(n: Network, caps: NetworkCapabilities?) = n.networkHandle.takeIf { it != 0L }?.let {
+    AutoSwitch.Net(caps?.let { c -> if (c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) app.unbraid.data.MOBILE else app.unbraid.data.WIFI }, it)
 }
 
 /** The phone's own network now, never a VPN; null with none. unbraid itself is left outside its VPN, so this holds while connected too. */

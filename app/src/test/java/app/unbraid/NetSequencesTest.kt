@@ -11,6 +11,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.random.Random
 
+/** For [NetSequencesTest]'s interleavings: no handover back to a network that stayed connected. */
+internal const val RETURNS = -2
+
+/** Network [id] before Android reported its kind. */
+private fun pending(id: Long) = Net(null, id)
+
 /**
  * Hostile sequences, seeded so a failure can be replayed: what a hand pick and a switch by network do through rule
  * edits, renames, deletes, restarts, network flaps, picks while offline, and events that come between a decision and
@@ -54,6 +60,13 @@ class NetSequencesTest {
             val h = here
             if (h == null) { holding = false; fresh = true } else { holding = true; fresh = false; seen = rules[h.kind] }
         }
+        /** Joined a network whose kind Android reports a moment later; [pickFirst]: a pick in between. */
+        fun joinLate(kind: String, pickFirst: Boolean) {
+            val n = Net(kind, nextId++)
+            here = n; if (on) run.seen(pending(n.id)); holding = false; fresh = true
+            if (pickFirst) pick()
+            if (on) run.seen(n)
+        }
         fun restart() { run = AutoSwitch.Run(); if (on) run.seen(here); holding = false; fresh = true }
     }
 
@@ -88,7 +101,7 @@ class NetSequencesTest {
             w.join(w.rnd.nextKind())
             val log = StringBuilder("seed $seed:")
             repeat(60) { i ->
-                val e = w.rnd.nextInt(15)
+                val e = w.rnd.nextInt(16)
                 log.append(" $e")
                 when (e) {
                     0, 1 -> w.settle("$log")
@@ -106,6 +119,7 @@ class NetSequencesTest {
                     13 -> repeat(3) { w.settle("$log") } // a burst of settles: decided once
                     // The VPN off: picks then belong to the phone's own network; on again, on this or another network.
                     14 -> { w.vpn(false); if (w.rnd.nextBoolean()) w.pick(); if (w.rnd.nextBoolean()) w.join(w.rnd.nextKind()); w.vpn(true) }
+                    15 -> w.joinLate(w.rnd.nextKind(), w.rnd.nextBoolean())
                 }
             }
         }
@@ -217,38 +231,139 @@ class NetSequencesTest {
         // A move to another Wi-Fi during the write: not saved, though that Wi-Fi's rule names the same profile; it decides
         // for itself once it lasted.
         AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; val next = Net(WIFI, 5); seen(next); assertFalse(commit(d, rules, false)); assertEquals("Home", decide(next, rules)) }
+        // Wi-Fi lost just before its settle (airplane mode): the engine still waits for it, the switch by network doesn't.
+        AutoSwitch.Run().run { seen(home); lost(home.id); assertNull(state.here); assertNull(settle(home, rules)) }
+        // ... and lost during the write: not saved.
+        AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; lost(home.id); assertFalse(commit(d, rules, false)) }
+        // Mobile A, Wi-Fi B, back to A, which stayed connected (the same handle): A's decision is void, A decides again.
+        AutoSwitch.Run().run {
+            val r = rules + (MOBILE to "Trip")
+            seen(cell); val d = settle(cell, r)!!; seen(home); seen(cell)
+            assertFalse(commit(d, r, false))
+            assertEquals("Trip", decide(cell, r))
+        }
+        // A network whose kind isn't reported yet: a pick on it holds once its kind comes; no rule applies before.
+        AutoSwitch.Run().run {
+            val r = rules + (MOBILE to "Trip")
+            seen(home); decide(home, r); seen(Net(null, 8)); assertNull(settle(Net(null, 8), r)); pick(r)
+            seen(Net(MOBILE, 8)); assertNull(decide(Net(MOBILE, 8), r))
+        }
+        // The rule's profile renamed while its switch waits to be saved: the save fails, and the renamed rule decides
+        // again (the switch is not used up).
+        AutoSwitch.Run().run {
+            seen(home); val d = settle(home, rules)!!; renamed("Home", "House")
+            val house = mapOf(WIFI to "House")
+            assertFalse(commit(d, house, false))
+            assertEquals("House", decide(home, house))
+        }
+        // ... and another profile made under the old name, with the rule set to it, before the save: the decision was for
+        // the renamed profile, so it doesn't switch to the new one.
+        AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; renamed("Home", "House"); assertFalse(commit(d, rules, false)) }
+        // A decision made again for the same network and profile is another one: the older save is not it.
+        AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; seen(cell); seen(home); val again = settle(home, rules)!!; assertFalse(commit(d, rules, false)); assertTrue(commit(again, rules, false)) }
     }
 
-    /** Decisions saved late and out of order, with events of every kind in between, checked against the rule above. */
+    /** The seeds that found the round-two findings before the model was fixed, each with the events that make it shortest. */
+    @Test fun theSeedsThatFoundTheFindings() {
+        interleave(8, setOf(5, 8, 9, 11, RETURNS)) // a decision made on a network already lost
+        interleave(82, setOf(5, 6, 7, 8, 9, 11)) // a decision saved after the phone left and came back
+        interleave(12, setOf(5, 6, 7, 11, RETURNS)) // a pick made before the network's kind was reported
+        interleave(17, setOf(5, 6, 7, 8, 9, RETURNS)) // a switch used up by a rename before its save
+    }
+
+    /**
+     * Decisions saved late and out of order, with every event the glue can deliver in between: handovers, a return to a
+     * network that stayed connected (Android keeps its handle), a loss the engine still waits out, a network whose kind
+     * isn't reported yet, callbacks that repeat, picks, rule edits, renames, the VPN off and on, the app on screen. The
+     * oracle is the rule stated on its own: a decision is saved only while it is the latest for the same stay on its
+     * network (not left since, even for a moment), no pick or rename of its profile came since, the rule still names it
+     * and the app is not on screen; a decision not saved is decided again, never used up.
+     */
     @Test fun randomInterleavingsOfDecisionsAndSaves() {
-        repeat(3_000) { seed ->
-            val rnd = Random(seed)
-            val run = AutoSwitch.Run()
-            var here: Net? = Net(WIFI, 1); var on = true; var shown = false; var picks = 0
-            val ids = listOf(0L, 1L, 2L, 3L) // few handles, so they come back; 0 among them
-            val rules = mutableMapOf(WIFI to "Home", MOBILE to "Trip")
-            run.seen(here)
-            val pending = mutableListOf<Pair<AutoSwitch.Decision, Int>>() // a decision and the picks made before it
-            val log = StringBuilder("seed $seed:")
-            repeat(60) {
-                val e = rnd.nextInt(9)
-                log.append(" $e")
-                when (e) {
-                    0, 1 -> here?.takeIf { on }?.let { n -> run.settle(n, rules)?.let { d ->
-                        assertEquals("$log", n.id, d.net); assertEquals("$log", rules[n.kind], d.profile)
-                        pending += d to picks
-                    } }
-                    2 -> { here = if (rnd.nextInt(4) == 0) null else Net(rnd.nextKind(), ids.random(rnd)); if (on) run.seen(here) }
-                    3 -> { run.pick(rules, here); picks++ }
-                    4 -> rules[rnd.nextKind()] = listOf("Home", "Trip", "Work").random(rnd)
-                    5 -> { on = !on; if (on) run.seen(here) else run.unwatched() }
-                    6 -> shown = !shown
-                    7, 8 -> if (pending.isNotEmpty()) {
-                        val (d, before) = pending.removeAt(rnd.nextInt(pending.size))
-                        val n = here
-                        val holds = on && n != null && n.id != 0L && n.id == d.net && before == picks && rules[n.kind] == d.profile && !shown
-                        assertEquals("$log", holds, run.commit(d, rules, shown))
+        repeat(5_000) { seed -> interleave(seed) }
+    }
+
+    /** One seeded sequence; events in [skip] are left out ([RETURNS]: handovers only to networks not seen before). */
+    private fun interleave(seed: Int, skip: Set<Int> = emptySet()) {
+        val rnd = Random(seed)
+        val run = AutoSwitch.Run()
+        fun kindOf(id: Long) = if (id % 2 == 0L) MOBILE else WIFI
+        var nextId = 10L
+        var here: Net? = Net(WIFI, 1) // the network the phone is on, as it is
+        var known = true // its kind reported yet
+        var on = true; var shown = false; var grace = false
+        var told: Long? = 1L // the network the model was last told of
+        var stay = 0 // a new stay each time the model is told of another network, or of none
+        val names = mutableListOf("Home", "Trip", "Work")
+        val rules = mutableMapOf(WIFI to "Home", MOBILE to "Trip")
+        var done: Pair<Int, Map<String, String>>? = null // saved, picked, or found without a rule on a stay, under the rules then
+        val live = mutableListOf<Pair<AutoSwitch.Decision, Int>>() // decisions the model may still save, with their stay
+        val void = mutableListOf<AutoSwitch.Decision>() // decisions that must never be saved
+        fun voidAll() { void += live.map { it.first }; live.clear() }
+        fun tell() { val id = here?.id?.takeIf { it != 0L }; if (id != told) { stay++; voidAll(); told = id } }
+        fun seenAs() = here?.let { if (known) it else pending(it.id) }
+        run.seen(here)
+        val log = StringBuilder("seed $seed:")
+        repeat(80) {
+            val e = rnd.nextInt(15).takeIf { it !in skip } ?: return@repeat
+            log.append(" $e")
+            when (e) {
+                // The glue settles on the network the model publishes.
+                0, 1 -> run.state.here?.let { n ->
+                    val truth = here?.takeIf { on && known && it.id != 0L && it.id == n.id }
+                    val want = truth?.let { rules[it.kind] }
+                    val expect = when {
+                        truth == null -> null
+                        done?.first == stay && done!!.second[truth.kind] == want -> null
+                        want == null -> { done = stay to rules.toMap(); null }
+                        live.any { it.second == stay && it.first.profile == want } -> null
+                        else -> want
                     }
+                    val d = run.settle(n, rules)
+                    assertEquals("$log", expect, d?.profile)
+                    if (d != null) { assertEquals("$log", truth!!.id, d.net); voidAll(); live += d to stay }
+                }
+                // A handover: to another network, to one that stayed connected, or to handle 0.
+                2 -> {
+                    val id = when (rnd.nextInt(6)) { 0 -> 0L; 1, 2 -> if (RETURNS in skip) nextId++ else rnd.nextLong(1, 3); else -> nextId++ }
+                    here = Net(kindOf(id), id); known = true; grace = false
+                    if (on) { tell(); run.seen(here) }
+                }
+                // With the VPN off, a pick is for the phone's own network as Android reports it: one of a kind not reported is none.
+                3 -> {
+                    run.pick(rules, here?.takeIf { known })
+                    if (!on) tell()
+                    voidAll()
+                    done = here?.takeIf { it.id != 0L && (on || known) }?.let { stay to rules.toMap() }
+                }
+                4 -> if (rnd.nextBoolean()) rules[rnd.nextKind()] = names.random(rnd) else rules.remove(rnd.nextKind())
+                5 -> if (on) { on = false; grace = false; run.unwatched(); voidAll() } else { on = true; tell(); run.seen(seenAs()) }
+                // The network lost: the engine waits a moment for it to come back; the switch by network must not.
+                6 -> here?.takeIf { on }?.let { n -> here = null; grace = true; tell(); run.lost(n.id) }
+                7 -> if (grace) { grace = false; if (on && here == null) run.seen(null) }
+                // A network whose kind isn't reported yet, and its kind arriving.
+                8 -> { val id = nextId++; here = Net(kindOf(id), id); known = false; grace = false; if (on) { tell(); run.seen(seenAs()) } }
+                9 -> if (!known) { known = true; if (on) run.seen(here) }
+                10 -> if (on && known) run.seen(here) // a callback that changes nothing
+                11 -> {
+                    val old = names.random(rnd); val new = "$old'".takeIf { it !in names } ?: return@repeat
+                    names[names.indexOf(old)] = new
+                    rules.replaceAll { _, v -> if (v == old) new else v }
+                    done = done?.let { (st, r) -> st to r.mapValues { (_, v) -> if (v == old) new else v } }
+                    live.filter { it.first.profile == old }.forEach { live.remove(it); void += it.first }
+                    run.renamed(old, new)
+                    // Sometimes another profile is made under the old name, and a rule may name it: a decision for the
+                    // renamed one is not for it.
+                    if (rnd.nextBoolean()) { names += old; if (rnd.nextBoolean()) rules[rnd.nextKind()] = old }
+                }
+                12 -> shown = !shown
+                13, 14 -> if (live.isNotEmpty() || void.isNotEmpty()) {
+                    val i = rnd.nextInt(live.size + void.size)
+                    val (d, st) = if (i < live.size) live.removeAt(i) else void.removeAt(i - live.size) to -1
+                    val n = here
+                    val holds = st == stay && on && known && n != null && n.id == d.net && rules[n.kind] == d.profile && !shown
+                    assertEquals("$log", holds, run.commit(d, rules, shown))
+                    if (holds) done = stay to rules.toMap()
                 }
             }
         }
@@ -263,6 +378,10 @@ class NetSequencesTest {
         val net = java.io.File("src/main/java/app/unbraid/vpn/Net.kt").readText()
         assertTrue(Regex("""override fun onAvailable\(n: Network\) \{[^\n]*network = n;[^\n]*AutoSwitch\.seen\(""").containsMatchIn(net))
         assertTrue(Regex("""private val lose = Runnable \{[^\n]*AutoSwitch\.seen\(null\)""").containsMatchIn(net))
+        // A loss reaches the model at once, before the engine's wait for the network to come back.
+        assertTrue(Regex("""override fun onLost\(n: Network\) \{ if \(n == network\) \{[^\n]*AutoSwitch\.lost\(n\.networkHandle\);[^\n]*postDelayed\(lose""").containsMatchIn(net))
+        // A network without its capabilities yet is seen as itself, of a kind not known yet, not as no network.
+        assertTrue(net.contains("AutoSwitch.seen(net(n, cm.getNetworkCapabilities(n)))"))
         assertTrue(Regex("""fun stop\(\) \{[^\n]*AutoSwitch\.unwatched\(\)""").containsMatchIn(net))
         assertFalse(net.contains("AutoSwitch.net.value ="))
         val watch = java.io.File("src/main/java/app/unbraid/vpn/AutoSwitch.kt").readText().substringAfter("fun watch(")
