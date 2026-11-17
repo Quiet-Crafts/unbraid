@@ -1,0 +1,385 @@
+Changes to sing-box v1.14.4 (GNU GPL v3.0 or later), made by the unbraid authors, last on 2026-11-17:
+a stand-in (fake) address is never handed to a second name while the range is unchanged: once the range is used
+up, lookups of new names are answered with a server failure instead, an address that still names a domain is
+skipped even when the saved position is older (a start moves past such addresses), an address whose name could not
+be saved is not handed out (and the pool then counts as used up), and libbox tells how many addresses can still be
+handed out (FakeIPRemaining), so the app can move to a fresh range in time.
+Applied by tools/build-libbox.sh; git apply skips these lines.
+
+diff --git a/dns/transport/fakeip/fakeip.go b/dns/transport/fakeip/fakeip.go
+index 03daeff..eecb92b 100644
+--- a/dns/transport/fakeip/fakeip.go
++++ b/dns/transport/fakeip/fakeip.go
+@@ -2,6 +2,7 @@ package fakeip
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"net/netip"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -73,6 +74,11 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
+ 		return nil, E.New("domain name too long for fakeip")
+ 	}
+ 	address, err := t.store.Create(domain, question.Qtype == mDNS.TypeAAAA)
++	if errors.Is(err, ErrExhausted) {
++		// Answered at once (and never cached): with an error instead, a hijacked lookup would get no answer and the
++		// program would wait out its resolver's timeout.
++		return dns.FixedResponseStatus(message, mDNS.RcodeServerFailure), nil
++	}
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/dns/transport/fakeip/store.go b/dns/transport/fakeip/store.go
+index b7c51df..2204579 100644
+--- a/dns/transport/fakeip/store.go
++++ b/dns/transport/fakeip/store.go
+@@ -2,8 +2,11 @@ package fakeip
+ 
+ import (
+ 	"context"
++	"math"
++	"math/big"
+ 	"net/netip"
+ 	"sync"
++	"sync/atomic"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+ 	E "github.com/sagernet/sing/common/exceptions"
+@@ -13,6 +16,50 @@ import (
+ 
+ var _ adapter.FakeIPStore = (*Store)(nil)
+ 
++// ErrExhausted: every address of the range has been handed out. An address is never handed to a second name while the
++// store keeps its range (a program still holding it would have its connections taken for the other name's), so lookups
++// of new names fail until the range changes.
++var ErrExhausted = E.New("fakeip address range exhausted")
++
++// The store that started last and is still open, for Remaining.
++var running atomic.Pointer[Store]
++
++// Remaining is how many addresses the running store can still hand out (the fewer of its IPv4 and IPv6 ranges, at most
++// math.MaxInt32), or -1 when no store runs.
++func Remaining() int32 {
++	s := running.Load()
++	if s == nil {
++		return -1
++	}
++	s.addressAccess.Lock()
++	defer s.addressAccess.Unlock()
++	if s.unsure {
++		return 0
++	}
++	left := int64(math.MaxInt32)
++	if s.inet4Current.IsValid() {
++		left = min(left, addressesBetween(s.inet4Current, s.inet4Last))
++	}
++	if s.inet6Current.IsValid() {
++		left = min(left, addressesBetween(s.inet6Current, s.inet6Last))
++	}
++	return int32(left)
++}
++
++// The addresses strictly between current (the last handed out) and last (the broadcast address, never handed out).
++func addressesBetween(current netip.Addr, last netip.Addr) int64 {
++	a, b := current.As16(), last.As16()
++	n := new(big.Int).Sub(new(big.Int).SetBytes(b[:]), new(big.Int).SetBytes(a[:]))
++	n.Sub(n, big.NewInt(1))
++	if n.Sign() < 0 {
++		return 0
++	}
++	if !n.IsInt64() {
++		return math.MaxInt32
++	}
++	return min(n.Int64(), math.MaxInt32)
++}
++
+ type Store struct {
+ 	ctx        context.Context
+ 	logger     logger.Logger
+@@ -25,6 +72,9 @@ type Store struct {
+ 	addressAccess sync.Mutex
+ 	inet4Current  netip.Addr
+ 	inet6Current  netip.Addr
++
++	// A mapping failed to save: what the cache holds may differ from what this store counted.
++	unsure bool
+ }
+ 
+ func NewStore(ctx context.Context, logger logger.Logger, inet4Range netip.Prefix, inet6Range netip.Prefix) *Store {
+@@ -82,14 +132,38 @@ func (s *Store) Start() error {
+ 		_ = storage.FakeIPReset()
+ 	}
+ 	s.storage = storage
++	s.reconcile()
++	running.Store(s)
+ 	return nil
+ }
+ 
++// reconcile moves each position past the addresses storage still maps: a restored position can be older than what was
++// handed out (the cache saves it in the background, and a late save can land after the final one), and Remaining
++// must count only what Create can still hand out. Allocation is in order, so they follow the position.
++func (s *Store) reconcile() {
++	pastMapped := func(current netip.Addr, last netip.Addr, prefix netip.Prefix) netip.Addr {
++		for current.IsValid() {
++			next := current.Next()
++			if next == last || !prefix.Contains(next) {
++				break
++			}
++			if _, used := s.storage.FakeIPLoad(next); !used {
++				break
++			}
++			current = next
++		}
++		return current
++	}
++	s.inet4Current = pastMapped(s.inet4Current, s.inet4Last, s.inet4Range)
++	s.inet6Current = pastMapped(s.inet6Current, s.inet6Last, s.inet6Range)
++}
++
+ func (s *Store) Contains(address netip.Addr) bool {
+ 	return s.inet4Range.Contains(address) || s.inet6Range.Contains(address)
+ }
+ 
+ func (s *Store) Close() error {
++	running.CompareAndSwap(s, nil)
+ 	if s.storage == nil {
+ 		return nil
+ 	}
+@@ -117,31 +191,38 @@ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
+ 		return address, nil
+ 	}
+ 
+-	var address netip.Addr
+-	if !isIPv6 {
+-		if !s.inet4Current.IsValid() {
+-			return netip.Addr{}, E.New("missing IPv4 fakeip address range")
+-		}
+-		nextAddress := s.inet4Current.Next()
+-		if nextAddress == s.inet4Last || !s.inet4Range.Contains(nextAddress) {
+-			nextAddress = s.inet4Range.Addr().Next().Next()
+-		}
+-		s.inet4Current = nextAddress
+-		address = nextAddress
+-	} else {
+-		if !s.inet6Current.IsValid() {
++	current, last, prefix := &s.inet4Current, s.inet4Last, s.inet4Range
++	if isIPv6 {
++		current, last, prefix = &s.inet6Current, s.inet6Last, s.inet6Range
++	}
++	if !current.IsValid() {
++		if isIPv6 {
+ 			return netip.Addr{}, E.New("missing IPv6 fakeip address range")
+ 		}
+-		nextAddress := s.inet6Current.Next()
+-		if nextAddress == s.inet6Last || !s.inet6Range.Contains(nextAddress) {
+-			nextAddress = s.inet6Range.Addr().Next().Next()
++		return netip.Addr{}, E.New("missing IPv4 fakeip address range")
++	}
++	// The position restored at start can be older than what was handed out (the cache saves it in the background, and
++	// a late save can land after the final one): an address that still names a domain is skipped, never given to a
++	// second one.
++	address := current.Next()
++	for {
++		if address == last || !prefix.Contains(address) {
++			return netip.Addr{}, ErrExhausted
++		}
++		*current = address
++		if _, used := s.storage.FakeIPLoad(address); !used {
++			break
+ 		}
+-		s.inet6Current = nextAddress
+-		address = nextAddress
++		address = address.Next()
+ 	}
++	// An address whose name could not be saved is not handed out, and the position stays before it: no gap a later
++	// start would stop at (reconcile), with mapped addresses counted as free beyond it. The cache can't be trusted
++	// any more either, so the pool counts as used up and the app moves to a fresh range, which resets it.
+ 	err := s.storage.FakeIPStore(address, domain)
+ 	if err != nil {
+-		s.logger.Warn("save FakeIP cache: ", err)
++		*current = address.Prev()
++		s.unsure = true
++		return netip.Addr{}, E.Cause(err, "save FakeIP cache")
+ 	}
+ 	s.storage.FakeIPSaveMetadataAsync(&adapter.FakeIPMetadata{
+ 		Inet4Range:   s.inet4Range,
+diff --git a/dns/transport/fakeip/store_test.go b/dns/transport/fakeip/store_test.go
+new file mode 100644
+index 0000000..67092c9
+--- /dev/null
++++ b/dns/transport/fakeip/store_test.go
+@@ -0,0 +1,158 @@
++package fakeip
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"net/netip"
++	"testing"
++
++	"github.com/sagernet/sing/common/logger"
++)
++
++func TestStoreNeverReusesAnAddress(t *testing.T) {
++	store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/28"), netip.Prefix{})
++	if left := Remaining(); left != -1 {
++		t.Fatalf("remaining %d before start, want -1", left)
++	}
++	if err := store.Start(); err != nil {
++		t.Fatal(err)
++	}
++	if left := Remaining(); left != 13 {
++		t.Fatalf("remaining %d, want 13", left)
++	}
++	seen := map[netip.Addr]string{}
++	for i := 0; i < 13; i++ {
++		name := fmt.Sprint("n", i, ".example")
++		address, err := store.Create(name, false)
++		if err != nil {
++			t.Fatalf("%s: %v", name, err)
++		}
++		if other, used := seen[address]; used {
++			t.Fatalf("%s given %s, already %s's", name, address, other)
++		}
++		seen[address] = name
++	}
++	if left := Remaining(); left != 0 {
++		t.Fatalf("remaining %d, want 0", left)
++	}
++	if _, err := store.Create("late.example", false); err != ErrExhausted {
++		t.Fatalf("late lookup: %v, want ErrExhausted", err)
++	}
++	for address, name := range seen {
++		if again, err := store.Create(name, false); err != nil || again != address {
++			t.Fatalf("%s now %s (%v), want %s", name, again, err, address)
++		}
++		if owner, _ := store.Lookup(address); owner != name {
++			t.Fatalf("%s maps to %s, want %s", address, owner, name)
++		}
++	}
++	if err := store.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if left := Remaining(); left != -1 {
++		t.Fatalf("remaining %d after close, want -1", left)
++	}
++}
++
++func TestStoreSkipsAddressesAStalePositionWouldReuse(t *testing.T) {
++	store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/28"), netip.Prefix{})
++	if err := store.Start(); err != nil {
++		t.Fatal(err)
++	}
++	defer store.Close()
++	first, _ := store.Create("a.example", false)
++	second, _ := store.Create("b.example", false)
++	// As if started from a position saved before both were handed out.
++	store.inet4Current = netip.MustParseAddr("198.18.0.1")
++	third, err := store.Create("c.example", false)
++	if err != nil || third == first || third == second || third != netip.MustParseAddr("198.18.0.4") {
++		t.Fatalf("c.example given %s (%v) after a and b had %s and %s", third, err, first, second)
++	}
++	for address, name := range map[netip.Addr]string{first: "a.example", second: "b.example", third: "c.example"} {
++		if owner, _ := store.Lookup(address); owner != name {
++			t.Fatalf("%s maps to %s, want %s", address, owner, name)
++		}
++	}
++	if left := Remaining(); left != 10 {
++		t.Fatalf("remaining %d, want 10", left)
++	}
++}
++
++func TestStartCountsOnlyWhatCanStillBeHandedOut(t *testing.T) {
++	store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/28"), netip.Prefix{})
++	if err := store.Start(); err != nil {
++		t.Fatal(err)
++	}
++	defer store.Close()
++	for i := 0; i < 3; i++ {
++		store.Create(fmt.Sprint("n", i, ".example"), false)
++	}
++	// A position saved before those three, as a start restores it.
++	store.inet4Current = netip.MustParseAddr("198.18.0.1")
++	store.reconcile()
++	if left := Remaining(); left != 10 {
++		t.Fatalf("remaining %d with three mapped, want 10", left)
++	}
++	for i := 3; i < 13; i++ {
++		store.Create(fmt.Sprint("n", i, ".example"), false)
++	}
++	store.inet4Current = netip.MustParseAddr("198.18.0.1")
++	store.reconcile()
++	if left := Remaining(); left != 0 {
++		t.Fatalf("remaining %d with the block mapped, want 0", left)
++	}
++	if address, err := store.Create("n0.example", false); err != nil || address != netip.MustParseAddr("198.18.0.2") {
++		t.Fatalf("n0.example now %s (%v), want 198.18.0.2", address, err)
++	}
++}
++
++type failingStorage struct {
++	*MemoryStorage
++	fail bool
++}
++
++func (s *failingStorage) FakeIPStore(address netip.Addr, domain string) error {
++	if s.fail {
++		return errors.New("disk full")
++	}
++	return s.MemoryStorage.FakeIPStore(address, domain)
++}
++
++func TestAFailedSaveLeavesNoGapAndCountsThePoolUsedUp(t *testing.T) {
++	prefix := netip.MustParsePrefix("198.18.0.0/28")
++	store := NewStore(context.Background(), logger.NOP(), prefix, netip.Prefix{})
++	if err := store.Start(); err != nil {
++		t.Fatal(err)
++	}
++	storage := &failingStorage{MemoryStorage: store.storage.(*MemoryStorage)}
++	store.storage = storage
++	store.Create("a.example", false)
++	storage.fail = true
++	if _, err := store.Create("b.example", false); err == nil {
++		t.Fatal("b.example given an address whose name wasn't saved")
++	}
++	if left := Remaining(); left != 0 {
++		t.Fatalf("remaining %d after a failed save, want 0", left)
++	}
++	storage.fail = false
++	for i := 0; i < 11; i++ {
++		store.Create(fmt.Sprint("n", i, ".example"), false)
++	}
++	if address, _ := store.Create("c.example", false); address != netip.MustParseAddr("198.18.0.14") {
++		t.Fatalf("c.example given %s, want 198.18.0.14 (no gap left at 198.18.0.3)", address)
++	}
++	store.Close()
++	// A start on the same cache from a position saved before all of it counts nothing free.
++	again := NewStore(context.Background(), logger.NOP(), prefix, netip.Prefix{})
++	again.storage, again.inet4Current, again.inet4Last = storage, netip.MustParseAddr("198.18.0.1"), store.inet4Last
++	again.reconcile()
++	running.Store(again)
++	defer running.CompareAndSwap(again, nil)
++	if left := Remaining(); left != 0 {
++		t.Fatalf("remaining %d after a restart on a full cache, want 0", left)
++	}
++	if _, err := again.Create("d.example", false); err != ErrExhausted {
++		t.Fatalf("d.example: %v, want ErrExhausted", err)
++	}
++}
+diff --git a/experimental/libbox/fakeip.go b/experimental/libbox/fakeip.go
+new file mode 100644
+index 0000000..2a1020c
+--- /dev/null
++++ b/experimental/libbox/fakeip.go
+@@ -0,0 +1,9 @@
++package libbox
++
++import "github.com/sagernet/sing-box/dns/transport/fakeip"
++
++// FakeIPRemaining is how many stand-in addresses the running engine can still hand out before lookups of new names
++// fail, or -1 when no fake-IP store runs.
++func FakeIPRemaining() int32 {
++	return fakeip.Remaining()
++}

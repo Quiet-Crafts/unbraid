@@ -214,7 +214,9 @@ The build script keeps its work files in `~/.cache/unbraid-libbox`. Set `WORK` t
 in `tools/` stop libbox from writing the running configuration, which holds private keys, to disk, seal the
 Tailscale node state with an Android Keystore key, refuse files sent through Taildrop, give an OpenVPN tunnel a
 resolver inside it when its server pushes none, let the app's connection checks look up their servers through
-the tunnel being checked, and release every network part a tunnel built when it stops or fails to start. A release build is signed only if `.secrets/signing.properties`
+the tunnel being checked, release every network part a tunnel built when it stops or fails to start, and never
+hand a stand-in (fake) address to a second name: a used-up block of them answers new names with a failure, and the
+app moves to the next block in time. A release build is signed only if `.secrets/signing.properties`
 exists, so a plain checkout builds an unsigned APK.
 
 ## Privacy
