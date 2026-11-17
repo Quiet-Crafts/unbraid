@@ -1,11 +1,11 @@
 Changes to sing-box v1.14.4 (GNU GPL v3.0 or later), made by the unbraid authors, last on 2026-11-17:
 a stand-in (fake) address is never handed to a second name while the range is unchanged: once the range is used
 up, lookups of new names are answered with a server failure instead, an address that still names a domain is
-skipped even when the saved position is older (a start moves past such addresses), an address whose name could not
-be saved is not handed out (and the pool then counts as used up), a start whose saved position is missing or
-unreadable keeps the names of its range instead of dropping them, a range whose names were lost with a damaged cache
-file counts as used up (also for later starts, until a range change resets the cache), and libbox tells how many
-addresses can still be handed out (FakeIPRemaining), so the app can move to a fresh range in time.
+skipped even when the saved position is older (a start moves past such addresses), and libbox tells how many
+addresses can still be handed out (FakeIPRemaining), so the app can move to a fresh range in time. Any trouble
+with the cache (a failed fake-IP read or write, a database failure, a checkpoint missing, of another range or older
+than the range's names) stops the table handing out addresses for the rest of its life (the count is then 0), and a
+cache file holding fake-IP names is never replaced by an empty one: found damaged at open, the start fails.
 Applied by tools/build-libbox.sh; git apply skips these lines.
 
 diff --git a/dns/transport/fakeip/fakeip.go b/dns/transport/fakeip/fakeip.go
@@ -33,7 +33,7 @@ index 03daeff..eecb92b 100644
  		return nil, err
  	}
 diff --git a/dns/transport/fakeip/store.go b/dns/transport/fakeip/store.go
-index b7c51df..b938106 100644
+index b7c51df..932d837 100644
 --- a/dns/transport/fakeip/store.go
 +++ b/dns/transport/fakeip/store.go
 @@ -2,8 +2,11 @@ package fakeip
@@ -48,7 +48,7 @@ index b7c51df..b938106 100644
  
  	"github.com/sagernet/sing-box/adapter"
  	E "github.com/sagernet/sing/common/exceptions"
-@@ -13,6 +16,50 @@ import (
+@@ -13,6 +16,57 @@ import (
  
  var _ adapter.FakeIPStore = (*Store)(nil)
  
@@ -69,7 +69,7 @@ index b7c51df..b938106 100644
 +	}
 +	s.addressAccess.Lock()
 +	defer s.addressAccess.Unlock()
-+	if s.unsure {
++	if s.troubled() {
 +		return 0
 +	}
 +	left := int64(math.MaxInt32)
@@ -96,10 +96,17 @@ index b7c51df..b938106 100644
 +	return min(n.Int64(), math.MaxInt32)
 +}
 +
++// One table is one range in one cache file's life. Within it an address is never handed to a second name; nothing else
++// is promised. Any doubt about what the cache holds (a fake-IP read or write that failed, a database failure, see
++// cachefile; a checkpoint missing or of another range while this range already has names, or older than its names)
++// makes the store unsure for the rest of its life: it hands out nothing more (new names get a server failure),
++// Remaining is 0, names it can still read keep their addresses, and it saves no checkpoint, so a later start on the
++// same range finds names without one and is unsure as well. The only way out is a new table on a new range, which the
++// app moves to when Remaining runs low or reaches 0.
  type Store struct {
  	ctx        context.Context
  	logger     logger.Logger
-@@ -25,6 +72,9 @@ type Store struct {
+@@ -25,6 +79,9 @@ type Store struct {
  	addressAccess sync.Mutex
  	inet4Current  netip.Addr
  	inet6Current  netip.Addr
@@ -109,30 +116,24 @@ index b7c51df..b938106 100644
  }
  
  func NewStore(ctx context.Context, logger logger.Logger, inet4Range netip.Prefix, inet6Range netip.Prefix) *Store {
-@@ -79,17 +129,56 @@ func (s *Store) Start() error {
+@@ -79,21 +136,75 @@ func (s *Store) Start() error {
  		if s.inet6Range.IsValid() {
  			s.inet6Current = s.inet6Range.Addr().Next()
  		}
 -		_ = storage.FakeIPReset()
-+		// Only a table known to be on another range is dropped. A checkpoint that is missing or couldn't be read doesn't
-+		// prove the names are gone: those still in this range stay, and are skipped (reconcile, Create).
-+		if metadata != nil {
-+			_ = storage.FakeIPReset()
++		// Names are handed out in order from the range's first address: if that one is taken, this range was in use
++		// without a checkpoint of its own to tell how far, and starting it afresh would hand out taken addresses.
++		s.storage = storage
++		if s.firstTaken() || s.troubled() || storage.FakeIPReset() != nil {
++			s.unsure = true
 +		}
  	}
  	s.storage = storage
-+	// A cache found damaged is replaced by an empty one (at open or while running), and the names it held go with it
-+	// while programs may still hold their addresses: nothing proves which are free, so the range counts as used up
-+	// until a table on another range resets the cache, and the app moves to a fresh one.
-+	if lost, ok := storage.(interface{ FakeIPLost() bool }); ok && lost.FakeIPLost() {
-+		if s.inet4Current.IsValid() {
-+			s.inet4Current = s.inet4Last.Prev()
-+		}
-+		if s.inet6Current.IsValid() {
-+			s.inet6Current = s.inet6Last.Prev()
-+		}
-+	}
++	inet4Current, inet6Current := s.inet4Current, s.inet6Current
 +	s.reconcile()
++	if s.inet4Current != inet4Current || s.inet6Current != inet6Current {
++		s.unsure = true // a checkpoint older than the names
++	}
 +	running.Store(s)
  	return nil
  }
@@ -158,6 +159,23 @@ index b7c51df..b938106 100644
 +	s.inet6Current = pastMapped(s.inet6Current, s.inet6Last, s.inet6Range)
 +}
 +
++func (s *Store) firstTaken() bool {
++	for _, prefix := range []netip.Prefix{s.inet4Range, s.inet6Range} {
++		if prefix.IsValid() {
++			if _, taken := s.storage.FakeIPLoad(prefix.Addr().Next().Next()); taken {
++				return true
++			}
++		}
++	}
++	return false
++}
++
++// troubled: the store or its cache had any trouble (see Store).
++func (s *Store) troubled() bool {
++	trouble, ok := s.storage.(interface{ FakeIPTrouble() bool })
++	return s.unsure || ok && trouble.FakeIPTrouble()
++}
++
  func (s *Store) Contains(address netip.Addr) bool {
  	return s.inet4Range.Contains(address) || s.inet6Range.Contains(address)
  }
@@ -167,22 +185,15 @@ index b7c51df..b938106 100644
  	if s.storage == nil {
  		return nil
  	}
-@@ -105,7 +194,8 @@ func (s *Store) Close() error {
- }
- 
- func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
--	if address, loaded := s.storage.FakeIPLoadDomain(domain, isIPv6); loaded {
-+	// An address of another range (left by a start that couldn't read its checkpoint, see Start) is not this name's.
-+	if address, loaded := s.storage.FakeIPLoadDomain(domain, isIPv6); loaded && s.Contains(address) {
- 		return address, nil
- 	}
- 
-@@ -113,35 +203,42 @@ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
- 	defer s.addressAccess.Unlock()
- 
- 	// Double-check after acquiring lock
--	if address, loaded := s.storage.FakeIPLoadDomain(domain, isIPv6); loaded {
-+	if address, loaded := s.storage.FakeIPLoadDomain(domain, isIPv6); loaded && s.Contains(address) {
+ 	s.addressAccess.Lock()
++	if s.troubled() {
++		s.addressAccess.Unlock()
++		return nil
++	}
+ 	metadata := &adapter.FakeIPMetadata{
+ 		Inet4Range:   s.inet4Range,
+ 		Inet6Range:   s.inet6Range,
+@@ -117,31 +228,41 @@ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
  		return address, nil
  	}
  
@@ -221,7 +232,10 @@ index b7c51df..b938106 100644
 +			return netip.Addr{}, ErrExhausted
 +		}
 +		*current = address
-+		if _, used := s.storage.FakeIPLoad(address); !used {
++		if _, used := s.storage.FakeIPLoad(address); s.troubled() {
++			s.unsure = true // that read can't tell whether the address is free
++			return netip.Addr{}, ErrExhausted
++		} else if !used {
 +			break
  		}
 -		s.inet6Current = nextAddress
@@ -242,10 +256,10 @@ index b7c51df..b938106 100644
  		Inet4Range:   s.inet4Range,
 diff --git a/dns/transport/fakeip/store_test.go b/dns/transport/fakeip/store_test.go
 new file mode 100644
-index 0000000..273455b
+index 0000000..ab2e8d7
 --- /dev/null
 +++ b/dns/transport/fakeip/store_test.go
-@@ -0,0 +1,276 @@
+@@ -0,0 +1,436 @@
 +package fakeip
 +
 +import (
@@ -257,6 +271,7 @@ index 0000000..273455b
 +	"os"
 +	"testing"
 +
++	"github.com/sagernet/bbolt"
 +	"github.com/sagernet/sing-box/adapter"
 +	"github.com/sagernet/sing-box/experimental/cachefile"
 +	"github.com/sagernet/sing-box/log"
@@ -374,15 +389,14 @@ index 0000000..273455b
 +	return s.MemoryStorage.FakeIPStore(address, domain)
 +}
 +
-+func TestAFailedSaveLeavesNoGapAndCountsThePoolUsedUp(t *testing.T) {
-+	prefix := netip.MustParsePrefix("198.18.0.0/28")
-+	store := NewStore(context.Background(), logger.NOP(), prefix, netip.Prefix{})
++func TestAFailedSaveStopsTheStore(t *testing.T) {
++	store := NewStore(context.Background(), logger.NOP(), netip.MustParsePrefix("198.18.0.0/28"), netip.Prefix{})
 +	if err := store.Start(); err != nil {
 +		t.Fatal(err)
 +	}
 +	storage := &failingStorage{MemoryStorage: store.storage.(*MemoryStorage)}
 +	store.storage = storage
-+	store.Create("a.example", false)
++	first, _ := store.Create("a.example", false)
 +	storage.fail = true
 +	if _, err := store.Create("b.example", false); err == nil {
 +		t.Fatal("b.example given an address whose name wasn't saved")
@@ -391,49 +405,54 @@ index 0000000..273455b
 +		t.Fatalf("remaining %d after a failed save, want 0", left)
 +	}
 +	storage.fail = false
-+	for i := 0; i < 11; i++ {
-+		store.Create(fmt.Sprint("n", i, ".example"), false)
++	if _, err := store.Create("c.example", false); err != ErrExhausted {
++		t.Fatalf("c.example after a failed save: %v, want ErrExhausted", err)
 +	}
-+	if address, _ := store.Create("c.example", false); address != netip.MustParseAddr("198.18.0.14") {
-+		t.Fatalf("c.example given %s, want 198.18.0.14 (no gap left at 198.18.0.3)", address)
++	if again, err := store.Create("a.example", false); err != nil || again != first {
++		t.Fatalf("a.example now %s (%v), want %s", again, err, first)
 +	}
 +	store.Close()
-+	// A start on the same cache from a position saved before all of it counts nothing free.
-+	again := NewStore(context.Background(), logger.NOP(), prefix, netip.Prefix{})
-+	again.storage, again.inet4Current, again.inet4Last = storage, netip.MustParseAddr("198.18.0.1"), store.inet4Last
-+	again.reconcile()
-+	running.Store(again)
-+	defer running.CompareAndSwap(again, nil)
-+	if left := Remaining(); left != 0 {
-+		t.Fatalf("remaining %d after a restart on a full cache, want 0", left)
-+	}
-+	if _, err := again.Create("d.example", false); err != ErrExhausted {
-+		t.Fatalf("d.example: %v, want ErrExhausted", err)
++	if storage.FakeIPMetadata() != nil {
++		t.Fatal("an unsure store saved a checkpoint")
 +	}
 +}
 +
-+// A store on a real cache file at path, as an engine start opens it.
-+func startOnCache(t *testing.T, path string, prefix netip.Prefix) (*Store, func()) {
++// A store on a real cache file at path, as an engine start opens it ([wrap] may stand in front of the cache); the
++// cache's start error if it refuses the file.
++func startOnCache(t *testing.T, path string, prefix netip.Prefix, wrap func(*cachefile.CacheFile) adapter.CacheFile) (*Store, *cachefile.CacheFile, func(), error) {
 +	t.Helper()
 +	ctx := context.Background()
 +	cache := cachefile.New(ctx, logger.NOP(), option.CacheFileOptions{Enabled: true, Path: path, StoreFakeIP: true})
 +	scope := adapter.NewScope(ctx, log.NewNOPFactory().NewLogger(""))
 +	if err := cache.Start(adapter.StartStateInitialize, scope); err != nil {
-+		t.Fatal(err)
++		return nil, nil, nil, err
 +	}
-+	store := NewStore(service.ContextWith[adapter.CacheFile](ctx, cache), logger.NOP(), prefix, netip.Prefix{})
++	var shown adapter.CacheFile = cache
++	if wrap != nil {
++		shown = wrap(cache)
++	}
++	store := NewStore(service.ContextWith[adapter.CacheFile](ctx, shown), logger.NOP(), prefix, netip.Prefix{})
 +	if err := store.Start(); err != nil {
 +		scope.Close()
 +		t.Fatal(err)
 +	}
-+	return store, func() {
++	return store, cache, func() {
 +		store.Close()
 +		scope.Close()
-+	}
++	}, nil
 +}
 +
-+// Drops the cache's checkpoint as a failed save or read does (reading it takes it out).
-+func dropCheckpoint(t *testing.T, path string) {
++func mustStart(t *testing.T, path string, prefix netip.Prefix) (*Store, *cachefile.CacheFile, func()) {
++	t.Helper()
++	store, cache, stop, err := startOnCache(t, path, prefix, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return store, cache, stop
++}
++
++// Opens the cache file alone, to change what a store will find in it.
++func onCache(t *testing.T, path string, f func(*cachefile.CacheFile)) {
 +	t.Helper()
 +	ctx := context.Background()
 +	cache := cachefile.New(ctx, logger.NOP(), option.CacheFileOptions{Enabled: true, Path: path, StoreFakeIP: true})
@@ -441,209 +460,525 @@ index 0000000..273455b
 +	if err := cache.Start(adapter.StartStateInitialize, scope); err != nil {
 +		t.Fatal(err)
 +	}
-+	cache.FakeIPMetadata()
++	f(cache)
 +	scope.Close()
 +}
 +
-+func TestAStartWithoutItsCheckpointKeepsTheNames(t *testing.T) {
-+	path := t.TempDir() + "/cache.db"
-+	prefix := netip.MustParsePrefix("198.18.0.0/28")
-+	store, stop := startOnCache(t, path, prefix)
-+	held := map[string]netip.Addr{}
-+	for _, name := range []string{"a.example", "b.example", "c.example"} {
-+		held[name], _ = store.Create(name, false)
++var (
++	rangeA = netip.MustParsePrefix("198.18.0.0/28")
++	rangeB = netip.MustParsePrefix("198.18.0.16/28")
++	older  = &adapter.FakeIPMetadata{Inet4Range: rangeA, Inet4Current: netip.MustParseAddr("198.18.0.2")}
++)
++
++// An unsure store: the names [held] keep their addresses, nothing new is handed out, and the count is 0.
++func assertUnsure(t *testing.T, store *Store, held map[string]netip.Addr) {
++	t.Helper()
++	if left := Remaining(); left != 0 {
++		t.Fatalf("remaining %d, want 0", left)
 +	}
-+	stop()
-+	dropCheckpoint(t, path)
-+	store, stop = startOnCache(t, path, prefix)
-+	defer stop()
++	if address, err := store.Create("new.example", false); err != ErrExhausted {
++		t.Fatalf("new.example given %s (%v), want ErrExhausted", address, err)
++	}
 +	for name, address := range held {
 +		if owner, _ := store.Lookup(address); owner != name {
-+			t.Fatalf("%s maps to %q after the restart, want %s", address, owner, name)
++			t.Fatalf("%s maps to %q, want %s", address, owner, name)
 +		}
-+	}
-+	if address, err := store.Create("d.example", false); err != nil || address != netip.MustParseAddr("198.18.0.5") {
-+		t.Fatalf("d.example given %s (%v), want 198.18.0.5 (the first three are held)", address, err)
-+	}
-+	if left := Remaining(); left != 9 {
-+		t.Fatalf("remaining %d, want 9", left)
 +	}
 +}
 +
-+func TestADamagedCacheCountsTheRangeUsedUp(t *testing.T) {
++func handOut(t *testing.T, store *Store, names ...string) map[string]netip.Addr {
++	t.Helper()
++	held := map[string]netip.Addr{}
++	for _, name := range names {
++		address, err := store.Create(name, false)
++		if err != nil {
++			t.Fatal(err)
++		}
++		held[name] = address
++	}
++	return held
++}
++
++func TestARestartOnTheSameRangeCarriesOn(t *testing.T) {
 +	path := t.TempDir() + "/cache.db"
-+	prefix := netip.MustParsePrefix("198.18.0.0/28")
-+	store, stop := startOnCache(t, path, prefix)
-+	store.Create("a.example", false)
++	store, _, stop := mustStart(t, path, rangeA)
++	handOut(t, store, "a.example", "b.example")
 +	stop()
-+	// Both meta pages overwritten: the file no longer opens as a database.
++	store, _, stop = mustStart(t, path, rangeA)
++	if address, err := store.Create("c.example", false); err != nil || address != netip.MustParseAddr("198.18.0.4") {
++		t.Fatalf("c.example given %s (%v), want 198.18.0.4", address, err)
++	}
++	if left := Remaining(); left != 10 {
++		t.Fatalf("remaining %d, want 10", left)
++	}
++	stop()
++	// The next range starts afresh, and drops the names of the last.
++	store, _, stop = mustStart(t, path, rangeB)
++	defer stop()
++	if address, err := store.Create("a.example", false); err != nil || address != netip.MustParseAddr("198.18.0.18") {
++		t.Fatalf("a.example on the next range given %s (%v), want 198.18.0.18", address, err)
++	}
++}
++
++func TestADamagedCacheFileIsRefusedAndKept(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	store, _, stop := mustStart(t, path, rangeA)
++	handOut(t, store, "a.example")
++	stop()
 +	file, err := os.OpenFile(path, os.O_WRONLY, 0)
-+	if err == nil {
++	if err == nil { // both meta pages overwritten: the file no longer opens as a database
 +		_, err = file.WriteAt(bytes.Repeat([]byte{0xff}, 2*os.Getpagesize()), 0)
 +		file.Close()
 +	}
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	for i := 0; i < 2; i++ { // the start that finds it damaged, then a later one on the same range
-+		store, stop = startOnCache(t, path, prefix)
-+		if left := Remaining(); left != 0 {
-+			t.Fatalf("start %d: remaining %d on a range whose names were lost, want 0", i, left)
++	for i := 0; i < 2; i++ {
++		if _, _, _, err := startOnCache(t, path, rangeA, nil); err == nil {
++			t.Fatalf("start %d opened a damaged cache file", i)
 +		}
-+		if _, err := store.Create("b.example", false); err != ErrExhausted {
-+			t.Fatalf("start %d: b.example: %v, want ErrExhausted", i, err)
++		if left := Remaining(); left != -1 {
++			t.Fatalf("start %d: remaining %d, want -1 (no store runs)", i, left)
 +		}
++	}
++	head, err := os.ReadFile(path)
++	if err != nil || len(head) < 16 || !bytes.Equal(head[:16], bytes.Repeat([]byte{0xff}, 16)) {
++		t.Fatalf("the damaged file was replaced (%v)", err)
++	}
++}
++
++func TestAStartWithoutItsCheckpointIsUnsure(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	store, _, stop := mustStart(t, path, rangeA)
++	held := handOut(t, store, "a.example", "b.example")
++	stop()
++	onCache(t, path, func(c *cachefile.CacheFile) { c.FakeIPMetadata() }) // reading it takes it out
++	for i := 0; i < 2; i++ {                                              // and it stays so: an unsure store saves none
++		store, _, stop = mustStart(t, path, rangeA)
++		assertUnsure(t, store, held)
 +		stop()
 +	}
-+	// Even when the checkpoint is lost as well.
-+	dropCheckpoint(t, path)
-+	store, stop = startOnCache(t, path, prefix)
-+	if left := Remaining(); left != 0 {
-+		t.Fatalf("remaining %d without a checkpoint, want 0", left)
-+	}
++}
++
++func TestACheckpointOfAnotherRangeKeepsThisRangesNames(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	store, _, stop := mustStart(t, path, rangeA)
++	handOut(t, store, "a.example")
 +	stop()
-+	// A table on the next range starts afresh.
-+	store, stop = startOnCache(t, path, netip.MustParsePrefix("198.18.0.16/28"))
++	store, _, stop = mustStart(t, path, rangeB)
++	held := handOut(t, store, "b.example", "c.example")
++	stop()
++	// B's checkpoint lost, A's still there from before.
++	onCache(t, path, func(c *cachefile.CacheFile) { c.FakeIPMetadata(); c.FakeIPSaveMetadata(older) })
++	store, _, stop = mustStart(t, path, rangeB)
 +	defer stop()
-+	if address, err := store.Create("b.example", false); err != nil || address != netip.MustParseAddr("198.18.0.18") {
-+		t.Fatalf("b.example on the next range given %s (%v), want 198.18.0.18", address, err)
++	assertUnsure(t, store, held)
++}
++
++func TestACheckpointOlderThanTheNamesIsUnsure(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	store, _, stop := mustStart(t, path, rangeA)
++	held := handOut(t, store, "a.example", "b.example", "c.example")
++	stop()
++	onCache(t, path, func(c *cachefile.CacheFile) { c.FakeIPMetadata(); c.FakeIPSaveMetadata(older) })
++	store, _, stop = mustStart(t, path, rangeA)
++	defer stop()
++	assertUnsure(t, store, held)
++}
++
++// A real cache whose reads of one address fail, as a disk error would: reported free, with the trouble noted.
++type flakyCache struct {
++	*cachefile.CacheFile
++	failAt netip.Addr
++	failed bool
++}
++
++func (c *flakyCache) FakeIPLoad(address netip.Addr) (string, bool) {
++	if address == c.failAt {
++		c.failed = true
++		return "", false
++	}
++	return c.CacheFile.FakeIPLoad(address)
++}
++
++func (c *flakyCache) FakeIPTrouble() bool { return c.failed || c.CacheFile.FakeIPTrouble() }
++
++func flakyAt(address string) func(*cachefile.CacheFile) adapter.CacheFile {
++	return func(c *cachefile.CacheFile) adapter.CacheFile {
++		return &flakyCache{CacheFile: c, failAt: netip.MustParseAddr(address)}
 +	}
 +}
 +
-+func TestANameOfAnotherRangeGetsAnAddressOfThisOne(t *testing.T) {
++func TestAReadErrorDuringTheStartsScanIsUnsure(t *testing.T) {
 +	path := t.TempDir() + "/cache.db"
-+	store, stop := startOnCache(t, path, netip.MustParsePrefix("198.18.0.0/28"))
-+	store.Create("a.example", false)
++	store, _, stop := mustStart(t, path, rangeA)
++	held := handOut(t, store, "a.example", "b.example")
 +	stop()
-+	dropCheckpoint(t, path) // so the next range's start can't tell the cache held another range
-+	store, stop = startOnCache(t, path, netip.MustParsePrefix("198.18.0.16/28"))
-+	defer stop()
-+	if address, err := store.Create("a.example", false); err != nil || address != netip.MustParseAddr("198.18.0.18") {
-+		t.Fatalf("a.example given %s (%v), want 198.18.0.18", address, err)
++	onCache(t, path, func(c *cachefile.CacheFile) { c.FakeIPMetadata() })
++	// Without a checkpoint the start reads the range's first address: a failed read must not count it free.
++	store, _, stop, err := startOnCache(t, path, rangeA, flakyAt("198.18.0.2"))
++	if err != nil {
++		t.Fatal(err)
 +	}
++	if left := Remaining(); left != 0 {
++		t.Fatalf("remaining %d, want 0", left)
++	}
++	stop()
++	// That start left the names, and no checkpoint.
++	store, _, stop = mustStart(t, path, rangeA)
++	defer stop()
++	assertUnsure(t, store, held)
++}
++
++func TestAReadErrorAtAllocationHandsOutNothing(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	store, _, stop := mustStart(t, path, rangeA)
++	held := handOut(t, store, "a.example", "b.example")
++	stop()
++	store, _, stop, err := startOnCache(t, path, rangeA, flakyAt("198.18.0.3"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer stop()
++	// As after a start from a position older than b that found nothing amiss: allocation reads b's address, and fails.
++	store.inet4Current = netip.MustParseAddr("198.18.0.2")
++	if address, err := store.Create("c.example", false); err != ErrExhausted {
++		t.Fatalf("c.example given %s (%v), want ErrExhausted", address, err)
++	}
++	store.storage.(*flakyCache).failAt = netip.Addr{}
++	assertUnsure(t, store, held)
++}
++
++func TestADatabasePanicStopsTheStoreAndKeepsTheFile(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	store, cache, stop := mustStart(t, path, rangeA)
++	held := handOut(t, store, "a.example", "b.example")
++	// A damaged checkpoint record: reading it panics inside the database transaction.
++	if err := cache.DB.Update(func(tx *bbolt.Tx) error {
++		return tx.Bucket([]byte("fakeip_address")).Put([]byte("fakeip_metadata"), []byte{0})
++	}); err != nil {
++		t.Fatal(err)
++	}
++	cache.FakeIPMetadata()
++	if left := Remaining(); left != 0 {
++		t.Fatalf("remaining %d after a database panic, want 0", left)
++	}
++	if address, err := store.Create("c.example", false); err != ErrExhausted {
++		t.Fatalf("c.example given %s (%v), want ErrExhausted", address, err)
++	}
++	stop()
++	// Not replaced by an empty file: with the bad record gone, the next start on the range finds its names.
++	onCache(t, path, func(c *cachefile.CacheFile) {
++		c.DB.Update(func(tx *bbolt.Tx) error { return tx.Bucket([]byte("fakeip_address")).Delete([]byte("fakeip_metadata")) })
++	})
++	store, _, stop = mustStart(t, path, rangeA)
++	defer stop()
++	assertUnsure(t, store, held)
++}
++
++func TestAPanicAtStartIsUnsure(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	store, _, stop := mustStart(t, path, rangeA)
++	held := handOut(t, store, "a.example")
++	stop()
++	onCache(t, path, func(c *cachefile.CacheFile) {
++		c.DB.Update(func(tx *bbolt.Tx) error {
++			return tx.Bucket([]byte("fakeip_address")).Put([]byte("fakeip_metadata"), []byte{0})
++		})
++	})
++	store, _, stop = mustStart(t, path, rangeA)
++	defer stop()
++	if left := Remaining(); left != 0 {
++		t.Fatalf("remaining %d, want 0", left)
++	}
++	if address, err := store.Create("new.example", false); err != ErrExhausted {
++		t.Fatalf("new.example given %s (%v), want ErrExhausted", address, err)
++	}
++	_ = held
 +}
 diff --git a/experimental/cachefile/cache.go b/experimental/cachefile/cache.go
-index 3cbec73..5b07c6a 100644
+index 3cbec73..1510019 100644
 --- a/experimental/cachefile/cache.go
 +++ b/experimental/cachefile/cache.go
-@@ -184,6 +184,7 @@ func (c *CacheFile) start() error {
- 	cacheFile.Close()
- 	options := bbolt.Options{Timeout: time.Second}
- 	var db *bbolt.DB
-+	var damaged bool
- 	for range 10 {
- 		db, err = bbolt.Open(c.path, fileMode, &options)
- 		if err != nil {
-@@ -195,6 +196,7 @@ func (c *CacheFile) start() error {
+@@ -7,6 +7,7 @@ import (
+ 	"os"
+ 	"strings"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/sagernet/bbolt"
+@@ -65,6 +66,9 @@ type CacheFile struct {
+ 	saveRDRC           map[saveCacheKey]bool
+ 	saveDNSCacheAccess sync.RWMutex
+ 	saveDNSCache       map[saveCacheKey]saveDNSCacheEntry
++
++	// See FakeIPTrouble.
++	fakeIPTrouble atomic.Bool
+ }
+ 
+ type saveCacheKey struct {
+@@ -191,6 +195,9 @@ func (c *CacheFile) start() error {
+ 				continue
+ 			}
+ 			if E.IsMulti(err, bboltErrors.ErrInvalid, bboltErrors.ErrChecksum, bboltErrors.ErrVersionMismatch) {
++				if c.storeFakeIP {
++					return E.Cause(err, "damaged cache file kept: it holds fake-IP names")
++				}
+ 				rmErr := filemanager.Remove(c.ctx, c.path)
  				if rmErr != nil {
  					return err
- 				}
-+				damaged = true
- 			}
- 			time.Sleep(100 * time.Millisecond)
- 			continue
-@@ -209,6 +211,7 @@ func (c *CacheFile) start() error {
+@@ -203,8 +210,11 @@ func (c *CacheFile) start() error {
+ 		if err == nil {
+ 			break
+ 		}
+-		c.logger.Error("database corrupted: ", err, ": resetting")
+ 		db.Close()
++		if c.storeFakeIP {
++			return E.Cause(err, "damaged cache file kept: it holds fake-IP names")
++		}
++		c.logger.Error("database corrupted: ", err, ": resetting")
+ 		rmErr := filemanager.Remove(c.ctx, c.path)
  		if rmErr != nil {
  			return err
- 		}
-+		damaged = true
+@@ -311,6 +321,15 @@ func (c *CacheFile) resetDB(failedDB *bbolt.DB, reason any) {
+ 	if c.DB != failedDB {
+ 		return
  	}
- 	if err != nil {
- 		return err
-@@ -237,6 +240,9 @@ func (c *CacheFile) start() error {
- 			return nil
- 		})
- 	})
-+	if err == nil && damaged {
-+		err = markFakeIPLost(db)
++	if c.storeFakeIP {
++		// Replaced by an empty file, a fake-IP table would start afresh on its range while programs still hold its
++		// addresses. The file stays as it is: this instance's table stops handing out addresses (FakeIPTrouble), and a
++		// start that finds the file damaged refuses it, so only a fresh range gets a new file.
++		c.logger.Error("database corrupted: ", reason, ": closed")
++		c.fakeIPTrouble.Store(true)
++		failedDB.Close()
++		return
 +	}
- 	if err != nil {
- 		db.Close()
- 		return err
-@@ -317,6 +323,7 @@ func (c *CacheFile) resetDB(failedDB *bbolt.DB, reason any) {
- 	db, err := bbolt.Open(c.path, 0o666, &bbolt.Options{Timeout: time.Second})
- 	if err == nil {
- 		_ = filemanager.Chown(c.ctx, c.path)
-+		_ = markFakeIPLost(db)
- 		c.DB = db
- 	}
- }
+ 	c.logger.Error("database corrupted: ", reason, ": resetting")
+ 	failedDB.Close()
+ 	filemanager.Remove(c.ctx, c.path)
 diff --git a/experimental/cachefile/fakeip.go b/experimental/cachefile/fakeip.go
-index 814c204..ae4537e 100644
+index 814c204..0b42131 100644
 --- a/experimental/cachefile/fakeip.go
 +++ b/experimental/cachefile/fakeip.go
-@@ -19,8 +19,31 @@ var (
- 	bucketFakeIPDomain4 = []byte(fakeipBucketPrefix + "domain4")
- 	bucketFakeIPDomain6 = []byte(fakeipBucketPrefix + "domain6")
+@@ -1,6 +1,7 @@
+ package cachefile
+ 
+ import (
++	"errors"
+ 	"net/netip"
+ 	"os"
+ 	"time"
+@@ -21,6 +22,19 @@ var (
  	keyMetadata         = []byte(fakeipBucketPrefix + "metadata")
-+	keyLost             = []byte(fakeipBucketPrefix + "lost")
  )
  
-+// FakeIPLost: the file was found damaged and replaced by an empty one since a table on another range last reset it, so
-+// fake-IP names it held are gone while programs may still hold their addresses. Also when it can't be read.
-+func (c *CacheFile) FakeIPLost() bool {
-+	var lost bool
-+	err := c.view(func(tx *bbolt.Tx) error {
-+		bucket := tx.Bucket(bucketFakeIP)
-+		lost = bucket != nil && bucket.Get(keyLost) != nil
-+		return nil
-+	})
-+	return lost || err != nil
++// FakeIPTrouble: since this cache opened, a fake-IP read or write failed, or the database failed and was closed
++// (resetDB). What it says about which addresses are taken can't be trusted from then on.
++func (c *CacheFile) FakeIPTrouble() bool {
++	return c.fakeIPTrouble.Load()
 +}
 +
-+func markFakeIPLost(db *bbolt.DB) error {
-+	return db.Update(func(tx *bbolt.Tx) error {
-+		bucket, err := tx.CreateBucketIfNotExists(bucketFakeIP)
-+		if err != nil {
-+			return err
-+		}
-+		return bucket.Put(keyLost, []byte{1})
-+	})
++func (c *CacheFile) fakeIPFailed(err error) error {
++	if err != nil {
++		c.fakeIPTrouble.Store(true)
++	}
++	return err
 +}
 +
  func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
  	var metadata adapter.FakeIPMetadata
  	err := c.batch(func(tx *bbolt.Tx) error {
+@@ -39,6 +53,10 @@ func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
+ 		return metadata.UnmarshalBinary(metadataBinary)
+ 	})
+ 	if err != nil {
++		// Absent (no bucket, no key) is no trouble; anything else is.
++		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrInvalid) {
++			c.fakeIPTrouble.Store(true)
++		}
+ 		return nil
+ 	}
+ 	return &metadata
+@@ -77,7 +95,7 @@ func (c *CacheFile) FakeIPSaveMetadataAsync(metadata *adapter.FakeIPMetadata) {
+ }
+ 
+ func (c *CacheFile) FakeIPStore(address netip.Addr, domain string) error {
+-	return c.batch(func(tx *bbolt.Tx) error {
++	return c.fakeIPFailed(c.batch(func(tx *bbolt.Tx) error {
+ 		bucket, err := tx.CreateBucketIfNotExists(bucketFakeIP)
+ 		if err != nil {
+ 			return err
+@@ -101,7 +119,7 @@ func (c *CacheFile) FakeIPStore(address netip.Addr, domain string) error {
+ 			}
+ 		}
+ 		return bucket.Put([]byte(domain), address.AsSlice())
+-	})
++	}))
+ }
+ 
+ func (c *CacheFile) FakeIPStoreAsync(address netip.Addr, domain string, logger logger.Logger) {
+@@ -144,14 +162,14 @@ func (c *CacheFile) FakeIPLoad(address netip.Addr) (string, bool) {
+ 		return cachedDomain, true
+ 	}
+ 	var domain string
+-	_ = c.view(func(tx *bbolt.Tx) error {
++	_ = c.fakeIPFailed(c.view(func(tx *bbolt.Tx) error {
+ 		bucket := tx.Bucket(bucketFakeIP)
+ 		if bucket == nil {
+ 			return nil
+ 		}
+ 		domain = string(bucket.Get(address.AsSlice()))
+ 		return nil
+-	})
++	}))
+ 	return domain, domain != ""
+ }
+ 
+@@ -171,7 +189,7 @@ func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bo
+ 		return cachedAddress, true
+ 	}
+ 	var address netip.Addr
+-	_ = c.view(func(tx *bbolt.Tx) error {
++	_ = c.fakeIPFailed(c.view(func(tx *bbolt.Tx) error {
+ 		var bucket *bbolt.Bucket
+ 		if isIPv6 {
+ 			bucket = tx.Bucket(bucketFakeIPDomain6)
+@@ -183,12 +201,12 @@ func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bo
+ 		}
+ 		address = M.AddrFromIP(bucket.Get([]byte(domain)))
+ 		return nil
+-	})
++	}))
+ 	return address, address.IsValid()
+ }
+ 
+ func (c *CacheFile) FakeIPReset() error {
+-	return c.batch(func(tx *bbolt.Tx) error {
++	return c.fakeIPFailed(c.batch(func(tx *bbolt.Tx) error {
+ 		for _, bucketName := range [][]byte{bucketFakeIP, bucketFakeIPDomain4, bucketFakeIPDomain6} {
+ 			if tx.Bucket(bucketName) == nil {
+ 				continue
+@@ -199,5 +217,5 @@ func (c *CacheFile) FakeIPReset() error {
+ 			}
+ 		}
+ 		return nil
+-	})
++	}))
+ }
 diff --git a/experimental/cachefile/fakeip_test.go b/experimental/cachefile/fakeip_test.go
 new file mode 100644
-index 0000000..ef6ad7f
+index 0000000..c19cd11
 --- /dev/null
 +++ b/experimental/cachefile/fakeip_test.go
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,108 @@
 +package cachefile
 +
 +import (
++	"bytes"
 +	"context"
 +	"net/netip"
++	"os"
 +	"testing"
 +
 +	"github.com/sagernet/sing-box/option"
 +	"github.com/sagernet/sing/common/logger"
 +)
 +
-+func TestAResetWhileRunningMarksTheFakeIPNamesLost(t *testing.T) {
-+	cache := New(context.Background(), logger.NOP(), option.CacheFileOptions{Enabled: true, Path: t.TempDir() + "/cache.db", StoreFakeIP: true})
++func open(t *testing.T, path string) *CacheFile {
++	t.Helper()
++	cache := New(context.Background(), logger.NOP(), option.CacheFileOptions{Enabled: true, Path: path, StoreFakeIP: true})
 +	if err := cache.start(); err != nil {
 +		t.Fatal(err)
 +	}
-+	defer func() { cache.database().Close() }()
++	return cache
++}
++
++func TestAFakeIPReadOrWriteThatFailsIsTrouble(t *testing.T) {
++	address := netip.MustParseAddr("198.18.0.2")
++	for name, f := range map[string]func(*CacheFile){
++		"checkpoint": func(c *CacheFile) { c.FakeIPMetadata() },
++		"address":    func(c *CacheFile) { c.FakeIPLoad(address) },
++		"name":       func(c *CacheFile) { c.FakeIPLoadDomain("a.example", false) },
++		"save":       func(c *CacheFile) { c.FakeIPStore(address, "a.example") },
++		"reset":      func(c *CacheFile) { c.FakeIPReset() },
++	} {
++		cache := open(t, t.TempDir()+"/cache.db")
++		if f(cache); cache.FakeIPTrouble() {
++			t.Fatalf("%s: trouble on a working cache (a missing checkpoint is none)", name)
++		}
++		cache.database().Close()
++		if f(cache); !cache.FakeIPTrouble() {
++			t.Fatalf("%s: a failure not noted as trouble", name)
++		}
++	}
++}
++
++func TestADatabaseFailureKeepsTheFileAndIsTrouble(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	cache := open(t, path)
 +	if err := cache.FakeIPStore(netip.MustParseAddr("198.18.0.2"), "a.example"); err != nil {
 +		t.Fatal(err)
 +	}
-+	if cache.FakeIPLost() {
-+		t.Fatal("lost before any reset")
-+	}
 +	cache.resetDB(cache.database(), "test")
-+	if !cache.FakeIPLost() {
-+		t.Fatal("not lost after the file was replaced")
++	if !cache.FakeIPTrouble() {
++		t.Fatal("a database failure not noted as trouble")
 +	}
-+	// A table on another range clears the cache, and with it the mark.
-+	if err := cache.FakeIPReset(); err != nil {
++	if err := cache.FakeIPStore(netip.MustParseAddr("198.18.0.3"), "b.example"); err == nil {
++		t.Fatal("a closed cache saved a name")
++	}
++	again := open(t, path)
++	defer again.database().Close()
++	if again.FakeIPTrouble() {
++		t.Fatal("trouble carried into another instance")
++	}
++	if name, _ := again.FakeIPLoad(netip.MustParseAddr("198.18.0.2")); name != "a.example" {
++		t.Fatalf("the file was replaced: 198.18.0.2 maps to %q", name)
++	}
++}
++
++func TestADamagedFileIsKeptOnlyWithFakeIPNames(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	if err := os.WriteFile(path, make([]byte, 2*os.Getpagesize()), 0o600); err != nil {
 +		t.Fatal(err)
 +	}
-+	if cache.FakeIPLost() {
-+		t.Fatal("still lost after a reset")
++	cache := New(context.Background(), logger.NOP(), option.CacheFileOptions{Enabled: true, Path: path, StoreFakeIP: true})
++	if err := cache.start(); err == nil {
++		t.Fatal("a damaged file opened")
 +	}
++	if info, err := os.Stat(path); err != nil || info.Size() != int64(2*os.Getpagesize()) {
++		t.Fatal("the damaged file was replaced")
++	}
++	// A file that opens but fails its check is kept too.
++	os.Remove(path)
++	cache = open(t, path)
++	cache.FakeIPStore(netip.MustParseAddr("198.18.0.2"), "a.example")
++	cache.database().Close()
++	data, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	// The header of the page holding the name: its type becomes one no page has.
++	at := bytes.Index(data, []byte("a.example")) / os.Getpagesize() * os.Getpagesize()
++	data[at+8], data[at+9] = 0xff, 0xff
++	if err := os.WriteFile(path, data, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	info, _ := os.Stat(path)
++	cache = New(context.Background(), logger.NOP(), option.CacheFileOptions{Enabled: true, Path: path, StoreFakeIP: true})
++	if err := cache.start(); err == nil {
++		cache.database().Close()
++		t.Fatal("a file that fails its check opened")
++	}
++	if after, err := os.Stat(path); err != nil || after.Size() != info.Size() {
++		t.Fatal("the file that fails its check was replaced")
++	}
++	// Without fake-IP names the file is replaced, as before.
++	cache = New(context.Background(), logger.NOP(), option.CacheFileOptions{Enabled: true, Path: path})
++	if err := cache.start(); err != nil {
++		t.Fatal(err)
++	}
++	cache.database().Close()
 +}
 diff --git a/experimental/libbox/fakeip.go b/experimental/libbox/fakeip.go
 new file mode 100644
