@@ -80,9 +80,11 @@ fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false
     // No tunnel (its provider gave no server, or its own server has no keys), a failed check, or a Tailscale exit without Tailscale.
     fun failing(id: String) = on && (id !in vpn.servers || id in vpn.stalled || id in vpn.notAnswering || id in vpn.dropping ||
         tsDown && setup.route(id)?.tsExit != null)
+    // Only websites whose rule applies count, as in the engine.
+    val applied = app.unbraid.data.Sites.applied(setup)
     fun row(id: String): WidgetRoute? {
         val apps = setup.apps.count { it.value == id }
-        val sites = setup.sites.count { it.value == id }
+        val sites = applied.count { it.value == id }
         val r = setup.route(id) ?: return if (id == DIRECT) WidgetRoute("", "Direct", 0, apps, direct = true, live = on, failing = false, sites = sites) else null
         // The name of an own server or a Tailscale device is the user's own: only its kind shows on a home screen.
         val f = failing(id)
@@ -90,7 +92,7 @@ fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false
     }
     val default = row(setup.defaultRoute)
     // A route is in use through its apps or through websites alone.
-    val others = (setup.apps.values.toSet() + setup.sites.values - setup.defaultRoute).mapNotNull(::row).sortedWith(compareBy({ !it.failing }, { it.direct }, { it.name.lowercase() }))
+    val others = (setup.apps.values.toSet() + applied.values - setup.defaultRoute).mapNotNull(::row).sortedWith(compareBy({ !it.failing }, { it.direct }, { it.name.lowercase() }))
     val tunnels = (listOfNotNull(default) + others).filter { !it.direct }
     val known = tunnels.filter { it.failing || it.working }
     return Glance(

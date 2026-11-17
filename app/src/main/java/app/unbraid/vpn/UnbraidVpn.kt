@@ -1143,9 +1143,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun alert(text: String) = alert(this, text)
 
     private fun notify(setup: Setup) {
+        val sites = app.unbraid.data.Sites.applied(setup) // only websites whose rule applies
         // The profile in use first: a switch made by itself ([AutoSwitch]) shows here, without a sound.
         notice(setup.profile?.let { "$it  ·  " }.orEmpty() + setup.activeRoutes.joinToString("  ·  ") { r ->
-            if (r.id == setup.defaultRoute) "${r.code} default" else "${r.code} ${setup.apps.count { it.value == r.id } + setup.sites.count { it.value == r.id }}" // its apps and websites
+            if (r.id == setup.defaultRoute) "${r.code} default" else "${r.code} ${setup.apps.count { it.value == r.id } + sites.count { it.value == r.id }}" // its apps and websites
         }.ifEmpty { "Only selected apps" })
     }
 
