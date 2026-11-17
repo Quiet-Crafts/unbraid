@@ -125,6 +125,13 @@ service that uses other addresses needs each one added. unbraid knows a website 
 the rule does not reach apps that Android keeps outside the VPN, such as apps set to Direct, or a browser that
 uses its own secure DNS, which keeps its app's route.
 
+A change to a website rule, or to a setting that decides whether it applies (Local network bypasses the VPN, Reach
+your tailnet), takes effect for connections made after the app looks the name up again. An app that kept an address
+from before the change follows the old path until it does; reopening the app or the page usually does it. Names that
+your local network or your tailnet answer (such as printer.lan, or your tailnet's own names) go to them first, so a
+website rule doesn't apply to those while that setting is on, and the list says so. A shared ending such as co.uk or
+gov.au can't be added, as it would cover every website that ends in it; add the website itself.
+
 ### What does Block do?
 
 An app on Block gets no internet connection while unbraid is connected: not through a route, not Direct, and no

@@ -429,13 +429,15 @@ data class Setup(
     fun outside(pkg: String) = apps[pkg] == DIRECT && !prefs.filter.through(pkg)
     /** How many of [installed] follow the default: the apps a new default would move. */
     fun followers(installed: Collection<String>) = installed.count(::follows)
-    /** Routes that carry traffic right now: the default plus any with apps or with websites whose rule applies (and those up for a speed test). */
-    val activeRoutes get() = activeRoutes(null)
     /**
-     * [activeRoutes] with the tailnet domain Tailscale [reported], as the compiler gets it: a website a Headscale tailnet's
-     * domain answers needs no tunnel. Without it, never fewer routes than the compiler opens, so each has its server.
+     * Routes that carry traffic right now: the default plus any with apps or with websites whose rule applies (and those up
+     * for a speed test). Decided by the setup alone, never by the tailnet domain Tailscale reports: the tunnels picked,
+     * checked for clashes, compiled and shown are the same set at every moment, so a website only a Headscale tailnet's
+     * domain answers still keeps its route's tunnel, as before.
      */
-    fun activeRoutes(reported: String?) = Sites.applied(this, reported = reported).let { sites -> routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) } }
+    val activeRoutes get() = Sites.applied(this).let { sites -> routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) } }
+    @Deprecated("Tunnels go by the setup alone", ReplaceWith("activeRoutes"))
+    @Suppress("UNUSED_PARAMETER") fun activeRoutes(reported: String?) = activeRoutes
     /** The Tailscale exit node in use, if any active route goes out through one (Tailscale allows one at a time). */
     val tsExit get() = activeRoutes.firstNotNullOfOrNull { it.tsExit }
     /** Tailscale runs for home access or for an exit-node route. */

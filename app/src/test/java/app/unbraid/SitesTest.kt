@@ -180,11 +180,10 @@ class SitesTest {
         val c = compile(s, tsSuffix = "corp.example")
         val named = c.rules().filter { it["domain"] != null && it["outbound"] != null }.flatMap { it.strings("domain")!! }
         assertEquals(listOf("example.com", "host.tail9.ts.net"), named.sorted())
-        // The names left out are refused only on a connection that still carries them (a stand-in address from before), and
-        // looked up by the rule that answers them, for a second at a time.
+        // The names left out are refused only on a connection that still carries them (a stand-in address from before);
+        // their lookups go to the rule that answers them, as in 3.0.2, with no rule of their own.
         assertEquals(listOf("box.corp.example", "printer.lan", "x.fritz.box", "nas.ts.net"), c.rules().filter { it.text("action") == "reject" && it["domain"] != null }.flatMap { it.strings("domain")!! })
-        assertEquals(listOf(listOf("printer.lan", "x.fritz.box") to "local", listOf("box.corp.example") to "dns-tailnet").toSet(),
-            c.dns().filter { it.text("rewrite_ttl") == "1" && it["domain"] != null }.map { it.strings("domain")!! to it.text("server") }.toSet())
+        assertTrue(c.dns().none { r -> r.strings("domain").orEmpty().any { it in setOf("printer.lan", "x.fritz.box", "box.corp.example") } })
         // Tailscale's own server: all of ts.net is the tailnet's. Reach your tailnet off, or the local network not bypassing the VPN: every one applies.
         assertEquals(setOf("nas.ts.net", "example.com", "box.corp.example"), Sites.applied(s.copy(home = home.copy(tsControlUrl = null))).keys)
         assertEquals(sites.keys - "printer.lan" - "x.fritz.box", Sites.applied(s.copy(home = home.copy(tailscale = false))).keys)
