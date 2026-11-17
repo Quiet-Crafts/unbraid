@@ -15,7 +15,6 @@ class SitesInUseTest {
         "data/Sites.kt" to 1, // applied itself
         "data/Model.kt" to 8, // profile plumbing: switching, saving, mending, comparing, editing
         "data/Backup.kt" to 3, // what a backup holds and its checks
-        "data/RestoreTraffic.kt" to 4, // what a restore changes, saved against saved
         "stats/Stats.kt" to 1, // the route of a website already matched against applied names
         "support/Report.kt" to 3, // the support report describes the setup as saved
         "ui/AppsScreen.kt" to 2, // the Websites list's size and its 50 limit

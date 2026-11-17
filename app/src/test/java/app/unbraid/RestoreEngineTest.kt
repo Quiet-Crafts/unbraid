@@ -39,6 +39,8 @@ class RestoreEngineTest {
         return p.inputStream.bufferedReader().readText().also { p.waitFor() }
     }
 
+    private fun strings(e: kotlinx.serialization.json.JsonElement) = (e as JsonArray).map { (it as JsonPrimitive).content }
+
     @Test fun namesAndRangesMatchAsTheEngineMatchesThem() {
         assumeTrue("SING_BOX not set", box != null)
         val dir = kotlin.io.path.createTempDirectory("restore-engine").toFile()
@@ -50,7 +52,7 @@ class RestoreEngineTest {
             val s = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands")), Route("w", wg = wg(1), own = "s")), defaultRoute = listOf("nl", DIRECT)[g.nextInt(2)],
                 servers = listOf(OwnServer("s", wg = wg(1))), apps = mapOf("org.a" to "w", "org.b" to BLOCK), sites = sites, version = VERSION,
                 prefs = Prefs(lan = g.nextBoolean(), blockLan = g.nextBoolean()), home = if (g.nextBoolean()) Home(wg = wg(7, "10.0.0.0/9, 10.192.0.0/10").copy(name = "Home")) else Home())
-            val c = RestoreTraffic.compile(s, { emptySet() }, lockdown = g.nextBoolean())!!
+            val c = RestoreTraffic.compile(s, { emptySet() }, at = RestoreTraffic.Situation(g.nextBoolean()))!!
             val text = File(dir, "config.json")
             // The config itself, as the engine reads it (the tun inbound and endpoints are only checked, not started).
             val compiled = Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, mapOf("nl" to app.unbraid.data.WgLink(app.unbraid.data.Server("x", "198.51.100.1", "198.51.100.1", wg(2).publicKey, 0), wg(2)),
@@ -68,11 +70,11 @@ class RestoreEngineTest {
                 set.writeText(JsonObject(mapOf("version" to JsonPrimitive(3), "rules" to JsonArray(listOf(JsonObject(r.filterKeys { it == "domain" || it == "domain_suffix" || it == "ip_cidr" }))))).toString())
                 val words = c.set(r["domain"]) + c.set(r["domain_suffix"]).map { it.removePrefix(".") }
                 val probes = if (names.isNotEmpty()) words.flatMap { listOf(it, "zz-check.$it", "x$it") } + "unbraid-check.example"
-                    else c.cidrs(ranges!!).flatMap { (a, l) -> listOf(a, a + (1L shl (32 - l)) - 1, a - 1, a + (1L shl (32 - l))) }.filter { it in 0..0xFFFFFFFFL }
+                    else strings(ranges!!).mapNotNull(Compiler::ipv4).flatMap { (a, l) -> listOf(a, a + (1L shl (32 - l)) - 1, a - 1, a + (1L shl (32 - l))) }.filter { it in 0..0xFFFFFFFFL }
                         .map { v -> (3 downTo 0).joinToString(".") { (v shr (it * 8) and 255).toString() } }
                 for (p in probes.distinct()) {
                     val engine = run("rule-set", "match", set.path, p).contains("match rules")
-                    val walk = if (names.isNotEmpty()) c.named(p, r["domain"], r["domain_suffix"]) else c.cidrs(ranges!!).any { RestoreTraffic.within(Compiler.ipv4(p)!!.first, it) }
+                    val walk = if (names.isNotEmpty()) c.named(p, r["domain"], r["domain_suffix"]) else c.ranges(ranges!!).has(Compiler.ipv4(p)!!.first)
                     assertEquals("$p against ${r.filterKeys { it == "domain" || it == "domain_suffix" || it == "ip_cidr" }}", engine, walk)
                     asked++
                 }

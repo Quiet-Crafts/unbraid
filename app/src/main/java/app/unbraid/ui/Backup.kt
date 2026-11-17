@@ -48,6 +48,7 @@ import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -117,13 +118,13 @@ class RestoreGate {
     }
 
     companion object {
-        /** Works [a] out: slow for a large setup, never on the main thread. [kin]: the apps sharing a user id with an app. */
-        fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }): Result {
+        /** Works [a] out: slow for a large setup, never on the main thread. [kin]: the apps sharing a user id with an app; [tick] may throw to stop it. */
+        fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }, tick: () -> Unit = {}): Result {
             val c = a.backup
             val plain = a.here.restoredFrom(c.setup, null, 0, c.keys)!!
             val keepable = !a.here.untouched && a.here.restoredFrom(c.setup, PREVIOUS, 0, c.keys) != null
             val next = if (a.keep && keepable) a.here.restoredFrom(c.setup, PREVIOUS, 0, c.keys)!! else plain
-            return Result(RestoreTraffic.notes(a.here, next, kin), Backup.weak(plain, a.here), keepable, plain.servers.count { it.keyless })
+            return Result(RestoreTraffic.notes(a.here, next, kin, tick), Backup.weak(plain, a.here), keepable, plain.servers.count { it.keyless })
         }
     }
 }
@@ -194,7 +195,8 @@ class BackupFlow(private val ui: Ui) {
                 val all = runCatching { pm.getInstalledApplications(0) }.getOrDefault(emptyList())
                 val uid = all.associate { it.packageName to it.uid }
                 val byUid = all.groupBy({ it.uid }, { it.packageName })
-                RestoreGate.check(ask) { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }
+                // Stopped as soon as the sheet is closed or the check asked again.
+                RestoreGate.check(ask, { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }) { ensureActive() }
             }
             gate.answer(ask, r); seen++
         }
