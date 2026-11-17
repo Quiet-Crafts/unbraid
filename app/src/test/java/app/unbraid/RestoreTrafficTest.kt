@@ -1,0 +1,348 @@
+package app.unbraid
+
+import app.unbraid.data.BLOCK
+import app.unbraid.data.Backup
+import app.unbraid.data.DIRECT
+import app.unbraid.data.Filter
+import app.unbraid.data.Home
+import app.unbraid.data.Location
+import app.unbraid.data.Manual
+import app.unbraid.data.OwnServer
+import app.unbraid.data.Prefs
+import app.unbraid.data.RestoreTraffic
+import app.unbraid.data.RestoreTraffic.Loss
+import app.unbraid.data.RestoreTraffic.OTHER
+import app.unbraid.data.RestoreTraffic.OTHER_NAME
+import app.unbraid.data.RestoreTraffic.Outcome
+import app.unbraid.data.RestoreTraffic.REJECT
+import app.unbraid.data.RestoreTraffic.Resolver
+import app.unbraid.data.Route
+import app.unbraid.data.Setup
+import app.unbraid.data.Sites
+import app.unbraid.data.VERSION
+import app.unbraid.data.WgConf
+import app.unbraid.data.WgPeer
+import app.unbraid.data.restoredFrom
+import app.unbraid.data.withoutSecrets
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.util.Random
+
+/** What a restore makes weaker, asked of the compiled configs: the walk against the compiler, the traps of earlier designs, and random pairs against an independent model. */
+class RestoreTrafficTest {
+    private fun wg(n: Int, allowed: String = "0.0.0.0/0", dns: String? = null) = WgConf.parse("[Interface]\nPrivateKey = ${('A' + n).toString().repeat(42)}E=\nAddress = 10.0.$n.2/32\n" +
+        (dns?.let { "DNS = $it\n" } ?: "") + "[Peer]\nPublicKey = ${('B' + n).toString().repeat(42)}E=\nEndpoint = 203.0.113.$n:51820\nAllowedIPs = $allowed\n", "Box $n")
+    private val nl = Route("nl", Location("nord", 153, "NL", "Netherlands"))
+    private val m1 = Route("m1", Location("mullvad", countryCode = "SE", country = "Sweden"))
+    private val keyless = OwnServer("k", wg = wg(5).withoutSecrets(), keyless = true)
+    private val base = Setup(routes = listOf(nl, m1, Route("w", wg = wg(1), own = "s"), Route("k1", wg = keyless.wg, own = "k", keyless = true)), defaultRoute = "nl",
+        servers = listOf(OwnServer("s", wg = wg(1)), keyless), opts = mapOf("nord" to mapOf("protect" to "on")), version = VERSION)
+
+    private fun walk(s: Setup, pkg: String?, name: String?, address: String = "203.0.113.80", kin: (String) -> Set<String> = { emptySet() }): Outcome =
+        RestoreTraffic.connect(RestoreTraffic.compile(s, kin)!!, (pkg?.let { kin(it) + it } ?: setOf(OTHER)), name, address)!!
+    private fun notes(a: Setup, b: Setup, kin: (String) -> Set<String> = { emptySet() }) = RestoreTraffic.notes(a, b, kin)
+
+    @Test fun theWalkAgreesWithTheCompilersOwnRules() {
+        val s = base.copy(apps = mapOf("org.b" to BLOCK, "org.d" to DIRECT, "org.f" to DIRECT, "org.w" to "w", "org.m" to "m1", "org.k" to "k1"),
+            sites = mapOf("tracker.example" to BLOCK, "example.com" to DIRECT, "work.example" to "w"),
+            prefs = Prefs(filter = Filter("adguard", apps = mapOf("org.f" to true)), blockLan = false),
+            home = Home(wg = wg(7, allowed = "10.20.0.0/16").copy(name = "Home")))
+        assertEquals(Outcome("r-nl", Resolver.Provider), walk(s, null, OTHER_NAME))
+        assertEquals(Outcome(REJECT), walk(s, "org.b", OTHER_NAME))
+        assertEquals(Outcome(REJECT), walk(s, "org.b", "example.com"))
+        assertEquals(Outcome("direct", Resolver.Local), walk(s, "org.d", OTHER_NAME))
+        assertEquals(Outcome("direct", Resolver.Filter), walk(s, "org.f", OTHER_NAME))
+        assertEquals(Outcome("r-w", Resolver.Route), walk(s, "org.w", OTHER_NAME))
+        assertEquals(Outcome("r-m1", Resolver.Route), walk(s, "org.m", OTHER_NAME))
+        // A route waiting for its config refuses its apps.
+        assertEquals(Outcome(REJECT), walk(s, "org.k", OTHER_NAME))
+        // Websites: a block holds for everyone and under it; a website's route beats its app's.
+        assertEquals(Outcome(REJECT), walk(s, null, "x.tracker.example"))
+        assertEquals(Outcome("direct", Resolver.Filter), walk(s, null, "example.com"))
+        assertEquals(Outcome("r-w", Resolver.Route), walk(s, "org.m", "a.work.example"))
+        // An app left outside unbraid never meets a website rule.
+        assertEquals(Outcome("direct", Resolver.Local), walk(s, "org.d", "work.example"))
+        // Addresses: the local network straight out, the home ranges through the home tunnel.
+        assertEquals("direct", walk(s, null, null, "192.168.1.20").exit)
+        assertEquals("home-wg", walk(s, null, null, "10.20.0.1").exit)
+        assertEquals("direct", walk(s, null, null, "10.21.0.1").exit)
+        assertEquals("r-nl", walk(s.copy(prefs = s.prefs.copy(lan = false)), null, null, "192.168.1.20").exit)
+        // A blocked app keeps the local network inside unbraid unless the user lets it be: then it reaches it.
+        assertEquals("direct", walk(s, "org.b", null, "192.168.1.20").exit)
+        assertEquals(REJECT, walk(s.copy(prefs = s.prefs.copy(blockLan = true)), "org.b", null, "192.168.1.20").exit)
+        // An app sharing its user id with a blocked one is refused with it, and not left outside.
+        val kin = { p: String -> if (p == "org.b" || p == "org.d") setOf("org.b", "org.d") else emptySet() }
+        assertEquals(Outcome(REJECT), walk(s, "org.d", OTHER_NAME, kin = kin))
+        // A Direct default with apps on a VPN: the default program goes Direct.
+        assertEquals("direct", walk(s.copy(defaultRoute = DIRECT), null, OTHER_NAME).exit)
+    }
+
+    /** Ground truth for a random setup: where each app and website was set to go. */
+    private fun expected(s: Setup, app: String?, name: String?): String {
+        val routeExit = { id: String -> when {
+            id == BLOCK -> REJECT
+            id == DIRECT -> "direct"
+            s.route(id)!!.keyless -> REJECT
+            else -> "tunnel"
+        } }
+        val byApp = app?.let { s.apps[it] } ?: s.defaultRoute
+        if (byApp == BLOCK) return REJECT
+        if (app != null && s.outside(app)) return "direct"
+        if (name != null) {
+            if (s.sites.any { (k, v) -> v == BLOCK && (name == k || name.endsWith(".$k")) }) return REJECT
+            Sites.match(name, s.sites.keys)?.let { return routeExit(s.sites.getValue(it)) }
+        }
+        return routeExit(byApp)
+    }
+
+    private val siteNames = listOf("n.example", "b.n.example", "c.b.n.example", "o.example", "x.o.example", "s.example")
+    private val appKeys = (0 until 6).map { "org.example.a$it" }
+    private val ids = listOf("nl", "m1", "w", "k1")
+
+    private fun random(g: Random): Setup {
+        fun <T> pick(l: List<T>) = l[g.nextInt(l.size)]
+        val filter = if (g.nextBoolean()) Filter() else Filter(pick(listOf("quad9", "adguard")), routes = g.nextBoolean(), direct = g.nextBoolean(), directApps = g.nextBoolean(),
+            apps = appKeys.filter { g.nextInt(10) < 3 }.associateWith { g.nextBoolean() })
+        return base.copy(
+            routes = base.routes.map { if (it.id == "nl" || it.id == "m1") it.copy(filter = pick(listOf(null, true, false))) else it },
+            defaultRoute = pick(listOf("nl", "m1", "w", DIRECT, DIRECT)),
+            apps = appKeys.filter { g.nextInt(10) < 6 }.associateWith { pick(ids + DIRECT + BLOCK) },
+            sites = siteNames.filter { g.nextBoolean() }.associateWith { pick(ids + DIRECT + BLOCK + BLOCK) },
+            prefs = Prefs(filter = filter, lan = g.nextInt(10) < 7, blockLan = g.nextBoolean()),
+            opts = mapOf("nord" to mapOf("protect" to pick(listOf("on", "off"))), "mullvad" to mapOf("protect" to pick(listOf("on", "off")))),
+        )
+    }
+
+    @Test fun theWalkFollowsEveryChoice() {
+        val g = Random(0x5EED)
+        repeat(500) { i ->
+            val s = random(g)
+            val c = RestoreTraffic.compile(s, { emptySet() })!!
+            for (app in appKeys + listOf<String?>(null)) for (name in siteNames.flatMap { listOf(it, "zz.$it") } + OTHER_NAME) {
+                val got = RestoreTraffic.connect(c, setOf(app ?: OTHER), name)!!.exit.let { if (it.startsWith("r-")) "tunnel" else it }
+                assertEquals("$i: $app to $name in ${s.apps} ${s.sites} default ${s.defaultRoute}", expected(s, app, name), got)
+            }
+        }
+    }
+
+    // ---- an independent model of what each connection gets, read from the compiler's comments, not from the walk ----
+
+    private data class Treat(val leave: String, val filter: Boolean = false, val provider: Boolean = false)
+
+    private fun model(s: Setup, app: String?, name: String?): Treat {
+        val f = s.prefs.filter
+        val server = f.server() != null
+        val through = s.apps.any { (k, v) -> v == DIRECT && f.through(k) }
+        val vpn = { id: String -> s.route(id)!!.let { r -> if (r.keyless) Treat("refused") else Treat("vpn:$id", filter = server && f.routes, provider = !(server && f.routes) && s.protects(r)) } }
+        val def = if (s.defaultRoute == DIRECT) Treat("direct", filter = server && f.direct) else vpn(s.defaultRoute)
+        val forApp = when (val id = app?.let { s.apps[it] }) {
+            null -> def
+            BLOCK -> return Treat("blocked")
+            DIRECT -> if (f.through(app)) Treat("direct", filter = true) else return Treat("direct")
+            else -> vpn(id)
+        }
+        if (name == null) return forApp
+        if (s.sites.any { (k, v) -> v == BLOCK && (name == k || name.endsWith(".$k")) }) return Treat("blocked")
+        val id = Sites.match(name, s.sites.keys)?.let(s.sites::getValue) ?: return forApp
+        return if (id == DIRECT) Treat("direct", filter = server && ((f.direct && s.defaultRoute == DIRECT) || through)) else vpn(id)
+    }
+
+    private fun weaker(was: Treat, now: Treat): Boolean {
+        val rank = { t: Treat -> when { t.leave == "blocked" -> 3; t.leave == "direct" -> 0; else -> 2 } }
+        if (was.leave == "blocked") return now.leave != "blocked"
+        if (now.leave == "refused" || now.leave == "blocked") return false
+        if (rank(now) < rank(was)) return true
+        if (rank(was) == rank(now)) {
+            if (was.filter && !now.filter) return true
+            if (was.leave.startsWith("vpn") && now.leave.startsWith("vpn") && was.provider && !now.provider && !now.filter) return true
+        }
+        return false
+    }
+
+    @Test fun randomRestoresAgainstAnIndependentModel() {
+        val g = Random(0xB4CC)
+        fun <T> pick(l: List<T>) = l[g.nextInt(l.size)]
+        val missed = mutableListOf<String>(); val spurious = mutableListOf<String>()
+        var weakerCount = 0; var sameCount = 0
+        val t = System.nanoTime()
+        repeat(3000) { i ->
+            val here = random(g)
+            var next = here
+            val effective = g.nextBoolean()
+            repeat(1 + g.nextInt(4)) {
+                next = if (effective) when (g.nextInt(8)) {
+                    0 -> next.copy(defaultRoute = pick(listOf("nl", "m1", "w", DIRECT)))
+                    1 -> pick(appKeys).let { k -> pick(listOf("nl", "m1", "w", "k1", DIRECT, BLOCK, null)).let { v -> next.copy(apps = if (v == null) next.apps - k else next.apps + (k to v)) } }
+                    2 -> pick(siteNames).let { n -> pick(listOf("nl", "m1", "w", "k1", DIRECT, BLOCK, null)).let { v -> next.copy(sites = if (v == null) next.sites - n else next.sites + (n to v)) } }
+                    3 -> next.copy(prefs = next.prefs.copy(filter = next.prefs.filter.copy(directApps = !next.prefs.filter.directApps, direct = g.nextBoolean(), routes = g.nextBoolean())))
+                    4 -> pick(appKeys).let { k -> pick(listOf(true, false, null)).let { v -> next.copy(prefs = next.prefs.copy(filter = next.prefs.filter.copy(apps = if (v == null) next.prefs.filter.apps - k else next.prefs.filter.apps + (k to v)))) } }
+                    5 -> next.copy(opts = mapOf("nord" to mapOf("protect" to pick(listOf("on", "off"))), "mullvad" to mapOf("protect" to pick(listOf("on", "off")))))
+                    6 -> pick(listOf("nl", "m1")).let { id -> next.copy(routes = next.routes.map { if (it.id == id) it.copy(filter = pick(listOf(null, true, false))) else it }) }
+                    else -> next.copy(prefs = next.prefs.copy(filter = Filter()))
+                } else when (g.nextInt(4)) {
+                    // Changes that change nothing a connection gets (checked below, not assumed).
+                    0 -> next.sites.entries.toList().takeIf { it.isNotEmpty() }?.let { pick(it) }?.let { (n, v) -> next.copy(sites = next.sites + ("deep.zz.$n" to v)) } ?: next
+                    1 -> next.copy(favorites = next.favorites + Location("nord", 81, "DE", "Germany"))
+                    2 -> next.copy(routes = next.routes.map { if (it.id == "nl") it.copy(hue = it.hue + 1) else it })
+                    else -> pick(appKeys).takeIf { it !in next.apps && next.defaultRoute != DIRECT }?.let { next.copy(apps = next.apps + (it to next.defaultRoute)) } ?: next
+                }
+            }
+            val apps = (appKeys + here.apps.keys + next.apps.keys).distinct()
+            val names = (here.sites.keys + next.sites.keys).flatMap { listOf(it, "zz-check.$it") }.distinct() + OTHER_NAME
+            val programs = listOf<String?>(null) + apps
+            val lost = programs.flatMap { p -> names.mapNotNull { n -> "$p to $n: ${model(here, p, n)} -> ${model(next, p, n)}".takeIf { weaker(model(here, p, n), model(next, p, n)) } } }
+            val said = notes(here, next)
+            if (lost.isNotEmpty()) { weakerCount++; if (said.isEmpty()) missed += "$i: ${lost.take(3)} | here d=${here.defaultRoute} ${here.apps} ${here.sites} ${here.prefs} | next d=${next.defaultRoute} ${next.apps} ${next.sites} ${next.prefs}" }
+            val sameTraffic = programs.all { p -> names.all { n -> model(here, p, n) == model(next, p, n) } }
+            if (sameTraffic && here.prefs == next.prefs && here.opts == next.opts && here.routes.map { it.copy(hue = 0) } == next.routes.map { it.copy(hue = 0) }) {
+                sameCount++
+                if (said.isNotEmpty()) spurious += "$i: says $said: ${here.sites} -> ${next.sites}, ${here.apps} -> ${next.apps}"
+            }
+        }
+        println("RESTORE-CHECK pairs: weaker=$weakerCount same=$sameCount missed=${missed.size} spurious=${spurious.size} in ${(System.nanoTime() - t) / 1_000_000} ms")
+        assertEquals(missed.take(4).joinToString("\n"), 0, missed.size)
+        assertEquals(spurious.take(4).joinToString("\n"), 0, spurious.size)
+        assertTrue("$weakerCount, $sameCount", weakerCount > 400 && sameCount > 400)
+    }
+
+    // ---- the traps earlier designs fell into, one each ----
+
+    @Test fun aWebsiteRuleAddedUnderAnotherOrRemovedIsSaid() {
+        val here = base.copy(sites = mapOf("example.com" to "w", "ads.example.com" to BLOCK))
+        assertTrue(notes(here, here.copy(sites = mapOf("example.com" to "w", "ads.example.com" to BLOCK, "cdn.example.com" to DIRECT))).contains("1 website goes from a VPN route to Direct."))
+        assertTrue(notes(here, here.copy(sites = mapOf("example.com" to "w"))).contains("1 website that is blocked now won't be."))
+        // A rule under a blocked website never opens it: Block comes first.
+        assertEquals(emptyList<String>(), notes(here, here.copy(sites = here.sites + ("x.ads.example.com" to DIRECT))))
+    }
+
+    @Test fun anAppMovedOutOfAFilterScopeIsSaid() {
+        val here = base.copy(apps = mapOf("org.a" to DIRECT), prefs = Prefs(filter = Filter("quad9", directApps = true)))
+        assertEquals(listOf("1 app loses the DNS filter."), notes(here, here.copy(prefs = Prefs(filter = Filter("quad9", directApps = true, apps = mapOf("org.a" to false))))))
+        // Its own filter switch moved to the routes' scope: the app is on Direct, so it loses it too.
+        assertEquals(listOf("1 app loses the DNS filter."), notes(here, here.copy(prefs = Prefs(filter = Filter("quad9", routes = true)))))
+    }
+
+    @Test fun removingADirectWebsiteWhoseLookupsTheFilterAnsweredIsSaid() {
+        val here = base.copy(defaultRoute = DIRECT, sites = mapOf("example.com" to DIRECT), prefs = Prefs(filter = Filter("quad9", direct = true)))
+        // The website now follows its app, here a Direct default that the filter covers too: nothing lost.
+        assertEquals(emptyList<String>(), notes(here, here.copy(sites = emptyMap())))
+        // With the filter on Direct apps only, a Direct app's website loses it.
+        val apps = here.copy(defaultRoute = "nl", apps = mapOf("org.a" to DIRECT), prefs = Prefs(filter = Filter("quad9", directApps = true)))
+        assertTrue(notes(apps, apps.copy(sites = emptyMap())).toString(), notes(apps, apps.copy(sites = emptyMap())).isNotEmpty())
+    }
+
+    @Test fun appsSharingAUserIdWithABlockedAppAreJudgedTogether() {
+        val kin = { p: String -> if (p == "org.b" || p == "org.c") setOf("org.b", "org.c") else emptySet() }
+        val here = base.copy(apps = mapOf("org.b" to BLOCK, "org.c" to DIRECT))
+        // org.c loses nothing while org.b stays blocked: the block refuses the whole user id.
+        assertEquals(emptyList<String>(), notes(here, here.copy(apps = mapOf("org.b" to BLOCK)), kin))
+        assertEquals(listOf("2 apps that are blocked now won't be."), notes(here, here.copy(apps = mapOf("org.c" to DIRECT)), kin))
+        // Without knowing they share one, only org.b would seem to open.
+        assertEquals(listOf("1 app that is blocked now won't be."), notes(here, here.copy(apps = mapOf("org.c" to DIRECT))))
+    }
+
+    @Test fun trafficRefusedNowThatWouldGoOutIsSaid() {
+        val here = base.copy(apps = mapOf("org.a" to "k1"), sites = mapOf("example.com" to "k1"))
+        assertEquals(listOf("1 app and 1 website that can't connect now, because their routes wait for a server's config, go out without it."),
+            notes(here, here.copy(apps = mapOf("org.a" to DIRECT), sites = mapOf("example.com" to DIRECT))))
+        val def = base.copy(defaultRoute = "k1")
+        assertEquals(listOf("The default route can't connect now, because its route waits for a server's config. After the restore its traffic goes out."), notes(def, def.copy(defaultRoute = "nl")))
+    }
+
+    @Test fun aNarrowerHomeRangeIsSaidAtEitherEnd() {
+        val here = base.copy(home = Home(wg = wg(7, allowed = "10.0.0.0/8").copy(name = "Home")))
+        val narrower = here.copy(home = Home(wg = here.home.wg!!.copy(allowedIps = listOf("10.20.0.0/16"))))
+        assertTrue(notes(here, narrower).contains("Part of the home network goes Direct instead of through the home tunnel."))
+        // Cut at its far end only: the first address stays covered.
+        val far = here.copy(home = Home(wg = here.home.wg!!.copy(allowedIps = listOf("10.0.0.0/9"))))
+        assertTrue(notes(here, far).contains("Part of the home network goes Direct instead of through the home tunnel."))
+        assertEquals(listOf("10.0.0.1", "10.255.255.254"), RestoreTraffic.edges("10.0.0.0/8"))
+        assertEquals(listOf("10.0.0.7"), RestoreTraffic.edges("10.0.0.7/32"))
+        // Wider says nothing.
+        assertTrue(notes(narrower, here).none { it.startsWith("Part of") })
+    }
+
+    @Test fun ownServersAreComparedByEveryAddressTheyConnectTo() {
+        val cfg = { second: String -> "client\ndev tun\nremote 203.0.113.2 1194\nremote $second 1194\nremote-cert-tls server\n<ca>\n-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n</ca>\n" }
+        val o = Manual.parseOvpn(cfg("203.0.113.3"), "Office", "u", "p")
+        val here = base.copy(routes = base.routes + Route("o", ovpn = o, own = "so"), servers = base.servers + OwnServer("so", ovpn = o))
+        val moved = Manual.parseOvpn(cfg("198.51.100.9"), "Office", "u", "p")
+        val next = here.copy(routes = here.routes.map { if (it.id == "o") it.copy(ovpn = moved) else it }, servers = here.servers.map { if (it.id == "so") it.copy(ovpn = moved) else it })
+        assertEquals(listOf("\"Office\" connects to another server at 198.51.100.9."), notes(here, next))
+        // Hosts are compared whole: two long names that differ only at their start are two servers.
+        val long = "a".repeat(100) + ".example.net"
+        val w1 = here.copy(servers = here.servers.map { if (it.id == "s") it.copy(wg = wg(1).copy(endpoint = "x$long:51820")) else it })
+        val w2 = here.copy(servers = here.servers.map { if (it.id == "s") it.copy(wg = wg(1).copy(endpoint = "y$long:51820")) else it })
+        assertTrue(notes(w1, w2).toString(), notes(w1, w2).any { it.startsWith("\"Box 1\" connects to another server at …") && it.length < 120 })
+        // The home tunnel by its address, key and DNS servers.
+        val home = base.copy(home = Home(wg = wg(7, allowed = "10.20.0.0/16", dns = "10.20.0.1").copy(name = "Home")))
+        assertEquals(listOf("Your home WireGuard uses other DNS servers: 9.9.9.9."), notes(home, home.copy(home = Home(wg = home.home.wg!!.copy(dns = listOf("9.9.9.9"))))))
+        assertEquals(listOf("Your home WireGuard connects to another server at 203.0.113.7."), notes(home, home.copy(home = Home(wg = home.home.wg!!.copy(publicKey = "C".repeat(42) + "E=")))))
+    }
+
+    @Test fun aWebsiteOnDirectTakesAVpnAppDirectThereToo() {
+        val here = base.copy(defaultRoute = DIRECT, apps = mapOf("org.browser" to "nl"))
+        assertEquals(listOf("1 website goes from a VPN route to Direct."), notes(here, here.copy(sites = mapOf("example.com" to DIRECT))))
+    }
+
+    @Test fun everyLossHasASentence() {
+        val here = base.copy(apps = mapOf("org.a" to "nl", "org.b" to BLOCK), sites = mapOf("a.example" to "nl", "b.example" to BLOCK),
+            prefs = Prefs(filter = Filter("quad9", directApps = true)), home = Home(wg = wg(7, allowed = "10.20.0.0/16").copy(name = "Home")))
+        val next = here.copy(defaultRoute = DIRECT, apps = mapOf("org.a" to DIRECT, "org.b" to DIRECT), sites = mapOf("a.example" to DIRECT, "b.example" to DIRECT),
+            home = Home(wg = here.home.wg!!.copy(allowedIps = listOf("10.20.0.0/24"))))
+        val said = notes(here, next)
+        // a.example goes Direct as the default does: said once, for the default.
+        assertEquals(listOf("The default route goes from Netherlands to Direct.", "1 app goes from a VPN route to Direct.", "1 app that is blocked now won't be.",
+            "1 website that is blocked now won't be.", "Part of the home network goes Direct instead of through the home tunnel."), said)
+        assertEquals(listOf("1 website goes from a VPN route to Direct."), notes(here, here.copy(sites = here.sites + ("a.example" to DIRECT))))
+        val provider = here.copy(apps = emptyMap(), sites = emptyMap(), prefs = Prefs())
+        assertEquals(listOf("The default route loses the provider's ad and tracker blocking it has now."), notes(provider, provider.copy(opts = mapOf("nord" to mapOf("protect" to "off")))))
+        val filtered = provider.copy(prefs = Prefs(filter = Filter("quad9", routes = true)))
+        assertEquals(listOf("The DNS filter is turned off."), notes(filtered, filtered.copy(prefs = Prefs())))
+        assertEquals(listOf("The default route loses the DNS filter."), notes(filtered, filtered.copy(prefs = Prefs(filter = Filter("quad9")))))
+        assertEquals(listOf("The DNS filter changes to another server."), notes(filtered, filtered.copy(prefs = Prefs(filter = Filter("adguard", routes = true)))))
+        assertEquals(listOf("Apps can reach the local network again."), notes(provider.copy(prefs = Prefs(lan = false)), provider))
+        val mullvad = provider.copy(defaultRoute = "m1", opts = mapOf("mullvad" to mapOf("protect" to "on", "adult" to "on", "gambling" to "on", "owned" to "on")))
+        assertEquals(listOf("Mullvad stops blocking adult sites and gambling sites.", "Mullvad no longer keeps to the servers it owns."), notes(mullvad, mullvad.copy(opts = mapOf("mullvad" to mapOf("protect" to "on")))))
+    }
+
+    @Test fun aSetupThatCanNotBeCompiledIsSaidSo() {
+        val two = base.copy(routes = base.routes + Route("t1", tsExit = "100.64.0.1") + Route("t2", tsExit = "100.64.0.2"), apps = mapOf("org.a" to "t1", "org.b" to "t2"))
+        assertEquals(listOf(RestoreTraffic.UNKNOWN), notes(two, base))
+    }
+
+    @Test fun theLargestSetupIsComparedQuickly() {
+        val many = (0 until 5000).associate { "org.example.app$it" to listOf("nl", "m1", "w", DIRECT, BLOCK)[it % 5] }
+        val sites = (0 until Sites.MAX).associate { "s$it.example" to listOf("nl", DIRECT, BLOCK)[it % 3] }
+        val here = base.copy(apps = many, sites = sites)
+        val next = here.copy(apps = many.mapValues { (k, v) -> if (k.hashCode() % 3 == 0) DIRECT else v }, sites = sites.mapValues { DIRECT })
+        val t = System.nanoTime()
+        val said = notes(here, next)
+        val ms = (System.nanoTime() - t) / 1_000_000
+        println("RESTORE-CHECK largest setup: $ms ms, $said")
+        assertTrue(said.isNotEmpty())
+        assertTrue("$ms ms", ms < 3000)
+    }
+
+    /** The walk takes its stand-in address from the config, so it follows the engine wherever its address pool stands. */
+    @Test fun theWalkFollowsTheFakeAddressBlock() = app.unbraid.vpn.Compiler.FAKE_RANGES.indices.forEach { b ->
+        val s = base.copy(apps = mapOf("org.w" to "w"))
+        val links = mapOf("nl" to app.unbraid.data.WgLink(app.unbraid.data.Server("x", "198.51.100.1", "198.51.100.1", wg(2).publicKey, 0), wg(2)), "w" to app.unbraid.data.WgLink(app.unbraid.data.Server("w", "203.0.113.1", "", wg(1).publicKey, 0), wg(1)))
+        val c = RestoreTraffic.Config(app.unbraid.vpn.Compiler.compile(app.unbraid.vpn.Compiler.Input(s, links, "app.unbraid", false, "", "", fakeBlock = b)), s, emptySet())
+        assertEquals("block $b", "r-w", RestoreTraffic.connect(c, setOf("org.w"), OTHER_NAME)!!.exit)
+    }
+
+    @Test fun aRestoreOverTheSameSetupSaysNothing() {
+        val s = base.copy(apps = mapOf("org.a" to "w", "org.b" to BLOCK), sites = mapOf("example.com" to DIRECT), prefs = Prefs(filter = Filter("quad9", routes = true, directApps = true)),
+            home = Home(wg = wg(7, allowed = "10.20.0.0/16").copy(name = "Home")))
+        val c = Backup.read(Backup.export(s, "3.0.2", 0))
+        assertEquals(emptyList<String>(), notes(s, s.restoredFrom(c.setup, null, 0, c.keys)!!))
+        // Saved without keys on the same phone: own servers get their config back, nothing changes.
+        val k = Backup.read(Backup.export(s, "3.0.2", 0, keys = false))
+        assertEquals(emptyList<String>(), notes(s, s.restoredFrom(k.setup, null, 0, k.keys)!!))
+        assertNotNull(RestoreTraffic.compile(s, { emptySet() }))
+    }
+
+}
