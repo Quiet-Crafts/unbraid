@@ -212,8 +212,11 @@ class NetSequencesTest {
         AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; pick(rules); assertFalse(commit(d, rules, false)); assertNull(decide(home, rules)) }
         // The rule edited during the write: not saved; the new rule is decided next.
         AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; assertFalse(commit(d, mapOf(WIFI to "Work"), false)); assertEquals("Work", decide(home, mapOf(WIFI to "Work"))) }
-        // A settle for a network already left decides nothing.
-        AutoSwitch.Run().run { seen(home); seen(cell); assertNull(settle(home, rules)) }
+        // A settle for a network already left decides nothing, not even for the network the phone is on now (it hasn't lasted yet).
+        AutoSwitch.Run().run { seen(home); seen(cell); assertNull(settle(home, rules + (MOBILE to "Trip"))); assertEquals("Trip", decide(cell, rules + (MOBILE to "Trip"))) }
+        // A move to another Wi-Fi during the write: not saved, though that Wi-Fi's rule names the same profile; it decides
+        // for itself once it lasted.
+        AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; val next = Net(WIFI, 5); seen(next); assertFalse(commit(d, rules, false)); assertEquals("Home", decide(next, rules)) }
     }
 
     /** Decisions saved late and out of order, with events of every kind in between, checked against the rule above. */
