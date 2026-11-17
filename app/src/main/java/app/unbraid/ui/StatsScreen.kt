@@ -97,6 +97,7 @@ import app.unbraid.APP
 import app.unbraid.BuildConfig
 import app.unbraid.Unbraid
 import app.unbraid.data.DIRECT
+import app.unbraid.data.Sites
 import app.unbraid.stats.SpeedTest
 import app.unbraid.stats.Stats
 import app.unbraid.vpn.UnbraidVpn
@@ -180,7 +181,7 @@ internal fun flowsSub(names: List<String>, routes: Int): String {
 }
 
 internal fun appLabel(pkg: String, installed: String?, saved: Stats.AppName?): String = when {
-    pkg.startsWith(Stats.SITE) -> pkg.removePrefix(Stats.SITE) // a website with a route of its own, by its address
+    pkg.startsWith(Stats.SITE) -> Sites.shown(pkg.removePrefix(Stats.SITE)) // a website with a route of its own, by its address
     pkg == "?" -> "Unknown app"
     pkg == Stats.OTHER -> "Other system traffic"
     installed != null -> if (saved?.shared == true) "$installed and others" else installed

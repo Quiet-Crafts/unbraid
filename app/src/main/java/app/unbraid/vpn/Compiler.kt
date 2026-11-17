@@ -177,7 +177,7 @@ object Compiler {
         // A Direct website is looked up like other Direct traffic that passes through: with the filter where one applies to it.
         val siteDns = { id: String -> if (id == DIRECT && filter != null && (directFiltered || through.isNotEmpty())) "dns-filter" else dnsFor(id) }
         // Websites with a route of their own: each run matches its names and every name under them.
-        val sites = Sites.runs(s.sites).map { (id, names) -> id to arrayOf<Pair<String, Any>>("domain" to JsonArray(names.map(::JsonPrimitive)), "domain_suffix" to JsonArray(names.map { JsonPrimitive(".$it") })) }
+        val sites = Sites.runs(Sites.applied(s)).map { (id, names) -> id to arrayOf<Pair<String, Any>>("domain" to JsonArray(names.map(::JsonPrimitive)), "domain_suffix" to JsonArray(names.map { JsonPrimitive(".$it") })) }
 
         return buildJsonObject {
             putJsonObject("log") { put("level", "warn"); put("timestamp", false) }

@@ -140,6 +140,26 @@ class SitesTest {
         assertTrue(rules(false).none { it.text("type") == "logical" })
     }
 
+    /** A route or Direct for a name on the own network or in the tailnet gets no rule; a block of one stays a block; the tailnet's domain is the allowed one. */
+    @Test fun aNameOnTheOwnNetworkGetsNoRule() {
+        val home = app.unbraid.data.Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example")
+        val s = setup.copy(home = home, sites = mapOf("printer.lan" to "it", "box.corp.example" to "it", "nas.ts.net" to app.unbraid.data.BLOCK, "x.fritz.box" to DIRECT, "example.com" to "it", "other.example" to "it"))
+        assertEquals(mapOf("nas.ts.net" to app.unbraid.data.BLOCK, "example.com" to "it", "other.example" to "it"), Sites.applied(s))
+        val c = compile(s)
+        val named = c.rules().filter { it["domain"] != null && it["outbound"] != null }.flatMap { it.strings("domain")!! }
+        assertEquals(listOf("example.com", "other.example"), named.sorted())
+        assertEquals(listOf("nas.ts.net"), c.rules().filter { it.text("action") == "reject" && it["domain"] != null }.flatMap { it.strings("domain")!! })
+        assertTrue(c.dns().none { it.strings("domain")?.any { d -> d == "printer.lan" || d == "box.corp.example" || d == "x.fritz.box" } == true })
+        // Without Tailscale there is no tailnet: the same name is an ordinary website. With the official server only ts.net counts.
+        assertEquals(mapOf("box.corp.example" to "it"), Sites.applied(setup.copy(sites = mapOf("box.corp.example" to "it"), home = home.copy(tailscale = false))))
+        assertEquals(null, Sites.tailnet(setup.copy(home = home.copy(tsControlUrl = null))))
+        assertEquals("corp.example", Sites.tailnet(s))
+        // The rows say so, in the screen's words.
+        assertEquals("Not applied: it is a name on your own network", siteState(s, "printer.lan"))
+        assertEquals("Not applied: it is a name in your tailnet", siteState(s, "box.corp.example"))
+        assertEquals("Blocked, no traffic", siteState(s, "nas.ts.net")); assertEquals("Italy", siteState(s, "example.com"))
+    }
+
     @Test fun profilesCarryTheirWebsites() {
         val s = setup.saveAs("Home").add("Trip", empty = false).site("Trip", "rai.it", "it").site("Trip", "example.com", null)
         assertEquals(setup.sites, s.sites) // a profile not in use is edited alone

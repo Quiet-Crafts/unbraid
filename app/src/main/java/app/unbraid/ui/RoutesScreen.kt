@@ -109,6 +109,7 @@ import app.unbraid.data.Nord
 import app.unbraid.data.Providers
 import app.unbraid.data.Route
 import app.unbraid.data.Server
+import app.unbraid.data.Sites
 import app.unbraid.vpn.ExitReport
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
@@ -751,7 +752,7 @@ private fun AddMenu(expanded: Boolean, onExpanded: (Boolean) -> Unit, onRoute: (
 /** App labels for a small group ("Signal", "Bank A, Bank B"), the app count for a larger one ("7 apps"). */
 internal fun appsLabel(pkgs: List<String>, labels: Map<String, String>, sites: List<String> = emptyList()) = when {
     pkgs.isEmpty() && sites.isEmpty() -> "No apps assigned"
-    pkgs.size + sites.size <= 3 -> (pkgs.map { labels[it] ?: it.substringAfterLast('.') } + sites).joinToString(", ")
+    pkgs.size + sites.size <= 3 -> (pkgs.map { labels[it] ?: it.substringAfterLast('.') } + sites.map(Sites::shown)).joinToString(", ")
     else -> listOfNotNull(count(pkgs.size).takeIf { pkgs.isNotEmpty() }, (if (sites.size == 1) "1 website" else "${sites.size} websites").takeIf { sites.isNotEmpty() }).joinToString(" · ")
 }
 
