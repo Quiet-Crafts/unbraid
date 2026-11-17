@@ -109,10 +109,11 @@ fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false
     val tsDown = vpn.tsState in setOf("NeedsLogin", "NeedsMachineAuth", "InUseOtherUser", "Stopped")
     // Evidence holds only for the engine running now, on the network the phone is on now (none: nothing works).
     val passed = vpn.passed?.takeIf { net != null && net != 0L && it.engine == vpn.engine && it.net == net }
-    // A Tailscale exit as Tailscale reports it: null while it says nothing of it, or while the engine still runs another
-    // exit for this route than the one saved (an edit not applied yet, or refused): that device's status says nothing of it.
+    // A Tailscale exit as Tailscale reports it: true when its device is the exit in use and online, false when it is
+    // offline, null while it says nothing of it: the engine still runs another exit for this route than the one saved (an
+    // edit not applied yet, or refused), or Tailscale uses another device (a speed test, or not switched yet).
     fun exit(r: app.unbraid.data.Route) = vpn.servers[r.id]?.host?.takeIf { it == r.tsExit }
-        ?.let { ip -> vpn.tsExitNodes.firstOrNull { it.ip == ip } }?.online?.takeIf { vpn.tsState == "Running" }
+        ?.let { ip -> vpn.tsExitNodes.firstOrNull { it.ip == ip } }?.takeIf { vpn.tsState == "Running" }?.let { if (!it.online) false else if (it.inUse) true else null }
     // Answered as saved now: a route saved since with another server or with its check off is not known to work.
     fun working(r: app.unbraid.data.Route) = on && !stopped && if (r.tsExit != null) net != null && exit(r) == true else passed?.let { Health.answered(it, r) } == true
     // No tunnel (its provider gave no server, or its own server has no keys).

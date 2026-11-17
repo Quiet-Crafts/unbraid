@@ -111,7 +111,10 @@ class WidgetSequencesTest {
         val s = setup.copy(routes = setup.routes + Route("ts", tsExit = "100.64.0.9", tsName = "nas"), apps = mapOf("a" to "ts"))
         val v = VpnState(Phase.On, servers = mapOf("nl" to srv, "ts" to Server("nas", "100.64.0.9", "", "", 0)), tsState = "Running")
         fun ts(v: VpnState, net: Long? = 9) = glance(v, s, net).others.single { it.code == "TS" }
-        assertTrue(ts(v.copy(tsExitNodes = listOf(TsNode("nas", "100.64.0.9", true)))).working)
+        assertTrue(ts(v.copy(tsExitNodes = listOf(TsNode("nas", "100.64.0.9", true, inUse = true)))).working)
+        // Online but Tailscale uses another device (a speed test, or not switched yet): not known to work, not failing.
+        assertTrue(ts(v.copy(tsExitNodes = listOf(TsNode("nas", "100.64.0.9", true)))).let { !it.failing && !it.working })
+        assertTrue(ts(v.copy(tsExitNodes = listOf(TsNode("nas", "100.64.0.9", true), TsNode("other", "100.64.0.8", true, inUse = true)))).let { !it.failing && !it.working })
         assertTrue(ts(v.copy(tsExitNodes = listOf(TsNode("nas", "100.64.0.9", false)))).let { it.failing && !it.working })
         assertTrue(ts(v.copy(tsExitNodes = listOf(TsNode("other", "100.64.0.8", true)))).let { !it.failing && !it.working })
         assertFalse(ts(v.copy(tsExitNodes = listOf(TsNode("nas", "100.64.0.9", true))), null).working) // no network

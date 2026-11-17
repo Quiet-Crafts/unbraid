@@ -102,7 +102,7 @@ class WidgetGlanceTest {
         val all = mapOf("nl" to srv, "ts" to Server("nas", "100.64.0.9", "", "", 0))
         val nl = passed(ts, "nl")
         // A Tailscale exit is never checked here: it works while Tailscale runs with its device online, and isn't known while it starts.
-        val online = listOf(app.unbraid.vpn.TsNode("nas", "100.64.0.9", true))
+        val online = listOf(app.unbraid.vpn.TsNode("nas", "100.64.0.9", true, inUse = true))
         assertTrue(glance(VpnState(Phase.On, servers = all, tsState = "Running", tsExitNodes = online), ts, NET).others.single().let { !it.failing && it.working })
         assertEquals(Triple(0, 0, 2), glance(VpnState(Phase.On, servers = all, tsState = "Starting"), ts, NET).let { Triple(it.ok, it.total, it.unchecked) })
         val down = glance(VpnState(Phase.On, servers = all, tsState = "NeedsLogin", passed = nl), ts, NET)
@@ -119,7 +119,7 @@ class WidgetGlanceTest {
     @Test fun aTailscaleExitCountsOnlyForTheExitTheEngineRuns() {
         val a = "100.64.0.9"; val b = "100.64.0.8"
         fun saved(ip: String) = setup.copy(routes = setup.routes + Route("ts", tsExit = ip, tsName = "nas"), apps = mapOf("a" to "ts"))
-        val nodes = listOf(app.unbraid.vpn.TsNode("nas", a, false), app.unbraid.vpn.TsNode("box", b, true))
+        val nodes = listOf(app.unbraid.vpn.TsNode("nas", a, false), app.unbraid.vpn.TsNode("box", b, true, inUse = true))
         val runsA = VpnState(Phase.On, servers = mapOf("nl" to srv, "ts" to Server("nas", a, "", "", 0)), tsState = "Running", tsExitNodes = nodes)
         fun ts(v: VpnState, s: Setup) = glance(v, s, NET).others.single()
         assertTrue(ts(runsA, saved(b)).let { !it.working && !it.failing }) // B saved and online, A still runs
