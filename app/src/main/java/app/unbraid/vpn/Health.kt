@@ -29,13 +29,29 @@ object Health {
 
     /**
      * Routes whose latest check answered, through engine start [engine] (each runs its own servers) on network [net]
-     * ([AutoSwitch.Net.id]). Any other engine or network makes them unknown again, whoever starts it.
+     * ([AutoSwitch.Net.id]), each as it was checked ([checkedAs]). Any other engine or network makes them unknown again,
+     * whoever starts it; so does a route saved since with another server, kind or check setting.
      */
-    data class Passed(val engine: Int, val net: Long, val routes: Set<String>)
+    data class Passed(val engine: Int, val net: Long, val routes: Map<String, app.unbraid.data.Route>)
 
-    /** [old] after a round on [engine] and [net]: [answered] routes passed, [failed] ones are no longer known to work. */
-    fun passed(old: Passed?, engine: Int, net: Long, answered: Set<String>, failed: Set<String>) =
-        Passed(engine, net, (old?.takeIf { it.engine == engine && it.net == net }?.routes.orEmpty() + answered) - failed)
+    /** What of route [r] its check is about: everything but its colour. */
+    fun checkedAs(r: app.unbraid.data.Route) = r.copy(hue = 0)
+
+    /** Route [r], as saved now, is the one [p] holds an answer for. */
+    fun answered(p: Passed, r: app.unbraid.data.Route) = eligible(r) && p.routes[r.id] == checkedAs(r)
+
+    /**
+     * [old] after a round of checks on [engine] and [net]: [checked] is each tunnel checked (tag) with its routes, [route]
+     * each route as the engine ran it. A tunnel not in [down] answered; one in it failed. [down] null: every check failed
+     * and so did the phone's own network, so nothing checked is known to work, though no server is blamed. No network
+     * (null, or Android's handle 0, which names none): nothing can be known.
+     */
+    fun round(old: Passed?, engine: Int, net: Long?, checked: Map<String, List<String>>, down: Set<String>?, route: (String) -> app.unbraid.data.Route?): Passed? {
+        if (net == null || net == 0L) return null
+        val (ok, failed) = checked.entries.partition { down != null && it.key !in down }
+        val kept = old?.takeIf { it.engine == engine && it.net == net }?.routes.orEmpty() - failed.flatMap { it.value }.toSet()
+        return Passed(engine, net, kept + ok.flatMap { it.value }.mapNotNull { id -> route(id)?.let { id to checkedAs(it) } })
+    }
 
     private val SERVERS = listOf("stun.l.google.com:19302", "stun.cloudflare.com:3478")
 
