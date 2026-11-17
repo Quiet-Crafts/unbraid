@@ -1,9 +1,20 @@
+@file:OptIn(SavedSites::class)
+
 package app.unbraid.data
 
 import app.unbraid.vpn.Compiler
 import java.lang.Character.UnicodeScript
 import java.net.IDN
 import java.text.Normalizer
+
+/**
+ * The websites as saved ([Setup.sites], [Profile.sites]), whether or not their rule applies now. Reading them needs this
+ * opt-in, so a count, a tunnel or a protection can't go by them unseen: those go by [Sites.applied].
+ */
+@RequiresOptIn("These are the websites as saved; what applies now is Sites.applied", RequiresOptIn.Level.WARNING)
+@Retention(AnnotationRetention.BINARY)
+@Target(AnnotationTarget.PROPERTY)
+annotation class SavedSites
 
 /** Websites with a route of their own ([Setup.sites]): how an address is written, and how many a profile holds. */
 object Sites {
@@ -17,15 +28,14 @@ object Sites {
     private const val ADDRESS = "An IP address can't have a rule. Add the website's name"
     private const val LETTERS = "unbraid can't spell this name's letters the way browsers do. Use the form that starts with xn-- instead"
 
-    /** Hosting platforms where everyone gets a name of their own: a rule for the platform's name would cover them all. */
-    private val PLATFORMS = setOf("github.io", "gitlab.io", "blogspot.com", "herokuapp.com", "appspot.com", "netlify.app", "vercel.app", "pages.dev", "workers.dev",
-        "web.app", "firebaseapp.com", "azurewebsites.net", "cloudfront.net", "s3.amazonaws.com", "ts.net")
+    /**
+     * Rules of the Public Suffix List, both its sections, in ASCII form: name endings handed out to unrelated owners ("co.uk",
+     * "github.io"); "*.x" makes every name one label under x such an ending, "!y" takes y back out of a "*." rule.
+     */
+    private val SHARED by lazy { Sites::class.java.getResourceAsStream("/shared_suffixes.txt")!!.bufferedReader().readLines().filter { it.isNotBlank() && !it.startsWith("//") }.toHashSet() }
 
-    /** Name endings shared by many unrelated websites ("co.uk"), with the list's wildcard and exception rules. */
-    private val SHARED by lazy { Sites::class.java.getResourceAsStream("/shared_suffixes.txt")!!.bufferedReader().readLines().filter { it.isNotBlank() && !it.startsWith("#") }.toHashSet() + PLATFORMS }
-
-    /** [name] is itself an ending many websites share, so a rule for it would cover them all. */
-    private fun shared(name: String) = name in SHARED || "*.${name.substringAfter('.')}" in SHARED && "!$name" !in SHARED
+    /** [name] is an ending many websites share, or holds a whole level of them ("*.kawasaki.jp" for kawasaki.jp), so a rule for it would cover them all. */
+    private fun shared(name: String) = name in SHARED || "*.$name" in SHARED || "*.${name.substringAfter('.')}" in SHARED && "!$name" !in SHARED
 
     /**
      * The address in [raw] as a rule keeps it, from what people type or paste ("https://www.Example.com/page" →
@@ -51,28 +61,41 @@ object Sites {
     }
 
     /**
-     * Why [s]'s rule for [name] doesn't apply now, or null when it does: one of the engine's earlier rules answers the
-     * name's lookups itself (the tailnet's while Reach your tailnet is on, the local network's while it bypasses the
-     * VPN), so its connections carry no name a website rule could match. The same domains, from the same functions, as
-     * the compiler's. A block of such a name still applies: it refuses the lookup before those rules. [reported] is the
-     * tailnet domain Tailscale gave, which a Headscale tailnet's own domain needs: without it only what holds whatever
-     * Tailscale reports counts (all of ts.net on Tailscale's own server, local names).
+     * Why a website's rule doesn't apply now, in its row's words: a blocked website above it takes its name ([By.BLOCK]),
+     * or one of the engine's earlier lookup rules answers the name itself, so no connection carries a name a website rule
+     * could match: the tailnet's while Reach your tailnet is on ([By.TAILNET]), the local network's while it bypasses the
+     * VPN ([By.LOCAL]). The compiler's own domains, from its own functions.
      */
-    fun overridden(name: String, s: Setup, reported: String? = null): String? = when {
-        s.home.tailscale && Compiler.tsDomains(s.home, reported).any { under(name, it) } ->
-            if (Compiler.officialTs(s.home)) "Tailscale answers ts.net names while Reach your tailnet is on" else "your tailnet answers this name while Reach your tailnet is on"
-        s.prefs.lan && Compiler.LOCAL_NAMES.any { under(name, it) } -> "your network answers this name while Local network bypasses the VPN is on"
-        else -> null
+    class Off(val by: By, val why: String) { enum class By { BLOCK, TAILNET, LOCAL } }
+
+    /**
+     * The one decision whether website [name], set to route [id] among [sites] (a profile's, or [s]'s own), applies now;
+     * null when it does. A block always applies: it refuses the lookup before every other rule. [reported] is the tailnet
+     * domain Tailscale gave, which a Headscale tailnet's own domain needs: without it only what holds whatever Tailscale
+     * reports counts (all of ts.net on Tailscale's own server, local names), so it never leaves out more than the compiler.
+     */
+    fun off(name: String, id: String?, s: Setup, sites: Map<String, String> = s.sites, reported: String? = null): Off? = when {
+        id == BLOCK -> null
+        else -> sites.filter { (above, to) -> to == BLOCK && name.endsWith(".$above") }.keys.minOrNull()?.let { Off(Off.By.BLOCK, "it is under $it") }
+            ?: if (s.home.tailscale && Compiler.tsDomains(s.home, reported).any { under(name, it) })
+                Off(Off.By.TAILNET, if (Compiler.officialTs(s.home)) "Tailscale answers ts.net names while Reach your tailnet is on" else "your tailnet answers this name while Reach your tailnet is on")
+            else if (s.prefs.lan && Compiler.LOCAL_NAMES.any { under(name, it) }) Off(Off.By.LOCAL, "your network answers this name while Local network bypasses the VPN is on")
+            else null
     }
 
     /**
-     * The one decision of which websites apply, [s]'s own or a profile's [sites]: a block always, a route or Direct
-     * unless [overridden]. The compiler (with the tailnet domain Tailscale [reported]), the routes in use, protection,
-     * statistics and every count go by it; the list and the editing go by what is saved. Without [reported] it leaves
-     * out no more than the compiler does, so every route the compiler sends a website to has its tunnel.
+     * The websites of [sites] whose rule applies now ([off]). The compiler, the routes in use, protection, statistics and
+     * every count go by it; the list and the editing go by what is saved.
      */
     fun applied(s: Setup, sites: Map<String, String> = s.sites, reported: String? = null): Map<String, String> =
-        sites.filter { (name, id) -> id == BLOCK || overridden(name, s, reported) == null }
+        sites.filter { (name, id) -> off(name, id, s, sites, reported) == null }
+
+    /**
+     * Whether [name] is a key a saved setup may hold: what any version's [clean] gave (letters, digits and inner hyphens in
+     * lower case, two labels or more, not ending in a number). A restored backup's websites are checked by it, so a name an
+     * older version saved stays; new input goes by [refusal].
+     */
+    fun stored(name: String) = name.length <= 253 && name.split('.').let { l -> l.size >= 2 && l.all(LABEL::matches) && !l.last().all { it in '0'..'9' } }
 
     /** Whether [name] is [suffix] or a name under it. */
     fun under(name: String, suffix: String) = name == suffix || name.endsWith(".$suffix")
@@ -92,8 +115,31 @@ object Sites {
     private val LETTERY = setOf(Character.UPPERCASE_LETTER, Character.LOWERCASE_LETTER, Character.TITLECASE_LETTER, Character.MODIFIER_LETTER, Character.OTHER_LETTER,
         Character.NON_SPACING_MARK, Character.COMBINING_SPACING_MARK, Character.DECIMAL_DIGIT_NUMBER, Character.LETTER_NUMBER).map { it.toInt() }.toSet()
 
-    /** A letter, mark or digit both rules write the same way. */
-    private fun letter(c: Int) = c < 0x80 || Character.getType(c) in LETTERY && c !in DIFFERENT && IGNORABLE.none { c in it }
+    /** A letter, mark or digit both rules write the same way, or a sign a name may hold beside certain letters ([contextual]). */
+    private fun letter(c: Int) = c < 0x80 || c in CONTEXT || Character.getType(c) in LETTERY && c !in DIFFERENT && IGNORABLE.none { c in it }
+
+    /** Signs a name may hold only beside certain letters ([contextual]): the Catalan middle dot, the Greek numeral sign, Hebrew geresh and gershayim, the Japanese middle dot. */
+    private val CONTEXT = setOf(0xb7, 0x375, 0x5f3, 0x5f4, 0x30fb)
+    private val KANA_KANJI = setOf(UnicodeScript.HIRAGANA, UnicodeScript.KATAKANA, UnicodeScript.HAN)
+
+    /**
+     * Whether [label] keeps IDNA's contextual rules (RFC 5892), as registries do: a middle dot only between two l's
+     * ("col·legi"), the Greek numeral sign before a Greek letter, geresh and gershayim after a Hebrew letter, the Japanese
+     * middle dot in a label with kana or kanji ("カタカナ・テスト"), and Arabic-Indic digits of one kind only.
+     */
+    private fun contextual(label: String): Boolean {
+        val c = label.codePoints().toArray()
+        val script = { i: Int -> c.getOrNull(i)?.let(UnicodeScript::of) }
+        return c.indices.all { i ->
+            when (c[i]) {
+                0xb7 -> c.getOrNull(i - 1) == 'l'.code && c.getOrNull(i + 1) == 'l'.code
+                0x375 -> script(i + 1) == UnicodeScript.GREEK
+                0x5f3, 0x5f4 -> script(i - 1) == UnicodeScript.HEBREW
+                0x30fb -> c.any { UnicodeScript.of(it) in KANA_KANJI }
+                else -> true
+            }
+        } && !(c.any { it in 0x660..0x669 } && c.any { it in 0x6f0..0x6f9 })
+    }
 
     /** The name in [raw] as a browser reads a web address, or the reason there is none. */
     private fun read(raw: String): Pair<String?, String> {
@@ -125,7 +171,7 @@ object Sites {
         // name or none.
         if ("xn--" in name) {
             val read = IDN.toUnicode(name)
-            if (!read.codePoints().allMatch { letter(it) } || !Normalizer.isNormalized(read, Normalizer.Form.NFC) || IDN.toASCII(read).lowercase() != name || !bidi(read.split('.'))) return null to NOT_A_NAME
+            if (!read.codePoints().allMatch { letter(it) } || !Normalizer.isNormalized(read, Normalizer.Form.NFC) || IDN.toASCII(read).lowercase() != name || !bidi(read.split('.')) || !read.split('.').all(::contextual)) return null to NOT_A_NAME
         }
         return name to ""
     }
@@ -156,23 +202,34 @@ object Sites {
     /** Scripts a label may mix and still be shown in its own letters, as browsers allow: Latin with Chinese and Japanese, Chinese, or Korean characters. */
     private val MIXES = listOf(setOf(UnicodeScript.LATIN, UnicodeScript.HAN, UnicodeScript.HIRAGANA, UnicodeScript.KATAKANA),
         setOf(UnicodeScript.LATIN, UnicodeScript.HAN, UnicodeScript.BOPOMOFO), setOf(UnicodeScript.LATIN, UnicodeScript.HAN, UnicodeScript.HANGUL))
-    /** Letters of other scripts that look like Latin ones, with the Latin letter each looks like. */
-    private val LOOKALIKE = ("асԁеһіјӏорԛѕԝхуαικνορτυχօսհոց" zip "acdehijlopqswxyaikvoptuxouhng").toMap()
+    /** Letters of other scripts that look like Latin ones, with the Latin letter each looks like: what a search also reads them as. */
+    private val LOOKALIKE = ("асԁеһіјӏорԛѕԝхуѵѡԍαικνορτυχօսհոց" zip "acdehijlopqswxyvwgaikvoptuxouhng").toMap()
+
+    /** Scripts shown in their own letters under any ending: none of their letters passes for a Latin one. */
+    private val SHOWN = ("LATIN HAN HIRAGANA KATAKANA BOPOMOFO HANGUL ARABIC HEBREW THAANA SYRIAC DEVANAGARI BENGALI GURMUKHI GUJARATI ORIYA TAMIL TELUGU KANNADA " +
+        "MALAYALAM SINHALA THAI LAO TIBETAN MYANMAR KHMER GEORGIAN ETHIOPIC").split(' ').map(UnicodeScript::valueOf).toSet()
+    /** Scripts whose letters can spell a Latin word ("аррӏе"): shown in their own letters only under an ending of their countries or in their own script. */
+    private val LATINISH = mapOf(UnicodeScript.CYRILLIC to setOf("ru", "su", "ua", "by", "bg", "kz", "kg", "mk", "mn", "rs", "tj", "uz", "ba", "me", "eu"),
+        UnicodeScript.GREEK to setOf("gr", "cy", "eu"), UnicodeScript.ARMENIAN to setOf("am"))
 
     /** [name]'s labels in their own letters, or null when it has none ("xn--" labels that decode to nothing valid). */
     private fun decoded(name: String) = if ("xn--" !in name) null else runCatching { IDN.toUnicode(name) }.getOrNull()?.takeIf { it != name && clean(it) == name }
 
     /**
      * [name] as people read it: an international name in its own letters ("xn--mnchen-3ya.de" → "münchen.de"). Only a
-     * reading that writes back to [name] itself, and, as browsers show it, only when no label mixes scripts or is made
-     * of letters that look like Latin ones ("xn--pple-43d.example" stays, not "аpple.example"): anything else stays in its ASCII form.
+     * reading that writes back to [name] itself, and, as browsers show it, only when no label mixes scripts, and a label
+     * in a script that can spell Latin words only under its own countries' endings ("xn--80a7ec7j.example" stays, not
+     * "ѵіѕа.example"; "пример.рф" shows): anything else stays in its ASCII form.
      */
-    fun shown(name: String): String = decoded(name)?.takeIf { it.split('.').all(::plain) } ?: name
+    fun shown(name: String): String = decoded(name)?.takeIf { d -> d.split('.').all { plain(it, d.substringAfterLast('.')) } } ?: name
 
-    private fun plain(label: String): Boolean {
-        val scripts = label.codePoints().toArray().map(UnicodeScript::of).filter { it != UnicodeScript.COMMON && it != UnicodeScript.INHERITED }.toSet()
-        if (scripts.size > 1 && MIXES.none { it.containsAll(scripts) }) return false
-        return scripts.singleOrNull() == UnicodeScript.LATIN || scripts.isEmpty() || !label.all { it in LOOKALIKE || it.isDigit() || it == '-' }
+    private fun scripts(label: String) = label.codePoints().toArray().map(UnicodeScript::of).filter { it != UnicodeScript.COMMON && it != UnicodeScript.INHERITED }.toSet()
+
+    private fun plain(label: String, end: String): Boolean {
+        val scripts = scripts(label)
+        if (scripts.size > 1) return MIXES.any { it.containsAll(scripts) }
+        val one = scripts.singleOrNull() ?: return true
+        return one in SHOWN || LATINISH[one]?.let { end in it || scripts(end) == scripts } == true
     }
 
     /** What a search of the list matches [name] by: the name, its own letters, and those letters read as the Latin ones they look like. */

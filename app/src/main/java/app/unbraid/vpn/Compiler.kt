@@ -14,6 +14,7 @@ import app.unbraid.data.TsLink
 import app.unbraid.data.validWgKey
 import app.unbraid.data.WgLink
 import app.unbraid.data.Route
+import app.unbraid.data.SavedSites
 import app.unbraid.data.Setup
 import app.unbraid.data.Sites
 import app.unbraid.data.WgPeer
@@ -89,9 +90,9 @@ object Compiler {
     const val PROBE = "probe"
 
     /** Route id → the tunnel tag it runs on: routes that resolve to one server with one login share a tunnel. */
-    fun shared(s: Setup, links: Map<String, Link>, blocked: Set<String> = emptySet()): Map<String, String> {
+    fun shared(s: Setup, links: Map<String, Link>, blocked: Set<String> = emptySet(), reported: String? = null): Map<String, String> {
         val owners = HashMap<String, String>()
-        val routes = s.activeRoutes.filter { it.tsExit == null && it.id !in blocked }
+        val routes = s.activeRoutes(reported).filter { it.tsExit == null && it.id !in blocked }
         require(clashes(s, links).isEmpty()) { CLASH } // [LinkPicker] blocks them first
         return routes.associate { r ->
             val link = links[r.id] ?: error("No server for ${r.name}")
@@ -105,6 +106,7 @@ object Compiler {
     class MissingDefault : Fail(MISSING_DEFAULT)
 
     /** Route ids that apps or websites are set to but the setup no longer has: their traffic is refused, never sent to the default. */
+    @OptIn(SavedSites::class) // a website's rule is refused whether it applies or not
     fun missing(s: Setup): Set<String> = (s.apps.values + s.sites.values).filterTo(HashSet()) { !builtIn(it) && s.route(it) == null }
 
     /**
@@ -126,12 +128,12 @@ object Compiler {
         val refused = i.blocked + missing(s) + BLOCK
         // Apps on Block: refused before anything else is decided for them, a website's route, the home network and the LAN included.
         val barred = JsonArray(s.apps.filterValues { it == BLOCK }.keys.sorted().map(::JsonPrimitive))
-        val active = s.activeRoutes.filter { it.id !in i.blocked }
+        val active = s.activeRoutes(i.tsSuffix).filter { it.id !in i.blocked }
         val defaultBlocked = s.defaultRoute in i.blocked
         require(active.mapNotNull { it.tsExit }.distinct().size <= 1) { "Tailscale allows one exit node at a time. Use the same node for every Tailscale route." }
         // Tailscale-exit routes have no tunnel of their own: they ride the Tailscale endpoint, whose exit node is set below.
         // Routes that resolve to the same server with the same credentials share one tunnel: two with one key would fight over it.
-        val shared = shared(s, i.links, i.blocked)
+        val shared = shared(s, i.links, i.blocked, i.tsSuffix)
         val tag = { id: String -> if (id == DIRECT || id == FILTERED) "direct" else if (s.route(id)?.tsExit != null) TS_TAG else shared[id] ?: "r-$id" }
         val tsDomains = tsDomains(s.home, i.tsSuffix)
         // OpenVPN routes use the DNS their server pushes, except NordVPN's own routes: those keep Nord's
@@ -178,7 +180,15 @@ object Compiler {
         val siteDns = { id: String -> if (id == DIRECT && filter != null && (directFiltered || through.isNotEmpty())) "dns-filter" else dnsFor(id) }
         // Websites with a route of their own: each run matches its names and every name under them. A rule for a name the
         // tailnet's or the local network's lookup rule answers first is left out: it could never apply, and its route needs no tunnel.
-        val sites = Sites.runs(Sites.applied(s, reported = i.tsSuffix)).map { (id, names) -> id to arrayOf<Pair<String, Any>>("domain" to JsonArray(names.map(::JsonPrimitive)), "domain_suffix" to JsonArray(names.map { JsonPrimitive(".$it") })) }
+        val match = { names: List<String> -> arrayOf<Pair<String, Any>>("domain" to JsonArray(names.map(::JsonPrimitive)), "domain_suffix" to JsonArray(names.map { JsonPrimitive(".$it") })) }
+        val sites = Sites.runs(Sites.applied(s, reported = i.tsSuffix)).map { (id, names) -> id to match(names) }
+        // Websites whose names the tailnet's or the local network's lookup rule answers ([Sites.off]), by that rule's server.
+        // Their answers last a second, as a stand-in address does, so apps ask again soon after the website's own rule
+        // comes back. A connection that still carries such a name came by a stand-in address handed out while the rule
+        // applied (the domain table outlives a reload): refused, so the app looks the name up again and gets what applies
+        // now, never the default's route.
+        @OptIn(SavedSites::class) val answered = s.sites.mapNotNull { (n, id) -> Sites.off(n, id, s, reported = i.tsSuffix)?.by?.takeIf { it != Sites.Off.By.BLOCK }?.let { it to n } }
+            .groupBy({ if (it.first == Sites.Off.By.TAILNET) "dns-tailnet" else "local" }, { it.second }).toSortedMap().map { (server, names) -> server to match(names.sorted()) }
 
         return buildJsonObject {
             putJsonObject("log") { put("level", "warn"); put("timestamp", false) }
@@ -211,6 +221,7 @@ object Compiler {
                     // Block comes first: no name is looked up for a blocked app, nor a blocked website's for anyone.
                     if (barred.isNotEmpty()) add(obj("package_name" to barred, "action" to "reject"))
                     for ((id, names) in sites) if (id == BLOCK) add(obj(*names, "action" to "reject"))
+                    for ((server, names) in answered) add(obj(*names, "server" to server, "rewrite_ttl" to 1))
                     if (homeTs && tsDomains.isNotEmpty()) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
                     if (s.prefs.lan) add(obj("domain_suffix" to arr(*LOCAL_NAMES.toTypedArray()), "server" to "local"))
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
@@ -343,6 +354,7 @@ object Compiler {
                         } },
                     )
                     val onTs = { id: String -> s.route(id)?.tsExit != null }
+                    for ((_, names) in answered) add(obj(*names, "action" to "reject", "no_drop" to true))
                     if (sites.isNotEmpty()) {
                         // Matched on the name the lookup gave (a fake-IP connection reaches these rules as that name), never on
                         // one read off the connection: an app could write any name there and take a website's route, Direct

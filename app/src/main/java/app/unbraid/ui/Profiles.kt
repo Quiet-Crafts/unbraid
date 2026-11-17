@@ -1,3 +1,5 @@
+@file:OptIn(app.unbraid.data.SavedSites::class) // a profile carries its websites as saved
+
 package app.unbraid.ui
 
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -266,12 +268,12 @@ fun NotSet(onChoose: () -> Unit) = Row(
 }
 
 /** What a profile keeps, in words: "Netherlands · 3 apps elsewhere" (apps on a route other than its default). */
-fun summary(s: Setup, p: Profile): String {
+fun summary(s: Setup, p: Profile, reported: String? = null): String {
     val n = p.apps.values.count { it != p.defaultRoute }
     if (!p.ready) return "Empty · no default route yet"
     val default = if (p.defaultRoute == DIRECT) "Direct" else s.route(p.defaultRoute)?.name ?: "Default route no longer exists"
     return "$default · ${if (n == 0) "no apps elsewhere" else if (n == 1) "1 app elsewhere" else "$n apps elsewhere"}" +
-        websitesText(s, p.sites)
+        websitesText(s, p.sites, reported)
 }
 
 /**
@@ -376,6 +378,7 @@ internal const val ON_NET_NOTE = "Switches while $APP is connected, a few second
 @Composable
 fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: (empty: Boolean) -> Unit, onEdit: (String) -> Unit) {
     val profiles = setup.saved
+    val reported = ui.vpn.collectAsStateWithLifecycle().value.tsSuffix
     var dragging by remember { mutableStateOf<String?>(null) }
     var drift by remember { mutableFloatStateOf(0f) }
     var rowPx by remember { mutableFloatStateOf(1f) }
@@ -452,7 +455,7 @@ fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: (empty: Boolea
                             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp),
                         ) { Icon(Icons.check, null, Modifier.size(14.dp), tint = Ink.accent); Text("In use", style = Type.caption, color = Ink.accent) }
                     }
-                    Text(summary(setup, p), style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(summary(setup, p, reported), style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 IconTap(Icons.edit, "Edit ${p.name}", { onEdit(p.name) }, tint = Ink.dim)
             }

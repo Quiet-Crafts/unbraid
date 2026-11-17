@@ -1,3 +1,5 @@
+@file:OptIn(app.unbraid.data.SavedSites::class) // the Websites list holds every saved website
+
 package app.unbraid.ui
 
 import androidx.compose.foundation.background
@@ -255,7 +257,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
         }
     }
 
-    if (addSite) SiteSheet(setup, offered, { site, to -> ui.site(site, to); addSite = false }, { addSite = false })
+    if (addSite) SiteSheet(setup, offered, ui.vpn.collectAsStateWithLifecycle().value.tsSuffix, { site, to -> ui.site(site, to); addSite = false }, { addSite = false })
 }
 
 @Composable

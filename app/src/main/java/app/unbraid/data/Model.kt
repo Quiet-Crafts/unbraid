@@ -1,3 +1,5 @@
+@file:OptIn(SavedSites::class)
+
 package app.unbraid.data
 
 import kotlinx.serialization.Serializable
@@ -162,7 +164,7 @@ data class Profile(
     /** Routes added to this profile, which it lists even while no app uses them. */
     val added: List<String> = emptyList(),
     /** Websites with a route of their own ([Sites]): address → route id or [DIRECT]. A website's route beats its app's. */
-    val sites: Map<String, String> = emptyMap(),
+    @SavedSites val sites: Map<String, String> = emptyMap(),
 ) {
     val ready get() = defaultRoute.isNotEmpty()
     /** App [pkg] on route [routeId], its default included: a choice that stays when the default changes. Null = it follows the default. */
@@ -221,7 +223,7 @@ data class Setup(
     /** The profile in use's [Profile.added], kept live like [defaultRoute] and [apps]. */
     val added: List<String> = emptyList(),
     /** The profile in use's [Profile.sites], kept live like [defaultRoute] and [apps]. */
-    val sites: Map<String, String> = emptyMap(),
+    @SavedSites val sites: Map<String, String> = emptyMap(),
     /** The profile to switch to by itself on a kind of network ([app.unbraid.vpn.AutoSwitch]): "wifi" or "mobile" → its name. */
     val onNet: Map<String, String> = emptyMap(),
     /** The profile in use; its saved copy follows every edit, as [defaultRoute] and [apps] hold it ([saved]). Null = none. */
@@ -428,7 +430,12 @@ data class Setup(
     /** How many of [installed] follow the default: the apps a new default would move. */
     fun followers(installed: Collection<String>) = installed.count(::follows)
     /** Routes that carry traffic right now: the default plus any with apps or with websites whose rule applies (and those up for a speed test). */
-    val activeRoutes get() = Sites.applied(this).let { sites -> routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) } }
+    val activeRoutes get() = activeRoutes(null)
+    /**
+     * [activeRoutes] with the tailnet domain Tailscale [reported], as the compiler gets it: a website a Headscale tailnet's
+     * domain answers needs no tunnel. Without it, never fewer routes than the compiler opens, so each has its server.
+     */
+    fun activeRoutes(reported: String?) = Sites.applied(this, reported = reported).let { sites -> routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) } }
     /** The Tailscale exit node in use, if any active route goes out through one (Tailscale allows one at a time). */
     val tsExit get() = activeRoutes.firstNotNullOfOrNull { it.tsExit }
     /** Tailscale runs for home access or for an exit-node route. */

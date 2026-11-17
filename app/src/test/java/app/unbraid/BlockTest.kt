@@ -73,9 +73,10 @@ class BlockTest {
         assertTrue(look < dns.indexOfFirst { it.text("server") == "fake" }) // before any address is handed out for it
         val rule = c.rules().single { it.strings("domain") == listOf("ads.example") }
         assertEquals("reject", rule.text("action")); assertEquals("true", rule.text("no_drop"))
-        // Block comes before every website's route, so a name under a blocked website can't take the route set for it.
+        // A name under a blocked website can't take the route set for it: its rule is left out, the block covers it.
         val nested = compile(setup.copy(sites = mapOf("ads.example" to BLOCK, "cdn.ads.example" to "us"))).rules()
-        assertTrue(nested.indexOfFirst { it.strings("domain") == listOf("ads.example") && it.text("action") == "reject" } < nested.indexOfFirst { it.strings("domain") == listOf("cdn.ads.example") })
+        assertTrue(nested.single { it.strings("domain") == listOf("ads.example") }.text("action") == "reject")
+        assertTrue(nested.none { it.strings("domain")?.contains("cdn.ads.example") == true })
         // The website with a route keeps it.
         assertEquals("r-us", c.rules().single { it.strings("domain") == listOf("example.com") && it["outbound"] != null }.text("outbound"))
     }
