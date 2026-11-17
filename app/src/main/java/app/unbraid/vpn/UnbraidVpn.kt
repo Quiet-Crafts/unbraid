@@ -99,6 +99,8 @@ data class VpnState(
     val stalled: Set<String> = emptySet(),
     /** Own-server routes whose internet check failed; never moved. */
     val notAnswering: Set<String> = emptySet(),
+    /** Routes whose latest check answered; they count as working only on the engine and network named ([Health.Passed]). */
+    val passed: Health.Passed? = null,
     /** Counts engine starts, each of which restarts every tunnel: what was observed of an earlier one no longer holds. */
     val engine: Int = 0,
     /** [Setup.hashCode] of the setup the engine runs in full (no route still waiting for a server): a profile switch is done. */
@@ -696,7 +698,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         var basis: Pair<Int, android.net.Network?>? = null // the engine start and network the streaks are about
         var lockdown = built // Android's Block setting as last seen here: at first, the one the tunnel was built with
         fun restart(now: Long, keep: Boolean = false) {
-            streaks.clear(); if (!keep) { history.clear(); undrop() }; failing = emptySet(); state.update { it.copy(notAnswering = emptySet()) }; grace = now + Health.GRACE; round = grace
+            streaks.clear(); if (!keep) { history.clear(); undrop() }; failing = emptySet(); state.update { it.copy(notAnswering = emptySet(), passed = null) }; grace = now + Health.GRACE; round = grace
         }
         while (true) {
             val wake = maxOf(grace, streaks.entries.mapNotNull { (t, s) -> Health.due(s, holds[t] ?: 0) }.fold(round, ::minOf))
@@ -760,6 +762,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     // Most likely the phone's own network: no server is blamed for these checks.
                     if (regular) { streaks.clear(); slow = minOf(slow * 2, 8) } else checked.forEach { streaks.remove(it) }
                     failing = streaks.keys.flatMap { servers[it].orEmpty() }.toSet()
+                    state.update { it.copy(passed = Health.passed(it.passed, engine, network?.networkHandle ?: 0, emptySet(), byTag.filterKeys { t -> t in checked }.values.flatten().toSet())) }
                     return@withLock null
                 }
                 val current = running ?: return@withLock null
@@ -772,7 +775,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     Health.dead(next, now, holds[t] ?: 0)
                 }.toSet()
                 val deadImports = byTag.filterKeys { it in confirmed }.values.flatten().toSet()
-                state.update { it.copy(notAnswering = Health.answering(it.notAnswering, imports, passed, deadImports)) }
+                state.update { it.copy(notAnswering = Health.answering(it.notAnswering, imports, passed, deadImports),
+                    passed = Health.passed(it.passed, engine, network?.networkHandle ?: 0, passed, byTag.filterKeys { t -> t in down }.values.flatten().toSet())) }
                 if (regular) slow = 1
                 checked.forEach { t ->
                     val s = Health.next(streaks[t] ?: Health.Streak(), t !in down, now)
