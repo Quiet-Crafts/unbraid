@@ -60,7 +60,7 @@ class Unbraid : Application() {
         app.unbraid.data.Snapshot.dir = filesDir
         val scope = MainScope()
         // The home-screen widgets mirror what they show of the connection and the setup, and nothing else redraws them.
-        combine(UnbraidVpn.state, store.setup) { v, s -> app.unbraid.vpn.glance(v, s) }.distinctUntilChanged().onEach { Widgets.update(this) }.launchIn(scope)
+        combine(UnbraidVpn.state, store.setup, app.unbraid.vpn.AutoSwitch.net, store.unreadable) { v, s, n, u -> app.unbraid.vpn.glance(v, s, n?.id, u) }.distinctUntilChanged().onEach { Widgets.update(this) }.launchIn(scope)
         Widgets.previews(this)
         // The launcher shortcuts and quick-settings tiles follow the first three profiles and the one in use.
         // Not while the saved settings won't open (defaults would remove the user's shortcuts); again once they do.

@@ -930,7 +930,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         switchFailed.value = null
         val s = setup.value
         val p = s.profiles.firstOrNull { it.name == name } ?: return true
-        if (s.profile == name) { viewing.value = null; then(); return true }
+        // Picking the profile in use counts too: it stays on this network.
+        if (s.profile == name) { viewing.value = null; app.unbraid.vpn.AutoSwitch.pickedByHand(); then(); return true }
         // An empty profile can't be used yet: it is shown, to be given a default route.
         if (!p.ready) { viewing.value = name; return true }
         if (keepAs != null && s.loose && s.use(name, keepAs).profile != name) return false
@@ -954,15 +955,14 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     fun renameProfile(old: String, name: String) {
         store.edit { s -> s.profileName(name, except = old)?.let { s.rename(old, it) } ?: s }
-        // Renamed while shown: keep showing it under its new name.
-        if (viewing.value == old && setup.value.profiles.none { it.name == old }) viewing.value = name.trim()
+        if (setup.value.profiles.any { it.name == old }) return
+        // A switch by network already decided follows the new name. Renamed while shown: keep showing it under its new name.
+        app.unbraid.vpn.AutoSwitch.renamed(old, name.trim())
+        if (viewing.value == old) viewing.value = name.trim()
     }
 
     /** On [kind] of network ([app.unbraid.data.NET_KINDS]) the app switches to profile [name] by itself; null = it doesn't switch. */
-    fun setOnNet(kind: String, name: String?) {
-        store.edit { s -> s.copy(onNet = if (name == null) s.onNet - kind else s.onNet + (kind to name)) }
-        app.unbraid.vpn.AutoSwitch.rulesChanged()
-    }
+    fun setOnNet(kind: String, name: String?) = store.edit { s -> s.copy(onNet = if (name == null) s.onNet - kind else s.onNet + (kind to name)) }
 
     fun forgetProfile(name: String) { store.edit { it.forget(name) }; if (viewing.value == name) viewing.value = null }
     fun moveProfile(name: String, by: Int) = store.edit { it.move(name, by) }

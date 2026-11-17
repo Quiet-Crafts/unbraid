@@ -135,8 +135,9 @@ abstract class ProfileTile(private val slot: Int) : LiveTile<Setup>({ combine(Un
             // setup in use (or this tile's profile is "Previous" itself), the app asks instead.
             ask || !profile.ready || next.profile != name || VpnService.prepare(this) != null -> openApp(Profiles.intent(this, name), slot, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             else -> {
-                Unbraid.store.update { it.use(name, PREVIOUS) }
+                // Noted first: a switch by network decided just before doesn't then replace this one.
                 AutoSwitch.pickedByHand()
+                Unbraid.store.update { it.use(name, PREVIOUS) }
                 Profiles.started(name)
                 if (!running()) UnbraidVpn.start(this)
             }

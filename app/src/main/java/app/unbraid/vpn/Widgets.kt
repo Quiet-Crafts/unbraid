@@ -20,10 +20,13 @@ import app.unbraid.data.DIRECT
 import app.unbraid.data.Setup
 import app.unbraid.vpn.VpnState.Phase
 
-/** One route as a widget shows it. [live] false = saved but carrying nothing now (off, paused, connecting). */
+/**
+ * One route as a widget shows it. [live] false = saved but carrying nothing now (off, paused, connecting). A live VPN
+ * route is [failing], [working] (on evidence only), or neither: not checked.
+ */
 data class WidgetRoute(val code: String, val name: String, val hue: Int, val apps: Int, val direct: Boolean, val live: Boolean, val failing: Boolean,
     /** Websites with this route as their own: a count only, never an address. */
-    val sites: Int = 0)
+    val sites: Int = 0, val working: Boolean = false)
 
 /**
  * What the home-screen widgets show, worked out from the connection and the setup alone: nothing is measured for them.
@@ -33,7 +36,7 @@ data class Glance(
     val phase: Phase = Phase.Off,
     /** False when every app goes Direct: running then connects, it doesn't protect. */
     val protects: Boolean = true,
-    /** VPN routes in use that work, of [total]; Direct counts in neither. */
+    /** VPN routes in use known to work, of [total] known either way; Direct counts in neither. */
     val ok: Int = 0,
     val total: Int = 0,
     val profile: String? = null,
@@ -45,6 +48,10 @@ data class Glance(
     val hs: Boolean = false,
     /** The other routes in use: failing ones first (never hidden below the fold), then exits A to Z, Direct last. */
     val others: List<WidgetRoute> = emptyList(),
+    /** VPN routes in use not known to work or fail: not checked yet on this network, or never (their check is off). */
+    val unchecked: Int = 0,
+    /** Connected on settings that won't open: every app is offline until the app opens them. */
+    val held: Boolean = false,
 ) {
     /** Tailscale as the tag shows it; [None] = not set up, no tag. */
     enum class Ts { None, Up, Down, Idle }
@@ -58,10 +65,18 @@ fun usesLabel(apps: Int, sites: Int, short: Boolean = false) = listOfNotNull(
     (if (short && apps > 0) (if (sites == 1) "1 site" else "$sites sites") else if (sites == 1) "1 website" else "$sites websites").takeIf { sites > 0 },
 ).joinToString(if (short) ", " else " · ")
 
-/** [vpn] and [setup] as the widgets show them. */
-fun glance(vpn: VpnState, setup: Setup): Glance {
+/**
+ * [vpn] and [setup] as the widgets show them, on network [net] ([AutoSwitch.Net.id]); [held]: the settings won't open.
+ * A route works only on evidence: a check answered on this network and engine ([VpnState.passed]), or for a Tailscale
+ * exit, Tailscale saying it runs.
+ */
+fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false): Glance {
+    // What the store holds then are defaults, not the user's setup: none of it shows.
+    if (held) return Glance(vpn.phase, until = if (vpn.phase == Phase.Paused) vpn.pausedUntil else 0, held = vpn.phase == Phase.On)
     val on = vpn.phase == Phase.On
     val tsDown = vpn.tsState in setOf("NeedsLogin", "NeedsMachineAuth", "InUseOtherUser", "Stopped")
+    val passed = vpn.passed?.takeIf { it.engine == vpn.engine && it.net == net }?.routes.orEmpty()
+    fun working(id: String) = on && if (setup.route(id)?.tsExit != null) vpn.tsState == "Running" else id in passed
     // No tunnel (its provider gave no server, or its own server has no keys), a failed check, or a Tailscale exit without Tailscale.
     fun failing(id: String) = on && (id !in vpn.servers || id in vpn.stalled || id in vpn.notAnswering || id in vpn.dropping ||
         tsDown && setup.route(id)?.tsExit != null)
@@ -70,14 +85,16 @@ fun glance(vpn: VpnState, setup: Setup): Glance {
         val sites = setup.sites.count { it.value == id }
         val r = setup.route(id) ?: return if (id == DIRECT) WidgetRoute("", "Direct", 0, apps, direct = true, live = on, failing = false, sites = sites) else null
         // The name of an own server or a Tailscale device is the user's own: only its kind shows on a home screen.
-        return WidgetRoute(r.code, if (r.imported) r.source else r.name, r.hue, apps, direct = false, live = on, failing = failing(id), sites = sites)
+        val f = failing(id)
+        return WidgetRoute(r.code, if (r.imported) r.source else r.name, r.hue, apps, direct = false, live = on, failing = f, sites = sites, working = !f && working(id))
     }
     val default = row(setup.defaultRoute)
     // A route is in use through its apps or through websites alone.
     val others = (setup.apps.values.toSet() + setup.sites.values - setup.defaultRoute).mapNotNull(::row).sortedWith(compareBy({ !it.failing }, { it.direct }, { it.name.lowercase() }))
     val tunnels = (listOfNotNull(default) + others).filter { !it.direct }
+    val known = tunnels.filter { it.failing || it.working }
     return Glance(
-        vpn.phase, !setup.directOnly, tunnels.count { !it.failing }, tunnels.size, setup.profile,
+        vpn.phase, !setup.directOnly, known.count { it.working }, known.size, setup.profile,
         when {
             !setup.tailscale -> Glance.Ts.None
             !on -> Glance.Ts.Idle
@@ -85,7 +102,7 @@ fun glance(vpn: VpnState, setup: Setup): Glance {
             tsDown -> Glance.Ts.Down
             else -> Glance.Ts.Idle
         },
-        if (vpn.phase == Phase.Paused) vpn.pausedUntil else 0, default, setup.home.tsControlUrl != null, others,
+        if (vpn.phase == Phase.Paused) vpn.pausedUntil else 0, default, setup.home.tsControlUrl != null, others, if (on) tunnels.size - known.size else 0,
     )
 }
 
@@ -113,7 +130,7 @@ object Widgets {
 
     private val all = listOf(StatusWidget::class.java to ::small, HealthWidget::class.java to ::health, RoutesWidget::class.java to ::routes, BoardWidget::class.java to ::board)
 
-    fun now() = glance(UnbraidVpn.state.value, Unbraid.store.setup.value)
+    fun now() = glance(UnbraidVpn.state.value, Unbraid.store.setup.value, AutoSwitch.net.value?.id, Unbraid.store.unreadable.value)
 
     /** Redraws every placed widget. */
     fun update(ctx: Context) {
@@ -128,7 +145,7 @@ object Widgets {
     fun previews(ctx: Context) {
         if (Build.VERSION.SDK_INT < 35) return
         val m = AppWidgetManager.getInstance(ctx)
-        fun r(code: String, name: String, hue: Int, apps: Int) = WidgetRoute(code, name, hue, apps, direct = false, live = true, failing = false)
+        fun r(code: String, name: String, hue: Int, apps: Int) = WidgetRoute(code, name, hue, apps, direct = false, live = true, failing = false, working = true)
         val g = Glance(Phase.On, true, 3, 3, "Home", default = r("NL", "Netherlands", 0, 0), others = listOf(r("IT", "Italy", 2, 2), r("US", "United States", 1, 3)))
         // Android limits how often previews may be set; a refusal only keeps the plain layout.
         for ((cls, draw) in all) runCatching { m.setWidgetPreview(ComponentName(ctx, cls), android.appwidget.AppWidgetProviderInfo.WIDGET_CATEGORY_HOME_SCREEN, draw(ctx, g, TYPICAL)) }
@@ -149,6 +166,7 @@ object Widgets {
     private class Act(val label: String, val short: String, val icon: Int, val fill: Int, val ink: Int, val does: String?)
 
     private fun act(g: Glance) = when {
+        g.held -> Act("Open $APP", "Open", R.drawable.ic_w_error, BAD_TINT, BAD, null)
         g.phase == Phase.On && g.down > 0 -> Act("View route", "View", R.drawable.ic_w_error, BAD_TINT, BAD, null)
         g.phase == Phase.On -> Act("Pause $PAUSE min", "Pause", R.drawable.ic_w_pause, TOP, TEXT, "pause")
         g.phase == Phase.Connecting -> Act("Connecting", "Connecting", R.drawable.ic_w_power, TOP, DIM, null)
@@ -157,7 +175,7 @@ object Widgets {
     }
 
     private fun headline(g: Glance) = when (g.phase) {
-        Phase.On -> if (g.protects) "Protected" else "Connected"
+        Phase.On -> if (g.held) "Apps offline" else if (g.protects) "Protected" else "Connected"
         Phase.Connecting -> "Connecting"
         Phase.Paused -> "Paused"
         Phase.Off -> if (g.protects) "Not protected" else "Off"
@@ -166,8 +184,12 @@ object Widgets {
     /** The line above the headline and its colour; [short] where the profile and Tailscale share the line. */
     private fun status(ctx: Context, g: Glance, short: Boolean): Pair<String, Int> = when (g.phase) {
         Phase.On -> when {
-            g.total == 0 -> "No VPN routes" to DIM
+            g.held -> "Settings won't open" to BAD
+            g.total + g.unchecked == 0 -> "No VPN routes" to DIM
+            // Nothing known yet: no count, rather than one that calls unchecked routes OK.
+            g.total == 0 -> (if (short) "Not checked" else "Routes not checked") to DIM
             short -> "${g.ok}/${g.total} OK" to if (g.down == 0) GOOD else BAD
+            g.unchecked > 0 -> "${g.ok}/${g.total} OK, ${g.unchecked} unchecked" to if (g.down == 0) GOOD else BAD
             else -> "${g.ok}/${g.total} routes OK" to if (g.down == 0) GOOD else BAD
         }
         Phase.Connecting -> (if (short) "Starting" else "Starting routes") to DIM
@@ -176,7 +198,7 @@ object Widgets {
     }
 
     /** What every widget shares: the card's tap, the cookie, Tailscale and the button (its text is each layout's own). */
-    private fun RemoteViews.common(ctx: Context, g: Glance, a: Act) {
+    private fun RemoteViews.common(ctx: Context, g: Glance, a: Act, spelled: Boolean = false) {
         val (color, icon) = when (g.phase) {
             Phase.On -> GOOD to R.drawable.ic_tile
             Phase.Connecting -> TOP to R.drawable.ic_tile
@@ -189,10 +211,16 @@ object Widgets {
         show(R.id.ts, g.ts != Glance.Ts.None)
         dot(R.id.tsDot, when (g.ts) { Glance.Ts.Up -> GOOD; Glance.Ts.Down -> BAD; else -> null })
         setTextColor(R.id.tsText, when (g.ts) { Glance.Ts.Up -> TEXT; Glance.Ts.Down -> BAD; else -> DIM })
-        setTextViewText(R.id.tsText, if (g.hs) "HS" else "TS")
         val net = if (g.hs) "Headscale" else "Tailscale"
+        // Spelled out where the tag has a line of its own; short where it shares one with the profile and the count.
+        setTextViewText(R.id.tsText, if (spelled) net else if (g.hs) "HS" else "TS")
         val ts = when (g.ts) { Glance.Ts.Up -> ", $net connected"; Glance.Ts.Down -> ", $net not connected"; else -> "" }
-        val routes = if (g.phase == Phase.On && g.total > 0) ", ${g.ok} of ${g.total} routes working" else ""
+        val routes = when {
+            g.phase != Phase.On || g.held -> ""
+            g.total > 0 -> ", ${g.ok} of ${g.total} checked routes working" + if (g.unchecked > 0) ", ${g.unchecked} not checked" else ""
+            g.unchecked > 0 -> ", routes not checked"
+            else -> ""
+        }
         setContentDescription(android.R.id.background, "$APP: ${headline(g).lowercase()}$routes${g.profile?.let { ", profile $it" }.orEmpty()}$ts. Open $APP")
         val open = open(ctx)
         setOnClickPendingIntent(android.R.id.background, open)
@@ -203,8 +231,8 @@ object Widgets {
     }
 
     /** The header of the larger widgets: the state line, the headline, the profile tag and the labelled button. */
-    private fun RemoteViews.head(ctx: Context, g: Glance, a: Act, short: Boolean, tag: Boolean) {
-        common(ctx, g, a)
+    private fun RemoteViews.head(ctx: Context, g: Glance, a: Act, short: Boolean, tag: Boolean, spelled: Boolean = false) {
+        common(ctx, g, a, spelled)
         val (line, color) = status(ctx, g, short)
         setTextViewText(R.id.over, line)
         setTextColor(R.id.over, color)
@@ -243,11 +271,13 @@ object Widgets {
             r.failing -> "Not answering" to BAD
             !r.live -> (when (g.phase) { Phase.Paused -> "Paused"; Phase.Connecting -> "Starting"; else -> "Off" }) to DIM
             r.direct -> "No VPN" to DIM
-            else -> (if (word) "Working" else "") to DIM
+            r.working -> (if (word) "Working" else "") to DIM
+            else -> (if (word) "Not checked" else "") to DIM
         }
         setTextViewText(R.id.health, text)
         setTextColor(R.id.health, color)
-        dot(R.id.dot, when { r.failing -> BAD; r.live && !r.direct -> GOOD; else -> null })
+        // Green only on evidence: a route not checked keeps the hollow ring.
+        dot(R.id.dot, when { r.failing -> BAD; r.working -> GOOD; else -> null })
     }
 
     private fun uses(r: WidgetRoute) = usesLabel(r.apps, r.sites)
@@ -267,7 +297,7 @@ object Widgets {
         setTextColor(R.id.action, a.ink)
     }
 
-    private fun health(ctx: Context, g: Glance, @Suppress("UNUSED_PARAMETER") height: Int) = RemoteViews(ctx.packageName, R.layout.widget_health).apply { head(ctx, g, act(g), short = false, tag = true) }
+    private fun health(ctx: Context, g: Glance, @Suppress("UNUSED_PARAMETER") height: Int) = RemoteViews(ctx.packageName, R.layout.widget_health).apply { head(ctx, g, act(g), short = false, tag = true, spelled = true) }
 
     /** Every route as a tile, three to a line: the default first, the rest reached by scrolling. A tile is as tall as the widget leaves ([height] dp). */
     private fun routes(ctx: Context, g: Glance, height: Int) = RemoteViews(ctx.packageName, R.layout.widget_routes).apply {

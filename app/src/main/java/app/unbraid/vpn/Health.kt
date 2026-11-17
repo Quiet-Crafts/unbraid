@@ -27,6 +27,16 @@ object Health {
     fun answering(marked: Set<String>, eligible: Set<String>, passed: Set<String>, dead: Set<String>): Set<String> =
         (marked intersect eligible) - passed + (dead intersect eligible)
 
+    /**
+     * Routes whose latest check answered, through engine start [engine] (each runs its own servers) on network [net]
+     * ([AutoSwitch.Net.id]). Any other engine or network makes them unknown again, whoever starts it.
+     */
+    data class Passed(val engine: Int, val net: Long, val routes: Set<String>)
+
+    /** [old] after a round on [engine] and [net]: [answered] routes passed, [failed] ones are no longer known to work. */
+    fun passed(old: Passed?, engine: Int, net: Long, answered: Set<String>, failed: Set<String>) =
+        Passed(engine, net, (old?.takeIf { it.engine == engine && it.net == net }?.routes.orEmpty() + answered) - failed)
+
     private val SERVERS = listOf("stun.l.google.com:19302", "stun.cloudflare.com:3478")
 
     /** One check's whole budget; a slower answer counts as none. */

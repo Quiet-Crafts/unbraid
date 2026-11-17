@@ -39,7 +39,7 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
         )
     }
 
-    fun stop() { handler.removeCallbacks(lose); runCatching { cm.unregisterNetworkCallback(this) }; AutoSwitch.kind.value = null }
+    fun stop() { handler.removeCallbacks(lose); runCatching { cm.unregisterNetworkCallback(this) }; AutoSwitch.net.value = null }
 
     fun quit() { stop(); thread.quitSafely() }
 
@@ -56,7 +56,7 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     // Every update the engine sees as a new interface closes all connections, so only real changes go through:
     // a loss waits briefly for the network to come back, and link changes on the same interface are ignored.
     @Volatile private var lost: Network? = null
-    private val lose = Runnable { if (network == lost) { network = null; AutoSwitch.kind.value = null; push() } }
+    private val lose = Runnable { if (network == lost) { network = null; AutoSwitch.net.value = null; push() } }
     private val pusher = InterfacePush {
         val name = network?.let { cm.getLinkProperties(it)?.interfaceName }
         val index = name?.let { runCatching { NetworkInterface.getByName(it)?.index }.getOrNull() }
@@ -70,8 +70,7 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     override fun onCapabilitiesChanged(n: Network, caps: NetworkCapabilities) {
         if (n != network) return
         UnbraidVpn.metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
-        // Wi-Fi or mobile data, for the profile set to follow it; a cable counts as Wi-Fi.
-        AutoSwitch.kind.value = if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) app.unbraid.data.MOBILE else app.unbraid.data.WIFI
+        AutoSwitch.net.value = net(n, caps)
     }
 
     /** Not [force]d: a real move to another network, which may fix blocked routes ([onChange]). */
@@ -81,6 +80,15 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
         if (!force && now.second >= 0) onChange?.invoke()
     }
 }
+
+/** Network [n] for the profile set to follow it: Wi-Fi or mobile data (a cable counts as Wi-Fi), and this connection to it. */
+private fun net(n: Network, caps: NetworkCapabilities) =
+    AutoSwitch.Net(if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) app.unbraid.data.MOBILE else app.unbraid.data.WIFI, n.networkHandle)
+
+/** The phone's own network now, never a VPN; null with none. unbraid itself is left outside its VPN, so this holds while connected too. */
+fun underlying(cm: ConnectivityManager): AutoSwitch.Net? = runCatching {
+    cm.activeNetwork?.let { n -> cm.getNetworkCapabilities(n)?.takeIf { !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN) }?.let { net(n, it) } }
+}.getOrNull()
 
 /**
  * Hands the engine the current default interface ([current]: name and index, "" and -1 for none): only a change, unless

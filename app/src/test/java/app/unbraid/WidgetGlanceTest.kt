@@ -8,6 +8,7 @@ import app.unbraid.data.Server
 import app.unbraid.data.Setup
 import app.unbraid.data.WgPeer
 import app.unbraid.vpn.Glance
+import app.unbraid.vpn.Health
 import app.unbraid.vpn.VpnState
 import app.unbraid.vpn.VpnState.Phase
 import app.unbraid.vpn.glance
@@ -16,6 +17,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+
+/** The network the checks in these tests ran on ([app.unbraid.vpn.AutoSwitch.Net.id]). */
+private const val NET = 7L
 
 class WidgetGlanceTest {
     private fun r(id: String, code: String, country: String, provider: String = "nord") = Route(id, Location(provider, 1, code, country))
@@ -26,9 +30,13 @@ class WidgetGlanceTest {
     )
     private val servers = mapOf("nl" to srv, "us" to srv, "it" to srv, "br" to srv)
 
+    /** Every VPN route in use answered its check on this engine and network ([NET]). */
+    private val all = Health.Passed(0, NET, setOf("nl", "us", "it", "br"))
+
     @Test fun countsOnlyTheVpnRoutesInUseAndOrdersThemLikeRoutes() {
-        val g = glance(VpnState(Phase.On, servers = servers), setup)
+        val g = glance(VpnState(Phase.On, servers = servers, passed = all), setup, NET)
         assertEquals(4 to 4, g.ok to g.total) // Direct and the unused Sweden route count in neither
+        assertEquals(0, g.unchecked)
         assertEquals("Netherlands", g.default?.name)
         assertEquals(listOf("Brazil", "Italy", "United States", "Direct"), g.others.map { it.name })
         assertEquals(listOf(1, 1, 2, 1), g.others.map { it.apps })
@@ -43,7 +51,9 @@ class WidgetGlanceTest {
         assertEquals(listOf("NL"), down(VpnState(Phase.On, servers = servers, dropping = setOf("nl"))))
         // Mullvad gave Brazil no server; the other routes are untouched.
         assertEquals(listOf("BR"), down(VpnState(Phase.On, servers = servers - "br", stuck = mapOf("mullvad" to false))))
-        assertEquals(3 to 4, glance(VpnState(Phase.On, servers = servers, stalled = setOf("it")), setup).let { it.ok to it.total })
+        assertEquals(3 to 4, glance(VpnState(Phase.On, servers = servers, stalled = setOf("it"), passed = all), setup, NET).let { it.ok to it.total })
+        // A failure counts, a route nothing checked doesn't.
+        assertEquals(Triple(0, 1, 3), glance(VpnState(Phase.On, servers = servers, stalled = setOf("it")), setup, NET).let { Triple(it.ok, it.total, it.unchecked) })
         // A failing route comes first, so no widget hides it below its fold.
         assertEquals(listOf("United States", "Brazil", "Italy", "Direct"), glance(VpnState(Phase.On, servers = servers, notAnswering = setOf("us")), setup).others.map { it.name })
     }
@@ -87,8 +97,11 @@ class WidgetGlanceTest {
     @Test fun aTailscaleExitFailsWhileTailscaleIsNotConnected() {
         val ts = setup.copy(routes = setup.routes + Route("ts", tsExit = "100.64.0.9", tsName = "nas"), apps = mapOf("a" to "ts"))
         val all = mapOf("nl" to srv, "ts" to srv)
-        assertFalse(glance(VpnState(Phase.On, servers = all, tsState = "Running"), ts).others.single().failing)
-        val down = glance(VpnState(Phase.On, servers = all, tsState = "NeedsLogin"), ts)
+        val nl = Health.Passed(0, NET, setOf("nl"))
+        // A Tailscale exit is never checked here: it works while Tailscale says it runs, and isn't known while it starts.
+        assertTrue(glance(VpnState(Phase.On, servers = all, tsState = "Running"), ts, NET).others.single().let { !it.failing && it.working })
+        assertEquals(Triple(0, 0, 2), glance(VpnState(Phase.On, servers = all, tsState = "Starting"), ts, NET).let { Triple(it.ok, it.total, it.unchecked) })
+        val down = glance(VpnState(Phase.On, servers = all, tsState = "NeedsLogin", passed = nl), ts, NET)
         assertTrue(down.others.single().failing)
         assertEquals("Tailscale", down.others.single().name)
         assertEquals(1 to 2, down.ok to down.total)
@@ -102,7 +115,7 @@ class WidgetGlanceTest {
         val g = glance(VpnState(Phase.On, servers = mapOf("nl" to srv)), s)
         assertEquals(listOf("Italy", "Direct"), g.others.map { it.name })
         assertEquals(listOf(1, 1), g.others.map { it.sites })
-        assertEquals(2, g.total); assertEquals(1, g.ok) // Italy has no tunnel yet
+        assertEquals(Triple(0, 1, 1), Triple(g.ok, g.total, g.unchecked)) // Italy has no tunnel yet; nothing checked the Netherlands
         assertEquals("1 website", app.unbraid.vpn.usesLabel(0, 1)); assertEquals("2 apps · 3 websites", app.unbraid.vpn.usesLabel(2, 3)); assertEquals("0 apps", app.unbraid.vpn.usesLabel(0, 0))
         assertEquals("1 app, 2 sites", app.unbraid.vpn.usesLabel(1, 2, short = true)); assertEquals("2 websites", app.unbraid.vpn.usesLabel(0, 2, short = true))
         // Tailscale against the user's own server is tagged HS.
