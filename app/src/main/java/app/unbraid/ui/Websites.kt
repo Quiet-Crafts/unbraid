@@ -121,7 +121,7 @@ internal fun sitesNote(outside: Boolean) = "A website's route beats its app's, a
  */
 internal fun shownSites(s: Setup, query: String, filter: String?): List<String> {
     val rank = (s.routes.sortedBy { it.name.lowercase() }.map { it.id } + DIRECT + BLOCK).filter { it != s.defaultRoute }.withIndex().associate { (i, id) -> id to i }
-    return s.sites.filter { (site, id) -> (filter == null || id == filter) && (query.isEmpty() || site.contains(query, true) || Sites.shown(site).contains(query, true)) }.keys
+    return s.sites.filter { (site, id) -> (filter == null || id == filter) && (query.isEmpty() || Sites.readings(site).any { it.contains(query, true) }) }.keys
         .sortedWith(compareBy({ rank[s.sites[it]] ?: Int.MAX_VALUE }, { it }))
 }
 
@@ -231,7 +231,7 @@ internal fun SiteSheet(setup: Setup, offered: List<Route>, onAdd: (String, Strin
             }
             Column(Modifier.padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedTextField(
-                    raw, { raw = it.take(300) }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Address", style = Type.caption) },
+                    raw, { raw = it.take(Sites.PASTE + 1) }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Address", style = Type.caption) },
                     placeholder = { Text("example.com", style = Type.body, color = Ink.dim) }, textStyle = Type.body, isError = error != null, colors = inkFieldColors(), shape = RoundedCornerShape(16.dp),
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { add() }),

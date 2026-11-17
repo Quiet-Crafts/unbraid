@@ -169,6 +169,9 @@ class SitesAdversarialTest {
             "com" to "Add the whole name, such as com.com",
             "a.localhost" to "a.localhost is this phone itself, so unbraid can't give it a rule",
             "1.0.0.10.in-addr.arpa" to "1.0.0.10.in-addr.arpa is a lookup of an address, not a website, so unbraid can't give it a rule",
+            "ts.net" to "ts.net is shared by many websites. Add one website under it instead", "k12.ca.us" to "k12.ca.us is shared by many websites. Add one website under it instead",
+            "x.sch.uk" to "x.sch.uk is shared by many websites. Add one website under it instead", "com.jm" to "com.jm is shared by many websites. Add one website under it instead",
+            "a".repeat(Sites.PASTE + 1) to "That is too long for an address. Paste the link alone",
             "co.uk" to "co.uk is shared by many websites. Add one website under it instead", "www.co.uk" to "co.uk is shared by many websites. Add one website under it instead",
             "github.io" to "github.io is shared by many websites. Add one website under it instead", "CO.UK." to "co.uk is shared by many websites. Add one website under it instead",
             "😀.com" to letters, "a\u202eb.com" to letters, "ex%61mple.com" to notName, "ex%2Ecom" to notName, "_dmarc.example.com" to notName, "a_b.com" to notName, "*.example.com" to notName, "-bad.com" to notName, "example..com" to notName,
@@ -179,9 +182,27 @@ class SitesAdversarialTest {
             assertEquals(raw, letters, Sites.refusal(raw)); assertNull(raw, Sites.clean(raw))
         }
         // Names a rule can work for in some setup are taken: local and tailnet names (marked "Not applied" while a lookup
-        // rule answers them first), someone's Funnel site, a company's internal names on its VPN.
+        // rule answers them first), someone's Funnel site, a company's internal names on its VPN. And registrable names
+        // that only look like a shared ending.
         for (ok in listOf("printer.lan", "myhost.local", "router.home.arpa", "x.fritz.box", "a.internal", "nas.tail1234.ts.net", "box.corp.example", "bbc.co.uk", "me.github.io",
-            "lan.example", "arpa.example", "ts.net.example", "localbank.com", "notlocal.com", "internal.example.org")) assertNull(ok, Sites.refusal(ok))
+            "go.co", "me.de", "www.ck", "city.kobe.jp", "school.k12.ca.us", "lan.example", "arpa.example", "ts.net.example", "localbank.com", "notlocal.com", "internal.example.org")) assertNull(ok, Sites.refusal(ok))
+    }
+
+    /** Every ending refused as shared is a rule of the Public Suffix List's ICANN section or a known hosting platform, so no registrable name is refused as one. */
+    @Test fun sharedEndingsAreRealOnes() {
+        val icann = javaClass.classLoader!!.getResource("psl_icann_multi.txt")!!.readText().lines().filter { it.isNotBlank() && !it.startsWith("//") }.toSet()
+        val shipped = javaClass.getResource("/shared_suffixes.txt")!!.readText().lines().filter { it.isNotBlank() && !it.startsWith("#") }
+        assertEquals(emptyList<String>(), shipped.filter { it !in icann })
+        assertTrue(shipped.size > 1000)
+    }
+
+    /** A paste is read whole or refused whole: a long one is never cut into another address. */
+    @Test fun aLongPasteIsNeverCut() {
+        val long = "https://" + "u".repeat(280) + "@example.com.au"
+        assertEquals("example.com.au", Sites.clean(long))
+        val longer = "https://" + "u".repeat(Sites.PASTE) + "@example.com.au"
+        assertNull(Sites.clean(longer)); assertNull(Sites.clean(longer.take(Sites.PASTE + 1))); assertNull(Sites.clean(longer.take(Sites.PASTE)))
+        assertEquals("That is too long for an address. Paste the link alone", siteError(Setup(), longer.take(Sites.PASTE + 1)))
     }
 
     /** International names are shown in their own letters when that reads back as the saved name, and in ASCII otherwise; never a crash. */
@@ -195,6 +216,15 @@ class SitesAdversarialTest {
             val shown = Sites.shown(bad)
             assertTrue(bad, shown == bad || Sites.clean(shown) == Sites.clean(bad))
         }
+        // As browsers show them: a label that mixes scripts, or is made only of letters that look like Latin ones, stays in
+        // its ASCII form, so "аpple" with a Cyrillic а never passes for apple. One script, or Latin with Chinese, Japanese
+        // or Korean characters, reads in its own letters.
+        for (spoof in listOf("xn--pple-43d.example", "xn--l-7sba6dbr.com", "xn--80ak6aa92e.com", "xn--paypl-7ve.com", "xn--vxaj.com")) assertEquals(spoof, Sites.shown(spoof))
+        assertEquals("пример.рф", Sites.shown("xn--e1afmkfd.xn--p1ai")); assertEquals("ελληνικά.gr", Sites.shown("xn--hxargifdar.gr"))
+        assertEquals("日本語テキストabc.jp", Sites.shown("xn--abc-rj4b9bzdq6889hdocu19k.jp")); assertEquals("한국abc.kr", Sites.shown("xn--abc-lt8lk11n.kr"))
+        // Search finds such a name by its own letters and by the Latin ones they look like.
+        val spoofs = Setup(routes = listOf(Route("it", Location("nord", 106, "IT", "Italy"))), defaultRoute = DIRECT, sites = mapOf("xn--pple-43d.example" to "it", "apple.com" to "it"), version = VERSION)
+        assertEquals(listOf("apple.com", "xn--pple-43d.example"), shownSites(spoofs, "apple", null)); assertEquals(listOf("xn--pple-43d.example"), shownSites(spoofs, "аpple", null))
         // The list searches both forms, so a typed "bücher" finds it.
         val s = Setup(routes = listOf(Route("it", Location("nord", 106, "IT", "Italy"))), defaultRoute = DIRECT, sites = mapOf("xn--bcher-kva.de" to "it", "example.com" to "it"), version = VERSION)
         assertEquals(listOf("xn--bcher-kva.de"), shownSites(s, "bücher", null)); assertEquals(listOf("xn--bcher-kva.de"), shownSites(s, "xn--bcher", null))
