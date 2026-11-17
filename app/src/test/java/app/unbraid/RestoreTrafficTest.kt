@@ -343,7 +343,7 @@ class RestoreTrafficTest {
         assertNotNull(RestoreTraffic.compile(s, { emptySet() }))
     }
 
-    // ---- what the second review found, one each ----
+    // ---- probes, lockdown, ranges, profiles and the budget, one trap each ----
 
     /** A website or app named like a made-up probe can't stand in for the default route: the probes are chosen against every rule. */
     @Test fun aRuleCanNotCaptureTheProbes() {
