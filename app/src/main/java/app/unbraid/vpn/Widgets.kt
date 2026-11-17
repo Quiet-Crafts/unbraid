@@ -77,8 +77,9 @@ fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false
     val tsDown = vpn.tsState in setOf("NeedsLogin", "NeedsMachineAuth", "InUseOtherUser", "Stopped")
     val passed = vpn.passed?.takeIf { it.engine == vpn.engine && it.net == net }?.routes.orEmpty()
     fun working(id: String) = on && if (setup.route(id)?.tsExit != null) vpn.tsState == "Running" else id in passed
-    // No tunnel (its provider gave no server, or its own server has no keys), a failed check, or a Tailscale exit without Tailscale.
-    fun failing(id: String) = on && (id !in vpn.servers || id in vpn.stalled || id in vpn.notAnswering || id in vpn.dropping ||
+    // No engine, no tunnel (its provider gave no server, or its own server has no keys), a failed check, or a Tailscale
+    // exit without Tailscale.
+    fun failing(id: String) = on && (vpn.down || id !in vpn.servers || id in vpn.stalled || id in vpn.notAnswering || id in vpn.dropping ||
         tsDown && setup.route(id)?.tsExit != null)
     // Only websites whose rule applies count, as in the engine.
     val applied = app.unbraid.data.Sites.applied(setup)

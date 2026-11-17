@@ -107,6 +107,8 @@ data class VpnState(
     val applied: Int = 0,
     /** [Setup.hashCode] of the last setup the engine refused (the one before it still runs): a profile switch is undone. */
     val refused: Int = 0,
+    /** No engine runs after a restart failed: every app on the VPN is offline while the service starts it again. */
+    val down: Boolean = false,
 ) {
     enum class Phase { Off, Connecting, On, Paused }
 }
@@ -121,6 +123,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
          */
         val restores = java.util.concurrent.atomic.AtomicLong()
         const val RESTORE_REFUSED = "The restored setup couldn't start, so unbraid is off. Check your routes, then connect again."
+        const val ENGINE_DOWN = "The connection engine stopped. Apps on the VPN are offline while $APP starts it again."
         /** Route id → engine tunnel tag of the running setup (speed tests dial through it). */
         @Volatile var tags: Map<String, String> = emptyMap()
         /** Tunnel tag → the DNS server that tunnel's own lookups use (health checks look their servers up there). */
@@ -527,7 +530,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
             tcpOnly = udpless
             restarting = false
-            moveFailed = false
+            engineDown = false
             starts++
             probe = next
             lastInput = input
@@ -541,7 +544,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         state.update { it.copy(notAnswering = if (fresh) emptySet() else it.notAnswering intersect eligibleImports) }
         // Published after tags and running: whoever sees this engine number also sees the tunnels it runs. The new
         // engine numbers its connections afresh; stats read the new servers when they first see them.
-        if (fresh) state.update { it.copy(servers = links.mapValues { l -> l.value.server }, engine = starts) }
+        if (fresh) state.update { it.copy(servers = links.mapValues { l -> l.value.server }, engine = starts, down = false, error = it.error.takeIf { e -> e != ENGINE_DOWN }) }
         // After tags and running, which stats label new connections by; also when only the setup changed (a city that
         // resolves to the same server is still another place in the history).
         if (fresh || was != setup) app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() }
@@ -581,48 +584,72 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         .groupBy({ it.first }, { it.second }).mapValues { (_, v) -> v.any { it } }
 
     /**
-     * What ran before a failed reload, back on the engine exactly as it was compiled, with a fresh probe pair; false if it
-     * won't start. Until then the app's own tests have no way in. With [block], on that block of the fake-IP pool: a new
-     * table ([watchPool]).
+     * What ran before a failed reload, back on the engine as it was compiled ([FakePool.restoreInput]), with a fresh
+     * probe pair; with [block], on that block of the fake-IP pool: a new table ([watchPool]). Until it runs the app's own
+     * tests have no way in. In the order [FakePool.restart] sets: [FakePool.Outcome.Kept] when nothing was given up.
      */
-    private fun restoreLastGood(srv: CommandServer, block: Int? = null): Boolean = runCatching {
-        probe = null
-        val last = lastInput ?: return false
-        val next = newProbe()
-        // What ran, but never with tailnet DNS authority or a sign-in way around the exit that was taken back since.
-        val now = store.setup.value.home
-        val input = Compiler.Input(last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = now.tsSuffixAllowed)), last.links, last.selfPackage, last.lockdown,
-            last.tsDir, last.cacheFile, store.tsSuffix, next, block ?: FakePool.restoreBlock(last.fakeBlock, lastBlock), last.blocked, last.tsLoginPending && tsLoginPending, last.blockedKin)
-        val json = Compiler.compile(input)
-        // A new block is spent before the engine can hand out any of it, as at a start. From here nothing goes back to the
-        // old one, not even after a failed start: the engine may have dropped the old names while apps still hold their
-        // addresses, and a table started there again would hand those to other names.
-        if (input.fakeBlock != lastBlock) store.fakeBlock = input.fakeBlock
-        lastBlock = input.fakeBlock
-        lastInput = input
-        lastGood = null
-        Compiler.tcpOnly(json).let { u -> Health.stun.udpless(u) { tcpOnly = tcpOnly + u } }
-        srv.startOrReloadService(json, OverrideOptions())
-        tcpOnly = Compiler.tcpOnly(json)
-        starts++
-        state.update { it.copy(engine = starts) }
-        probe = next
-        lastGood = json
-        moveFailed = false
-        true
-    }.getOrDefault(false)
+    private fun restoreLastGood(srv: CommandServer, block: Int? = null): FakePool.Outcome {
+        val last = lastInput ?: return FakePool.Outcome.Down
+        val input: Compiler.Input
+        val json: String
+        try {
+            input = FakePool.restoreInput(last, block, lastBlock, newProbe(), store.setup.value.home.tsSuffixAllowed, store.tsSuffix,
+                isLockdownEnabled, tsLoginPending, ::blockedKin)
+            json = Compiler.compile(input)
+        } catch (e: Exception) {
+            Log.e(TAG, "restore: ${logLine(e)}")
+            return FakePool.Outcome.Kept
+        }
+        val outcome = FakePool.restart(input.fakeBlock, lastBlock, save = { store.fakeBlock = it }, commit = {
+            probe = null
+            if (input.fakeBlock != lastBlock) blockSince = SystemClock.elapsedRealtime()
+            lastBlock = input.fakeBlock
+            lastInput = input
+            lastGood = null
+            engineDown = true
+        }) {
+            Compiler.tcpOnly(json).let { u -> Health.stun.udpless(u) { tcpOnly = tcpOnly + u } }
+            srv.startOrReloadService(json, OverrideOptions())
+        }
+        when (outcome) {
+            FakePool.Outcome.Ran -> {
+                tcpOnly = Compiler.tcpOnly(json)
+                starts++
+                engineDown = false
+                probe = input.probe
+                lastGood = json
+                // A new engine: nothing judged of the old one holds, here or on the widgets.
+                state.update { it.copy(engine = starts, down = false, notAnswering = emptySet(), passed = null, error = it.error.takeIf { e -> e != ENGINE_DOWN }) }
+                retime()
+            }
+            FakePool.Outcome.Down -> goDown()
+            FakePool.Outcome.Kept -> {}
+        }
+        return outcome
+    }
+
+    /**
+     * No engine runs and the tunnel stays, holding every app on it offline (never outside the VPN, whatever Android's
+     * Block setting), until [watchPool] starts one again. Health checks would fail through every tunnel meanwhile: they
+     * and the widgets judge nothing until then.
+     */
+    private fun goDown() {
+        engineDown = true
+        state.update { it.copy(down = true, passed = null, notAnswering = emptySet(), error = ENGINE_DOWN) }
+        notice(ENGINE_DOWN)
+    }
 
     private var pool: Job? = null
-    /** The last move's engine didn't start: [watchPool] tries again, on the same block, while none runs. */
-    private var moveFailed = false
+    /** No engine runs after a failed restart ([goDown]); read by the health watcher without the lock. */
+    @Volatile private var engineDown = false
     /** Said once per block: lookups of new names fail until the next move. */
     private var exhaustedSaid = false
 
     /**
-     * Moves the engine to the next block of fake IPs when its own runs low ([FakePool]). The same setup restarts as after
-     * any reload: the tunnel stays open meanwhile (apps' traffic waits, it never leaves outside the VPN), open connections
-     * close, and apps holding the old block's addresses are refused ([Compiler.compile]) and look their names up again.
-     * A failed restart leaves the tunnel holding traffic and is tried again at every check.
+     * Moves the engine to the next block of fake IPs when its own runs low ([FakePool]), and starts it again while none
+     * runs ([engineDown]). The same setup restarts as after any reload: the tunnel stays open meanwhile (apps' traffic waits,
+     * it never leaves outside the VPN), open connections close, and apps holding the old block's addresses are refused
+     * ([Compiler.compile]) and look their names up again.
      */
     private suspend fun watchPool() {
         while (true) {
@@ -632,18 +659,16 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 val srv = server ?: return@withLock
                 val last = lastBlock ?: return@withLock
                 val since = blockSince?.let { SystemClock.elapsedRealtime() - it }
-                when (FakePool.step(Libbox.fakeIPRemaining(), since, moveFailed)) {
+                when (FakePool.step(Libbox.fakeIPRemaining(), since, engineDown, ranRestores != restores.get())) {
                     FakePool.Step.Nothing, FakePool.Step.Wait -> {}
                     FakePool.Step.Exhausted -> if (!exhaustedSaid) { exhaustedSaid = true; Log.w(TAG, "fake IPs: block used up before the next move is due, new lookups fail until then") }
-                    FakePool.Step.Rotate -> {
-                        // Also when the move fails: the next one is due no sooner than a regular one.
-                        blockSince = SystemClock.elapsedRealtime()
-                        exhaustedSaid = false
-                        // A failure before the restart leaves the engine running; one after it is retried while none runs.
-                        moveFailed = !restoreLastGood(srv, Compiler.nextBlock(last, false))
-                        if (moveFailed) Log.e(TAG, "fake IPs: move failed") else { Log.i(TAG, "fake IPs: moved to the next block"); retime() }
+                    FakePool.Step.Rotate -> when (restoreLastGood(srv, Compiler.nextBlock(last, false))) {
+                        FakePool.Outcome.Ran -> { exhaustedSaid = false; Log.i(TAG, "fake IPs: moved to the next block") }
+                        FakePool.Outcome.Kept -> Log.e(TAG, "fake IPs: move not started, tried again at the next check")
+                        FakePool.Outcome.Down -> { exhaustedSaid = false; Log.e(TAG, "fake IPs: move failed") }
                     }
-                    FakePool.Step.Retry -> if (restoreLastGood(srv)) { Log.i(TAG, "fake IPs: the move succeeded on a retry"); retime() }
+                    FakePool.Step.Retry -> if (restoreLastGood(srv) == FakePool.Outcome.Ran) { Log.i(TAG, "engine running again"); notify(running ?: store.setup.value) }
+                    FakePool.Step.Stop -> teardown(RESTORE_REFUSED)
                 }
             }
         }
@@ -714,16 +739,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // libbox stops the old engine before starting the new one: only then bring the last good config back. It comes
         // back with a new probe pair too: the old password may have been seen while the old engine's port was free.
         val restarted = restarting
-        val restored = !restarted || restoreLastGood(srv)
         restarting = false
+        // Nothing runs after a restart, nor while down: only then is there something to bring back. If that fails too,
+        // the tunnel holds every app offline ([goDown]) rather than letting them out of the VPN.
+        val restored = !(restarted || engineDown) || restoreLastGood(srv) == FakePool.Outcome.Ran
         // A retry of the running setup that failed before any engine restart is tried again later; one that restarted
         // every tunnel isn't, so a failing server never takes all apps offline every few minutes (a network change
         // still tries again). A refused edit is never retried this way: it waits for the next edit.
         if (restored && restarted) { retry?.cancel(); retry = null }
         else if (restored && setup == applied && accounts == appliedAccounts) retryBlocked(retrying)
-        if (restored) retime()
         if (restored && ranRestores != restores.get()) teardown(RESTORE_REFUSED)
-        else if (restored) state.update { it.copy(error = Redact.message(e, "Change not applied"), refused = setup.hashCode()) } else teardown(Redact.message(e, "Connection lost"))
+        else if (restored) state.update { it.copy(error = Redact.message(e, "Change not applied"), refused = setup.hashCode()) }
+        else goDown()
         false
     }
 
@@ -767,7 +794,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // A sleep in between (Doze, screen off) says nothing about the servers.
             if (asleep() - slept >= Health.SLEPT) { restart(now); continue }
             if (basis != null && basis?.second != net.network) state.update { it.copy(notAnswering = emptySet()) }
-            if (state.value.phase != VpnState.Phase.On || net.network == null || SpeedTest.testing) { if (now >= round) round = now + jitter(); continue }
+            // No engine runs ([engineDown]): every tunnel would fail, which says nothing about its server.
+            if (state.value.phase != VpnState.Phase.On || net.network == null || SpeedTest.testing || engineDown) { if (now >= round) round = now + jitter(); continue }
             val network = net.network
             // Ports Automatic learned on another network don't hold here: back to each provider's first port.
             if (network != portNet) { portNet = network; if (portStep.isNotEmpty()) { portStep = emptyMap(); reload(); continue } }
@@ -808,7 +836,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (asleep() - slept >= Health.SLEPT) { restart(now); continue }
             val move = lock.withLock {
                 // Stopped, restarted or moved to another network meanwhile: this round says nothing (the next starts afresh).
-                if (state.value.phase != VpnState.Phase.On || starts != engine || generation != checkedGeneration || net.network != network) return@withLock null
+                if (state.value.phase != VpnState.Phase.On || engineDown || starts != engine || generation != checkedGeneration || net.network != network) return@withLock null
                 if (down == null) {
                     // Most likely the phone's own network: no server is blamed for these checks.
                     if (regular) { streaks.clear(); slow = minOf(slow * 2, 8) } else checked.forEach { streaks.remove(it) }
@@ -1002,7 +1030,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun stopEngine() {
         watch?.cancel(); watch = null
         health?.cancel(); health = null
-        pool?.cancel(); pool = null; moveFailed = false; exhaustedSaid = false
+        pool?.cancel(); pool = null; engineDown = false; exhaustedSaid = false
         state.update { it.copy(notAnswering = emptySet()) }
         generation++
         session++
