@@ -59,7 +59,7 @@ object SpeedTest {
     data class Run(
         val exit: String, val phase: Phase = Phase.Preparing, val now: Long = 0, val down: Long? = null, val up: Long? = null,
         val ping: Ndt7.Ping? = null, val elapsedMs: Long = 0, val server: Ndt7.Server? = null, val missing: String? = null, val error: String? = null,
-        /** The engine start ([app.unbraid.vpn.VpnState.engine]) a Tailscale node test switched; a restart puts the configured node back. */
+        /** The engine start ([app.unbraid.vpn.VpnState.engine]) a Tailscale node test switched, 0 until done; a restart puts the configured node back. */
         val engine: Int = 0,
     )
 
@@ -110,7 +110,7 @@ object SpeedTest {
         // An engine restart (a reload, or a move to new fake IPs) puts Tailscale back on its configured exit node.
         val engine = UnbraidVpn.state.value.engine
         val recordAs = Stats.note(exit, setup)
-        val mine = synchronized(lock) { _run.value = Run(exit, engine = engine); ++attempt }
+        val mine = synchronized(lock) { _run.value = Run(exit); ++attempt }
         val stop = { attempt != mine }
         // A tested node after an engine restart: what goes through Tailscale since leaves by the configured node.
         val moved = { node != null && UnbraidVpn.state.value.engine != engine }
@@ -169,7 +169,10 @@ object SpeedTest {
             // The routed node's stable ID (the switch back needs one), noted with the route's setting it belongs to.
             if (Unbraid.store.tsTestFrom == null) Unbraid.store.tsTestFrom = Unbraid.store.setup.value.tsExit?.let { r -> restoreTo(r, null, UnbraidVpn.state.value.tsExitNodes)?.let { "$r\n$it" } }.orEmpty()
             val ok = runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, node.id) }.isSuccess
-            if (ok) Thread.sleep(1500)
+            // A restart during the switch may have switched its new engine: switched back at once, never counted there.
+            if (ok && moved()) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; restoreNode(); return@execute }
+            // Its traffic counts to the node from here, on the engine switched ([nodeExit]).
+            if (ok) { set { it.copy(engine = engine) }; Thread.sleep(1500) }
             if (stop()) return@execute
             if (ok) Thread(test, "speedtest").start() else { set { it.copy(phase = Phase.Failed, error = "Tailscale couldn't switch to ${node.name}.") }; restoreNode() }
         }
@@ -383,7 +386,7 @@ object SpeedTest {
      * engine the test switched ([engine]): a restart puts Tailscale back on its configured node.
      */
     internal fun nodeExit(run: Run?, tag: String?, engine: Int): String? =
-        run?.takeIf { it.phase.busy && it.exit.startsWith(NODE) && tag == Compiler.TS_TAG && it.engine == engine }?.exit
+        run?.takeIf { it.phase.busy && it.exit.startsWith(NODE) && tag == Compiler.TS_TAG && it.engine > 0 && it.engine == engine }?.exit
 
     /** [nodeExit] for the running test and engine. */
     fun nodeExitOn(tag: String?): String? = nodeExit(_run.value, tag, UnbraidVpn.state.value.engine)
