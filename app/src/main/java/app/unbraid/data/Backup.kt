@@ -132,13 +132,14 @@ object Backup {
 
     /**
      * How hard [pass] is to guess: 0 easy, 1 fair, 2 hard, and a sentence. Server keys go in a file only under a hard one.
-     * It is judged as the file's key is made from it (NFC), in lower case, cut into words at spaces and ASCII punctuation:
+     * It is judged with every decorated form folded to its plain one (NFKC: ① is 1, ａ is a; the file's key is still made
+     * from the NFC form), in lower case, cut into words at spaces and ASCII punctuation:
      * - each word counts once: a word whose stem (the word without a number at its start or end) came before adds
      *   nothing, nor does the punctuation after it, so "pass1 pass2 pass3" is one word; spaces add nothing;
      * - a common password counts as one character;
      * - in what is left, a character adds nothing when it repeats the one before, starts a stretch of two or more that
      *   already appeared (and the number right after such a stretch of three or more: "pass1pass2"), or continues a
-     *   walk: a step to a neighbouring letter, digit or numeral in its counting order (abc, 321, αβγ, 一二三, in any script) or key (qaz, asd; a shifted
+     *   walk: a step to a neighbouring letter, digit or numeral in its counting order (abc, 321, αβγ, 一二三, ➀➁➂, in any script) or key (qaz, asd; a shifted
      *   digit is its key), after such a step, or the same with every other character (q1w2e3).
      * Runs of one character count once before anything else, then up to 4,096 characters are looked at, so a long
      * repeat at the start doesn't hide what follows. Hard: four or more different words of three characters or more
@@ -147,7 +148,7 @@ object Backup {
      * make up most of it. It catches obvious patterns only, and says so.
      */
     fun strength(pass: String): Pair<Int, String> {
-        val p = Normalizer.normalize(pass, Normalizer.Form.NFC)
+        val p = Normalizer.normalize(pass, Normalizer.Form.NFKC)
         val (words, kept) = distinctWords(p)
         val chars = guessable(kept)
         val plain = clusters(p).filter(::plainChar)
@@ -208,6 +209,8 @@ object Backup {
     }
 
     private fun letter(c: Int) = Character.isLetter(c) || Character.getType(c) == Character.LETTER_NUMBER.toInt()
+    private fun number(c: String) = c.codePointCount(0, c.length) == 1 && Character.getType(c.codePointAt(0)).let {
+        it == Character.DECIMAL_DIGIT_NUMBER.toInt() || it == Character.LETTER_NUMBER.toInt() || it == Character.OTHER_NUMBER.toInt() }
 
     /**
      * Counting sequences whose neighbours aren't neighbours in Unicode: Chinese and Japanese numerals (一二三, 壹贰叁),
@@ -229,6 +232,9 @@ object Backup {
         val step = step@{ a: String, b: String ->
             if (digit(a) && digit(b)) return@step Math.abs(Character.digit(a.codePointAt(0), 10) - Character.digit(b.codePointAt(0), 10)) == 1
             if ("$a$b" in COUNTED) return@step true
+            // Numbers of one kind next to each other in value, whatever their decoration (❶❷, ➀➁, Ⅰ Ⅱ).
+            if (number(a) && number(b) && Character.getType(a.codePointAt(0)) == Character.getType(b.codePointAt(0)) &&
+                Character.getNumericValue(a.codePointAt(0)).let { x -> x >= 0 && Math.abs(x - Character.getNumericValue(b.codePointAt(0))) == 1 }) return@step true
             // Neighbouring letters or numerals of one alphabet (αβγ, абв, Ⅰ Ⅱ Ⅲ), whatever the script.
             val (u, v) = a.codePointAt(0) to b.codePointAt(0)
             if (a.codePointCount(0, a.length) == 1 && b.codePointCount(0, b.length) == 1 && Math.abs(u - v) == 1 && letter(u) && letter(v)) return@step true
@@ -350,7 +356,7 @@ object Backup {
     private fun plainName(n: String) = n.isNotBlank() && n.length <= 256 && Manual.cleanName(n, 256) == n && n.none(::format)
 
     /** A Tailscale exit node as unbraid saves it: its tailnet address, IPv4 or IPv6. */
-    private fun tsAddress(a: String) = app.unbraid.vpn.Compiler.ipv4(a)?.second == 32 && '/' !in a || (a.length <= 39 && a.count { it == ':' } in 2..7 && a.all { it == ':' || it.isDigit() || it.lowercaseChar() in 'a'..'f' })
+    private fun tsAddress(a: String) = a == a.trim() && (app.unbraid.vpn.Compiler.ipv4(a)?.second == 32 && '/' !in a || WgConf.ipv6(a))
 
     /** A website as unbraid keeps it: as [Sites.clean] writes it, or as an older version saved it (labels of letters, digits and hyphens, the last not all digits). */
     private val LABEL = Regex("[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
