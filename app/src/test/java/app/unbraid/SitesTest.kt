@@ -140,6 +140,29 @@ class SitesTest {
         assertTrue(rules(false).none { it.text("type") == "logical" })
     }
 
+    /** HTTPS and SVCB lookups of a routed website are answered empty, before its other types go to its exit; every other lookup is as before. */
+    @Test fun addressHintsOfARoutedWebsiteAreAnsweredEmpty() {
+        val c = compile(setup)
+        val dns = c.dns()
+        fun empty(vararg names: String) = dns.indexOfFirst { it.strings("domain") == names.toList() && it.strings("query_type") == listOf("HTTPS", "SVCB") }
+        for (names in listOf(arrayOf("api.example.com"), arrayOf("bank.example"), arrayOf("example.com"))) {
+            val i = empty(*names)
+            assertTrue(names.joinToString(), i >= 0)
+            assertEquals("predefined", dns[i].text("action")); assertEquals("NOERROR", dns[i].text("rcode")); assertEquals(null, dns[i]["server"])
+            assertEquals(listOf(names.single().let { ".$it" }), dns[i].strings("domain_suffix"))
+            // Right before the website's own rule for the other types, which still asks its exit; both after the stand-in rule for A and AAAA.
+            assertEquals(names.toList(), dns[i + 1].strings("domain")); assertTrue(dns[i + 1].text("server") != null && dns[i + 1]["query_type"] == null)
+            assertTrue(dns.indexOfFirst { it.text("server") == "fake" } < i)
+        }
+        assertEquals(listOf("A", "AAAA"), dns.single { it.text("server") == "fake" }.strings("query_type"))
+        // A refused website (no tunnel) and a blocked one keep their refusals; a setup without websites gains no rule.
+        val refused = compile(setup, blocked = setOf("it")).dns()
+        assertEquals(listOf("reject"), refused.filter { it.strings("domain") == listOf("example.com") }.map { it.text("action") })
+        val blocked = compile(setup.copy(sites = mapOf("example.com" to app.unbraid.data.BLOCK))).dns()
+        assertEquals(listOf("reject"), blocked.filter { it.strings("domain") == listOf("example.com") }.map { it.text("action") })
+        assertTrue(compile(setup.copy(sites = emptyMap())).dns().none { it.strings("query_type") == listOf("HTTPS", "SVCB") })
+    }
+
     /** A route or Direct for a name on the own network or in the tailnet gets no rule; a block of one stays a block; the tailnet's domain is the allowed one. */
     @Test fun aNameOnTheOwnNetworkGetsNoRule() {
         val home = app.unbraid.data.Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example")

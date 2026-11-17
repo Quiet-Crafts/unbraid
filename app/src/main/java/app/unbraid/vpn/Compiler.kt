@@ -213,8 +213,14 @@ object Compiler {
                     if (homeTs && tsDomains.isNotEmpty()) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
                     if (s.prefs.lan) add(obj("domain_suffix" to arr("local", "lan", "home.arpa", "fritz.box"), "server" to "local"))
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
-                    // Other query types (HTTPS, SVCB, TXT…) go to the website's exit, else to the asking app's own, never the ISP.
-                    for ((id, names) in sites) if (id != BLOCK) add(if (id in refused) obj(*names, "action" to "reject") else obj(*names, "server" to siteDns(id)))
+                    // HTTPS and SVCB records can carry address hints, which a program would connect to as they are: not stand-in
+                    // addresses, so the website's rule would be skipped. They are answered empty, which costs the hints,
+                    // protocol parameters and Encrypted Client Hello keys. Other types (TXT…) go to the website's exit, else
+                    // to the asking app's own, never the ISP.
+                    for ((id, names) in sites) if (id != BLOCK) {
+                        if (id !in refused) add(obj(*names, "query_type" to arr("HTTPS", "SVCB"), "action" to "predefined", "rcode" to "NOERROR"))
+                        add(if (id in refused) obj(*names, "action" to "reject") else obj(*names, "server" to siteDns(id)))
+                    }
                     for ((id, pkgs) in perApp) add(if (id in refused) obj("package_name" to pkgs, "action" to "reject") else obj("package_name" to pkgs, "server" to dnsFor(id)))
                     // A blocked default never falls back to another resolver: the phone's network would see the names.
                     if (defaultBlocked) add(obj("action" to "reject"))
