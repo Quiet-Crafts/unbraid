@@ -121,7 +121,7 @@ fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false
     fun failing(id: String) = on && (vpn.down || missing(id) || id in vpn.stalled || id in vpn.notAnswering || id in vpn.dropping ||
         setup.route(id)?.takeIf { it.tsExit != null }?.let { tsDown || exit(it) == false } == true)
     // Only websites whose rule applies count, as in the engine.
-    val applied = app.unbraid.data.Sites.applied(setup)
+    val applied = app.unbraid.data.Sites.applied(setup, reported = vpn.tsSuffix)
     fun row(id: String): WidgetRoute? {
         val apps = setup.apps.count { it.value == id }
         val sites = applied.count { it.value == id }

@@ -1,3 +1,4 @@
+@file:OptIn(app.unbraid.data.SavedSites::class)
 package app.unbraid.ui
 
 import android.net.Uri

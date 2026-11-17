@@ -10,6 +10,7 @@ import app.unbraid.data.Provider
 import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.data.Setup
+import app.unbraid.data.Sites
 import app.unbraid.data.SsLink
 import app.unbraid.data.TsLink
 import app.unbraid.data.WgLink
@@ -110,12 +111,14 @@ object LinkPicker {
 
     /**
      * True if an app that went Direct under [old] goes to one of [routes] under [new] (explicitly or by default). Any change
-     * to the websites counts: one added, moved or removed (a Direct one too) can leave traffic Direct that [new] sends to them.
+     * to the websites counts: one added, moved or removed (a Direct one too), or one whose rule starts or stops applying
+     * (the local network or the tailnet stops answering its name), can leave traffic Direct that [new] sends to them.
      * So does an app newly on Block: what refuses it is installed at once, not after the routes that wait.
      */
+    @OptIn(app.unbraid.data.SavedSites::class)
     fun leavesDirect(old: Setup?, new: Setup, routes: Set<String>): Boolean = old != null && routes.any { id ->
         (old.apps.keys + new.apps.keys).any { new.routeOf(it) == id && old.routeOf(it) == DIRECT } || (new.defaultRoute == id && old.defaultRoute == DIRECT) ||
-            old.sites != new.sites || new.apps.any { (pkg, to) -> to == BLOCK && old.apps[pkg] != BLOCK } // newly blocked: not a moment longer on what it had
+            old.sites != new.sites || Sites.applied(old) != Sites.applied(new) || new.apps.any { (pkg, to) -> to == BLOCK && old.apps[pkg] != BLOCK } // newly blocked: not a moment longer on what it had
     }
 
     /** A kept or cached tunnel is reused only if its provider still vouches for its server key ([Provider.trusts]). */

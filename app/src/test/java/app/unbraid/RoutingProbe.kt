@@ -23,6 +23,12 @@ object RoutingProbe {
 
     /** One line per app and name: "app name A=... TXT=... go=...". [blocked]: routes without a tunnel. */
     fun outcomes(s: Setup, tsSuffix: String?, names: List<String>, apps: List<String>, blocked: Set<String> = emptySet()): List<String> {
+        val (dns, route) = compiled(s, tsSuffix, blocked)
+        return apps.flatMap { app -> names.map { name -> "$app $name A=${lookup(dns, app, name, "A")} TXT=${lookup(dns, app, name, "TXT")} go=${connect(route, dns, app, name)}" } }
+    }
+
+    /** The DNS and route sections of [s] compiled with the tailnet domain [tsSuffix], every exit a rule names checked to have its tunnel. */
+    fun compiled(s: Setup, tsSuffix: String?, blocked: Set<String> = emptySet()): Pair<JsonObject, JsonObject> {
         val links = s.routes.filter { it.tsExit == null }.associate { r -> Server("${r.id} #1", "${r.id}.nordvpn.com", "10.9.0.${r.id.hashCode() and 0x7f}", "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=", 10).let { r.id to WgLink(it, Nord.peer(it, KEY)) } }
         val c = Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links, "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", tsSuffix, blocked = blocked))).jsonObject
         val dns = c["dns"]!!.jsonObject
@@ -31,7 +37,7 @@ object RoutingProbe {
         val tags = listOf("endpoints", "outbounds").flatMap { k -> c[k]?.jsonArray.orEmpty().map { it.jsonObject.text("tag")!! } }.toSet()
         val named = route["rules"]!!.jsonArray.flatMap { r -> listOfNotNull(r.jsonObject.text("outbound")) + r.jsonObject["rules"]?.jsonArray.orEmpty().mapNotNull { it.jsonObject.text("outbound") } } + route.text("final")!!
         check(tags.containsAll(named)) { "Rules name exits without a tunnel: ${named - tags}" }
-        return apps.flatMap { app -> names.map { name -> "$app $name A=${lookup(dns, app, name, "A")} TXT=${lookup(dns, app, name, "TXT")} go=${connect(route, dns, app, name)}" } }
+        return dns to route
     }
 
     private fun JsonObject.list(k: String) = this[k]?.jsonArray?.map { it.jsonPrimitive.content }
@@ -69,9 +75,13 @@ object RoutingProbe {
         else -> "93.184.215.14"
     }
 
-    /** Where [app]'s TCP connection to port 443 of [name] goes: an outbound tag, "reject", or "none" when the lookup was refused. */
-    fun connect(route: JsonObject, dns: JsonObject, app: String, name: String): String {
-        val a = lookup(dns, app, name, "A")
+    /**
+     * Where [app]'s TCP connection to port 443 of [name] goes: an outbound tag, "reject", or "none" when the lookup was
+     * refused. [kept]: the app kept an address from before instead of looking the name up: a stand-in address ("fake",
+     * the domain table outlives a reload, so it still carries the name) or a plain one a resolver gave (its server's tag).
+     */
+    fun connect(route: JsonObject, dns: JsonObject, app: String, name: String, kept: String? = null): String {
+        val a = kept ?: lookup(dns, app, name, "A")
         if (a == "reject" || a == "empty") return "none"
         // A stand-in address carries the name; any other answer is a plain address.
         var domain: String? = if (a == "fake") name else null

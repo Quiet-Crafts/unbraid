@@ -720,6 +720,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         else if (seen == restores.get() && seen != ranRestores) {
             // A restored setup refused while the one from before the restore still runs, which exists nowhere else now:
             // that one stops, and apps wait offline for the restored one.
+            probe = null // the engine that knew it stops here
             runCatching { srv.closeService() }
             feed(Life.Event.Failed(lastBlock ?: 0, setup to accounts, now))
         } else {
@@ -1149,9 +1150,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun alert(text: String) = alert(this, text)
 
     private fun notify(setup: Setup) {
-        val sites = app.unbraid.data.Sites.applied(setup) // only websites whose rule applies
+        // Only websites whose rule applies, by the tailnet domain the running config was compiled with.
+        val reported = lastInput?.tsSuffix
+        val sites = app.unbraid.data.Sites.applied(setup, reported = reported)
         // The profile in use first: a switch made by itself ([AutoSwitch]) shows here, without a sound.
-        notice(setup.profile?.let { "$it  ·  " }.orEmpty() + setup.activeRoutes.joinToString("  ·  ") { r ->
+        notice(setup.profile?.let { "$it  ·  " }.orEmpty() + setup.activeRoutes(reported).joinToString("  ·  ") { r ->
             if (r.id == setup.defaultRoute) "${r.code} default" else "${r.code} ${setup.apps.count { it.value == r.id } + sites.count { it.value == r.id }}" // its apps and websites
         }.ifEmpty { "Only selected apps" })
     }

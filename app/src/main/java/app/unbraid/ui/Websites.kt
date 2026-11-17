@@ -1,3 +1,5 @@
+@file:OptIn(app.unbraid.data.SavedSites::class) // the list, its rows and the Add sheet show every saved website
+
 package app.unbraid.ui
 
 import androidx.compose.animation.AnimatedVisibility
@@ -57,6 +59,7 @@ import app.unbraid.data.BLOCK
 import app.unbraid.data.DIRECT
 import app.unbraid.data.builtIn
 import app.unbraid.data.Route
+import app.unbraid.data.SavedSites
 import app.unbraid.data.Setup
 import app.unbraid.data.Sites
 
@@ -69,13 +72,12 @@ internal const val NO_ROUTE = "none"
  */
 internal fun siteState(s: Setup, site: String, reported: String? = null): String {
     val id = s.sites[site]
-    // Block reaches every address under a blocked website, whatever route one of them has.
-    val over = s.sites.filter { (parent, to) -> to == BLOCK && site.endsWith(".$parent") }.keys.minOrNull()
-    val off = Sites.overridden(site, s, reported)
+    val off = Sites.off(site, id, s, reported = reported)
     return when {
         id == BLOCK -> "Blocked, no traffic"
-        over != null -> "Blocked: it is under $over"
-        off != null -> "Not applied: $off"
+        // Block reaches every address under a blocked website, whatever route one of them has.
+        off?.by == Sites.Off.By.BLOCK -> "Blocked: ${off.why}"
+        off != null -> "Not applied: ${off.why}"
         id == DIRECT -> "Direct, skips the VPN"
         else -> s.route(id)?.name ?: "A route that no longer exists"
     } + if (Sites.clean(site) != site) " · not an address browsers open" else ""
@@ -85,14 +87,14 @@ internal fun siteState(s: Setup, site: String, reported: String? = null): String
 internal fun sitesBy(s: Setup, reported: String? = null) = Sites.applied(s, reported = reported).entries.groupBy({ it.value }, { it.key }).mapValues { it.value.sorted() }
 
 /** A profile's websites in a summary (" · 3 websites"), with how many of them don't apply now; empty for none. */
-internal fun websitesText(s: Setup, sites: Map<String, String>): String {
-    val off = sites.size - Sites.applied(s, sites).size
+internal fun websitesText(s: Setup, sites: Map<String, String>, reported: String? = null): String {
+    val off = sites.size - Sites.applied(s, sites, reported).size
     return if (sites.isEmpty()) "" else (if (sites.size == 1) " · 1 website" else " · ${sites.size} websites") + if (off > 0) ", $off not applied" else ""
 }
 
 /** Said in the Add website sheet under the address: what the rule covers, and why it won't apply now when a lookup rule comes first. */
-internal fun siteHint(s: Setup, site: String, to: String) =
-    "Covers ${Sites.shown(site)} and every address under it" + (Sites.overridden(site, s)?.takeIf { to != BLOCK }?.let { ". Not applied now: $it" } ?: "")
+internal fun siteHint(s: Setup, site: String, to: String, reported: String? = null) =
+    "Covers ${Sites.shown(site)} and every address under it" + (Sites.off(site, to, s, reported = reported)?.let { ". ${if (it.by == Sites.Off.By.BLOCK) "Blocked" else "Not applied"} now: ${it.why}" } ?: "")
 
 /** [name] cut in the middle when it is too long for two lines of a row, so its start and its end both show. */
 internal fun shortName(name: String) = if (name.length <= 56) name else name.take(26) + "…" + name.takeLast(26)
@@ -213,7 +215,7 @@ private fun SiteRow(ui: Ui, site: String, setup: Setup, offered: List<Route>, ex
 /** Adding a website: its address (a pasted link works), then where it goes. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun SiteSheet(setup: Setup, offered: List<Route>, onAdd: (String, String) -> Unit, onDismiss: () -> Unit) {
+internal fun SiteSheet(setup: Setup, offered: List<Route>, reported: String?, onAdd: (String, String) -> Unit, onDismiss: () -> Unit) {
     var raw by rememberSaveable { mutableStateOf("") }
     // The first route that isn't the default: a website on the default's own route changes little.
     var to by rememberSaveable { mutableStateOf(offered.firstOrNull { it.id != setup.defaultRoute }?.id ?: offered.firstOrNull()?.id ?: DIRECT) }
@@ -236,7 +238,7 @@ internal fun SiteSheet(setup: Setup, offered: List<Route>, onAdd: (String, Strin
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { add() }),
                 )
-                Text(error ?: site?.let { siteHint(setup, it, to) } ?: "Type the address or paste a link", style = Type.caption, color = if (error != null) Ink.bad else Ink.dim, modifier = Modifier.padding(horizontal = 4.dp))
+                Text(error ?: site?.let { siteHint(setup, it, to, reported) } ?: "Type the address or paste a link", style = Type.caption, color = if (error != null) Ink.bad else Ink.dim, modifier = Modifier.padding(horizontal = 4.dp))
             }
             Text("GOES THROUGH", style = Type.overline, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp))
             Box(Modifier.padding(start = 10.dp)) { RouteTiles(routeTiles(setup, offered), to, siteNote(to), indent = false) { to = it } }

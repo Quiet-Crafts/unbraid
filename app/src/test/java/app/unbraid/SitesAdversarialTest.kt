@@ -188,12 +188,22 @@ class SitesAdversarialTest {
             "go.co", "me.de", "www.ck", "city.kobe.jp", "school.k12.ca.us", "lan.example", "arpa.example", "ts.net.example", "localbank.com", "notlocal.com", "internal.example.org")) assertNull(ok, Sites.refusal(ok))
     }
 
-    /** Every ending refused as shared is a rule of the Public Suffix List's ICANN section or a known hosting platform, so no registrable name is refused as one. */
-    @Test fun sharedEndingsAreRealOnes() {
-        val icann = javaClass.classLoader!!.getResource("psl_icann_multi.txt")!!.readText().lines().filter { it.isNotBlank() && !it.startsWith("//") }.toSet()
-        val shipped = javaClass.getResource("/shared_suffixes.txt")!!.readText().lines().filter { it.isNotBlank() && !it.startsWith("#") }
-        assertEquals(emptyList<String>(), shipped.filter { it !in icann })
-        assertTrue(shipped.size > 1000)
+    /**
+     * The shipped endings are exactly the Public Suffix List's rules of two labels or more, both sections, nothing left out
+     * and nothing added, under the list's own notice; and its "*." and "!" rules work: a rule for a level of shared
+     * endings ("kawasaki.jp") or for one of them is refused, a name the list takes back out ("city.kawasaki.jp") is not.
+     */
+    @Test fun sharedEndingsAreTheWholeList() {
+        val psl = java.util.zip.GZIPInputStream(javaClass.classLoader!!.getResourceAsStream("public_suffix_list.dat.gz")!!).bufferedReader().readText()
+        val rules = psl.lines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("//") && '.' in it }
+            .map { r -> Regex("^(\\*\\.|!)?(.*)$").find(r)!!.groupValues.let { it[1] + java.net.IDN.toASCII(it[2], java.net.IDN.ALLOW_UNASSIGNED).lowercase() } }.toSet()
+        val text = javaClass.getResource("/shared_suffixes.txt")!!.readText()
+        assertEquals(rules, text.lines().filter { it.isNotBlank() && !it.startsWith("//") }.toSet())
+        assertTrue(text.startsWith(psl.lines().take(3).joinToString("\n"))) // the list's MPL-2.0 notice, word for word
+        assertTrue(Regex("VERSION: ${Regex("VERSION: (\\S+)").find(psl)!!.groupValues[1]}").containsMatchIn(text))
+        for (shared in listOf("catholic.edu.au", "onrender.com", "kawasaki.jp", "x.kawasaki.jp", "sch.uk", "x.sch.uk", "nom.br", "x.nom.br", "x.ck", "github.io", "ts.net", "co.uk", "k12.ca.us"))
+            assertEquals(shared, "$shared is shared by many websites. Add one website under it instead", Sites.refusal(shared))
+        for (own in listOf("city.kawasaki.jp", "www.ck", "y.x.kawasaki.jp", "y.x.sch.uk", "school.catholic.edu.au", "me.onrender.com", "kawasaki-city.jp")) assertNull(own, Sites.refusal(own))
     }
 
     /** A paste is read whole or refused whole: a long one is never cut into another address. */
@@ -273,6 +283,57 @@ class SitesAdversarialTest {
             }
         }
         assertEquals(emptyList<String>(), bad.take(10))
+    }
+
+    /**
+     * Registered-style names in many scripts are taken in both forms, written as browsers write them; the signs IDNA lets
+     * stand only beside certain letters are taken there (the Japanese middle dot among kana or kanji, the Catalan one
+     * between two l's, the Greek numeral sign, Hebrew gershayim) and refused elsewhere.
+     */
+    @Test fun namesInEveryScriptAreTakenAsBrowsersWriteThem() {
+        for ((raw, ascii) in listOf( // the ASCII forms are a browser's (WHATWG URL parser)
+            "カタカナ・テスト.jp" to "xn--lcka6bwa0bnl60b.jp", "ひらがな・カタカナ.jp" to "xn--v8j0cwa6gzha3lrdrv.jp", "漢字・かな.jp" to "xn--u8j2c8vg31l3xu.jp",
+            "コーヒー.jp" to "xn--tck2c4fb.jp", "日本語.jp" to "xn--wgv71a119e.jp", "東京大学.jp" to "xn--1lq68wkwbj6u.jp",
+            "中文.网" to "xn--fiq228c.xn--ur0a", "北京大学.中国" to "xn--1lq90ic7fzpc.xn--fiqs8s",
+            "도메인.한국" to "xn--hq1bm8jm9l.xn--3e0b707e", "한국인터넷진흥원.한국" to "xn--3e0bx5e6xzftae3gxzpskhile.xn--3e0b707e",
+            "موقع.وزارة-الاتصالات.مصر" to "xn--4gbrim.xn----ymcbaaajlc6dj7bxne2c.xn--wgbh1c", "مثال.السعودية" to "xn--mgbh0fb.xn--mgberp4a5d4ar",
+            "דוגמה.ישראל" to "xn--6dbbec0c.xn--4dbrk0ce", "תשפ״ב.co.il" to "xn--5db1bod6c.co.il",
+            "उदाहरण.भारत" to "xn--p1b6ci4b4b3a.xn--h2brj9c", "ตัวอย่าง.ไทย" to "xn--72c1a1bt4awk9o.xn--o3cw4h",
+            "col·legi.cat" to "xn--collegi-xma.cat", "ελ͵λάδα.gr" to "xn--wva4ipalc0bb.gr", "пример.рф" to "xn--e1afmkfd.xn--p1ai",
+        )) {
+            assertEquals(raw, ascii, Sites.clean(raw)); assertNull(raw, Sites.refusal(raw))
+            assertEquals(ascii, ascii, Sites.clean(ascii)); assertNull(ascii, Sites.refusal(ascii))
+            assertEquals(ascii, raw, Sites.shown(ascii))
+        }
+        // The same signs where IDNA doesn't let them stand: browsers would open these, no registry hands them out.
+        for (raw in listOf("a・b.jp", "・.jp", "l·a.cat", "a·l.cat", "·l.cat", "a͵b.gr", "͵.gr", "a״.co.il", "״ב.co.il", "١۱.example")) {
+            assertNull(raw, Sites.clean(raw))
+            runCatching { java.net.IDN.toASCII(raw).lowercase() }.getOrNull()?.let { assertNull(it, Sites.clean(it)) }
+        }
+    }
+
+    /**
+     * A label in a script whose letters can spell a Latin word is shown in its own letters only under an ending of its
+     * countries or its own script, as browsers do; anywhere else it stays in ASCII, and a search still finds it by the
+     * Latin word it looks like.
+     */
+    @Test fun aLabelThatCanSpellALatinWordShowsOnlyAtHome() {
+        for (n in listOf("xn--80a7ec7j.example", "xn--80ak6aa92e.com", "xn--80ak6aa92e.example")) assertEquals(n, n, Sites.shown(n)) // ѵіѕа, аррӏе
+        assertEquals("ѵіѕа.ru", Sites.shown("xn--80a7ec7j.ru")); assertEquals("ѵіѕа.рф", Sites.shown("xn--80a7ec7j.xn--p1ai"))
+        assertEquals("παράδειγμα.ελ", Sites.shown("xn--hxajbheg2az3al.xn--qxam")); assertEquals("xn--hxajbheg2az3al.com", Sites.shown("xn--hxajbheg2az3al.com"))
+        assertEquals("մեկ.հայ", Sites.shown("xn--29aun.xn--y9a3aq")); assertEquals("xn--29aun.com", Sites.shown("xn--29aun.com"))
+        assertTrue(Sites.readings("xn--80a7ec7j.example").any { it.contains("visa") })
+        val s = Setup(routes = listOf(Route("it", Location("nord", 106, "IT", "Italy"))), defaultRoute = DIRECT, sites = mapOf("xn--80a7ec7j.example" to "it"), version = VERSION)
+        assertEquals(listOf("xn--80a7ec7j.example"), shownSites(s, "visa", null))
+    }
+
+    /** A restored backup's websites are checked for what any version could have saved, so a name an older version kept stays. */
+    @Test fun aStoredNameIsWhatAnyVersionSaved() {
+        for (ok in listOf("example.com", "x.0xff", "xn--ax-iuk.com", "xn--lcka6bwa0bnl60b.jp", "www.com", "a-b.c-d")) assertTrue(ok, Sites.stored(ok))
+        for (bad in listOf("", "com", "Example.com", "example..com", "-a.com", "a.123", "a b.com", "münchen.de", "a".repeat(64) + ".com", ("a".repeat(60) + ".").repeat(5) + "com"))
+            assertTrue(bad, !Sites.stored(bad))
+        // Everything the reader keeps is a stored name.
+        for (raw in listOf("https://www.Example.com/x", "カタカナ・テスト.jp", "col·legi.cat")) assertTrue(raw, Sites.stored(Sites.clean(raw)!!))
     }
 
     private fun String.debugText() = map { if (it.code in 32..126) it.toString() else "\\u%04x".format(it.code) }.joinToString("")

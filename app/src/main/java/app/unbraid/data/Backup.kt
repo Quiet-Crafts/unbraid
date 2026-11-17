@@ -1,3 +1,4 @@
+@file:OptIn(app.unbraid.data.SavedSites::class)
 package app.unbraid.data
 
 import kotlinx.serialization.Serializable

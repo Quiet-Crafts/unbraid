@@ -180,8 +180,11 @@ class SitesTest {
         val c = compile(s, tsSuffix = "corp.example")
         val named = c.rules().filter { it["domain"] != null && it["outbound"] != null }.flatMap { it.strings("domain")!! }
         assertEquals(listOf("example.com", "host.tail9.ts.net"), named.sorted())
-        assertEquals(listOf("nas.ts.net"), c.rules().filter { it.text("action") == "reject" && it["domain"] != null }.flatMap { it.strings("domain")!! })
-        assertTrue(c.dns().none { it.strings("domain")?.any { d -> d == "printer.lan" || d == "box.corp.example" || d == "x.fritz.box" } == true })
+        // The names left out are refused only on a connection that still carries them (a stand-in address from before), and
+        // looked up by the rule that answers them, for a second at a time.
+        assertEquals(listOf("box.corp.example", "printer.lan", "x.fritz.box", "nas.ts.net"), c.rules().filter { it.text("action") == "reject" && it["domain"] != null }.flatMap { it.strings("domain")!! })
+        assertEquals(listOf(listOf("printer.lan", "x.fritz.box") to "local", listOf("box.corp.example") to "dns-tailnet").toSet(),
+            c.dns().filter { it.text("rewrite_ttl") == "1" && it["domain"] != null }.map { it.strings("domain")!! to it.text("server") }.toSet())
         // Tailscale's own server: all of ts.net is the tailnet's. Reach your tailnet off, or the local network not bypassing the VPN: every one applies.
         assertEquals(setOf("nas.ts.net", "example.com", "box.corp.example"), Sites.applied(s.copy(home = home.copy(tsControlUrl = null))).keys)
         assertEquals(sites.keys - "printer.lan" - "x.fritz.box", Sites.applied(s.copy(home = home.copy(tailscale = false))).keys)
@@ -219,7 +222,7 @@ class SitesTest {
         assertFalse(app.unbraid.vpn.glance(app.unbraid.vpn.VpnState(app.unbraid.vpn.VpnState.Phase.On), s).protects)
         assertEquals(emptyMap<String, List<String>>(), app.unbraid.ui.sitesBy(s))
         assertEquals("Direct · no apps elsewhere · 1 website, 1 not applied", summary(s, Profile("P", DIRECT, sites = s.sites)))
-        assertTrue(compile(s).rules().none { it["domain"] != null })
+        assertTrue(compile(s).rules().none { it["domain"] != null && it.text("action") != "reject" })
         // The same website where it applies: on Italy, with a tunnel, and counted.
         val on = s.copy(prefs = s.prefs.copy(lan = false))
         assertEquals(listOf("it"), on.activeRoutes.map { it.id }); assertFalse(on.directOnly)

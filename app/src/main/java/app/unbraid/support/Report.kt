@@ -6,6 +6,7 @@ import app.unbraid.data.Filters
 import app.unbraid.data.Providers
 import app.unbraid.data.Route
 import app.unbraid.data.Setup
+import app.unbraid.data.Sites
 import app.unbraid.vpn.VpnState
 
 /**
@@ -33,19 +34,21 @@ object Report {
      */
     fun build(app: String, flavor: String, android: String, device: String, setup: Setup, vpn: VpnState, running: Setup?, installed: Int?): String {
         val s = running ?: setup
-        val used = s.activeRoutes.map { it.id }.toSet()
+        // Websites whose rule applies in what runs: a saved one a lookup rule answers first carries nothing.
+        val sites = Sites.applied(s, reported = vpn.tsSuffix)
+        val used = s.activeRoutes(vpn.tsSuffix).map { it.id }.toSet()
         // On the default route: the apps that follow it plus those chosen for it.
         fun apps(id: String): String =
             if (id == s.defaultRoute) "the rest of the apps" + installed?.let { " (${(it - s.apps.size).coerceAtLeast(0) + s.apps.count { a -> a.value == id }})" }.orEmpty()
             else s.apps.count { it.value == id }.let { if (it == 1) "1 app" else "$it apps" } +
-                s.sites.count { it.value == id }.let { if (it == 0) "" else if (it == 1) ", 1 website" else ", $it websites" } // a count only, never an address
+                sites.count { it.value == id }.let { if (it == 0) "" else if (it == 1) ", 1 website" else ", $it websites" } // a count only, never an address
         val routes = s.routes.mapIndexed { i, r ->
             val status = when { r.id in vpn.notAnswering -> "not answering"; r.id in vpn.dropping -> "dropping"; r.id in used -> "active"; else -> "unused" }
             val place = if (r.imported) "n/a" else r.loc.countryCode?.takeIf(code::matches)?.uppercase() ?: "unknown"
             "${i + 1}. ${kind(r)}, $place, $status, ${apps(r.id)}"
         }
-        val direct = listOfNotNull("- Direct, active, ${apps(DIRECT)}".takeIf { s.defaultRoute == DIRECT || DIRECT in s.apps.values || DIRECT in s.sites.values })
-        val block = listOfNotNull("- Block, active, ${apps(BLOCK)}".takeIf { BLOCK in s.apps.values || BLOCK in s.sites.values })
+        val direct = listOfNotNull("- Direct, active, ${apps(DIRECT)}".takeIf { s.defaultRoute == DIRECT || DIRECT in s.apps.values || DIRECT in sites.values })
+        val block = listOfNotNull("- Block, active, ${apps(BLOCK)}".takeIf { BLOCK in s.apps.values || BLOCK in sites.values })
         val filter = s.prefs.filter
         val filterKind = when (filter.id) { null -> "off"; Filters.OWN -> "own server"; "nextdns" -> "personal profile"; else -> "public resolver" }
         return (listOf(

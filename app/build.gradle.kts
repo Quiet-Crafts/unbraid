@@ -68,6 +68,8 @@ android {
 }
 
 kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
+// Tests build setups with websites and read them back as saved.
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().matching { "UnitTest" in it.name }.configureEach { compilerOptions.optIn.add("app.unbraid.data.SavedSites") }
 
 // The engine is built locally (tools/build-libbox.sh), so the build accepts only the libbox.aar whose SHA-256 is
 // committed beside it: a swapped or stale AAR fails here instead of shipping.
