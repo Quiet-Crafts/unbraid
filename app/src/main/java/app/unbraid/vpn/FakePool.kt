@@ -45,14 +45,21 @@ object FakePool {
     fun restoreBlock(ran: Int, spent: Int?) = spent ?: ran
 
     /**
-     * [last] made no more open than [now], the setup saved now: every app and website [now] blocks is blocked, and the
-     * routes [now] lost (removed, or a provider signed out of in [accounts]) are returned to run with no tunnel, so their
-     * apps and websites get no connection. Nothing [now] opens up is taken over: that change stays not applied.
+     * What ran ([last]) as it may come back while [now], the setup saved now, couldn't start: every app and website whose
+     * choice differs between the two (changed, added or removed) gets no connection, and so does every app that follows
+     * the default if the default differs, until a reload applies the change. Unchanged choices stay. Routes [now] lost
+     * (removed, or a provider signed out of in [accounts]) and a differing default are returned, to run with no tunnel.
+     * Of protections with a stricter side, the stricter of the two; settings with no such order (a filter's server)
+     * stay as they ran.
      */
     fun narrowed(last: Setup, now: Setup, accounts: Map<String, String>): Pair<Setup, Set<String>> {
-        fun blocks(old: Map<String, String>, new: Map<String, String>) = old + new.filterValues { it == app.unbraid.data.BLOCK }
+        fun same(old: Map<String, String>, new: Map<String, String>) = (old.keys + new.keys).associateWith { k -> old[k].takeIf { it == new[k] } ?: app.unbraid.data.BLOCK }
         val lost = last.routes.filter { r -> now.route(r.id) == null || !r.imported && accounts[r.loc.provider] == null }.mapTo(HashSet()) { it.id }
-        return last.copy(apps = blocks(last.apps, now.apps), sites = blocks(last.sites, now.sites), home = last.home.copy(tsSuffixAllowed = now.home.tsSuffixAllowed)) to lost
+        val p = last.prefs
+        val prefs = p.copy(lan = p.lan && now.prefs.lan, blockLan = p.blockLan || now.prefs.blockLan, filter = if (p.filter.id != null) p.filter else now.prefs.filter)
+        val home = last.home.copy(tsSuffixAllowed = last.home.tsSuffixAllowed.takeIf { it == now.home.tsSuffixAllowed }, subnets = last.home.subnets.filter { it in now.home.subnets })
+        return last.copy(apps = same(last.apps, now.apps), sites = same(last.sites, now.sites), prefs = prefs, home = home) to
+            lost + listOfNotNull(last.defaultRoute.takeIf { it != now.defaultRoute })
     }
 
     /**
@@ -64,7 +71,7 @@ object FakePool {
     fun restoreInput(last: Compiler.Input, block: Int?, spent: Int?, probe: Pair<Int, String>, now: Setup, accounts: Map<String, String>, tsSuffix: String?,
                      lockdown: Boolean, tsLoginPending: Boolean, kin: (Setup) -> Set<String>): Compiler.Input {
         val (setup, lost) = narrowed(last.setup, now, accounts)
-        return Compiler.Input(setup, last.links, last.selfPackage, lockdown, last.tsDir, last.cacheFile, tsSuffix, probe,
+        return Compiler.Input(setup, last.links, last.selfPackage, lockdown || last.lockdown, last.tsDir, last.cacheFile, tsSuffix, probe,
             block ?: restoreBlock(last.fakeBlock, spent), last.blocked + lost, last.tsLoginPending && tsLoginPending, kin(setup))
     }
 

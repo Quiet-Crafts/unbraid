@@ -8,6 +8,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import app.unbraid.data.BLOCK
+import app.unbraid.data.DIRECT
 import app.unbraid.data.Home
 import app.unbraid.data.Location
 import app.unbraid.data.Route
@@ -136,21 +137,23 @@ class FakePoolTest {
     }
 
     /**
-     * What comes back after a failed restart is never more open than what is saved now: over random last-good and
-     * current setups and sign-ins, an app or website the current setup blocks is blocked, and one whose route the
-     * current setup removed or whose provider was signed out of gets no tunnel. Every restored input still compiles.
+     * What comes back after a failed restart, over random pairs of last good and saved setups and sign-ins: every app,
+     * website and app following the default either keeps exactly the choice it has in both, on a route still there and
+     * signed in, or has no connection. Protections take the stricter side. Every restored input still compiles.
      */
-    @Test fun aRestoreIsNeverMoreOpenThanTheSetupSavedNow() = repeat(500) { seed ->
+    @Test fun aRestoreKeepsOnlyWhatBothSetupsAgreeOn() = repeat(1000) { seed ->
         val rnd = java.util.Random(seed.toLong())
         val all = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands")), Route("us", Location("proton", 228, "US", "United States")),
             Route("ts", tsExit = "100.64.0.9", tsName = "nas"))
-        fun any(vararg x: String) = x[rnd.nextInt(x.size)]
+        fun <T> any(x: List<T>) = x[rnd.nextInt(x.size)]
         fun random(): Setup {
             val routes = all.filter { rnd.nextBoolean() }.ifEmpty { all.take(1) }
-            val to = routes.map { it.id } + listOf(BLOCK, app.unbraid.data.DIRECT)
-            return Setup(routes = routes, defaultRoute = routes.first().id, version = VERSION, home = Home(tailscale = true),
-                apps = (1..4).filter { rnd.nextBoolean() }.associate { "app$it" to to[rnd.nextInt(to.size)] },
-                sites = (1..3).filter { rnd.nextBoolean() }.associate { any("a.example", "b.example", "x.a.example") to to[rnd.nextInt(to.size)] })
+            val to = routes.map { it.id } + listOf(BLOCK, DIRECT)
+            return Setup(routes = routes, defaultRoute = any(routes.map { it.id } + DIRECT), version = VERSION,
+                home = Home(tailscale = true, tsSuffixAllowed = any(listOf(null, "a.ts", "b.ts")), subnets = listOf("10.1.0.0/24", "10.2.0.0/24").filter { rnd.nextBoolean() }),
+                prefs = app.unbraid.data.Prefs(lan = rnd.nextBoolean(), blockLan = rnd.nextBoolean(), filter = any(listOf(app.unbraid.data.Filter(), app.unbraid.data.Filter("nextdns", "abc")))),
+                apps = (1..4).filter { rnd.nextBoolean() }.associate { "app$it" to any(to) },
+                sites = (1..3).filter { rnd.nextBoolean() }.associate { any(listOf("a.example", "b.example", "x.a.example")) to any(to) })
         }
         val last = random()
         val now = random()
@@ -158,14 +161,26 @@ class FakePoolTest {
         val server = { id: String -> app.unbraid.data.Server("$id #1", "$id.example", "10.9.0.1", "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=", 10) }
         val links = last.routes.associate { it.id to if (it.tsExit != null) app.unbraid.data.TsLink(server(it.id))
             else app.unbraid.data.WgLink(server(it.id), app.unbraid.data.Nord.peer(server(it.id), "aGVsbG8taGVsbG8taGVsbG8taGVsbG8taGVsbG8tMTI=")) }
-        val r = FakePool.restoreInput(Compiler.Input(last, links, "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", fakeBlock = 0),
-            null, 0, 2 to "p", now, accounts, null, rnd.nextBoolean(), false) { emptySet() }
+        val ranLocked = rnd.nextBoolean()
+        val nowLocked = rnd.nextBoolean()
+        val r = FakePool.restoreInput(Compiler.Input(last, links, "app.unbraid", ranLocked, "/tmp/ts", "/tmp/cache.db", fakeBlock = 0),
+            null, 0, 2 to "p", now, accounts, null, nowLocked, false) { emptySet() }
+        val s = r.setup
         fun lost(id: String?) = all.firstOrNull { it.id == id }?.let { now.route(it.id) == null || !it.imported && accounts[it.loc.provider] == null } == true
-        for ((m, restored) in listOf(now.apps to r.setup.apps, now.sites to r.setup.sites)) {
-            m.filterValues { it == BLOCK }.keys.forEach { assertEquals("seed $seed: $it", BLOCK, restored[it]) }
+        fun none(choice: String?) = choice == BLOCK || choice in r.blocked
+        fun check(what: String, choice: (Setup) -> String?) {
+            val c = choice(s)
+            assertTrue("seed $seed: $what has $c, not in both (${choice(last)}, ${choice(now)}) or on a lost route",
+                none(c) || c == choice(last) && c == choice(now) && !lost(c))
         }
-        (r.setup.apps.values + r.setup.sites.values + r.setup.defaultRoute).filter(::lost).forEach { assertTrue("seed $seed: $it keeps a tunnel", it in r.blocked) }
-        assertEquals(now.home.tsSuffixAllowed, r.setup.home.tsSuffixAllowed)
+        (last.apps.keys + now.apps.keys + s.apps.keys + "follower").forEach { k -> check(k) { it.apps[k] ?: it.defaultRoute } }
+        (last.sites.keys + now.sites.keys + s.sites.keys).forEach { k -> check(k) { it.sites[k] } }
+        assertEquals(last.prefs.lan && now.prefs.lan, s.prefs.lan)
+        assertEquals(last.prefs.blockLan || now.prefs.blockLan, s.prefs.blockLan)
+        assertEquals(last.prefs.filter.id != null || now.prefs.filter.id != null, s.prefs.filter.id != null)
+        assertTrue(s.home.subnets.all { it in last.home.subnets && it in now.home.subnets })
+        assertTrue(s.home.tsSuffixAllowed == null || s.home.tsSuffixAllowed == last.home.tsSuffixAllowed && s.home.tsSuffixAllowed == now.home.tsSuffixAllowed)
+        assertEquals(ranLocked || nowLocked, r.lockdown)
         Compiler.compile(r)
     }
 
