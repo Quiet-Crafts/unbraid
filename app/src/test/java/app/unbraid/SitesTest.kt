@@ -140,6 +140,49 @@ class SitesTest {
         assertTrue(rules(false).none { it.text("type") == "logical" })
     }
 
+    /** HTTPS and SVCB lookups of a routed website are answered empty, before its other types go to its exit; every other lookup is as before. */
+    @Test fun addressHintsOfARoutedWebsiteAreAnsweredEmpty() {
+        val c = compile(setup)
+        val dns = c.dns()
+        fun empty(vararg names: String) = dns.indexOfFirst { it.strings("domain") == names.toList() && it.strings("query_type") == listOf("HTTPS", "SVCB") }
+        for (names in listOf(arrayOf("api.example.com"), arrayOf("bank.example"), arrayOf("example.com"))) {
+            val i = empty(*names)
+            assertTrue(names.joinToString(), i >= 0)
+            assertEquals("predefined", dns[i].text("action")); assertEquals("NOERROR", dns[i].text("rcode")); assertEquals(null, dns[i]["server"])
+            assertEquals(listOf(names.single().let { ".$it" }), dns[i].strings("domain_suffix"))
+            // Right before the website's own rule for the other types, which still asks its exit; both after the stand-in rule for A and AAAA.
+            assertEquals(names.toList(), dns[i + 1].strings("domain")); assertTrue(dns[i + 1].text("server") != null && dns[i + 1]["query_type"] == null)
+            assertTrue(dns.indexOfFirst { it.text("server") == "fake" } < i)
+        }
+        assertEquals(listOf("A", "AAAA"), dns.single { it.text("server") == "fake" }.strings("query_type"))
+        // A refused website (no tunnel) and a blocked one keep their refusals; a setup without websites gains no rule.
+        val refused = compile(setup, blocked = setOf("it")).dns()
+        assertEquals(listOf("reject"), refused.filter { it.strings("domain") == listOf("example.com") }.map { it.text("action") })
+        val blocked = compile(setup.copy(sites = mapOf("example.com" to app.unbraid.data.BLOCK))).dns()
+        assertEquals(listOf("reject"), blocked.filter { it.strings("domain") == listOf("example.com") }.map { it.text("action") })
+        assertTrue(compile(setup.copy(sites = emptyMap())).dns().none { it.strings("query_type") == listOf("HTTPS", "SVCB") })
+    }
+
+    /** A route or Direct for a name on the own network or in the tailnet gets no rule; a block of one stays a block; the tailnet's domain is the allowed one. */
+    @Test fun aNameOnTheOwnNetworkGetsNoRule() {
+        val home = app.unbraid.data.Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example")
+        val s = setup.copy(home = home, sites = mapOf("printer.lan" to "it", "box.corp.example" to "it", "nas.ts.net" to app.unbraid.data.BLOCK, "x.fritz.box" to DIRECT, "example.com" to "it", "other.example" to "it"))
+        assertEquals(mapOf("nas.ts.net" to app.unbraid.data.BLOCK, "example.com" to "it", "other.example" to "it"), Sites.applied(s))
+        val c = compile(s)
+        val named = c.rules().filter { it["domain"] != null && it["outbound"] != null }.flatMap { it.strings("domain")!! }
+        assertEquals(listOf("example.com", "other.example"), named.sorted())
+        assertEquals(listOf("nas.ts.net"), c.rules().filter { it.text("action") == "reject" && it["domain"] != null }.flatMap { it.strings("domain")!! })
+        assertTrue(c.dns().none { it.strings("domain")?.any { d -> d == "printer.lan" || d == "box.corp.example" || d == "x.fritz.box" } == true })
+        // Without Tailscale there is no tailnet: the same name is an ordinary website. With the official server only ts.net counts.
+        assertEquals(mapOf("box.corp.example" to "it"), Sites.applied(setup.copy(sites = mapOf("box.corp.example" to "it"), home = home.copy(tailscale = false))))
+        assertEquals(null, Sites.tailnet(setup.copy(home = home.copy(tsControlUrl = null))))
+        assertEquals("corp.example", Sites.tailnet(s))
+        // The rows say so, in the screen's words.
+        assertEquals("Not applied: it is a name on your own network", siteState(s, "printer.lan"))
+        assertEquals("Not applied: it is a name in your tailnet", siteState(s, "box.corp.example"))
+        assertEquals("Blocked, no traffic", siteState(s, "nas.ts.net")); assertEquals("Italy", siteState(s, "example.com"))
+    }
+
     @Test fun profilesCarryTheirWebsites() {
         val s = setup.saveAs("Home").add("Trip", empty = false).site("Trip", "rai.it", "it").site("Trip", "example.com", null)
         assertEquals(setup.sites, s.sites) // a profile not in use is edited alone

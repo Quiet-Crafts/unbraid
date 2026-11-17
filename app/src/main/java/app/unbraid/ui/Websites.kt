@@ -65,15 +65,20 @@ internal const val NO_ROUTE = "none"
 /** Where website [site] goes, for its row and for TalkBack. */
 internal fun siteState(s: Setup, site: String): String {
     val id = s.sites[site]
+    val own = Sites.ownNetwork(site, Sites.tailnet(s))
     // Block reaches every address under a blocked website, whatever route one of them has.
     val over = s.sites.filter { (parent, to) -> to == BLOCK && site.endsWith(".$parent") }.keys.minOrNull()
     return when {
         id == BLOCK -> "Blocked, no traffic"
         over != null -> "Blocked: it is under $over"
+        own != null -> "Not applied: it is $own"
         id == DIRECT -> "Direct, skips the VPN"
         else -> s.route(id)?.name ?: "A route that no longer exists"
     }
 }
+
+/** [name] cut in the middle when it is too long for two lines of a row, so its start and its end both show. */
+internal fun shortName(name: String) = if (name.length <= 56) name else name.take(26) + "…" + name.takeLast(26)
 
 /** Said under a website's choices when it is on Direct or on Block: what that means for every app. */
 internal fun siteNote(id: String) = when (id) {
@@ -83,9 +88,7 @@ internal fun siteNote(id: String) = when (id) {
 }
 
 /** Why [raw] can't be added as a website of [s], or null when it can (or nothing is typed yet). */
-internal fun siteError(s: Setup, raw: String): String? = when {
-    raw.isBlank() -> null
-    Sites.clean(raw) == null -> "That isn't a website address. Try one like example.com"
+internal fun siteError(s: Setup, raw: String): String? = if (raw.isBlank()) null else Sites.refusal(raw, Sites.tailnet(s)) ?: when {
     Sites.clean(raw) in s.sites -> "This website is already on the list"
     s.sites.size >= Sites.MAX -> "A profile holds up to ${Sites.MAX} websites"
     else -> null
@@ -101,7 +104,7 @@ internal fun sitesNote(outside: Boolean) = "A website's route beats its app's, a
  */
 internal fun shownSites(s: Setup, query: String, filter: String?): List<String> {
     val rank = (s.routes.sortedBy { it.name.lowercase() }.map { it.id } + DIRECT + BLOCK).filter { it != s.defaultRoute }.withIndex().associate { (i, id) -> id to i }
-    return s.sites.filter { (site, id) -> (filter == null || id == filter) && (query.isEmpty() || site.contains(query, true)) }.keys
+    return s.sites.filter { (site, id) -> (filter == null || id == filter) && (query.isEmpty() || site.contains(query, true) || Sites.shown(site).contains(query, true)) }.keys
         .sortedWith(compareBy({ rank[s.sites[it]] ?: Int.MAX_VALUE }, { it }))
 }
 
@@ -169,7 +172,10 @@ private fun SiteRow(ui: Ui, site: String, setup: Setup, offered: List<Route>, ex
         ) {
             Box(Modifier.size(40.dp).clip(RoundedCornerShape(14.dp)).background(Ink.surfaceTop), contentAlignment = Alignment.Center) { Icon(Icons.link, null, Modifier.size(22.dp), tint = Ink.text) }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(site, style = Type.body, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                // A long name keeps both ends in view, which tell it apart; open, it shows whole. TalkBack always reads it whole.
+                val name = Sites.shown(site)
+                Text(if (expanded) name else shortName(name), style = Type.body, color = Ink.text, maxLines = if (expanded) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.semantics { contentDescription = name })
                 Text(siteState(setup, site), style = Type.caption, color = if (!builtIn(id) && route == null) Ink.bad else Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             RouteMark(route?.code ?: "··", route?.let { Ink.route(it.hue) } ?: if (id == BLOCK) Ink.bad else Ink.direct, Modifier.clearAndSetSemantics {}, direct = id == DIRECT, block = id == BLOCK)
@@ -212,7 +218,7 @@ internal fun SiteSheet(setup: Setup, offered: List<Route>, onAdd: (String, Strin
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = { add() }),
                 )
-                Text(error ?: site?.let { "Covers $it and every address under it" } ?: "Type the address or paste a link", style = Type.caption, color = if (error != null) Ink.bad else Ink.dim, modifier = Modifier.padding(horizontal = 4.dp))
+                Text(error ?: site?.let { "Covers ${Sites.shown(it)} and every address under it" } ?: "Type the address or paste a link", style = Type.caption, color = if (error != null) Ink.bad else Ink.dim, modifier = Modifier.padding(horizontal = 4.dp))
             }
             Text("GOES THROUGH", style = Type.overline, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp))
             Box(Modifier.padding(start = 10.dp)) { RouteTiles(routeTiles(setup, offered), to, siteNote(to), indent = false) { to = it } }
