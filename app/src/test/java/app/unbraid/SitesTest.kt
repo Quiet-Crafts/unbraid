@@ -197,6 +197,19 @@ class SitesTest {
         assertEquals("Covers nas.lan and every address under it", app.unbraid.ui.siteHint(s, "nas.lan", app.unbraid.data.BLOCK))
     }
 
+    /** A name an older version saved that today's reader refuses is listed, marked, routed as before and removable. */
+    @Test fun aNameSavedByAnOlderVersionStaysUsable() {
+        val old = listOf("x.0xff", "xn--ax-iuk.com") // a number as the last label; a Hangul filler browsers drop
+        val s = setup.copy(sites = old.associateWith { "it" })
+        for (n in old) {
+            assertNull(n, Sites.clean(n)); assertEquals(n, Sites.shown(n)); assertTrue(n, n in Sites.readings(n))
+            assertEquals("Italy · not an address browsers open", siteState(s, n))
+        }
+        assertEquals(old, shownSites(s, "", null)); assertEquals(old.toSet(), Sites.applied(s).keys)
+        assertTrue(compile(s).rules().any { it.strings("domain")?.containsAll(old) == true && it.text("outbound") == "r-it" })
+        assertEquals(listOf("xn--ax-iuk.com"), s.site(null, "x.0xff", null).sites.keys.toList())
+    }
+
     /** A website that doesn't apply opens no tunnel, protects nothing, and is in no count of what a route carries. */
     @Test fun aWebsiteNotAppliedIsNotInUse() {
         val s = setup.copy(defaultRoute = DIRECT, apps = emptyMap(), sites = mapOf("printer.lan" to "it"))
