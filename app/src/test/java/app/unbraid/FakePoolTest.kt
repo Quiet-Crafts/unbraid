@@ -148,7 +148,7 @@ class FakePoolTest {
         fun <T> any(x: List<T>) = x[rnd.nextInt(x.size)]
         fun random(): Setup {
             val routes = all.filter { rnd.nextBoolean() }.ifEmpty { all.take(1) }
-            val to = routes.map { it.id } + listOf(BLOCK, DIRECT)
+            val to = all.map { it.id } + listOf(BLOCK, DIRECT) // a choice can name a route the setup no longer has
             return Setup(routes = routes, defaultRoute = any(routes.map { it.id } + DIRECT), version = VERSION,
                 home = Home(tailscale = true, tsSuffixAllowed = any(listOf(null, "a.ts", "b.ts")), subnets = listOf("10.1.0.0/24", "10.2.0.0/24").filter { rnd.nextBoolean() }),
                 prefs = app.unbraid.data.Prefs(lan = rnd.nextBoolean(), blockLan = rnd.nextBoolean(), filter = any(listOf(app.unbraid.data.Filter(), app.unbraid.data.Filter("nextdns", "abc")))),
@@ -167,7 +167,7 @@ class FakePoolTest {
             null, 0, 2 to "p", now, accounts, null, nowLocked, false) { emptySet() }
         val s = r.setup
         fun lost(id: String?) = all.firstOrNull { it.id == id }?.let { now.route(it.id) == null || !it.imported && accounts[it.loc.provider] == null } == true
-        fun none(choice: String?) = choice == BLOCK || choice in r.blocked
+        fun none(choice: String?) = choice == BLOCK || choice in r.blocked || choice in Compiler.missing(s) // the engine refuses all three
         fun check(what: String, choice: (Setup) -> String?) {
             val c = choice(s)
             assertTrue("seed $seed: $what has $c, not in both (${choice(last)}, ${choice(now)}) or on a lost route",
