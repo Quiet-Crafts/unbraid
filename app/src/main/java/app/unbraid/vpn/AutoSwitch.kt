@@ -46,15 +46,16 @@ object AutoSwitch {
      * A switch by network that didn't happen: to [profile], set for [kind] of network, decided on network [net], and
      * [why]. Kept for the Routes page, as a notice may be off or replaced.
      */
-    data class NotSwitched(val profile: String, val kind: String, val net: Long, val why: String) {
+    data class NotSwitched(val profile: String, val kind: String, val net: Long, val why: String, val left: Int = 0) {
         /**
          * Still true of setup [s] with the switch by network at [m]: the rule for its kind of network still names this
-         * profile, which exists and isn't in use, and the phone hasn't left that network. Only while nothing watches the
-         * network (the VPN off) is it not known whether the phone left; a network seen lost has been left. A profile
+         * profile, which exists and isn't in use, and the phone hasn't left that network ([State.left] still as when it
+         * was decided: a network seen lost, or left and joined again, has been left, however fast). Only while nothing
+         * watches the network (the VPN off) is it not known whether the phone left. A profile
          * renamed or deleted, then another made under the old name, fails the rule check, so the card never acts on that
          * other one.
          */
-        fun holds(s: Setup, m: State) = s.onNet[kind] == profile && s.profile != profile && s.profiles.any { it.name == profile } && (!m.watched || m.here?.id == net)
+        fun holds(s: Setup, m: State) = s.onNet[kind] == profile && s.profile != profile && s.profiles.any { it.name == profile } && m.left == left && (!m.watched || m.here?.id == net)
     }
 
     val notSwitched = MutableStateFlow<NotSwitched?>(null)
@@ -92,6 +93,8 @@ object AutoSwitch {
         val made: Int = 0,
         /** Numbers the visits to networks: each time the phone joins one (the same handle again too) it is a new stay. */
         val stay: Int = 0,
+        /** Counts the departures seen: a network lost, or another one moved to, while the monitor ran. */
+        val left: Int = 0,
     )
 
     sealed interface Event {
@@ -113,7 +116,7 @@ object AutoSwitch {
     }
 
     /** Switch to [profile] on network [net]; [n] tells it from a decision made again for the same ones. */
-    data class Decision(val net: Long, val profile: String, val n: Int)
+    data class Decision(val net: Long, val profile: String, val n: Int, val left: Int = 0)
 
     /** The state after an event, a decision to carry out, and for [Event.Commit] whether to save it. */
     data class Out(val state: State, val decision: Decision? = null, val save: Boolean = false)
@@ -126,9 +129,9 @@ object AutoSwitch {
             // Android's handle 0 names no network. The same network again (its kind reported, a repeat) is no move.
             val n = e.net?.takeIf { it.id != 0L }
             if (s.watched && n != null && n.id == s.here?.id) Out(s.copy(here = n))
-            else Out(State(true, n, s.acted?.takeIf { it.first == n?.id }, made = s.made, stay = s.stay + 1))
+            else Out(State(true, n, s.acted?.takeIf { it.first == n?.id }, made = s.made, stay = s.stay + 1, left = s.left + if (s.watched && s.here != null) 1 else 0))
         }
-        is Event.Lost -> Out(if (s.watched && s.here?.id == e.id) State(true, made = s.made, stay = s.stay) else s)
+        is Event.Lost -> Out(if (s.watched && s.here?.id == e.id) State(true, made = s.made, stay = s.stay, left = s.left + 1) else s)
         Event.Unwatched -> Out(s.copy(watched = false, here = null, pending = null))
         is Event.Picked -> {
             // Picked with no network known, it is for none: the next network's rule applies.
@@ -149,7 +152,7 @@ object AutoSwitch {
                 s.acted?.let { it.first == here.id && it.second[kind] == rule } == true -> Out(s)
                 s.pending?.let { it.net == here.id && it.profile == rule } == true -> Out(s) // being saved
                 rule == null -> Out(s.copy(acted = here.id to e.rules.toMap()))
-                else -> Decision(here.id, rule, s.made + 1).let { Out(s.copy(pending = it, made = it.n), it) }
+                else -> Decision(here.id, rule, s.made + 1, s.left).let { Out(s.copy(pending = it, made = it.n), it) }
             }
         }
         is Event.Commit -> {
@@ -242,7 +245,7 @@ object AutoSwitch {
             val to = step.to
             // Nothing to switch (already in use, or blocked): noted as done, and said only if it still holds.
             if (to == null) {
-                if (run.commit(d, s.onNet, Unbraid.foreground.value)) step.blocked?.let { notSwitched.value = NotSwitched(d.profile, n.kind!!, n.id, it); UnbraidVpn.problem(ctx, it) }
+                if (run.commit(d, s.onNet, Unbraid.foreground.value)) step.blocked?.let { notSwitched.value = NotSwitched(d.profile, n.kind!!, n.id, it, d.left); UnbraidVpn.problem(ctx, it) }
                 return@collectLatest
             }
             // Saved off the main thread and never cut short: once the setup in use changed, the switch is followed (and

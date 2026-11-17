@@ -63,6 +63,17 @@ class AutoSwitchTest {
         // That network seen lost (airplane mode): left, so the card goes, though no other network came.
         assertFalse(ns.holds(setup, AutoSwitch.step(wifi, AutoSwitch.Event.Lost(100)).state))
         assertTrue(ns.holds(setup, AutoSwitch.step(wifi, AutoSwitch.Event.Lost(99)).state)) // another network lost: no change
+        // Left and joined again before anything collected the change (the same handle): the stay the card was for is over.
+        fun after(vararg e: AutoSwitch.Event) = e.fold(wifi) { st, ev -> AutoSwitch.step(st, ev).state }
+        val back = AutoSwitch.Net(WIFI, 100)
+        assertFalse(ns.holds(setup, after(AutoSwitch.Event.Seen(AutoSwitch.Net(MOBILE, 101)), AutoSwitch.Event.Seen(back))))
+        assertFalse(ns.holds(setup, after(AutoSwitch.Event.Lost(100), AutoSwitch.Event.Seen(back))))
+        assertFalse(ns.holds(setup, after(AutoSwitch.Event.Seen(null), AutoSwitch.Event.Seen(back))))
+        // Lost, then the monitor stops at once: still left, though nothing watches now.
+        assertFalse(ns.holds(setup, after(AutoSwitch.Event.Lost(100), AutoSwitch.Event.Unwatched)))
+        // The VPN off and on again on the same network: no departure.
+        assertTrue(ns.holds(setup, after(AutoSwitch.Event.Unwatched, AutoSwitch.Event.Seen(back))))
+        assertTrue(ns.holds(setup, after(AutoSwitch.Event.Unwatched)))
         assertFalse(ns.holds(setup.copy(profile = "Trip"), wifi)) // switched to
         assertFalse(ns.holds(setup.forget("Trip"), wifi)) // deleted
         // Renamed, then another profile made under the old name: the card doesn't act on that one.
