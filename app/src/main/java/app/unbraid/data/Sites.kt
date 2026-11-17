@@ -35,7 +35,7 @@ object Sites {
      */
     fun clean(raw: String): String? = read(raw).first
 
-    /** Why [raw] can't be added as a website, in the Add website sheet's words; null when it can. Only names no rule could ever work for. */
+    /** Why [raw] can't be added as a website, in the Add website sheet's words; null when it can. Beyond what [clean] refuses: names no rule could ever work for, and endings many websites share. */
     fun refusal(raw: String): String? {
         val (name, why) = read(raw)
         if (name == null) return why
