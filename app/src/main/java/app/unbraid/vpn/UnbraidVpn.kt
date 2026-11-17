@@ -595,7 +595,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun restoreLastGood(srv: CommandServer, block: Int? = null): FakePool.Outcome {
         val last = lastInput ?: return FakePool.Outcome.Kept
         val input = FakePool.restoreInput(last, block, lastBlock, runCatching { newProbe() }.getOrElse { return FakePool.Outcome.Kept },
-            store.setup.value.home.tsSuffixAllowed, store.tsSuffix, isLockdownEnabled, tsLoginPending, ::blockedKin)
+            store.setup.value, store.accounts.value, store.tsSuffix, isLockdownEnabled, tsLoginPending, ::blockedKin)
         val json = runCatching { Compiler.compile(input).also(Libbox::checkConfig) }.getOrElse { Log.e(TAG, "restore: ${logLine(it)}"); return FakePool.Outcome.Kept }
         return FakePool.restart(input.fakeBlock, lastBlock, save = { store.fakeBlock = it }, commit = {
             probe = null // the old engine's way in goes with it

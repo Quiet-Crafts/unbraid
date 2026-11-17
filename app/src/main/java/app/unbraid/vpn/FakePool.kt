@@ -45,16 +45,27 @@ object FakePool {
     fun restoreBlock(ran: Int, spent: Int?) = spent ?: ran
 
     /**
-     * What a restore or a move runs: what last ran ([last]), on [block] (a move) or else [restoreBlock], with a new
-     * probe pair, and with what may have changed since it was compiled read again: tailnet DNS authority and the sign-in
-     * way around the exit only ever narrowed, Android's Block setting, and the apps sharing a user id with a blocked
-     * one ([kin], asked of the setup that runs: one installed since must not be left outside the VPN with it).
+     * [last] made no more open than [now], the setup saved now: every app and website [now] blocks is blocked, and the
+     * routes [now] lost (removed, or a provider signed out of in [accounts]) are returned to run with no tunnel, so their
+     * apps and websites get no connection. Nothing [now] opens up is taken over: that change stays not applied.
      */
-    fun restoreInput(last: Compiler.Input, block: Int?, spent: Int?, probe: Pair<Int, String>, tsSuffixAllowed: String?, tsSuffix: String?,
+    fun narrowed(last: Setup, now: Setup, accounts: Map<String, String>): Pair<Setup, Set<String>> {
+        fun blocks(old: Map<String, String>, new: Map<String, String>) = old + new.filterValues { it == app.unbraid.data.BLOCK }
+        val lost = last.routes.filter { r -> now.route(r.id) == null || !r.imported && accounts[r.loc.provider] == null }.mapTo(HashSet()) { it.id }
+        return last.copy(apps = blocks(last.apps, now.apps), sites = blocks(last.sites, now.sites), home = last.home.copy(tsSuffixAllowed = now.home.tsSuffixAllowed)) to lost
+    }
+
+    /**
+     * What a restore or a move runs: what last ran ([last]), on [block] (a move) or else [restoreBlock], with a new
+     * probe pair, made no more open than the setup and accounts saved now ([narrowed]), and with what may have changed
+     * since read again: the sign-in way around the exit only ever narrowed, Android's Block setting, and the apps sharing
+     * a user id with a blocked one ([kin], asked of the setup that runs: one installed since must not be left outside).
+     */
+    fun restoreInput(last: Compiler.Input, block: Int?, spent: Int?, probe: Pair<Int, String>, now: Setup, accounts: Map<String, String>, tsSuffix: String?,
                      lockdown: Boolean, tsLoginPending: Boolean, kin: (Setup) -> Set<String>): Compiler.Input {
-        val setup = last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = tsSuffixAllowed))
+        val (setup, lost) = narrowed(last.setup, now, accounts)
         return Compiler.Input(setup, last.links, last.selfPackage, lockdown, last.tsDir, last.cacheFile, tsSuffix, probe,
-            block ?: restoreBlock(last.fakeBlock, spent), last.blocked, last.tsLoginPending && tsLoginPending, kin(setup))
+            block ?: restoreBlock(last.fakeBlock, spent), last.blocked + lost, last.tsLoginPending && tsLoginPending, kin(setup))
     }
 
     /** How a [restart] ended: [Ran]; [Kept], nothing given up (the engine runs as before); [Failed], none runs. */
