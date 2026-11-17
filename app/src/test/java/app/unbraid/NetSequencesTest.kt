@@ -6,6 +6,7 @@ import app.unbraid.vpn.AutoSwitch
 import app.unbraid.vpn.AutoSwitch.Net
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -259,6 +260,19 @@ class NetSequencesTest {
         // ... and another profile made under the old name, with the rule set to it, before the save: the decision was for
         // the renamed profile, so it doesn't switch to the new one.
         AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; renamed("Home", "House"); assertFalse(commit(d, rules, false)) }
+        // A settle timer started in a stay that ended: the phone left the network and came back to the same handle (the
+        // monitor's flow conflates the two), so the old timer must not decide for the new stay, which has not lasted yet.
+        AutoSwitch.Run().run {
+            seen(home); val old = state.stay
+            seen(cell); seen(home)
+            assertNull(settle(home, rules, old)); assertEquals("Home", decide(home, rules))
+        }
+        AutoSwitch.Run().run { seen(home); val old = state.stay; lost(home.id); seen(home); assertNull(settle(home, rules, old)); assertNotNull(settle(home, rules)) }
+        AutoSwitch.Run().run { seen(home); val old = state.stay; unwatched(); seen(home); assertNull(settle(home, rules, old)) }
+        // A profile deleted and another made under its name: the old decision, pending or picked, is not the new one's.
+        AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; deleted("Home"); assertFalse(commit(d, rules, false)); assertEquals("Home", decide(home, rules)) }
+        AutoSwitch.Run().run { seen(home); pick(rules + (WIFI to "Work")); deleted("Work"); assertEquals("Home", decide(home, rules)) }
+        AutoSwitch.Run().run { seen(home); pick(rules); deleted("Home"); assertNull(decide(home, emptyMap())); assertEquals("Home", decide(home, rules)) }
         // A decision made again for the same network and profile is another one: the older save is not it.
         AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; seen(cell); seen(home); val again = settle(home, rules)!!; assertFalse(commit(d, rules, false)); assertTrue(commit(again, rules, false)) }
     }
@@ -269,6 +283,8 @@ class NetSequencesTest {
         interleave(82, setOf(5, 6, 7, 8, 9, 11)) // a decision saved after the phone left and came back
         interleave(12, setOf(5, 6, 7, 11, RETURNS)) // a pick made before the network's kind was reported
         interleave(17, setOf(5, 6, 7, 8, 9, RETURNS)) // a switch used up by a rename before its save
+        interleave(68) // a settle timer from before the VPN went off and on decides for the new stay
+        interleave(428) // a profile deleted and another made under its name, which the old decision then applies to
     }
 
     /**
@@ -294,23 +310,27 @@ class NetSequencesTest {
         var on = true; var shown = false; var grace = false
         var told: Long? = 1L // the network the model was last told of
         var stay = 0 // a new stay each time the model is told of another network, or of none
+        var visit = 0 // a new visit as well each time the VPN comes on again: what a settle timer is armed for
         val names = mutableListOf("Home", "Trip", "Work")
         val rules = mutableMapOf(WIFI to "Home", MOBILE to "Trip")
         var done: Pair<Int, Map<String, String>>? = null // saved, picked, or found without a rule on a stay, under the rules then
+        var timer: Triple<Net, Int, Int>? = null // a settle timer armed on a network: the model's stay and the oracle's
         val live = mutableListOf<Pair<AutoSwitch.Decision, Int>>() // decisions the model may still save, with their stay
         val void = mutableListOf<AutoSwitch.Decision>() // decisions that must never be saved
         fun voidAll() { void += live.map { it.first }; live.clear() }
-        fun tell() { val id = here?.id?.takeIf { it != 0L }; if (id != told) { stay++; voidAll(); told = id } }
+        fun tell() { val id = here?.id?.takeIf { it != 0L }; if (id != told) { stay++; visit++; voidAll(); told = id } }
         fun seenAs() = here?.let { if (known) it else pending(it.id) }
         run.seen(here)
         val log = StringBuilder("seed $seed:")
         repeat(80) {
-            val e = rnd.nextInt(15).takeIf { it !in skip } ?: return@repeat
+            val e = rnd.nextInt(17).takeIf { it !in skip } ?: return@repeat
             log.append(" $e")
             when (e) {
                 // The glue settles on the network the model publishes.
-                0, 1 -> run.state.here?.let { n ->
-                    val truth = here?.takeIf { on && known && it.id != 0L && it.id == n.id }
+                // Its timer may have started in an earlier stay on the same handle (the monitor's flow conflates a departure and return).
+                0, 1 -> (timer?.takeIf { rnd.nextBoolean() } ?: run.state.here?.let { Triple(it, run.state.stay, visit) })?.let { (n, modelStay, ownVisit) ->
+                    timer = null
+                    val truth = here?.takeIf { on && known && it.id != 0L && it.id == n.id && ownVisit == visit }
                     val want = truth?.let { rules[it.kind] }
                     val expect = when {
                         truth == null -> null
@@ -319,7 +339,7 @@ class NetSequencesTest {
                         live.any { it.second == stay && it.first.profile == want } -> null
                         else -> want
                     }
-                    val d = run.settle(n, rules)
+                    val d = run.settle(n, rules, modelStay)
                     assertEquals("$log", expect, d?.profile)
                     if (d != null) { assertEquals("$log", truth!!.id, d.net); voidAll(); live += d to stay }
                 }
@@ -337,7 +357,7 @@ class NetSequencesTest {
                     done = here?.takeIf { it.id != 0L && (on || known) }?.let { stay to rules.toMap() }
                 }
                 4 -> if (rnd.nextBoolean()) rules[rnd.nextKind()] = names.random(rnd) else rules.remove(rnd.nextKind())
-                5 -> if (on) { on = false; grace = false; run.unwatched(); voidAll() } else { on = true; tell(); run.seen(seenAs()) }
+                5 -> if (on) { on = false; grace = false; run.unwatched(); voidAll() } else { on = true; visit++; tell(); run.seen(seenAs()) }
                 // The network lost: the engine waits a moment for it to come back; the switch by network must not.
                 6 -> here?.takeIf { on }?.let { n -> here = null; grace = true; tell(); run.lost(n.id) }
                 7 -> if (grace) { grace = false; if (on && here == null) run.seen(null) }
@@ -357,6 +377,16 @@ class NetSequencesTest {
                     if (rnd.nextBoolean()) { names += old; if (rnd.nextBoolean()) rules[rnd.nextKind()] = old }
                 }
                 12 -> shown = !shown
+                15 -> run.state.here?.takeIf { it.kind != null }?.let { timer = Triple(it, run.state.stay, visit) }
+                // A profile deleted, and sometimes another made under its name with a rule pointing at it: not the one decided on.
+                16 -> if (names.size > 1) {
+                    val old = names.random(rnd)
+                    names.remove(old); rules.values.removeAll { it == old }
+                    done = done?.let { (st, r) -> st to r.filterValues { it != old } }
+                    live.filter { it.first.profile == old }.forEach { live.remove(it); void += it.first }
+                    run.deleted(old)
+                    if (rnd.nextBoolean()) { names += old; if (rnd.nextBoolean()) rules[rnd.nextKind()] = old }
+                }
                 13, 14 -> if (live.isNotEmpty() || void.isNotEmpty()) {
                     val i = rnd.nextInt(live.size + void.size)
                     val (d, st) = if (i < live.size) live.removeAt(i) else void.removeAt(i - live.size) to -1
