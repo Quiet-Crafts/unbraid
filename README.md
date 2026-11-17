@@ -216,10 +216,12 @@ Tailscale node state with an Android Keystore key, refuse files sent through Tai
 resolver inside it when its server pushes none, let the app's connection checks look up their servers through
 the tunnel being checked, release every network part a tunnel built when it stops or fails to start, and never
 hand a stand-in (fake) address to a second name while its table lives: a used-up block of them answers new names
-with a failure, a table whose names were lost (a damaged cache) counts as used up, and the app moves to the next of
-eight blocks in time. A block comes back only after the seven others, so an address an app kept longer than that
-(across eight moves, reconnects or pauses) can name another site by then; apps that keep an old block's address are
-refused until they look the name up again. A release build is signed only if `.secrets/signing.properties`
+with a failure, a table with any doubt about its cache (a failed read or write, a damaged file) stops handing out
+addresses, a damaged cache is never replaced by an empty one, and the app moves to the next of eight blocks in time.
+If the engine can't start again, apps on the VPN stay offline while every new try takes a new block with a new table,
+built from the setup you have then. A block apps were using comes back only after the seven others, so an address
+an app kept longer than that (across eight moves, reconnects, pauses or failed starts) can name another site by then;
+apps that keep an old block's address are refused until they look the name up again. A release build is signed only if `.secrets/signing.properties`
 exists, so a plain checkout builds an unsigned APK.
 
 ## Privacy
