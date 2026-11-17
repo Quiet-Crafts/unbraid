@@ -2,6 +2,7 @@ package app.unbraid.data
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -47,9 +48,11 @@ object Backup {
         Memory("There isn't enough free memory to do this now. Close other apps and try again."),
         Invalid("This backup can't be restored."),
         TooBig("Your setup is too large for one backup file. Remove some own servers, then try again."),
+        OtherPlatform("This backup was made by unbraid for Mac. Moving a setup between Mac and Android isn't supported yet."),
+        Unrestorable("Nothing was saved, because this backup couldn't be restored"),
     }
 
-    class Failed(val reason: Reason, detail: String? = null) : Exception(detail?.let { "${reason.text.removeSuffix(".")}: $it" } ?: reason.text)
+    class Failed(val reason: Reason, val detail: String? = null) : Exception(detail?.let { "${reason.text.removeSuffix(".")}: $it" } ?: reason.text)
 
     private fun fail(r: Reason, detail: String? = null): Nothing = throw Failed(r, detail)
 
@@ -122,17 +125,113 @@ object Backup {
 
     private fun sha256(b: ByteArray, n: Int) = MessageDigest.getInstance("SHA-256").apply { update(b, 0, n) }.digest()
 
-    /** How hard [pass] is to guess: 0 weak, 1 fair, 2 strong, and a sentence. A hint only: nothing is refused. */
+    /** Every passphrase has at least this many characters people see. */
+    const val MIN_PASS = 8
+
+    /**
+     * How hard [pass] is to guess: 0 easy, 1 fair, 2 hard, and a sentence. Server keys go in a file only under a hard one.
+     * It is judged as the file's key is made from it (NFC), in lower case, cut into words at spaces and ASCII punctuation:
+     * - each word counts once: a word whose stem (the word without a number at its start or end) came before adds
+     *   nothing, nor does the punctuation after it, so "pass1 pass2 pass3" is one word; spaces add nothing;
+     * - a common password counts as one character;
+     * - in what is left, a character adds nothing when it repeats the one before, starts a stretch of two or more that
+     *   already appeared (and the number right after such a stretch of three or more: "pass1pass2"), or continues a
+     *   walk: a step to a neighbouring letter or digit (abc, 321, in any script's digits) or key (qaz, asd; a shifted
+     *   digit is its key), after such a step, or the same with every other character (q1w2e3).
+     * Runs of one character count once before anything else, then up to 4,096 characters are looked at, so a long
+     * repeat at the start doesn't hide what follows. Hard: four or more different words of three characters or more
+     * that count for 12 characters together, or 72 bits from the counted characters: a plain one (ASCII, a letter with a
+     * case or a digit in any script) by the kinds of plain character used, any other (Han, emoji) 7, or 11 when those
+     * make up most of it. It catches obvious patterns only, and says so.
+     */
     fun strength(pass: String): Pair<Int, String> {
-        val pool = listOf(26 to pass.any(Char::isLowerCase), 26 to pass.any(Char::isUpperCase), 10 to pass.any(Char::isDigit),
-            33 to pass.any { !it.isLetterOrDigit() }).sumOf { if (it.second) it.first else 0 }.coerceAtLeast(1)
-        val bits = graphemes(pass) * Math.log(pool.toDouble()) / Math.log(2.0)
-        val words = pass.trim().split(Regex("\\s+")).count { it.length >= 3 }
+        val p = Normalizer.normalize(pass, Normalizer.Form.NFC)
+        val (words, kept) = distinctWords(p)
+        val chars = guessable(kept)
+        val plain = clusters(p).filter(::plainChar)
+        val pool = listOf(26 to plain.any { it.codePointAt(0).let(Character::isLowerCase) }, 26 to plain.any { it.codePointAt(0).let(Character::isUpperCase) },
+            10 to plain.any(::digit), 33 to plain.any { it.codePointAt(0).let { c -> !Character.isLetter(c) && !Character.isDigit(c) && !Character.isWhitespace(c) } })
+            .sumOf { if (it.second) it.first else 0 }.coerceAtLeast(2)
+        val other = chars.count { !plainChar(it) }
+        val bits = (chars.size - other) * Math.log(pool.toDouble()) / Math.log(2.0) + other * (if (2 * other > chars.size) 11 else 7)
+        val four = words.count { it.size >= 3 && guessable(it).size >= 3 } >= 4 && chars.size >= 12
         return when {
-            words >= 4 || bits >= 72 -> 2 to "Strong."
+            four || bits >= 72 -> 2 to "No obvious pattern found: the meter knows common ones only."
             bits >= 50 -> 1 to "Fair. Longer is safer: four or more words work well."
-            else -> 0 to "Easy to guess. Use 12 or more characters, or four or more words."
+            else -> 0 to "Easy to guess. Four or more different words work well."
         }
+    }
+
+    /** Passwords everyone tries first: each counts as one character wherever it appears. */
+    private val COMMON = listOf("password", "passw0rd", "qwerty", "azerty", "letmein", "welcome", "iloveyou", "admin", "unbraid", "monkey", "dragon", "123456")
+
+    /** The characters people see in [s]. */
+    private fun clusters(s: String): List<String> = java.text.BreakIterator.getCharacterInstance().run {
+        setText(s); var a = first(); generateSequence { next().takeIf { it != java.text.BreakIterator.DONE }?.let { b -> s.substring(a, b).also { a = b } } }.toList()
+    }
+
+    private fun digit(c: String) = Character.isDigit(c.codePointAt(0)) && c.codePointCount(0, c.length) == 1
+    private fun plainChar(c: String) = (c.length == 1 && c[0].code < 128) || c.codePointAt(0).let { Character.isLowerCase(it) || Character.isUpperCase(it) } || digit(c)
+
+    /** The words of [p] in lower case, each common password one character, each stem once ([strength]), and the characters that count. */
+    private fun distinctWords(p: String): Pair<List<List<String>>, List<String>> {
+        var t = p.lowercase(java.util.Locale.ROOT)
+        for (w in COMMON) t = t.replace(w, "\u0001")
+        val sep = { c: String -> c.isBlank() || (c.length == 1 && c[0].code < 128 && !c[0].isLetterOrDigit() && c != "\u0001") }
+        // Pieces: a word and the separators after it. Runs of one character first, then the cap.
+        val pieces = mutableListOf(mutableListOf<String>() to mutableListOf<String>())
+        clusters(t).fold(mutableListOf<String>()) { a, c -> if (a.lastOrNull() != c) a.add(c); a }.take(4096).forEach { c ->
+            val last = pieces.last()
+            if (sep(c)) last.second.add(c) else if (last.second.isEmpty()) last.first.add(c) else pieces.add(mutableListOf(c) to mutableListOf())
+        }
+        val stems = HashSet<List<String>>()
+        val words = mutableListOf<List<String>>()
+        val kept = mutableListOf<String>()
+        for ((word, after) in pieces) {
+            val stem = word.dropWhile(::digit).dropLastWhile(::digit)
+            if (word.isNotEmpty() && !stems.add(stem.ifEmpty { word })) continue
+            if (word.isNotEmpty()) words.add(word)
+            kept += word + after.filterNot { it.isBlank() }
+        }
+        return words to kept
+    }
+
+    /** Neighbouring letters and digits on a QWERTY, QWERTZ or AZERTY keyboard, both ways, as two-character strings. */
+    private val KEYBOARD: Set<String> = buildSet {
+        for (rows in listOf(listOf("1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"), listOf("1234567890", "qwertzuiop", "asdfghjkl", "yxcvbnm"),
+            listOf("1234567890", "azertyuiop", "qsdfghjklm", "wxcvbn"))) {
+            val keys = rows.flatMapIndexed { y, row -> row.mapIndexed { x, ch -> Triple(ch, x + listOf(0.0, 0.5, 0.75, 1.25)[y], y) } }
+            for (a in keys) for (b in keys) if (a.first != b.first && Math.abs(a.third - b.third) <= 1 && Math.abs(a.second - b.second) <= 1) add("${a.first}${b.first}")
+        }
+    }
+
+    /** The characters of [s] that add to a guess ([strength]). */
+    private fun guessable(s: List<String>): List<String> {
+        val c = s.fold(mutableListOf<String>()) { a, x -> if (a.lastOrNull() != x && a.size < 4096) a.add(x); a }
+        // A shifted digit on a keyboard is that digit's key.
+        val key = { x: String -> "!@#$%^&*()".indexOf(x).takeIf { x.length == 1 && it >= 0 }?.let { "1234567890"[it].toString() } ?: x }
+        val step = step@{ a: String, b: String ->
+            if (digit(a) && digit(b)) return@step Math.abs(Character.digit(a.codePointAt(0), 10) - Character.digit(b.codePointAt(0), 10)) == 1
+            val x = key(a); val y = key(b)
+            x.length == 1 && y.length == 1 && x[0].code < 128 && y[0].code < 128 && x[0].isLetterOrDigit() && y[0].isLetterOrDigit() && (Math.abs(x[0] - y[0]) == 1 || "$x$y" in KEYBOARD)
+        }
+        // The longest stretch starting at [i] that already appeared before it.
+        val seen = { i: Int -> (0 until i).filter { c[it] == c[i] }.maxOfOrNull { j -> var k = 0; while (i + k < c.size && j + k < i && c[j + k] == c[i + k]) k++; k } ?: 0 }
+        val n = mutableListOf<String>()
+        var i = 0
+        while (i < c.size) {
+            val l = seen(i)
+            if (l >= 2) {
+                i += l
+                // A counter after a repeated word: "pass1pass2pass3".
+                if (l >= 3) while (i < c.size && digit(c[i])) i++
+                continue
+            }
+            val walk = (i >= 2 && step(c[i - 2], c[i - 1]) && step(c[i - 1], c[i])) || (i >= 4 && step(c[i - 4], c[i - 2]) && step(c[i - 2], c[i]))
+            if ((i == 0 || c[i] != c[i - 1]) && !walk) n.add(c[i])
+            i++
+        }
+        return n
     }
 
     // ---- what the file holds ----
@@ -181,12 +280,37 @@ object Backup {
     fun export(s: Setup, app: String, now: Long, keys: Boolean = true) =
         json.encodeToString(Contents.serializer(), Contents(CONTENTS, app, now, contents(s, keys).stamped, keys)).toByteArray()
 
-    /** [plain] read and checked whole ([valid]); throws [Failed] (Newer, Invalid) and changes nothing. */
+    /** [plain] read and checked whole ([valid]); throws [Failed] (Newer, Invalid, OtherPlatform) and changes nothing. */
     fun read(plain: ByteArray): Contents {
-        val c = runCatching { json.decodeFromString(Contents.serializer(), String(plain, Charsets.UTF_8)) }.getOrElse { fail(Reason.Invalid, "its contents can't be read") }
+        val text = String(plain, Charsets.UTF_8)
+        val c = runCatching { json.decodeFromString(Contents.serializer(), text) }.getOrElse {
+            // The Mac's backups hold their setup under "mac": the same container, another app's settings.
+            if (runCatching { json.parseToJsonElement(text).let { it is JsonObject && "mac" in it && "setup" !in it } }.getOrDefault(false)) fail(Reason.OtherPlatform)
+            fail(Reason.Invalid, "its contents can't be read")
+        }
         if (c.format > CONTENTS || c.setup.version > VERSION) fail(Reason.Newer)
-        return c.copy(setup = valid(c.setup.migrated()))
+        return c.copy(app = c.app.takeIf { APP_VERSION.matches(it) }.orEmpty(), setup = valid(named(c.setup.migrated())))
     }
+
+    /** [plain] read back as a restore would read it, so a file that restoring would refuse is never written. Throws [Failed]. */
+    fun readBack(plain: ByteArray) {
+        try { read(plain) } catch (e: Failed) { fail(Reason.Unrestorable, (e.detail ?: e.reason.text.replaceFirstChar(Char::lowercase)).removeSuffix(".")) }
+    }
+
+    /** The version that made a backup, as the restore sheet shows it: a short version string, or nothing. */
+    private val APP_VERSION = Regex("[0-9][0-9A-Za-z.+-]{0,31}")
+
+    /**
+     * [s] as a backup may hold it: a pinned server by its name and host only. Every provider looks a pin up in its own
+     * list again and takes the saved address and key only while that list can't be read, so a backup must never be what
+     * names the server a provider's tunnel is made to. Nor may it choose a provider's blocking resolvers: IVPN's block
+     * list is saved as a pair of addresses, so it starts again from the standard one.
+     */
+    fun named(s: Setup): Setup = s.copy(routes = s.routes.map { it.copy(loc = bare(it.loc)) }, favorites = s.favorites.map(::bare),
+        opts = s.opts.mapValues { (p, o) -> if (p == "ivpn") o - "list" else o })
+
+    /** [l] with its pin kept by name and host ([named]). */
+    fun bare(l: Location) = l.copy(pinned = l.pinned?.let { Server(it.name, it.host, "", "", -1, it.city, it.country) })
 
     private val ID = Regex("[A-Za-z0-9._-]{1,64}")
     private val PKG = Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+")
@@ -196,6 +320,10 @@ object Backup {
 
     /** A name as the importers leave it: no control or direction characters, not padded. */
     private fun plainName(n: String) = n.isNotBlank() && n.length <= 256 && Manual.cleanName(n, 256) == n
+
+    /** A place's texts, shown as route names in the app and on widgets: each empty or a plain name. */
+    private fun plainPlace(l: Location) = listOfNotNull(l.provider, l.countryCode, l.country, l.city, l.region, l.group, l.protocol,
+        l.pinned?.name, l.pinned?.host, l.pinned?.city, l.pinned?.country).all { it.isEmpty() || plainName(it) }
 
     /**
      * [s] if every part of it is as unbraid itself would save it: own servers pass the same checks as an import, every
@@ -213,13 +341,15 @@ object Backup {
             val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.tsExit).size
             need(n <= 1, "a route has more than one exit")
             if (n == 0) need(Providers.get(r.loc.provider) != null, "a route uses a provider this unbraid doesn't know")
-            r.tsExit?.let { need(it.length <= 253 && it.none(Char::isISOControl), "a Tailscale route is damaged") }
+            r.tsExit?.let { need(it.length <= 253 && it.none(Char::isISOControl) && r.tsName.let { n -> n == null || plainName(n) }, "a Tailscale route is damaged") }
+            need(plainPlace(r.loc), "a route's place is damaged")
             // A route saved without keys gets them back only through its own server, which must be saved without them too.
             val own = s.servers.firstOrNull { it.id == r.own }
             need(r.keyless == (own?.keyless == true) && (!r.keyless || (n == 1 && r.tsExit == null)), "a route and its own server don't match")
             if (r.keyless) keyless(r.name, r.wg, r.ovpn, r.ss) else server(r.name, r.wg, r.ovpn, r.ss)
         }
         s.home.wg?.let { server(it.name, it, null, null) }
+        need(s.favorites.all(::plainPlace), "a favourite is damaged")
         // An app or a website may be on Block; a default route never is.
         val ok = { id: String -> builtIn(id) || s.route(id) != null }
         val pkgs = { m: Map<String, String> -> m.keys.all { it.length <= 255 && PKG.matches(it) } }
@@ -288,7 +418,12 @@ const val WAIT_MS = 30 * 86_400_000L
  */
 fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true): Setup? {
     // Saved without keys: an own server this phone still has gets its config back here, and the home peer stays as it is.
-    val full = backup.servers.filter { it.keyless }.mapNotNull { k -> servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) }?.let { k.id to it } }.toMap()
+    // A route that had no own server here got one made up in the file: this phone's route of that name gives it back.
+    val full = backup.servers.filter { it.keyless }.mapNotNull { k ->
+        (servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) } ?: backup.routes.filter { it.own == k.id }.firstNotNullOfOrNull { x ->
+            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf(k::sameAs)
+        })?.let { k.id to it }
+    }.toMap()
     val b = if (full.isEmpty()) backup else backup.copy(
         servers = backup.servers.map { full[it.id] ?: it },
         routes = backup.routes.map { x -> full[x.own]?.takeIf { x.keyless }?.let { x.copy(wg = it.wg, ovpn = it.ovpn, ss = it.ss, keyless = false) } ?: x },
@@ -318,7 +453,9 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val addRoutes = used.mapNotNull { x ->
         val c = x.copy(own = x.own?.let { sv[it] ?: it })
         val there = r.route(x.id)
-        val id = if (there == null) x.id else if (there == c) { rt[x.id] = x.id; return@mapNotNull null } else fresh("r", routeIds)
+        // The same route as the file holds it ([Backup.named]); one tied here to no own server is the same as the file's tied one.
+        val same = there != null && c.copy(loc = Backup.bare(c.loc)).let { f -> there == f || (f.own == null && there.copy(own = null) == f) }
+        val id = if (there == null) x.id else if (same) { rt[x.id] = x.id; return@mapNotNull null } else fresh("r", routeIds)
         rt[x.id] = id; routeIds += id; c.copy(id = id)
     }
     val m = { id: String -> rt[id] ?: id }

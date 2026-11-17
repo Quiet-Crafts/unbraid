@@ -54,7 +54,20 @@ private const val KEEP_NO_ROOM = "There's no room for another profile. Turn off 
 
 /** What a backup file holds, for the captions. */
 const val BACKUP_HOLDS = "Your routes, app and website choices, favourites, profiles, own servers and your settings. Keys and passwords of your own servers and home WireGuard only if you choose."
-const val BACKUP_LEAVES = "Provider sign-ins are never saved in a backup: after restoring, sign in to each provider again. Tailscale is left out too. Statistics stay on this phone."
+const val BACKUP_LEAVES = "Provider sign-ins are never saved in a backup: after restoring, sign in to each provider again. Your Tailscale sign-in is left out too. Statistics stay on this phone."
+
+/**
+ * Why passphrase [pass] (typed again as [again]) can't save yet: null when it can, "" while there is nothing to say.
+ * Every passphrase needs [Backup.MIN_PASS] characters; one guarding server [keys] must be rated hard.
+ */
+fun passProblem(pass: String, again: String, keys: Boolean): String? = when {
+    keys && pass.isNotEmpty() && Backup.strength(pass).first < 2 -> "With keys and passwords included, choose a passphrase that is harder to guess."
+    pass.isEmpty() -> ""
+    app.unbraid.data.graphemes(pass) < Backup.MIN_PASS -> "A passphrase needs at least ${Backup.MIN_PASS} characters."
+    again.isNotEmpty() && again != pass -> "The two passphrases are different."
+    again.isEmpty() -> ""
+    else -> null
+}
 
 /** The keys switch for a setup: whether it can be turned on (only with something to include), and its caption. */
 fun keysSwitch(secrets: Boolean, on: Boolean): Pair<Boolean, String> = secrets to when { !secrets -> KEYS_NONE; on -> KEYS_ON; else -> KEYS_OFF }
@@ -116,7 +129,8 @@ class BackupFlow(private val ui: Ui) {
             val r = withContext(Dispatchers.Default) {
                 runCatching {
                     val plain = Backup.export(setup, BuildConfig.VERSION_NAME, System.currentTimeMillis(), withKeys)
-                    try { Backup.seal(plain, p) } finally { plain.fill(0) }
+                    // Read back first: a backup that couldn't be restored is said now, while the setup can still be mended.
+                    try { Backup.readBack(plain); Backup.seal(plain, p) } finally { plain.fill(0) }
                 }
             }
             val wrote = r.getOrNull()?.let { b -> withContext(Dispatchers.IO) { runCatching { app.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(b) } }.isSuccess } } == true
@@ -227,16 +241,13 @@ private fun BackupSheet(ui: Ui, flow: BackupFlow) {
                     Text(BACKUP_LEAVES, style = Type.caption, color = Ink.dim)
                     DialogField(flow.pass, { flow.pass = it }, "Passphrase", secret = true)
                     DialogField(flow.pass2, { flow.pass2 = it }, "Passphrase again", secret = true)
-                    val weak = flow.pass.isNotEmpty() && Backup.strength(flow.pass).first == 0
+                    val problem = passProblem(flow.pass, flow.pass2, flow.keys && secrets)
                     if (flow.pass.isNotEmpty()) Backup.strength(flow.pass).let { (n, text) -> Text(text, style = Type.caption, color = if (n == 0) Ink.bad else Ink.dim) }
-                    val tooWeak = weak && flow.keys && secrets
-                    if (tooWeak) Text("With keys and passwords included, choose a stronger passphrase.", style = Type.caption, color = Ink.bad)
-                    val differ = flow.pass2.isNotEmpty() && flow.pass != flow.pass2
-                    if (differ) Text("The two passphrases are different.", style = Type.caption, color = Ink.bad)
+                    problem?.takeIf { it.isNotEmpty() }?.let { Text(it, style = Type.caption, color = Ink.bad) }
                     Text("You need this passphrase to restore. unbraid can't recover it.", style = Type.caption, color = Ink.dim)
                     if (flow.busy) Text("Saving the backup. This takes a few seconds.", style = Type.caption, color = Ink.dim)
                     flow.message?.let { Text(it, style = Type.caption, color = Ink.bad) }
-                    Buttons(flow, "Save backup", enabled = flow.pass.isNotEmpty() && flow.pass == flow.pass2 && !tooWeak) { flow.chooseFile() }
+                    Buttons(flow, "Save backup", enabled = problem == null) { flow.chooseFile() }
                 }
                 "open" -> {
                     Text("Restore settings", style = Type.title)
