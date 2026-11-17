@@ -12,9 +12,6 @@ object Sites {
     private const val ADDRESS = "An IP address can't have a rule. Add the website's name"
     private const val LETTERS = "unbraid can't spell this name's letters the way browsers do. Use the form that starts with xn-- instead"
 
-    /** Where names on the local network end: answered by the router or the phone, never by a VPN's resolver. */
-    private val LOCAL = listOf("local", "lan", "arpa", "fritz.box", "localhost", "internal")
-
     /** Hosting platforms where everyone gets a name of their own: a rule for the platform's name would cover them all. */
     private val PLATFORMS = setOf("github.io", "gitlab.io", "blogspot.com", "herokuapp.com", "appspot.com", "netlify.app", "vercel.app", "pages.dev", "workers.dev",
         "web.app", "firebaseapp.com", "azurewebsites.net", "cloudfront.net", "s3.amazonaws.com")
@@ -27,37 +24,44 @@ object Sites {
      */
     fun clean(raw: String): String? = read(raw).first
 
-    /** Why [raw] can't be added as a website, in the Add website sheet's words; null when it can. [tailnet]: see [ownNetwork]. */
-    fun refusal(raw: String, tailnet: String? = null): String? {
+    /** Why [raw] can't be added as a website, in the Add website sheet's words; null when it can. Only names no rule could ever work for. */
+    fun refusal(raw: String): String? {
         val (name, why) = read(raw)
         if (name == null) return why
-        ownNetwork(name, tailnet)?.let { return "$name is $it, so unbraid can't give it a rule" }
+        never(name)?.let { return "$name is $it, so unbraid can't give it a rule" }
         return if (name in PLATFORMS || SHARED.matches(name)) "$name is shared by many websites. Add one website under it instead" else null
     }
 
-    /**
-     * What [name] is when a website rule can't work for it, or null for any other name: a name on the own network or in
-     * the tailnet is answered by its own resolver, which a website's route would skip, and `.local` names never pass
-     * unbraid at all. [tailnet] is the tailnet's own domain, when there is one.
-     */
-    fun ownNetwork(name: String, tailnet: String? = null): String? = when {
-        tailnet != null && under(name, tailnet) -> "a name in your tailnet"
-        under(name, "ts.net") -> "a Tailscale name, answered by Tailscale"
+    /** What [name] is when no website rule can ever work for it: no connection is ever made to it by name. */
+    private fun never(name: String) = when {
         under(name, "localhost") -> "this phone itself"
         under(name, "arpa") && !under(name, "home.arpa") -> "a lookup of an address, not a website"
-        LOCAL.any { under(name, it) } -> "a name on your own network"
         else -> null
     }
 
-    /** The tailnet domain [s]'s websites are judged by: the one a Headscale tailnet was allowed, while Tailscale is used. */
-    fun tailnet(s: Setup): String? = if (s.tailscale && !Compiler.officialTs(s.home)) Compiler.tsSuffix(s.home.tsSuffixAllowed) else null
+    /**
+     * Why [s]'s rule for [name] doesn't apply now, or null when it does: one of the engine's earlier rules answers the
+     * name's lookups itself (the tailnet's while Reach your tailnet is on, the local network's while it bypasses the
+     * VPN), so its connections carry no name a website rule could match. The same domains, from the same functions, as
+     * the compiler's. A block of such a name still applies: it refuses the lookup before those rules. [reported] is the
+     * tailnet domain Tailscale gave, which a Headscale tailnet's own domain needs: without it only what holds whatever
+     * Tailscale reports counts (all of ts.net on Tailscale's own server, local names).
+     */
+    fun overridden(name: String, s: Setup, reported: String? = null): String? = when {
+        s.home.tailscale && Compiler.tsDomains(s.home, reported).any { under(name, it) } ->
+            if (Compiler.officialTs(s.home)) "Tailscale answers ts.net names while Reach your tailnet is on" else "your tailnet answers this name while Reach your tailnet is on"
+        s.prefs.lan && Compiler.LOCAL_NAMES.any { under(name, it) } -> "your network answers this name while Local network bypasses the VPN is on"
+        else -> null
+    }
 
     /**
-     * The one decision of which of [s]'s websites apply: a route or Direct is left out for a name on the own network or in
-     * the tailnet (a setup saved before those were refused may hold one), a block of one stays a block. The compiler, the
-     * statistics and the rows go by this.
+     * The one decision of which websites apply, [s]'s own or a profile's [sites]: a block always, a route or Direct
+     * unless [overridden]. The compiler (with the tailnet domain Tailscale [reported]), the routes in use, protection,
+     * statistics and every count go by it; the list and the editing go by what is saved. Without [reported] it leaves
+     * out no more than the compiler does, so every route the compiler sends a website to has its tunnel.
      */
-    fun applied(s: Setup): Map<String, String> = tailnet(s).let { t -> s.sites.filter { (name, id) -> id == BLOCK || ownNetwork(name, t) == null } }
+    fun applied(s: Setup, sites: Map<String, String> = s.sites, reported: String? = null): Map<String, String> =
+        sites.filter { (name, id) -> id == BLOCK || overridden(name, s, reported) == null }
 
     /** Whether [name] is [suffix] or a name under it. */
     fun under(name: String, suffix: String) = name == suffix || name.endsWith(".$suffix")
@@ -81,7 +85,7 @@ object Sites {
         val last = labels.last()
         if (last.all { it in '0'..'9' } || (last.startsWith("0x") && last.drop(2).all { it in "0123456789abcdef" })) return null to if (last.isNotEmpty()) ADDRESS else NOT_A_NAME
         if (name.length > 253 || !labels.all(LABEL::matches)) return null to NOT_A_NAME
-        if (labels.size < 2) return null to (ownNetwork(name)?.let { "$name is $it, so unbraid can't give it a rule" } ?: "Add the whole name, such as $name.com")
+        if (labels.size < 2) return null to (never(name)?.let { "$name is $it, so unbraid can't give it a rule" } ?: "Add the whole name, such as $name.com")
         return name to ""
     }
 

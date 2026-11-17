@@ -133,7 +133,7 @@ object Compiler {
         // Routes that resolve to the same server with the same credentials share one tunnel: two with one key would fight over it.
         val shared = shared(s, i.links, i.blocked)
         val tag = { id: String -> if (id == DIRECT || id == FILTERED) "direct" else if (s.route(id)?.tsExit != null) TS_TAG else shared[id] ?: "r-$id" }
-        val tsDomains = listOfNotNull("ts.net".takeIf { officialTs(s.home) }, trustedSuffix(i.tsSuffix, s.home)).distinct()
+        val tsDomains = tsDomains(s.home, i.tsSuffix)
         // OpenVPN routes use the DNS their server pushes, except NordVPN's own routes: those keep Nord's
         // (Threat Protection) resolvers through the tunnel.
         // unbraid's filter, when set: on VPN routes (through each route's tunnel) it replaces their own DNS and blocking.
@@ -176,8 +176,9 @@ object Compiler {
 
         // A Direct website is looked up like other Direct traffic that passes through: with the filter where one applies to it.
         val siteDns = { id: String -> if (id == DIRECT && filter != null && (directFiltered || through.isNotEmpty())) "dns-filter" else dnsFor(id) }
-        // Websites with a route of their own: each run matches its names and every name under them.
-        val sites = Sites.runs(Sites.applied(s)).map { (id, names) -> id to arrayOf<Pair<String, Any>>("domain" to JsonArray(names.map(::JsonPrimitive)), "domain_suffix" to JsonArray(names.map { JsonPrimitive(".$it") })) }
+        // Websites with a route of their own: each run matches its names and every name under them. A rule for a name the
+        // tailnet's or the local network's lookup rule answers first is left out: it could never apply, and its route needs no tunnel.
+        val sites = Sites.runs(Sites.applied(s, reported = i.tsSuffix)).map { (id, names) -> id to arrayOf<Pair<String, Any>>("domain" to JsonArray(names.map(::JsonPrimitive)), "domain_suffix" to JsonArray(names.map { JsonPrimitive(".$it") })) }
 
         return buildJsonObject {
             putJsonObject("log") { put("level", "warn"); put("timestamp", false) }
@@ -211,7 +212,7 @@ object Compiler {
                     if (barred.isNotEmpty()) add(obj("package_name" to barred, "action" to "reject"))
                     for ((id, names) in sites) if (id == BLOCK) add(obj(*names, "action" to "reject"))
                     if (homeTs && tsDomains.isNotEmpty()) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
-                    if (s.prefs.lan) add(obj("domain_suffix" to arr("local", "lan", "home.arpa", "fritz.box"), "server" to "local"))
+                    if (s.prefs.lan) add(obj("domain_suffix" to arr(*LOCAL_NAMES.toTypedArray()), "server" to "local"))
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
                     // HTTPS and SVCB records can carry address hints, which a program would connect to as they are: not stand-in
                     // addresses, so the website's rule would be skipped. They are answered empty, which costs the hints,
@@ -509,6 +510,15 @@ object Compiler {
      * Headscale (which can name any domain, even a whole top-level one) only the one the user allowed.
      */
     fun trustedSuffix(raw: String?, h: Home) = tsSuffix(raw)?.takeIf { if (officialTs(h)) it.endsWith(".ts.net") else it == h.tsSuffixAllowed }
+
+    /**
+     * Domains whose lookups the tailnet's DNS answers while Reach your tailnet is on, [reported] being the tailnet domain
+     * Tailscale gave: all of ts.net on Tailscale's own server, else only the allowed one. A website rule under them never applies then ([Sites.overridden]).
+     */
+    fun tsDomains(h: Home, reported: String?) = listOfNotNull("ts.net".takeIf { officialTs(h) }, trustedSuffix(reported, h)).distinct()
+
+    /** Name endings the local network answers while it bypasses the VPN, before any website rule ([Sites.overridden]). */
+    val LOCAL_NAMES = listOf("local", "lan", "home.arpa", "fritz.box")
 
     private fun sha(s: String) = MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
 

@@ -167,11 +167,8 @@ class SitesAdversarialTest {
             "http://[::1]:80/" to address, "[2001:db8::1]" to address, "::1" to address, "2001:db8::1" to address,
             "localhost" to "localhost is this phone itself, so unbraid can't give it a rule", "nas" to "Add the whole name, such as nas.com",
             "com" to "Add the whole name, such as com.com",
-            "printer.lan" to "printer.lan is a name on your own network, so unbraid can't give it a rule", "myhost.local" to "myhost.local is a name on your own network, so unbraid can't give it a rule",
-            "router.home.arpa" to "router.home.arpa is a name on your own network, so unbraid can't give it a rule", "x.fritz.box" to "x.fritz.box is a name on your own network, so unbraid can't give it a rule",
-            "a.internal" to "a.internal is a name on your own network, so unbraid can't give it a rule", "a.localhost" to "a.localhost is this phone itself, so unbraid can't give it a rule",
+            "a.localhost" to "a.localhost is this phone itself, so unbraid can't give it a rule",
             "1.0.0.10.in-addr.arpa" to "1.0.0.10.in-addr.arpa is a lookup of an address, not a website, so unbraid can't give it a rule",
-            "nas.tail1234.ts.net" to "nas.tail1234.ts.net is a Tailscale name, answered by Tailscale, so unbraid can't give it a rule",
             "co.uk" to "co.uk is shared by many websites. Add one website under it instead", "www.co.uk" to "co.uk is shared by many websites. Add one website under it instead",
             "github.io" to "github.io is shared by many websites. Add one website under it instead", "CO.UK." to "co.uk is shared by many websites. Add one website under it instead",
             "😀.com" to letters, "a\u202eb.com" to letters, "ex%61mple.com" to notName, "ex%2Ecom" to notName, "_dmarc.example.com" to notName, "a_b.com" to notName, "*.example.com" to notName, "-bad.com" to notName, "example..com" to notName,
@@ -181,10 +178,10 @@ class SitesAdversarialTest {
         for (raw in listOf("straße.de", "faß.de", "ας.gr", "a\u200db.com", "a\u200cb.com")) {
             assertEquals(raw, letters, Sites.refusal(raw)); assertNull(raw, Sites.clean(raw))
         }
-        // The tailnet's own domain, as a Headscale server names it.
-        assertEquals("box.corp.example is a name in your tailnet, so unbraid can't give it a rule", Sites.refusal("box.corp.example", "corp.example"))
-        assertNull(Sites.refusal("box.corp.example")); assertNull(Sites.refusal("bbc.co.uk")); assertNull(Sites.refusal("me.github.io"))
-        for (ok in listOf("lan.example", "arpa.example", "ts.net.example", "localbank.com", "notlocal.com", "internal.example.org")) assertNull(ok, Sites.refusal(ok, "corp.example"))
+        // Names a rule can work for in some setup are taken: local and tailnet names (marked "Not applied" while a lookup
+        // rule answers them first), someone's Funnel site, a company's internal names on its VPN.
+        for (ok in listOf("printer.lan", "myhost.local", "router.home.arpa", "x.fritz.box", "a.internal", "nas.tail1234.ts.net", "box.corp.example", "bbc.co.uk", "me.github.io",
+            "lan.example", "arpa.example", "ts.net.example", "localbank.com", "notlocal.com", "internal.example.org")) assertNull(ok, Sites.refusal(ok))
     }
 
     /** International names are shown in their own letters when that reads back as the saved name, and in ASCII otherwise; never a crash. */
@@ -217,7 +214,7 @@ class SitesAdversarialTest {
         val s = Setup(routes = listOf(Route("it", Location("nord", 106, "IT", "Italy"))), defaultRoute = DIRECT, sites = mapOf("example.com" to "it"), version = VERSION)
         assertNull(siteError(s, "")); assertNull(siteError(s, "   ")); assertNull(siteError(s, "rai.it"))
         assertEquals("An IP address can't have a rule. Add the website's name", siteError(s, "10.0.0.1"))
-        assertEquals("nas.local is a name on your own network, so unbraid can't give it a rule", siteError(s, "https://nas.local/x"))
+        assertEquals("a.localhost is this phone itself, so unbraid can't give it a rule", siteError(s, "https://a.localhost/x")); assertNull(siteError(s, "https://nas.local/x"))
         assertEquals("This website is already on the list", siteError(s, "https://www.example.com\\@evil.com"))
         assertTrue(siteError(s, "straße.de")!!.startsWith("unbraid can't spell"))
     }
@@ -235,14 +232,14 @@ class SitesAdversarialTest {
         repeat(40_000) {
             val raw = before.random(rng) + (0 until rng.nextInt(1, 6)).joinToString("") { (if (it > 0) dots.random(rng) else "") + pieces.random(rng) } + after.random(rng)
             val name = runCatching { Sites.clean(raw) }.getOrElse { bad += "clean threw for ${raw.debugText()}"; return@repeat }
-            val why = runCatching { Sites.refusal(raw, "corp.example") }.getOrElse { bad += "refusal threw for ${raw.debugText()}"; return@repeat }
+            val why = runCatching { Sites.refusal(raw) }.getOrElse { bad += "refusal threw for ${raw.debugText()}"; return@repeat }
             if (name == null && why == null) bad += "no reason for ${raw.debugText()}"
             if (name != null) {
                 if (Sites.clean(name) != name) bad += "${raw.debugText()} saved as unstable $name"
                 if (name.length > 253 || name.split('.').size < 2 || name.startsWith("www.") && name.drop(4).contains('.')) bad += "${raw.debugText()} saved as odd $name"
                 val shown = Sites.shown(name)
                 if (shown != name && Sites.clean(shown) != name) bad += "$name shown as $shown, which saves as ${Sites.clean(shown)}"
-                if (why == null && Sites.ownNetwork(name, "corp.example") != null) bad += "$name should be refused"
+                if (why == null && Sites.refusal(name) != null) bad += "${raw.debugText()} is taken but its saved form $name is refused"
             }
         }
         assertEquals(emptyList<String>(), bad.take(10))

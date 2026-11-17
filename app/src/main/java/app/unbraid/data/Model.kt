@@ -427,14 +427,14 @@ data class Setup(
     fun outside(pkg: String) = apps[pkg] == DIRECT && !prefs.filter.through(pkg)
     /** How many of [installed] follow the default: the apps a new default would move. */
     fun followers(installed: Collection<String>) = installed.count(::follows)
-    /** Routes that carry traffic right now: the default plus any with apps or websites (and those up for a speed test). */
-    val activeRoutes get() = routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) }
+    /** Routes that carry traffic right now: the default plus any with apps or with websites whose rule applies (and those up for a speed test). */
+    val activeRoutes get() = Sites.applied(this).let { sites -> routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) } }
     /** The Tailscale exit node in use, if any active route goes out through one (Tailscale allows one at a time). */
     val tsExit get() = activeRoutes.firstNotNullOfOrNull { it.tsExit }
     /** Tailscale runs for home access or for an exit-node route. */
     val tailscale get() = home.tailscale || tsExit != null
     /** Nothing goes through a VPN (Direct default, no app on a route, no home tunnel): running protects nothing. */
-    val directOnly get() = defaultRoute == DIRECT && (apps.values + sites.values).all { it == DIRECT } && home.wg == null && !home.tailscale
+    val directOnly get() = defaultRoute == DIRECT && (apps.values + Sites.applied(this).values).all { it == DIRECT } && home.wg == null && !home.tailscale
 
     /** Website [site] (as [Sites.clean] gives it) on route [routeId], or with no route of its own (null), in profile [name] ([editing]). */
     fun site(name: String?, site: String, routeId: String?) = editing(name) { it.copy(sites = if (routeId == null) it.sites - site else it.sites + (site to routeId)) }
