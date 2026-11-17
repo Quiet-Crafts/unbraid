@@ -363,12 +363,14 @@ internal val NETS = listOf(WIFI to "On Wi-Fi", MOBILE to "On mobile data")
 /** Under a kind of network's row: what it counts, or why its profile can't be used yet. */
 internal fun onNetSub(s: Setup, kind: String): String? = when {
     s.onNet[kind]?.let { n -> s.saved.none { it.name == n && it.ready } } == true -> "This profile needs a default route first"
-    kind == WIFI -> "A cable too"
+    kind == WIFI -> "Any Wi-Fi, public ones too, and a cable"
     else -> null
 }
 
-internal const val ON_NET_NOTE = "Switches while $APP is connected, a few seconds after the phone moves between Wi-Fi and mobile data, and not while $APP is open on screen. " +
-    "A profile you pick by hand stays until the network changes again. Every app reconnects for a moment."
+internal const val ON_NET_NOTE = "Switches while $APP is connected, a few seconds after the phone moves to another network, and not while $APP is open on screen. " +
+    "$APP can't tell one Wi-Fi from another: each one gets the Wi-Fi profile. " +
+    "A profile you pick by hand stays while the phone stays on the network you picked it on. It ends when the phone joins another network or reconnects, or $APP restarts. " +
+    "Every app reconnects for a moment."
 
 /** Manage profiles: rename or delete behind the pencil, drag the handle (or TalkBack's Move up / down) to reorder. */
 @Composable

@@ -25,23 +25,27 @@ class AutoSwitchTest {
         defaultRoute = "nl", profiles = listOf(Profile("Home", "nl"), Profile("Trip", "us"), Profile("Empty", "")), profile = "Home",
         onNet = mapOf(WIFI to "Home", MOBILE to "Trip"), version = VERSION,
     )
-    private fun step(s: Setup, kind: String, acted: Pair<String, Map<String, String>>? = null, over: Boolean = false) = AutoSwitch.decide(s, kind, acted) { _, _ -> over }
+    private fun step(s: Setup, kind: String, over: Boolean = false) = AutoSwitch.decide(s, s.onNet[kind]) { _, _ -> over }
 
     @Test fun aNewKindOfNetworkTakesItsProfile() {
         assertEquals("Trip", step(setup, MOBILE).to)
-        assertEquals("Trip", step(setup, MOBILE, acted = WIFI to setup.onNet).to)
         // Already in use, no profile set for it, or one that can't be used yet: nothing, and nothing said.
         for (s in listOf(step(setup, WIFI), step(setup.copy(onNet = mapOf(WIFI to "Home")), MOBILE), step(setup.copy(onNet = mapOf(MOBILE to "Empty")), MOBILE), step(setup.copy(onNet = mapOf(MOBILE to "Gone")), MOBILE))) {
             assertNull(s.to); assertNull(s.blocked)
         }
     }
 
-    /** Decided once per kind of network and set of rules: a profile picked by hand since then stays until one of them changes. */
+    /** Decided once per network and the profile its rule names: a profile picked by hand there stays until the phone leaves it. */
     @Test fun aProfilePickedByHandStays() {
-        val byHand = setup.use("Trip") // on Wi-Fi, whose profile is Home
-        assertNull(step(byHand, WIFI, acted = WIFI to setup.onNet).to)
-        assertEquals("Home", step(byHand, WIFI, acted = MOBILE to setup.onNet).to)
-        assertEquals("Home", step(byHand, WIFI, acted = WIFI to mapOf(WIFI to "Trip")).to) // the rules changed: they apply now
+        val wifi = AutoSwitch.Net(WIFI, 100)
+        val run = AutoSwitch.Run()
+        assertEquals("Home", run.settle(wifi, setup.onNet))
+        run.pick(wifi, setup.onNet) // Trip, by hand
+        assertNull(run.settle(wifi, setup.onNet))
+        assertNull(run.settle(wifi, setup.onNet + (MOBILE to "Home"))) // the other network's rule: nothing here
+        assertEquals("Trip", run.settle(wifi, setup.onNet + (WIFI to "Trip"))) // a new rule for this network applies over it
+        run.pick(wifi, setup.onNet + (WIFI to "Trip"))
+        assertEquals("Trip", run.settle(AutoSwitch.Net(WIFI, 101), setup.onNet + (WIFI to "Trip"))) // another Wi-Fi: its rule
     }
 
     @Test fun aSwitchThatCantHappenSaysWhy() {
@@ -62,7 +66,7 @@ class AutoSwitchTest {
         assertEquals(mapOf(WIFI to "Home", MOBILE to "Away"), setup.rename("Trip", "Away").onNet)
         assertEquals(mapOf(WIFI to "Home"), setup.forget("Trip").onNet)
         // Said on the Profiles page, under the kind of network.
-        assertEquals("A cable too", onNetSub(setup, WIFI)); assertNull(onNetSub(setup, MOBILE))
+        assertEquals("Any Wi-Fi, public ones too, and a cable", onNetSub(setup, WIFI)); assertNull(onNetSub(setup, MOBILE))
         assertEquals("This profile needs a default route first", onNetSub(setup.copy(onNet = mapOf(MOBILE to "Empty")), MOBILE))
         // The rules are not a new format: a setup with them is saved as before, and an older build reads it without them.
         assertEquals(2, setup.stamped.version)

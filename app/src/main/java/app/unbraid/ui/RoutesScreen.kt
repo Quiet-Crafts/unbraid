@@ -224,6 +224,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     var adding by rememberSaveable { mutableStateOf(false) }
     val switching by ui.switching.collectAsStateWithLifecycle()
     val failed by ui.switchFailed.collectAsStateWithLifecycle()
+    val notSwitched by app.unbraid.vpn.AutoSwitch.notSwitched.collectAsStateWithLifecycle()
     val switchTo = rememberProfileSwitch(ui)
     val addProfile = { empty: Boolean -> if (setup.profiles.size < MAX_PROFILES) { full = false; sheetEmpty = empty; profileSheet = "" } else full = true }
     var newName by rememberSaveable { mutableStateOf("") }
@@ -383,6 +384,12 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                 failed?.let { f ->
                     item(key = "switchFailed") {
                         Notice(Icons.error, Ink.bad, "Couldn't switch to ${f.to}.${f.kept?.let { " $it is still in use." }.orEmpty()}", "Try again", dismiss = { ui.switchFailed.value = null }, live = true) { switchTo(f.to) }
+                    }
+                }
+                // The last switch by network that didn't happen, also when its notice was off or replaced.
+                notSwitched?.let { (to, why) ->
+                    item(key = "notSwitched") {
+                        Notice(Icons.error, Ink.bad, why, "Switch", dismiss = { app.unbraid.vpn.AutoSwitch.notSwitched.value = null }, live = true) { switchTo(to) }
                     }
                 }
                 item(key = "profileLabel") {
