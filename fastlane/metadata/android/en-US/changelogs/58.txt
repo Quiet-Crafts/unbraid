@@ -1,0 +1,2 @@
+• An own DNS server at home now works: when its address is in your tailnet, a home network behind Tailscale or your home WireGuard tunnel, lookups reach it through that tunnel, on VPN routes and on Direct.
+• Settings: Take the tour now says nine stops, not eight.

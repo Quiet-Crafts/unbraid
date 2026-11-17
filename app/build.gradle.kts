@@ -22,8 +22,8 @@ android {
         applicationId = "app.unbraid"
         minSdk = 33
         targetSdk = 37
-        versionCode = 57
-        versionName = "3.0.1"
+        versionCode = 58
+        versionName = "3.0.2"
         ndk { abiFilters += "arm64-v8a" }
     }
     signingConfigs {
