@@ -8,7 +8,19 @@ import app.unbraid.data.Prefs
 import app.unbraid.data.Route
 import app.unbraid.data.Setup
 import app.unbraid.data.WgPeer
+import app.unbraid.data.Country
+import app.unbraid.data.Field
+import app.unbraid.data.Link
+import app.unbraid.data.Profile
+import app.unbraid.data.Provider
+import app.unbraid.data.Server
+import app.unbraid.data.WgLink
+import app.unbraid.vpn.Compiler
 import app.unbraid.vpn.LinkPicker
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Setups as version 3.0.2 saved them, with websites on public names, on Tailscale names with Tailscale on and off, on
@@ -64,21 +76,58 @@ object UpgradeTable {
     )
     private val platforms get() = mapOf("googleapis.com" to "it", "githubusercontent.com" to DIRECT, "gob.mx" to "us")
 
-    /**
-     * Three WireGuard configs for one client key, peer key and server, in the order A, B, C: A and C ask for keepalive 25,
-     * B for 17, so B clashes with A. A's only use is a local name the local network answers. The tunnels are the ones the
-     * link picker keeps (it refuses the clashing route), as the service compiles them. A and C
-     * are one tunnel (same settings): 3.0.2 ran it as A's, now C runs it alone when A has none, so the tag reads as A's.
-     */
-    private fun shared(n: String, keepalive: Int) = Route(n, wg = WgPeer(n, "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=", listOf("10.5.0.2/32"), "aGVsbG8taGVsbG8taGVsbG8taGVsbG8taGVsbG8tMTI=", endpoint = "198.51.100.7:51820", allowedIps = listOf("0.0.0.0/0"), keepalive = keepalive))
-    private val clashNames = listOf("printer.lan", "other.example", "bank.example")
+    private const val PUB = "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30="
+    private const val KEY = "aGVsbG8taGVsbG8taGVsbG8taGVsbG8taGVsbG8tMTI="
+    private fun peer(n: String, ip: String, keepalive: Int?) = WgPeer(n, KEY, listOf("10.5.0.2/32"), PUB, endpoint = "$ip:51820", allowedIps = listOf("0.0.0.0/0"), keepalive = keepalive)
 
-    fun clashLines(): List<String> = listOf(true, false).flatMap { lan ->
-        val s = Setup(routes = listOf(shared("a", 25), shared("b", 17), shared("c", 25)), defaultRoute = DIRECT, sites = mapOf("printer.lan" to "a", "other.example" to "b", "bank.example" to "c"), prefs = Prefs(lan = lan), version = 3)
-        val p = LinkPicker.pick(s, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { null }
-        RoutingProbe.outcomes(s, null, clashNames, apps, p.blocked.keys, p.links).map { "wg-clash-lan-$lan ${it.replace(" go=r-c", " go=r-a")}" }
+    /** A one-key provider whose best servers are S1, then S2. */
+    private object TwoServers : Provider {
+        override val id = "fake"; override val name = "Fake"; override val fields = emptyList<Field>(); override val help = ""; override val oneKey = true
+        private val best = listOf(Server("S1", "s1.example", "198.51.100.1", PUB, 0), Server("S2", "s2.example", "198.51.100.2", PUB, 0))
+        override fun signIn(input: Map<String, String>) = "acc"
+        override fun countries(account: String) = emptyList<Country>()
+        override fun connect(loc: Location, account: String): Link = (loc.pinned ?: best[0]).let { WgLink(it, peer(it.name, it.ip, null)) }
+        override fun servers(loc: Location, account: String, limit: Int) = best.take(limit)
     }
 
-    /** Every case's outcomes, one line each, prefixed by the case name. */
-    fun lines() = cases.flatMap { (name, s, rest) -> RoutingProbe.outcomes(s, rest.first, names, apps, rest.second).map { "$name $it" } } + clashLines()
+    /**
+     * WireGuard clashes, in saved order A, B, C, with local network access on and off. "wg-clash": three imported configs for
+     * one client key and server, A and C with keepalive 25, B with 17. "provider-clash": A and C unpinned on [TwoServers],
+     * B importing S1's identity with keepalive 17. A's only use is a local name the local network answers. Each gives where
+     * the names go, which server each route got (or why none), and the WireGuard tunnels the service compiles.
+     */
+    private val clashNames = listOf("printer.lan", "mail.example", "bank.example")
+    fun clashLines(): List<String> = listOf(true, false).flatMap { lan ->
+        listOf(
+            "wg-clash" to listOf(Route("a", wg = peer("a", "198.51.100.7", 25)), Route("b", wg = peer("b", "198.51.100.7", 17)), Route("c", wg = peer("c", "198.51.100.7", 25))),
+            "provider-clash" to listOf(Route("a", Location("fake", countryCode = "NL")), Route("b", wg = peer("b", "198.51.100.1", 17)), Route("c", Location("fake", countryCode = "NL"))),
+        ).flatMap { (case, routes) ->
+            val s = Setup(routes = routes, defaultRoute = DIRECT, sites = mapOf("printer.lan" to "a", "mail.example" to "b", "bank.example" to "c"), prefs = Prefs(lan = lan), version = 3)
+            val p = LinkPicker.pick(s, emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), emptyMap()) { if (it == "fake") TwoServers else null }
+            val c = Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, p.links, "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", null, blocked = p.blocked.keys))).jsonObject
+            val tunnels = c["endpoints"]?.jsonArray.orEmpty().map { it.jsonObject }.filter { it["type"]?.jsonPrimitive?.content == "wireguard" }.map { e ->
+                val peer = e["peers"]!!.jsonArray[0].jsonObject
+                "${e["tag"]!!.jsonPrimitive.content}@${peer["address"]!!.jsonPrimitive.content}:${peer["port"]!!.jsonPrimitive.content}/ka${peer["persistent_keepalive_interval"]!!.jsonPrimitive.content}"
+            }
+            val links = s.routes.joinToString(" ") { r -> "${r.id}=" + (p.links[r.id]?.server?.name ?: p.blocked[r.id]?.let { "refused" } ?: "none") }
+            RoutingProbe.outcomes(s, null, clashNames, apps, p.blocked.keys, p.links).map { "$case-lan-$lan $it" } +
+                "$case-lan-$lan active=${s.activeRoutes.joinToString(",") { it.id }} $links tunnels=${tunnels.joinToString(",")}"
+        }
+    }
+
+    /**
+     * Route ownership while another profile is edited: an unprofiled live setup uses route A only for a local name the local
+     * network answers, and the inactive Work profile uses A too. The check the profile editor makes before changing Work's
+     * location: A shared with the live setup is copied first, so the live website keeps its exit.
+     */
+    fun ownershipLines(): List<String> = listOf(true, false).map { lan ->
+        val s = Setup(routes = listOf(Route("a", Location("nord", 153, "NL", "Netherlands"))), defaultRoute = DIRECT, sites = mapOf("printer.lan" to "a"),
+            profiles = listOf(Profile("Work", DIRECT, sites = mapOf("printer.lan" to "a"))), prefs = Prefs(lan = lan), version = 3)
+        val shared = s.activeRoutes.any { it.id == "a" } || "a" in s.added || s.saved.any { p -> p.name != "Work" && "a" in p.own }
+        "ownership-lan-$lan active=${s.activeRoutes.joinToString(",") { it.id }} live-shares-a=$shared"
+    }
+
+    /** Every case's outcomes, one line each, prefixed by the case name, then the routes each case keeps a tunnel for. */
+    fun lines() = cases.flatMap { (name, s, rest) -> RoutingProbe.outcomes(s, rest.first, names, apps, rest.second).map { "$name $it" } } + clashLines() + ownershipLines() +
+        cases.map { (name, s, _) -> "$name active=${s.activeRoutes.joinToString(",") { it.id }}" }
 }

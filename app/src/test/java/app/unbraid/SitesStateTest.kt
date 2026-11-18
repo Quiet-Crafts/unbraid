@@ -29,7 +29,7 @@ import org.junit.Test
 
 /**
  * Each state a saved website can be in, through every place that asks: what the compiler emits, what its row says,
- * whether it counts and holds its route's tunnel open, and where a connection by an address from before goes.
+ * whether it counts, and where a connection by an address from before goes. Its route keeps its tunnel in every state.
  */
 class SitesStateTest {
     private val italy = Route("it", Location("nord", 106, "IT", "Italy"))
@@ -37,18 +37,18 @@ class SitesStateTest {
     private val browser = "com.browser"
 
     /** One cell of the table: the setup with [name] on Italy and [more], what the row says, whether Italy is in use, where a fresh connection and one by a kept stand-in go. */
-    private fun cell(s: Setup, name: String, row: String, inUse: Boolean, fresh: String, kept: String, reported: String? = null, blocked: Set<String> = emptySet(), tunnel: Boolean = inUse) {
+    private fun cell(s: Setup, name: String, row: String, inUse: Boolean, fresh: String, kept: String, reported: String? = null, blocked: Set<String> = emptySet()) {
         assertEquals(name, row, siteState(s, name, reported))
-        assertEquals(name, tunnel, s.activeRoutes.any { it.id == "it" })
+        assertTrue(name, s.activeRoutes.any { it.id == "it" })
         assertEquals(name, inUse, "it" in sitesBy(s, reported))
-        if (!s.home.tailscale && BLOCK !in s.sites.values) assertEquals(name, !tunnel, s.directOnly) // nothing protected unless it applies
+        if (!s.home.tailscale && BLOCK !in s.sites.values) assertEquals(name, !inUse, s.directOnly) // shown as protecting nothing unless it applies
         val (dns, route) = RoutingProbe.compiled(s, reported, blocked)
         assertEquals(name, fresh, RoutingProbe.connect(route, dns, browser, name))
         assertEquals(name, kept, RoutingProbe.connect(route, dns, browser, name, kept = "fake"))
-        // The tunnel opens exactly while the website keeps it in use (and has one to open).
+        // The tunnel opens whenever the route has one to open, as in 3.0.2.
         val links = s.routes.associate { r -> Server("x #1", "x.nordvpn.com", "10.9.0.1", "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=", 10).let { r.id to WgLink(it, Nord.peer(it, KEY)) } }
         val config = Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links, "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", reported, blocked = blocked))).jsonObject
-        assertEquals(name, tunnel && "it" !in blocked, config["endpoints"]!!.jsonArray.any { it.jsonObject["tag"]!!.jsonPrimitive.content == "r-it" })
+        assertEquals(name, "it" !in blocked, config["endpoints"]!!.jsonArray.any { it.jsonObject["tag"]!!.jsonPrimitive.content == "r-it" })
     }
 
     @Test fun applied() = cell(base.copy(sites = mapOf("example.com" to "it")), "example.com", "Italy", true, "r-it", "r-it")
@@ -62,19 +62,18 @@ class SitesStateTest {
             "Not applied: Tailscale answers ts.net names while Reach your tailnet is on", false, "home-ts", "reject")
 
     /**
-     * On Headscale only once Tailscale reports the domain the user allowed; before, the website applies. Either way its
-     * route keeps its tunnel: tunnels go by the setup alone, so picking, clash checks and compiling never disagree.
+     * On Headscale only once Tailscale reports the domain the user allowed; before, the website applies.
      */
     @Test fun answeredByAHeadscaleTailnet() {
         val s = base.copy(home = Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example"), sites = mapOf("box.corp.example" to "it"))
-        cell(s, "box.corp.example", "Not applied: your tailnet answers this name while Reach your tailnet is on", false, "home-ts", "reject", reported = "corp.example", tunnel = true)
+        cell(s, "box.corp.example", "Not applied: your tailnet answers this name while Reach your tailnet is on", false, "home-ts", "reject", reported = "corp.example")
         cell(s, "box.corp.example", "Italy", true, "r-it", "r-it")
         cell(s, "box.corp.example", "Italy", true, "r-it", "r-it", reported = "other.example")
         assertEquals("Direct · no apps elsewhere · 1 website, 1 not applied", summary(s, Profile("P", DIRECT, sites = s.sites), "corp.example"))
         assertEquals("Direct · no apps elsewhere · 1 website", summary(s, Profile("P", DIRECT, sites = s.sites)))
     }
 
-    /** Under a blocked website: the block takes the name, so its own route is not in use; an address from before is refused by the block. */
+    /** Under a blocked website: the block takes the name, so its own route carries none of it; an address from before is refused by the block. */
     @Test fun underABlockedWebsite() {
         val s = base.copy(sites = mapOf("example.com" to BLOCK, "api.example.com" to "it"))
         cell(s, "api.example.com", "Blocked: it is under example.com", false, "none", "reject")

@@ -8,7 +8,8 @@ import java.text.Normalizer
 
 /**
  * The websites as saved ([Setup.sites], [Profile.sites]), whether or not their rule applies now. Reading them needs this
- * opt-in, so a count, a tunnel or a protection can't go by them unseen: those go by [Sites.applied].
+ * opt-in, so a count or a label can't go by them unseen: those go by [Sites.applied]. Routes in use go by them as saved
+ * ([Setup.activeRoutes]).
  */
 @RequiresOptIn("These are the websites as saved; what applies now is Sites.applied", RequiresOptIn.Level.ERROR)
 @Retention(AnnotationRetention.BINARY)

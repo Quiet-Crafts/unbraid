@@ -863,14 +863,48 @@ private-zone-in-parent-lan-off com.chat storage.googleapis.com A=fake TXT=dns-r-
 private-zone-in-parent-lan-off com.chat raw.githubusercontent.com A=fake TXT=local go=direct
 private-zone-in-parent-lan-off com.chat www.gob.mx A=fake TXT=dns-r-us go=r-us
 wg-clash-lan-true org.browser printer.lan A=local TXT=local go=direct
-wg-clash-lan-true org.browser other.example A=fake TXT=reject go=reject
+wg-clash-lan-true org.browser mail.example A=fake TXT=reject go=reject
 wg-clash-lan-true org.browser bank.example A=fake TXT=dns-r-c go=r-a
 wg-clash-lan-true com.chat printer.lan A=local TXT=local go=direct
-wg-clash-lan-true com.chat other.example A=fake TXT=reject go=reject
+wg-clash-lan-true com.chat mail.example A=fake TXT=reject go=reject
 wg-clash-lan-true com.chat bank.example A=fake TXT=dns-r-c go=r-a
+wg-clash-lan-true active=a,b,c a=a b=refused c=c tunnels=r-a@198.51.100.7:51820/ka25
+provider-clash-lan-true org.browser printer.lan A=local TXT=local go=direct
+provider-clash-lan-true org.browser mail.example A=fake TXT=reject go=reject
+provider-clash-lan-true org.browser bank.example A=fake TXT=dns-r-c go=r-c
+provider-clash-lan-true com.chat printer.lan A=local TXT=local go=direct
+provider-clash-lan-true com.chat mail.example A=fake TXT=reject go=reject
+provider-clash-lan-true com.chat bank.example A=fake TXT=dns-r-c go=r-c
+provider-clash-lan-true active=a,b,c a=S1 b=refused c=S2 tunnels=r-a@198.51.100.1:51820/ka25,r-c@198.51.100.2:51820/ka25
 wg-clash-lan-false org.browser printer.lan A=fake TXT=dns-r-a go=r-a
-wg-clash-lan-false org.browser other.example A=fake TXT=reject go=reject
+wg-clash-lan-false org.browser mail.example A=fake TXT=reject go=reject
 wg-clash-lan-false org.browser bank.example A=fake TXT=dns-r-c go=r-a
 wg-clash-lan-false com.chat printer.lan A=fake TXT=dns-r-a go=r-a
-wg-clash-lan-false com.chat other.example A=fake TXT=reject go=reject
+wg-clash-lan-false com.chat mail.example A=fake TXT=reject go=reject
 wg-clash-lan-false com.chat bank.example A=fake TXT=dns-r-c go=r-a
+wg-clash-lan-false active=a,b,c a=a b=refused c=c tunnels=r-a@198.51.100.7:51820/ka25
+provider-clash-lan-false org.browser printer.lan A=fake TXT=dns-r-a go=r-a
+provider-clash-lan-false org.browser mail.example A=fake TXT=reject go=reject
+provider-clash-lan-false org.browser bank.example A=fake TXT=dns-r-c go=r-c
+provider-clash-lan-false com.chat printer.lan A=fake TXT=dns-r-a go=r-a
+provider-clash-lan-false com.chat mail.example A=fake TXT=reject go=reject
+provider-clash-lan-false com.chat bank.example A=fake TXT=dns-r-c go=r-c
+provider-clash-lan-false active=a,b,c a=S1 b=refused c=S2 tunnels=r-a@198.51.100.1:51820/ka25,r-c@198.51.100.2:51820/ka25
+ownership-lan-true active=a live-shares-a=true
+ownership-lan-false active=a live-shares-a=true
+public active=nl,it,us
+public-direct-default active=it,us
+public-it-down active=nl,it,us
+odd-ts-off-lan-off active=it,us
+odd-ts-off-lan-on active=it,us
+odd-ts-off-nl-default active=nl,it,us
+odd-ts-home-on active=it,us
+odd-ts-home-on-lan-off active=nl,it,us
+odd-ts-home-on-unreported active=it,us
+odd-ts-exit-only active=it,us,ts
+odd-headscale active=it,us
+odd-headscale-unreported active=it,us
+odd-headscale-other-domain active=it,us
+tailnet-parent active=it,us
+private-zone-in-parent active=it,us
+private-zone-in-parent-lan-off active=nl,it,us

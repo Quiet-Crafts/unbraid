@@ -220,11 +220,11 @@ class SitesTest {
         assertFalse(Sites.opens("xn--ax-iuk.com")); assertFalse(Sites.opens("x.0xff"))
     }
 
-    /** A website that doesn't apply opens no tunnel, protects nothing, and is in no count of what a route carries. */
-    @Test fun aWebsiteNotAppliedIsNotInUse() {
+    /** A website that doesn't apply shows as protecting nothing and is in no count of what a route carries; its route keeps its tunnel, as in 3.0.2. */
+    @Test fun aWebsiteNotAppliedCountsForNothingButKeepsItsTunnel() {
         val s = setup.copy(defaultRoute = DIRECT, apps = emptyMap(), sites = mapOf("printer.lan" to "it"))
         assertTrue(Sites.applied(s).isEmpty())
-        assertEquals(emptyList<String>(), s.activeRoutes.map { it.id })
+        assertEquals(listOf("it"), s.activeRoutes.map { it.id })
         assertTrue(s.directOnly)
         assertFalse(app.unbraid.vpn.glance(app.unbraid.vpn.VpnState(app.unbraid.vpn.VpnState.Phase.On), s).protects)
         assertEquals(emptyMap<String, List<String>>(), app.unbraid.ui.sitesBy(s))

@@ -131,8 +131,9 @@ from before the change follows the old path until it does; reopening the app or 
 an address a name really has. A stand-in address kept for a name that your local network or your tailnet has since taken
 over is refused until the app looks the name up again.) Names that
 your local network or your tailnet answer (such as printer.lan, or your tailnet's own names) go to them first, so a
-website rule doesn't apply to those while that setting is on, and the list says so. A shared ending such as co.uk or
-gov.au can't be added, as it would cover every website that ends in it; add the website itself.
+website rule doesn't apply to those while that setting is on, and the list says so. A route used only by such a "Not
+applied" website still keeps its VPN connection open. A shared ending such as co.uk or gov.au can't be added, as it
+would cover every website that ends in it; add the website itself.
 
 ### What does Block do?
 

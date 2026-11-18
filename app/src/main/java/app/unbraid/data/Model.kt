@@ -430,18 +430,11 @@ data class Setup(
     /** How many of [installed] follow the default: the apps a new default would move. */
     fun followers(installed: Collection<String>) = installed.count(::follows)
     /**
-     * Routes that carry traffic right now: the default plus any with apps or with websites whose rule applies (and those up
-     * for a speed test). Decided by the setup alone, never by the tailnet domain Tailscale reports: the tunnels picked,
-     * checked for clashes, compiled and shown are the same set at every moment, so a website only a Headscale tailnet's
-     * domain answers still keeps its route's tunnel, as before.
+     * Routes that carry traffic right now: the default plus any with apps or saved websites (and those up for a speed test).
+     * A website counts whether its rule applies or not, so tunnels, clash order and route ownership never depend on what
+     * answers a name; a route used only by a website that is "Not applied" keeps its tunnel open.
      */
-    val activeRoutes get() = Sites.applied(this).let { sites -> routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) } }
-    /**
-     * Every route the setup names, a website whose rule doesn't apply included, in saved order: the routes 3.0.2 gave a
-     * tunnel. WireGuard clashes are decided among these, so which of two clashing routes wins never depends on what
-     * answers a website's name; only the [activeRoutes] among them get a tunnel.
-     */
-    val namedRoutes get() = routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) }
+    val activeRoutes get() = routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) }
     /** The Tailscale exit node in use, if any active route goes out through one (Tailscale allows one at a time). */
     val tsExit get() = activeRoutes.firstNotNullOfOrNull { it.tsExit }
     /** Tailscale runs for home access or for an exit-node route. */
