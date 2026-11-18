@@ -284,7 +284,7 @@ object Backup {
      */
     fun contents(s: Setup, keys: Boolean = true): Setup {
         val c = s.copy(home = Home(wg = s.home.wg), prefs = s.prefs.copy(stats = false), pristine = false,
-            waiting = emptySet(), waitingUntil = 0, version = VERSION, testing = emptySet())
+            waiting = emptySet(), waitingUntil = 0, waitingEach = emptyMap(), version = VERSION, testing = emptySet())
         if (keys) return c
         val linked = linked(c)
         return linked.copy(home = Home(), servers = linked.servers.map { it.withoutSecrets() }, routes = linked.routes.map { it.withoutSecrets() })
@@ -524,14 +524,16 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     )
     val pkgs = b.apps.keys + b.profiles.flatMap { it.apps.keys }
     var r = b.copy(home = home.copy(wg = if (keys) b.home.wg else home.wg), prefs = b.prefs.copy(stats = prefs.stats), pristine = false, version = VERSION,
-        waiting = pkgs, waitingUntil = if (pkgs.isEmpty()) 0 else now + WAIT_MS, testing = emptySet())
+        waiting = pkgs, waitingUntil = if (pkgs.isEmpty()) 0 else now + WAIT_MS, waitingEach = emptyMap(), testing = emptySet())
     if (keepAs == null || untouched) return r
     if (r.profiles.size >= MAX_PROFILES) return null
     val name = (listOf(keepAs) + (2..MAX_PROFILES + 1).map { "$keepAs $it" }).firstNotNullOfOrNull { r.profileName(it) } ?: return null
     val fresh = { prefix: String, taken: Set<String> -> generateSequence { prefix + java.util.UUID.randomUUID().toString().take(8) }.first { it !in taken } }
     val here = routes.mapTo(HashSet()) { it.id }
     val ok = { id: String -> builtIn(id) || id in here }
-    val apps = apps.filterValues(ok)
+    val due = { p: String, x: String -> waitingEach[p]?.get(x) ?: waitingUntil }
+    // A choice whose wait is over is not kept: the backup's wait for the same app must not bring it back.
+    val apps = apps.filter { (p, x) -> ok(x) && (p !in waiting || now < due(p, x)) }
     val sites = sites.filterValues(ok)
     // Without profiles every route here shows, those no app uses too: all of them are kept, as saving a first profile does.
     val listed = if (profiles.isEmpty()) (added + (routes.map { it.id } - (setOf(defaultRoute) + apps.values + sites.values + added))).distinct() else added
@@ -565,5 +567,10 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     // The first profile: every route shown until now stays listed, as when the first profile is saved ([Setup.saveAs]).
     if (r.profiles.isEmpty()) r = r.copy(added = (r.added + (r.routes.map { it.id } - (setOf(r.defaultRoute) + r.apps.values + r.sites.values + r.added))).distinct())
     val kept = Profile(name, if (ok(defaultRoute) && defaultRoute.isNotEmpty()) m(defaultRoute) else "", apps.mapValues { m(it.value) }, listed.filter(ok).map(m), sites.mapValues { m(it.value) })
-    return r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers, profiles = r.profiles + kept)
+    // Choices of the kept setup's apps still waiting to be installed wait on, each until the deadline it had: otherwise the
+    // next look at the installed apps drops them, Block too. One the backup has as well waits as the backup's do.
+    val still = apps.filterKeys { it in waiting }.mapNotNull { (p, x) ->
+        due(p, x).takeIf { b.apps[p] != m(x) && b.profiles.none { f -> f.apps[p] == m(x) } }?.let { p to mapOf(m(x) to it) }
+    }.toMap()
+    return r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers, profiles = r.profiles + kept, waiting = r.waiting + still.keys, waitingEach = still)
 }

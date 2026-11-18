@@ -236,6 +236,8 @@ data class Setup(
     /** Apps a restore brought that weren't on this phone yet: they keep their route until [waitingUntil] (epoch ms), to be installed. */
     val waiting: Set<String> = emptySet(),
     val waitingUntil: Long = 0,
+    /** Choices of waiting apps a later restore kept ([restoredFrom]), app → route → deadline: each until its own instead of [waitingUntil]. */
+    val waitingEach: Map<String, Map<String, Long>> = emptyMap(),
     /** Routes without apps connected only for a combined speed test; never saved. */
     @kotlinx.serialization.Transient val testing: Set<String> = emptySet(),
 ) {

@@ -134,9 +134,11 @@ class RestoreGate {
         /** Works [a] out: slow for a large setup, never on the main thread. [kin]: the apps sharing a user id with an app; [tick] may throw to stop it. */
         fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }, tick: () -> Unit = {}): Result {
             val c = a.backup
-            val plain = a.here.restoredFrom(c.setup, null, 0, c.keys)!!
-            val keepable = !a.here.untouched && a.here.restoredFrom(c.setup, PREVIOUS, 0, c.keys) != null
-            val next = if (a.keep && keepable) a.here.restoredFrom(c.setup, PREVIOUS, 0, c.keys)!! else plain
+            // As of now, as Restore works it out: a wait over by then only keeps less, so what can be kept here still can be.
+            val now = System.currentTimeMillis()
+            val plain = a.here.restoredFrom(c.setup, null, now, c.keys)!!
+            val keepable = !a.here.untouched && a.here.restoredFrom(c.setup, PREVIOUS, now, c.keys) != null
+            val next = if (a.keep && keepable) a.here.restoredFrom(c.setup, PREVIOUS, now, c.keys)!! else plain
             return Result(RestoreTraffic.notes(a.here, next, kin, tick), Backup.weak(plain, a.here), keepable, plain.servers.count { it.keyless })
         }
     }

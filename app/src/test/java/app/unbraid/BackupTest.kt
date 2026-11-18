@@ -1,5 +1,6 @@
 package app.unbraid
 
+import app.unbraid.data.BLOCK
 import app.unbraid.data.Backup
 import app.unbraid.data.Backup.Reason
 import app.unbraid.data.DIRECT
@@ -25,6 +26,7 @@ import app.unbraid.data.restoredFrom
 import app.unbraid.vpn.LinkPicker
 import app.unbraid.ui.BACKUP_HOLDS
 import app.unbraid.ui.BACKUP_LEAVES
+import app.unbraid.ui.RestoreGate
 import app.unbraid.ui.keepKnown
 import app.unbraid.ui.keysSwitch
 import org.junit.Assert.assertArrayEquals
@@ -299,6 +301,54 @@ class BackupTest {
         // Past the wait, unknown apps go.
         val k3 = keepKnown(s, known, now = 6000)
         assertEquals(setOf("org.example.b"), k3.apps.keys); assertTrue(k3.waiting.isEmpty()); assertEquals(0, k3.waitingUntil)
+    }
+
+    /** An app a restore left waiting to be installed keeps its choice, Block too, in the setup a second restore keeps. */
+    @Test fun aWaitingAppKeepsItsChoiceInTheKeptSetup() {
+        val pkg = "org.example.later"
+        val first = newSetup().restoredFrom(Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands"))), defaultRoute = DIRECT,
+            apps = mapOf(pkg to BLOCK), version = VERSION), null, 1000)!!
+        assertEquals(setOf(pkg), first.waiting)
+        // Another backup, without that app, restored over it with the setup in use kept.
+        val second = first.restoredFrom(Backup.read(Backup.export(full(), "", 0)).setup, PREVIOUS, 2000)!!
+        val k = keepKnown(second, emptySet(), now = 3000)
+        assertEquals(BLOCK, k.profiles.single { it.name == PREVIOUS }.apps[pkg])
+        assertEquals(BLOCK, k.use(PREVIOUS).routeOf(pkg))
+        // Past its own wait it goes, as any app Android doesn't know, while the backup's apps wait on.
+        val late = keepKnown(second, emptySet(), now = 1000 + WAIT_MS)
+        assertFalse(pkg in late.profiles.single { it.name == PREVIOUS }.apps)
+        assertEquals(setOf("org.example.a", "org.example.b", "org.example.c"), late.waiting)
+        // Kept again by a third restore, from Previous in use, it still has its first deadline.
+        assertEquals(mapOf(pkg to mapOf(BLOCK to 1000 + WAIT_MS)), k.use(PREVIOUS).restoredFrom(Backup.read(Backup.export(full(), "", 0)).setup, PREVIOUS, 4000)!!.waitingEach)
+        // One the new backup has too, with another choice: each choice keeps its own deadline, the kept one's never longer.
+        val nl = Route("nl", Location("nord", 153, "NL", "Netherlands"))
+        val old = newSetup().restoredFrom(Setup(routes = listOf(nl), defaultRoute = "nl", apps = mapOf(pkg to DIRECT), version = VERSION), null, 1000)!!
+        val both = old.restoredFrom(Setup(routes = listOf(nl), defaultRoute = "nl", apps = mapOf(pkg to BLOCK), version = VERSION), PREVIOUS, 2000)!!
+        val day30 = keepKnown(both, emptySet(), now = 1000 + WAIT_MS)
+        assertEquals(BLOCK, day30.apps[pkg])
+        assertFalse(pkg in day30.profiles.single { it.name == PREVIOUS }.apps)
+        assertFalse(pkg in keepKnown(both, emptySet(), now = 2000 + WAIT_MS).apps)
+        // Found installed only past the kept choice's deadline: that one goes, the backup's stays. Installed in time, both do.
+        val installed = keepKnown(both, setOf(pkg), now = 1000 + WAIT_MS)
+        assertEquals(BLOCK, installed.apps[pkg])
+        assertFalse(pkg in installed.profiles.single { it.name == PREVIOUS }.apps)
+        assertTrue(installed.waiting.isEmpty())
+        assertEquals(DIRECT, keepKnown(both, setOf(pkg), now = 3000).profiles.single { it.name == PREVIOUS }.apps[pkg])
+        // A wait that is over is not carried, nor its choice kept: the backup's wait for the app doesn't bring it back.
+        assertFalse(pkg in first.restoredFrom(Backup.read(Backup.export(full(), "", 0)).setup, PREVIOUS, 1000 + WAIT_MS)!!.waiting)
+        val over = old.restoredFrom(Setup(routes = listOf(nl), defaultRoute = "nl", apps = mapOf(pkg to BLOCK), version = VERSION), PREVIOUS, 1000 + WAIT_MS)!!
+        assertFalse(pkg in over.profiles.single { it.name == PREVIOUS }.apps)
+    }
+
+    /** The confirm sheet works a restore out as of now, as Restore does: a choice whose wait is over isn't counted there either. */
+    @Test fun theConfirmSheetCountsWaitsAsOfNow() {
+        val pkg = "org.example.later"
+        // Route "us" only an app whose wait ended long ago uses: kept, it would be one route too many.
+        val here = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands")), Route("us", Location("nord", 228, "US", "United States"))),
+            defaultRoute = "nl", apps = mapOf(pkg to "us"), profiles = listOf(Profile("Trip", "nl")), waiting = setOf(pkg), waitingUntil = 1, version = VERSION)
+        val big = Setup(routes = (1 until Backup.MAX_EACH).map { Route("b$it", Location("nord", 153, "NL", "Netherlands")) }, defaultRoute = "b1", version = VERSION)
+        assertNull(here.restoredFrom(big, PREVIOUS, 0))
+        assertTrue(RestoreGate.check(RestoreGate.Ask(here, Backup.Contents(setup = big), true)).keepable)
     }
 
     @Test fun strengthIsAHintOnly() {

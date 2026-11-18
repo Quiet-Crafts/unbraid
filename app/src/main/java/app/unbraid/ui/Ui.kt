@@ -100,11 +100,17 @@ private inline fun Setup.removing(gone: Set<String>, name: String, refused: (app
  * profile: an uninstalled app must not keep a route (and a tunnel) alive, nor bring it back with a profile used later.
  */
 internal fun keepKnown(s: Setup, known: Set<String>, now: Long = System.currentTimeMillis()): Setup {
-    // Restored apps not installed yet keep their choice for a while; an installed one no longer waits.
-    val wait = if (now < s.waitingUntil) s.waiting - known else emptySet()
-    val keep = { p: String -> p in known || p in wait }
-    return s.copy(apps = s.apps.filterKeys(keep), profiles = s.profiles.map { p -> p.copy(apps = p.apps.filterKeys(keep)) },
-        waiting = wait, waitingUntil = if (wait.isEmpty()) 0 else s.waitingUntil)
+    // Restored apps not installed yet keep their choice for a while, one a later restore kept until its own deadline; an
+    // installed one no longer waits. A kept one goes at its own deadline even for an app found installed only after it:
+    // there's no telling when it was, and the app's choice the last restore brought is the one to follow.
+    val each = { p: String, r: String -> s.waitingEach[p]?.get(r) }
+    val waits = { p: String, r: String -> p in s.waiting && p !in known && now < (each(p, r) ?: s.waitingUntil) }
+    val keep = { m: Map<String, String> -> m.filter { (p, r) -> if (p in known) each(p, r)?.let { now < it } ?: true else waits(p, r) } }
+    val apps = keep(s.apps)
+    val profiles = s.profiles.map { p -> p.copy(apps = keep(p.apps)) }
+    val wait = (apps.keys + profiles.flatMap { it.apps.keys }).filterTo(HashSet()) { it in s.waiting && it !in known }
+    return s.copy(apps = apps, profiles = profiles,
+        waiting = wait, waitingUntil = if (wait.isEmpty()) 0 else s.waitingUntil, waitingEach = s.waitingEach.filterKeys { it in wait })
 }
 
 /**
