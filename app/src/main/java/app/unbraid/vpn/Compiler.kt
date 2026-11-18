@@ -164,9 +164,10 @@ object Compiler {
         // Every tunnel the app can test, with the DNS of a route on it; Tailscale even without an exit route (its nodes).
         val probeTags = active.groupBy { tag(it.id) }.mapValues { (_, rs) -> dnsFor(rs.first().id) }.toMutableMap()
             .apply { if (s.tailscale) putIfAbsent(TS_TAG, defaultDns); if (app.unbraid.BuildConfig.DEBUG) put("direct", "local") } // debug: the line itself, for comparisons
-        // Apps with their own route, grouped. Direct only appears here under lockdown (otherwise excluded at OS level).
+        // Apps with their own route, grouped. Direct only appears here under lockdown (otherwise excluded at OS level); also
+        // on the Direct default while that asks the filter, as those apps' lookups go to the phone's DNS.
         val perApp = s.apps.entries.groupBy({ if (it.key in through) FILTERED else it.value }, { it.key }).toSortedMap()
-            .filterKeys { id -> id != s.defaultRoute && when (id) { DIRECT -> i.lockdown; BLOCK -> false; else -> true } }
+            .filterKeys { id -> (id != s.defaultRoute || id == DIRECT && directFiltered) && when (id) { DIRECT -> i.lockdown; BLOCK -> false; else -> true } }
             .mapValues { (_, p) -> JsonArray(p.sorted().map(::JsonPrimitive)) }
         // Destination rules that beat any app rule. Repeated after every resolve, because fake-IP connections
         // only get a real address there.

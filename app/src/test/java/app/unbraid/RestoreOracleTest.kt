@@ -79,7 +79,7 @@ class RestoreOracleTest {
         /** A filter at an address of the home network is asked through the home tunnel. */
         val filterVia = f.server()?.ip?.takeIf { a -> Compiler.ipv4(a) != null && home.any { within(a, it) } }?.let { "home-wg" }
         /** An app's own group of rules, null when it has none (it follows the default). */
-        fun group(app: String): String? = s.apps[app]?.let { r -> if (through(app)) "filtered" else r }?.takeIf { g -> g != s.defaultRoute && g != BLOCK && (g != DIRECT || lockdown) }
+        fun group(app: String): String? = s.apps[app]?.let { r -> if (through(app)) "filtered" else r }?.takeIf { g -> (g != s.defaultRoute || g == DIRECT && directFiltered) && g != BLOCK && (g != DIRECT || lockdown) }
         val vpnApps = s.apps.keys.any { group(it).let { g -> g != null && g != DIRECT && g != "filtered" } }
         val anyGroupNotDirect = s.apps.keys.any { group(it).let { g -> g != null && g != DIRECT } }
         val lanOut = s.prefs.lan && !lockdown && (barred.isEmpty() || !s.prefs.blockLan)

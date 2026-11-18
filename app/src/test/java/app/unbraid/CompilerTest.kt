@@ -209,6 +209,17 @@ class CompilerTest {
         val d = example.copy(defaultRoute = DIRECT, apps = mapOf("com.a" to "us"), prefs = Prefs(filter = quad9.copy(direct = true)))
         assertEquals("dns-filter", compile(d)["dns"]!!.jsonObject.str("final"))
         assertEquals("local", compile(d.copy(prefs = Prefs(filter = quad9)))["dns"]!!.jsonObject.str("final"))
+        // An app set to Direct with its lookups unfiltered keeps the phone's DNS under lockdown, where it passes through,
+        // also when the Direct default asks the filter (U-15); one set to pass through asks the filter.
+        val both = d.copy(apps = mapOf("com.a" to "us", "com.x" to DIRECT, "com.y" to DIRECT), prefs = Prefs(filter = quad9.copy(direct = true, apps = mapOf("com.y" to true))))
+        for (lockdown in listOf(false, true)) {
+            val c = compile(both, lockdown)
+            val of = { pkg: String -> c["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }.firstOrNull { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf(pkg) }?.str("server") }
+            assertEquals("lockdown=$lockdown", if (lockdown) "local" else null, of("com.x"))
+            assertEquals("lockdown=$lockdown", lockdown, c.rules().any { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf("com.x") && it.str("server") == "local" })
+            assertEquals("lockdown=$lockdown", "dns-filter", of("com.y"))
+            assertEquals("lockdown=$lockdown", if (lockdown) listOf("app.unbraid") else listOf("com.x", "app.unbraid"), c.excluded())
+        }
         // NextDNS needs a profile; an own server by name is looked up first, through the same tunnel.
         assertNull(Filter("nextdns").server())
         assertEquals("/abc123", Filter("nextdns", "abc123").server()!!.path)
