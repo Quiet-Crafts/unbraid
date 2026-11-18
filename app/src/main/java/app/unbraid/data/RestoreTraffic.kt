@@ -652,7 +652,7 @@ object RestoreTraffic {
             for (k in NET_KINDS.sorted()) (on(current, k, st.first) to on(next, k, st.second)).let { nx -> if (nx !in path) { path[nx] = path.getValue(st) + k; queue += nx } }
         }
         val where = { k: String -> if (k == WIFI) "Wi-Fi" else "mobile data" }
-        val runs = { s: Setup, p: String?, restored: Boolean -> (p ?: s.profile)?.let { "the profile $it" } ?: if (restored) "the restored setup" else "your current setup" }
+        val runs = { s: Setup, p: String?, restored: Boolean -> (p ?: s.profile)?.let { "the profile ${Backup.safe(it, 60)}" } ?: if (restored) "the restored setup" else "your current setup" }
         val out = mutableListOf<Triple<String, Setup, Setup>>()
         val seen = hashSetOf(current to next)
         for ((st, ks) in path) {
@@ -665,7 +665,7 @@ object RestoreTraffic {
         val ready = { s: Setup -> s.profiles.filter { it.ready }.map { it.name } }
         for (n in ready(current).filter { it in ready(next) }) {
             val a = current.viewAs(n); val b = next.viewAs(n)
-            if (a != b && seen.add(a to b)) out += Triple("When you switch to the profile $n, compared with $n now:", a, b)
+            if (a != b && seen.add(a to b)) out += Triple(Backup.safe(n, 60).let { "When you switch to the profile $it, compared with $it now:" }, a, b)
         }
         return out
     }
@@ -739,7 +739,7 @@ object RestoreTraffic {
         val was = exits(current)
         return exits(next).flatMap { n ->
             val c = was.firstOrNull { it.key == n.key } ?: was.firstOrNull { n.key != "home" && it.key != "home" && it.name == n.name } ?: return@flatMap emptyList()
-            val who = if (n.key == "home") "Your home WireGuard" else "\"${shown(n.name)}\""
+            val who = if (n.key == "home") "Your home WireGuard" else "\"${shown(Backup.safe(n.name, 256))}\""
             listOfNotNull(
                 when {
                     // Compared whole, shown shortened: two long names that differ only at their start are still two servers.

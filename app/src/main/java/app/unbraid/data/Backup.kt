@@ -350,11 +350,16 @@ object Backup {
     private fun joiner(c: Char) = c == '‌' || c == '‍'
     private fun format(c: Char) = Character.getType(c).let { it == Character.FORMAT.toInt() || it == Character.LINE_SEPARATOR.toInt() || it == Character.PARAGRAPH_SEPARATOR.toInt() } && !joiner(c)
 
-    /** Text from a file as an error may show it: no control, direction or other invisible formatting characters, at most [n] characters. */
-    private fun safe(s: String, n: Int = 40) = s.filterNot { it.isISOControl() || format(it) }.takeGraphemes(n)
+    /** Text from a file as the app shows it: no control, direction or other invisible formatting characters, at most [n] characters. */
+    fun safe(s: String, n: Int = 40) = s.filterNot { it.isISOControl() || format(it) }.takeGraphemes(n)
 
-    /** A name as the importers leave it: no control, direction or other invisible formatting characters, not padded. */
-    private fun plainName(n: String) = n.isNotBlank() && n.length <= 256 && Manual.cleanName(n, 256) == n && n.none(::format)
+    /**
+     * A name as the importers leave it, the rule every earlier version checked: no control or direction characters, not
+     * padded. Other invisible formatting characters pass, as the importers keep them, so a backup an older version wrote
+     * always opens; wherever a name from the file is shown, [safe] takes them out. It stays as it is when stored: a server
+     * saved without keys gets its config back from this phone's server of the same name.
+     */
+    private fun plainName(n: String) = n.isNotBlank() && n.length <= 256 && Manual.cleanName(n, 256) == n
 
     /** A Tailscale exit node as unbraid saves it: its tailnet address, IPv4 or IPv6. */
     private fun tsAddress(a: String) = a == a.trim() && (app.unbraid.vpn.Compiler.ipv4(a)?.second == 32 && '/' !in a || WgConf.ipv6(a))
@@ -431,7 +436,7 @@ object Backup {
         return (s.servers.filter { !it.keyless }.map { Triple(it.name, it.ovpn, it.ss) } + s.routes.filter { !it.keyless }.map { Triple(it.name, it.ovpn, it.ss) }).mapNotNull { (name, o, x) ->
             val why = o?.takeIf { it !in known }?.let { runCatching { Manual.weakness(it) }.getOrNull() } ?: x?.takeIf { it !in known }?.let(Manual::weakness) ?: return@mapNotNull null
             // The import's first sentence says what is weak; the sheet says what it risks once for all.
-            "${name.takeGraphemes(60)}: " + why.substringBefore(". ").removeSuffix(".").removePrefix("This config ")
+            "${safe(name, 60)}: " + why.substringBefore(". ").removeSuffix(".").removePrefix("This config ")
         }.distinct()
     }
 
