@@ -35,7 +35,7 @@ import java.util.IdentityHashMap
  *    answered the name and the way that question went out, and what that resolver blocks. Each part is compared on its
  *    own ([losses]): refused above any tunnel above Direct; a question kept on the phone or sent through a tunnel above
  *    one sent Direct; the filter above the provider's blocking above any other resolver; and blocking that covers every
- *    kind of site it covered. Neither a hold ([HELD]) nor a question answered on the phone is ranked against an exit.
+ *    kind of site it covered. A hold ([HELD]) ranks against Direct only, as a refusal; a question answered on the phone against no exit.
  * 4. Setups compared: the one in use against the restored one, then every other pair the phone can run without this
  *    sheet ([pairs]): after any order of networks, the profiles the rules switch to (and on a network with no rule, the
  *    one it switched to before), and each profile both have by name, as picked by hand or from a tile.
@@ -134,8 +134,16 @@ object RestoreTraffic {
         val excludedRanges = excluded.mapNotNull(Compiler::ipv4)
         /** Exits that carry TCP only: UDP is refused there. */
         val tcpOnly = Compiler.tcpOnly(text)
-        /** What the providers' own blocking resolvers block, by address, with this setup's choices; and what the filter blocks. */
-        val blocking = Providers.all.mapNotNull { p -> p.blockingDns { setup.opt(p.id, it) }?.let { it to providerBlocks(p, setup) } }.toMap()
+        /**
+         * What a provider's own blocking blocks, with this setup's choices, by the tag of the route resolver it answers as:
+         * only where that route's provider policy chose it, as the compiler does. Another resolver at the same address (a
+         * WireGuard config's own DNS server) blocks nothing known. And what the filter blocks.
+         */
+        val blocking = setup.routes.mapNotNull { r ->
+            val p = Providers.get(r.loc.provider)?.takeIf { !r.imported && setup.protects(r) } ?: return@mapNotNull null
+            val tag = "dns-r-${r.id}"
+            tag.takeIf { p.blockingDns { setup.opt(p.id, it) }.let { it != null && it == servers[tag]?.str("server") } }?.let { it to providerBlocks(p, setup) }
+        }.toMap()
         val filterBlocks = setup.prefs.filter.server()?.let { blocks(it.blocks) }.orEmpty()
         val dnsBy = decided(dnsRules)
         val routeBy = decided(rules)
@@ -364,12 +372,12 @@ object RestoreTraffic {
         "local" -> Resolver.Local
         "dns-tailnet" -> Resolver.Home
         // The filter is written with its own port (and TLS or a path); a route's resolver with neither.
-        else -> c.servers[tag]?.let { d -> if ("server_port" in d) Resolver.Filter else if (d.str("server") in c.blocking) Resolver.Provider else null } ?: Resolver.Route
+        else -> c.servers[tag]?.let { d -> if ("server_port" in d) Resolver.Filter else if (tag in c.blocking) Resolver.Provider else null } ?: Resolver.Route
     }
 
     private fun blocksOf(c: Config, tag: String) = when (kind(c, tag)) {
         Resolver.Filter -> c.filterBlocks
-        Resolver.Provider -> c.blocking[c.servers[tag]?.str("server")].orEmpty()
+        Resolver.Provider -> c.blocking[tag].orEmpty()
         else -> emptySet()
     }
 
@@ -389,6 +397,8 @@ object RestoreTraffic {
      * alone, whose exit is the way it goes out; one answered on the phone counts only against one sent Direct.
      */
     fun losses(was: Outcome, now: Outcome, lookup: Boolean = false): Set<Loss> {
+        // Held off Direct, then out Direct: a refusal lifted, and Direct.
+        if (was.exit == HELD && now.exit == DIRECT_TAG) return setOf(Loss.Unblocked, Loss.ToDirect)
         if (was.exit == HELD || now.exit == HELD) return emptySet()
         if (was.exit == EMPTY || now.exit == EMPTY) return if (was.exit == EMPTY && now.exit == DIRECT_TAG) setOf(Loss.Lookups) else emptySet()
         val out = HashSet<Loss>()
@@ -427,8 +437,8 @@ object RestoreTraffic {
     }
 
     /**
-     * What a restore makes weaker, by what it is said for; [later]: what gets weaker only once a route waiting for its
-     * config gets it; [leaving]: apps that go outside unbraid (left out by Android), where no website rule, filter or home
+     * What a restore makes weaker, by what it is said for; [later]: what gets weaker once the routes waiting for their
+     * config get it, both setups compared that way (the sheet says what it adds to now); [leaving]: apps that go outside unbraid (left out by Android), where no website rule, filter or home
      * tunnel reaches them, with the worst their own traffic loses; [cut] when the budget left part of it unchecked.
      */
     data class Found(val losses: Map<Who, Set<Loss>>, val leaving: Map<Who, Loss?> = emptyMap(), val cut: Boolean = false, val later: Map<Who, Set<Loss>> = emptyMap())
@@ -436,8 +446,13 @@ object RestoreTraffic {
     private class Program(val pkgs: Set<String>, val members: List<Set<String>>, val ping: Boolean = false)
     private class Name(val name: String?, val members: List<String>)
     private class Address(val ip: Long, val home: Boolean, val local: Boolean)
-    /** Two steps and what the second loses; [later]: the steps of routes waiting for their config, as once it is added. */
-    private class Duo(val was: Step, val now: Step, val losses: Set<Loss>, val later: Boolean = false)
+    /**
+     * Two steps and what the second loses; [later]: the steps of routes waiting for their config, as once it is added.
+     * [then]: those, compared on their own, beside the steps now.
+     */
+    private class Duo(val was: Step, val now: Step, val losses: Set<Loss>, val later: Boolean = false, val then: Duo? = null) {
+        val phases get() = listOfNotNull(this, then)
+    }
 
     /** The first of [base], then [base] numbered, that [taken] refuses: a probe no rule names. */
     private fun fresh(base: (Int) -> String, taken: (String) -> Boolean) = generateSequence(0) { it + 1 }.map(base).first { !taken(it) }
@@ -504,6 +519,8 @@ object RestoreTraffic {
             val lists = cidrLists.map(::Ranges)
             val poolRanges = Ranges(pool)
             // The stand-in pool (a benchmark range) is no real destination: only lookups' stand-ins point there.
+            // Paid before it is done: every address against every range list, and against each config's routes and exclusions.
+            if (!budget.take(bounds.size * (cidrLists.size + all.sumOf { it.included.size + it.excluded.size } + 1L))) { cut = true; break@sides }
             val addresses = bounds.zipWithNext().filter { (a, _) -> !poolRanges.has(a) }.map { (a, b) -> Address(if (b - a > 2) a + 1 else a, homeRanges.has(a), localRanges.has(a)) }
                 .groupBy { a -> "${a.home}${a.local}" + lists.map { it.has(a.ip) } + all.map { it.inside(a.ip) } }.values
                 .map { g -> g.firstOrNull { it.ip == ip(PUBLIC) } ?: g.first() }
@@ -516,16 +533,21 @@ object RestoreTraffic {
             // UDP goes as TCP does but where an exit carries TCP only.
             val nets = if (all.any { it.tcpOnly.isNotEmpty() }) listOf("tcp", "udp") else listOf("tcp")
 
+            // Now, and once the routes waiting for their config get it: two comparisons, each on its own.
             fun duo(lookup: Boolean = false, f: (Config) -> Step?): Duo? {
                 val a = f(side.was) ?: return null
                 val b = f(side.now) ?: return null
-                if (side.wasGiven == null || side.nowGiven == null || a.out.exit != REJECT || b.out.exit != REJECT) return Duo(a, b, losses(a.out, b.out, lookup))
-                // Refused on both sides, but maybe by a route waiting for its config: compared again as once it is added.
-                val c = f(side.wasGiven) ?: return null
-                val e = f(side.nowGiven) ?: return null
-                return if (c.out.exit == REJECT && e.out.exit != REJECT) Duo(a, b, setOf(Loss.Unblocked)) else Duo(c, e, losses(c.out, e.out, lookup), later = true)
+                val then = if (side.wasGiven == null || side.nowGiven == null) null else {
+                    val c = f(side.wasGiven) ?: return null
+                    val e = f(side.nowGiven) ?: return null
+                    Duo(c, e, losses(c.out, e.out, lookup), later = true)
+                }
+                return Duo(a, b, losses(a.out, b.out, lookup), then = then)
             }
             val say = { w: Set<Who>, d: Duo, l: Loss -> w.forEach { (if (d.later) later else lost).getOrPut(it) { mutableSetOf() } += l } }
+            // Each phase of [d] said against the same phase of the program's own traffic [own], for [pe] of that phase.
+            fun told(d: Duo, own: Duo, pe: List<Set<Who>>, w: (Duo, Duo, Set<Who>, Loss) -> Set<Who>?) =
+                d.phases.zip(own.phases).forEachIndexed { i, (x, o) -> x.losses.forEach { l -> w(x, o, pe[i], l)?.let { say(it, x, l) } } }
             // The default program's own traffic and lookups: what traffic no app is named for is judged against.
             var dflt: Duo? = null
             val dfltLookups = HashMap<String, Duo>()
@@ -540,14 +562,15 @@ object RestoreTraffic {
                 val ownName = if (p.ping) null else top
                 val own = duo { walk(it, p.pkgs, ownName, public.ip, protos[0], null) } ?: return null
                 if (pi == 0) dflt = own
-                val pe = entity(p, own, keys, dflt)
-                own.losses.forEach { say(pe, own, it) }
+                // What its own traffic is said for, in each phase, and what it loses there.
+                val mine = { o: Duo, d: Duo? -> o.phases.mapIndexed { i, x -> entity(p, x, keys, d?.phases?.getOrNull(i)).also { e -> x.losses.forEach { say(e, x, it) } } } }
+                val pe = mine(own, dflt)
                 val left = { s: Step -> s.by == By.AppFirst && s.out.exit == DIRECT_TAG }
-                if (left(own.now) && !left(own.was)) pe.filterIsInstance<Who.App>().forEach { leaving[it] = own.losses.minOrNull() }
+                if (left(own.now) && !left(own.was)) pe[0].filterIsInstance<Who.App>().forEach { leaving[it] = own.losses.minOrNull() }
                 // Its own lookups of each question type, which its other lookups are judged against.
                 val ownLookups = if (p.ping) emptyMap() else types.associateWith { q -> duo(true) { lookup(it, p.pkgs, top, q) } ?: return null }
                 if (pi == 0) dfltLookups.putAll(ownLookups)
-                val lookupEntities = ownLookups.mapValues { (q, o) -> entity(p, o, keys, dfltLookups[q]).also { e -> o.losses.forEach { say(e, o, it) } } }
+                val lookupEntities = ownLookups.mapValues { (q, o) -> mine(o, dfltLookups[q]) }
                 for (n in names) {
                     if (p.ping && n.name != null) continue
                     // Beyond the budget an app meets only its own traffic; the sheet says so.
@@ -557,13 +580,13 @@ object RestoreTraffic {
                         val first = duo { walk(it, p.pkgs, n.name, addresses[0].ip, net, t) } ?: return null
                         for ((ai, a) in addresses.withIndex()) {
                             val d = if (ai == 0 || !t.hit) first else duo { walk(it, p.pkgs, n.name, a.ip, net, null) } ?: return null
-                            if (d.losses.isEmpty() || (net == protos[0] && n.name == ownName && a === public)) continue
-                            d.losses.forEach { l -> if (!opensNearby(d, l)) say(who(n, a, d, own, pe, place, l), d, l) }
+                            if (net == protos[0] && n.name == ownName && a === public) continue
+                            told(d, own, pe) { x, o, e, l -> if (opensNearby(x, l)) null else who(n, a, x, o, e, place, l) }
                         }
                     }
                     if (n.name != null && n.name != top && !p.ping) for (q in types) {
                         val d = duo(true) { lookup(it, p.pkgs, n.name, q) } ?: return null
-                        d.losses.forEach { l -> say(who(n, null, d, ownLookups.getValue(q), lookupEntities.getValue(q), place, l), d, l) }
+                        told(d, ownLookups.getValue(q), lookupEntities.getValue(q)) { x, o, e, l -> who(n, null, x, o, e, place, l) }
                     }
                 }
             }
@@ -594,7 +617,10 @@ object RestoreTraffic {
     private fun opensNearby(d: Duo, l: Loss) = l == Loss.ToDirect && Loss.Unblocked in d.losses && d.now.by == By.Address
 
     /** What loss [l] of a class other than an app's own traffic is said for ([RestoreTraffic] point 5); [place]: whose name a name is. */
-    private fun who(n: Name, a: Address?, d: Duo, own: Duo, pe: Set<Who>, place: (String, Boolean) -> Who, loss: Loss): Set<Who> {
+    private fun who(n: Name, a: Address?, d: Duo, own: Duo, pe: Set<Who>, place: (String, Boolean) -> Who, loss: Loss): Set<Who>? {
+        // Held off Direct only for want of an app to tie it to: said for that traffic; the local and home networks are
+        // left as they are for every app without a hold.
+        if (d.was.out.exit == HELD) return if (a?.home == true || a?.local == true) null else pe
         // A refusal lifted to Direct is said for what refused it, both ways.
         val l = if (loss == Loss.ToDirect && Loss.Unblocked in d.losses) Loss.Unblocked else loss
         // Going as the app's own traffic goes, or as an app decided before anything else: the app's.
@@ -652,7 +678,7 @@ object RestoreTraffic {
             for (k in NET_KINDS.sorted()) (on(current, k, st.first) to on(next, k, st.second)).let { nx -> if (nx !in path) { path[nx] = path.getValue(st) + k; queue += nx } }
         }
         val where = { k: String -> if (k == WIFI) "Wi-Fi" else "mobile data" }
-        val runs = { s: Setup, p: String?, restored: Boolean -> (p ?: s.profile)?.let { "the profile $it" } ?: if (restored) "the restored setup" else "your current setup" }
+        val runs = { s: Setup, p: String?, restored: Boolean -> (p ?: s.profile)?.let { "the profile ${Backup.safe(it, 60)}" } ?: if (restored) "the restored setup" else "your current setup" }
         val out = mutableListOf<Triple<String, Setup, Setup>>()
         val seen = hashSetOf(current to next)
         for ((st, ks) in path) {
@@ -665,7 +691,7 @@ object RestoreTraffic {
         val ready = { s: Setup -> s.profiles.filter { it.ready }.map { it.name } }
         for (n in ready(current).filter { it in ready(next) }) {
             val a = current.viewAs(n); val b = next.viewAs(n)
-            if (a != b && seen.add(a to b)) out += Triple("When you switch to the profile $n, compared with $n now:", a, b)
+            if (a != b && seen.add(a to b)) out += Triple(Backup.safe(n, 60).let { "When you switch to the profile $it, compared with $it now:" }, a, b)
         }
         return out
     }
@@ -739,7 +765,7 @@ object RestoreTraffic {
         val was = exits(current)
         return exits(next).flatMap { n ->
             val c = was.firstOrNull { it.key == n.key } ?: was.firstOrNull { n.key != "home" && it.key != "home" && it.name == n.name } ?: return@flatMap emptyList()
-            val who = if (n.key == "home") "Your home WireGuard" else "\"${shown(n.name)}\""
+            val who = if (n.key == "home") "Your home WireGuard" else "\"${shown(Backup.safe(n.name, 256))}\""
             listOfNotNull(
                 when {
                     // Compared whole, shown shortened: two long names that differ only at their start are still two servers.
@@ -835,7 +861,9 @@ object RestoreTraffic {
         }
         for (d in listOf(true, false)) say(waiting.filterTo(HashSet()) { leavesDirect(it) == d }, Loss.Unblocked) { many ->
             "that can't connect now, because ${if (many) "their routes wait" else "its route waits"} for a server's config, ${if (many) "go" else "goes"} out${if (d) " Direct" else ""} without it" }
-        say(opened.filterTo(HashSet()) { it == Who.NoApp || it == Who.SignIn }, Loss.Unblocked) { if (it) "are no longer refused" else "is no longer refused" }
+        // Each in a sentence of its own, said Direct where it then leaves outside any VPN.
+        for (w in listOf(Who.NoApp, Who.SignIn)) if (w in opened) say(setOf(w), Loss.Unblocked) { many ->
+            (if (many) "are no longer refused" else "is no longer refused") + if (!leavesDirect(w)) "" else if (many) " and go Direct" else " and goes Direct" }
         if (Who.Local in opened) out += Note("Blocked apps can reach the local network.", Loss.Unblocked, setOf(Who.Local))
         if (Who.Home in opened) out += Note("Part of the home network that is refused now won't be.", Loss.Unblocked, setOf(Who.Home))
 
@@ -844,9 +872,13 @@ object RestoreTraffic {
         val filter = with(Loss.Filter)
         if (filterOff) out += Note(FILTER_OFF, Loss.Filter, filter) else say(filter, Loss.Filter)
         for (l in listOf(Loss.ProviderBlocking, Loss.Blocking, Loss.Udp)) say(with(l), l)
-        // What a route waiting for its config does differently once it gets it: after the restore it would.
-        val then = found.later.filterValues { it.isNotEmpty() }.mapValues { (_, l) -> l.minBy { it.ordinal } }
-        for (l in VERB.keys) say(then.filterValues { it == l }.keys, l, "once a server's config is added again, ")
+        // What gets weaker once a route waiting for its config gets it, where it is worse than what is said for now.
+        val later = found.later.filterValues { it.isNotEmpty() }
+        val then = later.mapValues { (_, l) -> l.minBy { it.ordinal } }.filter { (w, l) -> found.losses[w].orEmpty().none { it <= l } }
+        val again = "once a server's config is added again, "
+        for (d in listOf(true, false)) say(then.filter { (w, l) -> l == Loss.Unblocked && (Loss.ToDirect in later.getValue(w)) == d }.keys, Loss.Unblocked, again) { many ->
+            (if (many) "are no longer blocked" else "is no longer blocked") + if (!d) "" else if (many) " and go Direct" else " and goes Direct" }
+        for (l in VERB.keys) say(then.filterValues { it == l }.keys, l, again)
         if (found.cut) out += Note(CUT)
         return out
     }

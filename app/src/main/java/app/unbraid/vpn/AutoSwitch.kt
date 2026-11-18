@@ -127,6 +127,11 @@ object AutoSwitch {
         data class RuleEdited(val kind: String) : Event
         /** Profile [name] was deleted: nothing decided or acted on for it carries over to another made under that name. */
         data class Deleted(val name: String) : Event
+        /**
+         * The whole setup was replaced (a restore): nothing decided or picked for the old one carries over, and the stay
+         * starts again, so the restored rules are decided once the network lasted, even rules equal to the old ones.
+         */
+        data object Replaced : Event
         /** [net], in its visit number [stay], lasted long enough, with the VPN on and the app not on screen. */
         data class Settled(val net: Net, val rules: Map<String, String>, val stay: Int) : Event
         /** About to save [d] (or, with nothing to switch, to note it done) under [rules], with the app on screen or not ([shown]). */
@@ -161,6 +166,7 @@ object AutoSwitch {
         // Whatever it is now, the rule as it stands is decided afresh once the app leaves the screen; other kinds' picks stay.
         is Event.RuleEdited -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to (r - e.kind) }))
         is Event.Deleted -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.filterValues { it != e.name } }, pending = s.pending?.takeIf { it.profile != e.name }))
+        Event.Replaced -> Out(s.copy(acted = null, pending = null, stay = s.stay + 1))
         is Event.Settled -> {
             val here = s.here
             val kind = here?.kind
@@ -197,6 +203,7 @@ object AutoSwitch {
         fun renamed(old: String, new: String) = on(Event.Renamed(old, new))
         fun deleted(name: String) = on(Event.Deleted(name))
         fun ruleEdited(kind: String) = on(Event.RuleEdited(kind))
+        fun replaced() = on(Event.Replaced)
         /** [stay] is the visit the timer started in; by default the one now. */
         fun settle(n: Net, rules: Map<String, String>, stay: Int = state.stay) = on(Event.Settled(n, rules, stay)).decision
         fun commit(d: Decision, rules: Map<String, String>, shown: Boolean) = on(Event.Commit(d, rules, shown)).save
@@ -229,6 +236,9 @@ object AutoSwitch {
 
     /** The user set, changed or removed the rule for [kind] of network. */
     fun ruleEdited(kind: String) = run.ruleEdited(kind)
+
+    /** The setup was replaced by a restore: the Not switched card is about the old one. */
+    fun replaced() { notSwitched.value = null; run.replaced() }
 
     /** What to do: switch [to] a profile, or say why not ([blocked]); neither = nothing. */
     class Step(val to: String? = null, val blocked: String? = null)

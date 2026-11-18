@@ -286,7 +286,8 @@ class RestoreTrafficTest {
 
     @Test fun aWebsiteOnDirectTakesAVpnAppDirectThereToo() {
         val here = base.copy(defaultRoute = DIRECT, apps = mapOf("org.browser" to "nl"))
-        assertEquals(listOf("1 website goes from a VPN route to Direct."), notes(here, here.copy(sites = mapOf("example.com" to DIRECT))))
+        // Android ties some of its traffic to no app: held off Direct while an app is on a VPN, its website rule now sends it Direct.
+        assertEquals(listOf("1 website goes from a VPN route to Direct.", "Traffic Android can't tie to an app is no longer refused and goes Direct."), notes(here, here.copy(sites = mapOf("example.com" to DIRECT))))
     }
 
     @Test fun everyLossHasASentence() {
@@ -298,7 +299,8 @@ class RestoreTrafficTest {
         // a.example goes Direct as the default does: said once, for the default. Its own rule picks who answers it,
         // Quad9 for Direct traffic that passes through, which blocks less than Nord's blocking now: said for it.
         assertEquals(listOf("The default route goes from Netherlands to Direct.", "1 app goes from a VPN route to Direct.", "Part of the home network goes Direct instead of through the home tunnel.",
-            "1 app that is blocked now goes Direct.", "1 website that is blocked now goes Direct.", "1 website gets DNS blocking that blocks fewer kinds of sites than now."), said)
+            "1 app that is blocked now goes Direct.", "1 website that is blocked now goes Direct.", "Traffic Android can't tie to an app is no longer refused and goes Direct.",
+            "1 website gets DNS blocking that blocks fewer kinds of sites than now."), said)
         assertEquals(listOf("1 website goes from a VPN route to Direct."), notes(here, here.copy(sites = here.sites + ("a.example" to DIRECT))))
         val provider = here.copy(apps = emptyMap(), sites = emptyMap(), prefs = Prefs())
         assertEquals(listOf("The default route loses the provider's ad and tracker blocking it has now."), notes(provider, provider.copy(opts = mapOf("nord" to mapOf("protect" to "off")))))
@@ -410,14 +412,14 @@ class RestoreTrafficTest {
         val t = System.nanoTime()
         val said = notes(here, here.copy(sites = here.sites + ("work.example" to DIRECT)))
         println("RESTORE-CHECK 200 exits, 50 websites: ${(System.nanoTime() - t) / 1_000_000} ms, $said")
-        assertEquals(listOf("1 website goes from a VPN route to Direct."), said)
+        assertEquals(listOf("1 website goes from a VPN route to Direct.", "Traffic Android can't tie to an app is no longer refused and goes Direct."), said)
         assertEquals(false, RestoreTraffic.found(here, here.copy(sites = here.sites + ("work.example" to DIRECT)))!!.cut)
         // Every website on an exit of its own and every app on another: too many pairs, and the sheet says the check was cut.
         val apart = here.copy(sites = (0 until 49).associate { "s$it.example" to routes[it].id }, apps = (0 until 5000).associate { "org.example.a$it" to routes[it % 200].id })
         val t2 = System.nanoTime()
         val cut = notes(apart, apart.copy(sites = apart.sites + ("work.example" to DIRECT)))
         println("RESTORE-CHECK 200 exits, 49 websites apart, 5000 apps: ${(System.nanoTime() - t2) / 1_000_000} ms, $cut")
-        assertEquals(listOf("1 website goes from a VPN route to Direct.", RestoreTraffic.CUT), cut)
+        assertEquals(listOf("1 website goes from a VPN route to Direct.", "Traffic Android can't tie to an app is no longer refused and goes Direct.", RestoreTraffic.CUT), cut)
     }
 
     // ---- situations the phone can be in, and the cost of the check ----
@@ -445,7 +447,7 @@ class RestoreTrafficTest {
     @Test fun trafficWithNoAppIsWalkedOnItsOwn() {
         val here = base.copy(defaultRoute = "k1", prefs = Prefs(lan = false))
         val said = notes(here, here.copy(defaultRoute = DIRECT, apps = mapOf("org.vpn" to "nl"), sites = mapOf("bank.example" to DIRECT)))
-        assertTrue(said.toString(), "Traffic Android can't tie to an app is no longer refused." in said)
+        assertTrue(said.toString(), "Traffic Android can't tie to an app is no longer refused and goes Direct." in said)
     }
 
     /** What could not leave before and leaves Direct after is said as going Direct, not only as no longer refused. */
@@ -481,6 +483,55 @@ class RestoreTrafficTest {
         val wgDefault = base.copy(routes = base.routes + exit, defaultRoute = "w", home = Home())
         assertEquals(listOf("While Tailscale waits for you to sign in, its sign-in pages go Direct."), notes(wgDefault, wgDefault.copy(defaultRoute = "t")))
         assertEquals(setOf(false, true), RestoreTraffic.situations(wgDefault, wgDefault.copy(defaultRoute = "t")).map { it.signIn }.toSet())
+    }
+
+    /** Now and once a waiting route gets its config are compared apart, each said in its own sentences. */
+    @Test fun nowAndOnceAConfigIsAddedAreSaidApart() {
+        // Blocked now and moved to a route waiting for its config: refused both now, open once the config is added.
+        val blocked = base.copy(sites = mapOf("bank.example" to BLOCK))
+        assertEquals(listOf("Once a server's config is added again, 1 website is no longer blocked."), notes(blocked, blocked.copy(sites = mapOf("bank.example" to "k1"))))
+        // The filter on VPN routes now; a default route waiting for its config without it: refused now, unfiltered once added.
+        val filtered = base.copy(prefs = Prefs(filter = Filter("adguard", routes = true)))
+        assertEquals(listOf("Once a server's config is added again, the default route loses the DNS filter."),
+            notes(filtered, filtered.copy(defaultRoute = "k1", prefs = Prefs(filter = Filter("adguard")))))
+        // A loss now that holds once the config is added too is said once, for now.
+        val vpn = base.copy(apps = mapOf("org.a" to "nl"))
+        assertEquals(listOf("1 app goes from a VPN route to Direct."), notes(vpn, vpn.copy(apps = mapOf("org.a" to DIRECT))))
+    }
+
+    /** A route's own DNS server at the address of a provider's blocking resolver is not that provider's blocking. */
+    @Test fun providerBlockingIsCreditedOnlyWhereItsPolicyChoseTheResolver() {
+        val iv = Route("iv", Location("ivpn", countryCode = "NL", country = "Netherlands"))
+        val lab = wg(9, dns = "10.0.254.2")
+        // An app keeps IVPN's route in use after the restore, so its blocking resolver is in both configs.
+        val here = base.copy(routes = base.routes + iv, defaultRoute = "iv", apps = mapOf("org.keep" to "iv"), opts = mapOf("ivpn" to mapOf("protect" to "on")))
+        val next = here.copy(routes = here.routes + Route("x", wg = lab, own = "sx"), servers = here.servers + OwnServer("sx", wg = lab), defaultRoute = "x")
+        assertEquals(listOf("The default route loses the provider's ad and tracker blocking it has now."), notes(here, next))
+        // IVPN's own route asks the same address and keeps it.
+        assertEquals(Resolver.Provider, walk(here, null, OTHER_NAME).resolver)
+        assertEquals(Resolver.Route, walk(next, null, OTHER_NAME).resolver)
+    }
+
+    /** Traffic Android ties to no app, held off Direct now and out Direct after, is said in a sentence of its own. */
+    @Test fun heldTrafficWithNoAppThatGoesDirectIsSaid() {
+        val here = base.copy(defaultRoute = DIRECT, apps = mapOf("com.example.private" to "nl"))
+        val next = here.copy(apps = emptyMap())
+        assertEquals(RestoreTraffic.HELD, RestoreTraffic.connect(RestoreTraffic.compile(here, { emptySet() })!!, emptySet(), null, "203.0.113.80")!!.exit)
+        assertEquals(listOf("1 app goes from a VPN route to Direct.", "Traffic Android can't tie to an app is no longer refused and goes Direct."), notes(here, next))
+    }
+
+    /** Sorting addresses into classes is paid before it is done: a very long list of home subnets is cut, not scanned for seconds. */
+    @Test fun manyHomeSubnetsArePaidForBeforeTheyAreScanned() {
+        val subnets = (0 until 24_000).map { "10.${40 + it / 65_536}.${it / 256 % 256}.${it % 256}/32" }
+        val here = base.copy(home = Home(tailscale = true, subnets = subnets), prefs = Prefs(lan = true))
+        assertTrue(RestoreTraffic.size(here) <= RestoreTraffic.MAX_ENTRIES)
+        val budget = RestoreTraffic.Budget()
+        val t = System.nanoTime()
+        val said = RestoreTraffic.check(here, here.copy(defaultRoute = DIRECT), budget = budget)
+        val ms = (System.nanoTime() - t) / 1_000_000
+        println("RESTORE-CHECK 24000 home subnets: $ms ms, $said")
+        assertTrue("$ms ms", ms < 1500)
+        assertEquals(RestoreTraffic.CUT, said.last().text)
     }
 
     /** The largest setups a backup may hold, built to cost the most: bounded before anything is walked, and stopped when cancelled. */

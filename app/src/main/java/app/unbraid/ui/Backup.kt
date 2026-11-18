@@ -44,6 +44,7 @@ import app.unbraid.data.Providers
 import app.unbraid.data.RestoreTraffic
 import app.unbraid.data.Setup
 import app.unbraid.data.restoredFrom
+import app.unbraid.vpn.AutoSwitch
 import app.unbraid.vpn.Profiles
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
@@ -287,12 +288,14 @@ class BackupFlow(private val ui: Ui) {
             return
         }
         ui.restored()
+        // The switch by network decided and picked for the setup that is gone: the restored rules apply afresh.
+        AutoSwitch.replaced()
         Profiles.refresh(app)
         val kept = t.profiles.size > c.setup.profiles.size
         finish(true, listOfNotNull(
             if (saved) "Settings restored." else "Settings restored, but they couldn't be saved yet. Keep unbraid open and try again from the notice.",
             if (kept) "Your current setup is kept as the profile ${t.profiles.last().name}." else null,
-            t.servers.filter { it.keyless }.takeIf { it.isNotEmpty() }?.let { "Add the config again for ${it.joinToString { s -> s.name }} in Settings, Providers & servers. Until then, ${if (it.size == 1) "its" else "their"} apps stay offline." },
+            t.servers.filter { it.keyless }.takeIf { it.isNotEmpty() }?.let { "Add the config again for ${it.joinToString { s -> Backup.safe(s.name, 60) }} in Settings, Providers & servers. Until then, ${if (it.size == 1) "its" else "their"} apps stay offline." },
             signIns(t)?.let { "Sign in to $it to use their routes." },
             "unbraid is reconnecting with them.".takeIf { UnbraidVpn.state.value.phase == VpnState.Phase.On },
         ).joinToString(" "))

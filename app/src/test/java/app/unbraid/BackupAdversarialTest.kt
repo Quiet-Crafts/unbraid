@@ -81,7 +81,9 @@ class BackupAdversarialTest {
             RestoreTraffic.notes(noFilter, noFilter.copy(opts = mapOf("nord" to mapOf("protect" to "off")))))
         assertEquals(listOf("The DNS filter is turned off.", "\"Box\" connects to 198.51.100.66 instead of 203.0.113.1.", "Your home WireGuard uses other DNS servers: 198.51.100.53.", leaves,
             "The default route goes from Netherlands to Direct.", "1 app and 1 website go from a VPN route to Direct.", "Part of the home network goes Direct instead of through the home tunnel.",
-            "Apps can reach the local network again.", "1 app that is blocked now goes Direct.", "1 website that is blocked now goes Direct."), sheet(kinds.fold(phone) { s, (_, change) -> change(s) }))
+            "Apps can reach the local network again.", "1 app that is blocked now goes Direct.", "1 website that is blocked now goes Direct.",
+            // The game no longer blocked and the default on Direct: what Android ties to no app is no longer held off Direct.
+            "Traffic Android can't tie to an app is no longer refused and goes Direct."), sheet(kinds.fold(phone) { s, (_, change) -> change(s) }))
     }
 
     @Test fun weakOwnServersAreNamedUntilAccepted() {
@@ -171,9 +173,10 @@ class BackupAdversarialTest {
         // As the exit in use too: the compiler would pass it to Tailscale, which finds no node by that text.
         assertEquals(Reason.Invalid, reason { Backup.read(Backup.export(ts(":::").copy(defaultRoute = "t"), "3.0.2", 0)) })
         Backup.read(Backup.export(ts("::ffff:100.64.0.1").copy(defaultRoute = "t"), "3.0.2", 0))
-        // Zero-width and other formatting characters in a name are refused; the joiners emoji are made of are not.
-        for (n in listOf("Box​", "Box⁠x", "Box﻿", "Box x")) assertEquals(n, Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", n))), "3.0.2", 0)) })
-        Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", "Team 👩‍💻"))), "3.0.2", 0))
+        // A line separator in a name is refused, as the importers take it out; zero-width and other formatting characters
+        // pass, as the importers keep them ([everyNameAnOlderVersionAcceptedOpens]).
+        assertEquals(Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", "Box\u2028x"))), "3.0.2", 0)) })
+        for (n in listOf("Box\u200B", "Box\u2060x", "Box\uFEFF", "Team \uD83D\uDC69\u200D\uD83D\uDCBB")) Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", n))), "3.0.2", 0))
         // An error that names a server from the file shows it without its direction marks or line breaks.
         val damaged = Backup.export(phone.copy(servers = phone.servers + OwnServer("k", wg = wg.copy(name = "‮evil\nname", privateKey = ""), keyless = true)), "3.0.2", 0)
         val e = try { Backup.read(damaged); null } catch (x: Backup.Failed) { x }!!
@@ -182,6 +185,39 @@ class BackupAdversarialTest {
         val joined = phone.copy(profiles = listOf(Profile("Wo⁠rk", "gone")))
         val p = try { Backup.valid(joined); null } catch (x: Backup.Failed) { x }!!
         assertTrue(p.message!!, "Work" in p.message!! && '⁠' !in p.message!!)
+    }
+
+    /**
+     * Every name 3.0.2 let through, by its own rule (not blank, at most 256 characters, unchanged by the importers'
+     * cleaning), opens in a backup: own servers saved without keys of each kind, a Tailscale route's name and a place, with
+     * formatting, direction, zero-width and control characters and long names. Stored as it was; shown without them.
+     */
+    @Test fun everyNameAnOlderVersionAcceptedOpens() {
+        val accepted = { n: String -> n.isNotBlank() && n.length <= 256 && Manual.cleanName(n, 256) == n }
+        val parts = listOf("a", "Z", "0", " ", "-", ".", "é", "ß", "漢", "ا", "👩‍💻", "́", "​", "‌", "‍", "⁠", "⁡", "⁤",
+            "﻿", "­", "᠎", "⁪", "⁯", "￹", "󠀁", "‮", "⁦", "‎", "؜", "\u0007", "\u0000", "\n", "\t", " ", "　", " ")
+        val g = Random(302)
+        val invisible = { n: String -> n.any { Character.getType(it) == Character.FORMAT.toInt() && it != '‌' && it != '‍' } }
+        var tried = 0; var hidden = 0
+        while (tried < 400) {
+            val n = buildString { repeat(if (g.nextInt(4) == 0) 100 + g.nextInt(120) else 1 + g.nextInt(10)) { append(parts[g.nextInt(parts.size)]) } }.let { if (g.nextBoolean()) Manual.cleanName(it, 256) else it }
+            if (!accepted(n)) continue
+            tried++; if (invisible(n)) hidden++
+            val wgK = OwnServer("w", wg = wg.copy(name = n, privateKey = ""), keyless = true)
+            val ov = OwnServer("o", ovpn = app.unbraid.data.OvpnProfile(n, ""), keyless = true)
+            val ss = OwnServer("x", ss = app.unbraid.data.SsProfile(n, "203.0.113.30", 8388, "aes-256-gcm", ""), keyless = true)
+            val s = phone.copy(servers = phone.servers + wgK + ov + ss, routes = phone.routes + Route("t", tsExit = "100.101.102.103", tsName = n) + Route("c", Location("nord", 153, "NL", "Netherlands", city = n)))
+            val c = try { Backup.read(Backup.export(s, "3.0.2", 0, keys = false)) } catch (e: Backup.Failed) { fail("${n.map { "%04x".format(it.code) }}: ${e.message}"); return }
+            assertEquals(listOf(n, n, n), c.setup.servers.filter { it.id in setOf("w", "o", "x") }.map { it.name })
+            assertEquals(n, c.setup.route("t")!!.tsName)
+            assertTrue(Backup.safe(n, 300).none { it.isISOControl() || Character.getType(it) == Character.FORMAT.toInt() && it != '‌' && it != '‍' })
+        }
+        assertTrue("$hidden", hidden > 100)
+        // The restore sheet names such a server without them.
+        val lab = wg.copy(name = "Lab⁠VPN")
+        val here = phone.copy(servers = listOf(OwnServer("s", wg = lab)), routes = phone.routes.map { if (it.id == "w") it.copy(wg = lab) else it })
+        val moved = here.copy(servers = listOf(OwnServer("s", wg = lab.copy(endpoint = "198.51.100.66:51820"))))
+        assertTrue(RestoreTraffic.notes(here, moved).toString(), "\"LabVPN\" connects to 198.51.100.66 instead of 203.0.113.1." in RestoreTraffic.notes(here, moved))
     }
 
     /** A website an older version saved, that the stricter reader of today refuses, keeps the backup restorable: it stays as this phone keeps it. */
