@@ -44,6 +44,7 @@ import app.unbraid.data.Providers
 import app.unbraid.data.RestoreTraffic
 import app.unbraid.data.Setup
 import app.unbraid.data.restoredFrom
+import app.unbraid.vpn.AutoSwitch
 import app.unbraid.vpn.Profiles
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
@@ -287,6 +288,8 @@ class BackupFlow(private val ui: Ui) {
             return
         }
         ui.restored()
+        // The switch by network decided and picked for the setup that is gone: the restored rules apply afresh.
+        AutoSwitch.replaced()
         Profiles.refresh(app)
         val kept = t.profiles.size > c.setup.profiles.size
         finish(true, listOfNotNull(

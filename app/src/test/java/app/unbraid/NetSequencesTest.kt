@@ -15,6 +15,9 @@ import kotlin.random.Random
 /** For [NetSequencesTest]'s interleavings: no handover back to a network that stayed connected. */
 internal const val RETURNS = -2
 
+/** For [NetSequencesTest]'s interleavings: no restore replaces the whole setup. */
+internal const val RESTORES = -3
+
 /** Network [id] before Android reported its kind. */
 private fun pending(id: Long) = Net(null, id)
 
@@ -277,14 +280,36 @@ class NetSequencesTest {
         AutoSwitch.Run().run { seen(home); val d = settle(home, rules)!!; seen(cell); seen(home); val again = settle(home, rules)!!; assertFalse(commit(d, rules, false)); assertTrue(commit(again, rules, false)) }
     }
 
+    /** A restore replaces the setup: a hand pick, a decision or a card made for the one before never holds over the restored rules. */
+    @Test fun aRestoreStartsTheSwitchByNetworkAfresh() {
+        val wifi = Net(WIFI, 1)
+        val old = mapOf(WIFI to "Work", MOBILE to "Travel")
+        val restored = mapOf(WIFI to "Work", MOBILE to "Phone")
+        // Guest picked by hand on Wi-Fi, then a backup with another Work and other rules restored on the same connection.
+        AutoSwitch.Run().run { seen(wifi); pick(old); replaced(); assertEquals("Work", decide(wifi, restored)) }
+        // Rules equal to the old ones too: the restored Work is another profile.
+        AutoSwitch.Run().run { seen(wifi); pick(old); replaced(); assertEquals("Work", decide(wifi, old)) }
+        // A decision waiting for its save is not saved; the restored rules decide again.
+        AutoSwitch.Run().run { seen(wifi); val d = settle(wifi, old)!!; replaced(); assertFalse(commit(d, restored, false)); assertEquals("Work", decide(wifi, restored)) }
+        // A settle timer started before the restore decides nothing: the restored setup has not lasted yet.
+        AutoSwitch.Run().run { seen(wifi); val stay = state.stay; replaced(); assertNull(settle(wifi, restored, stay)); assertEquals("Work", decide(wifi, restored)) }
+        // The Not switched card was about the old setup.
+        AutoSwitch.notSwitched.value = AutoSwitch.NotSwitched("Work", WIFI, 1, "Not switched to Work.")
+        AutoSwitch.replaced()
+        assertNull(AutoSwitch.notSwitched.value)
+        // The restore calls it once the store holds the restored setup.
+        val apply = java.io.File("src/main/java/app/unbraid/ui/Backup.kt").readText().substringAfter("fun apply()")
+        assertTrue(Regex("""Unbraid\.store\.setup\.value != t\)[\s\S]*?return\s*\}[\s\S]*?AutoSwitch\.replaced\(\)""").containsMatchIn(apply))
+    }
+
     /** The seeds that found the round-two findings before the model was fixed, each with the events that make it shortest. */
     @Test fun theSeedsThatFoundTheFindings() {
-        interleave(8, setOf(5, 8, 9, 11, RETURNS)) // a decision made on a network already lost
-        interleave(82, setOf(5, 6, 7, 8, 9, 11)) // a decision saved after the phone left and came back
-        interleave(12, setOf(5, 6, 7, 11, RETURNS)) // a pick made before the network's kind was reported
-        interleave(17, setOf(5, 6, 7, 8, 9, RETURNS)) // a switch used up by a rename before its save
-        interleave(68) // a settle timer from before the VPN went off and on decides for the new stay
-        interleave(428) // a profile deleted and another made under its name, which the old decision then applies to
+        interleave(8, setOf(5, 8, 9, 11, RETURNS, RESTORES)) // a decision made on a network already lost
+        interleave(82, setOf(5, 6, 7, 8, 9, 11, RESTORES)) // a decision saved after the phone left and came back
+        interleave(12, setOf(5, 6, 7, 11, RETURNS, RESTORES)) // a pick made before the network's kind was reported
+        interleave(17, setOf(5, 6, 7, 8, 9, RETURNS, RESTORES)) // a switch used up by a rename before its save
+        interleave(68, setOf(RESTORES)) // a settle timer from before the VPN went off and on decides for the new stay
+        interleave(428, setOf(RESTORES)) // a profile deleted and another made under its name, which the old decision then applies to
     }
 
     /**
@@ -299,9 +324,13 @@ class NetSequencesTest {
         repeat(5_000) { seed -> interleave(seed) }
     }
 
-    /** One seeded sequence; events in [skip] are left out ([RETURNS]: handovers only to networks not seen before). */
+    /**
+     * One seeded sequence; events in [skip] are left out ([RETURNS]: handovers only to networks not seen before;
+     * [RESTORES]: no restore). Restores draw from a random of their own, so the other events keep each seed's order.
+     */
     private fun interleave(seed: Int, skip: Set<Int> = emptySet()) {
         val rnd = Random(seed)
+        val restores = Random(seed + 1_000_003)
         val run = AutoSwitch.Run()
         fun kindOf(id: Long) = if (id % 2 == 0L) MOBILE else WIFI
         var nextId = 10L
@@ -323,6 +352,13 @@ class NetSequencesTest {
         run.seen(here)
         val log = StringBuilder("seed $seed:")
         repeat(80) {
+            // A restore replaces the whole setup, its rules too: nothing decided, picked or armed for the old one counts,
+            // and the restored rules apply on the network the phone is on once it lasted, as on a network just joined.
+            if (RESTORES !in skip && restores.nextInt(12) == 0) {
+                log.append(" R")
+                if (restores.nextBoolean()) rules[restores.nextKind()] = names.random(restores)
+                run.replaced(); stay++; visit++; voidAll(); done = null
+            }
             val e = rnd.nextInt(17).takeIf { it !in skip } ?: return@repeat
             log.append(" $e")
             when (e) {
