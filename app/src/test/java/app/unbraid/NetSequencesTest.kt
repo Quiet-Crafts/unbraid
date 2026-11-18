@@ -48,7 +48,12 @@ class NetSequencesTest {
         fun join(kind: String) { here = Net(kind, nextId++); if (on) run.seen(here); holding = false; fresh = true }
         fun offline() { here = null; if (on) run.seen(null); holding = false; fresh = true }
         fun vpn(up: Boolean) { on = up; if (up) run.seen(here) else run.unwatched() }
-        fun rule(kind: String, name: String?) { if (name == null) rules.remove(kind) else rules[kind] = name }
+        /** The user sets, changes or removes the rule for [kind]: on the network the phone is on, what was acted on is forgotten. */
+        fun rule(kind: String, name: String?) {
+            if (name == null) rules.remove(kind) else rules[kind] = name
+            run.ruleEdited(kind)
+            if (here?.kind == kind) { holding = false; fresh = true }
+        }
         fun rename(old: String, new: String) {
             names[names.indexOf(old)] = new
             rules.replaceAll { _, v -> if (v == old) new else v }
@@ -284,6 +289,7 @@ class NetSequencesTest {
         interleave(12, setOf(5, 6, 7, 11, RETURNS)) // a pick made before the network's kind was reported
         interleave(17, setOf(5, 6, 7, 8, 9, RETURNS)) // a switch used up by a rename before its save
         interleave(68) // a settle timer from before the VPN went off and on decides for the new stay
+        interleave(361) // a rule removed and set again on the same network: decided afresh, not held as acted on
         interleave(428) // a profile deleted and another made under its name, which the old decision then applies to
     }
 
@@ -320,6 +326,12 @@ class NetSequencesTest {
         fun voidAll() { void += live.map { it.first }; live.clear() }
         fun tell() { val id = here?.id?.takeIf { it != 0L }; if (id != told) { stay++; visit++; voidAll(); told = id } }
         fun seenAs() = here?.let { if (known) it else pending(it.id) }
+        /** The user sets, changes or removes the rule for [kind]: what was acted on for that kind is forgotten, whatever it is set to. */
+        fun edit(kind: String, name: String?) {
+            if (name == null) rules.remove(kind) else rules[kind] = name
+            done = done?.let { (st, r) -> st to (r - kind) }
+            run.ruleEdited(kind)
+        }
         run.seen(here)
         val log = StringBuilder("seed $seed:")
         repeat(80) {
@@ -356,7 +368,7 @@ class NetSequencesTest {
                     voidAll()
                     done = here?.takeIf { it.id != 0L && (on || known) }?.let { stay to rules.toMap() }
                 }
-                4 -> if (rnd.nextBoolean()) rules[rnd.nextKind()] = names.random(rnd) else rules.remove(rnd.nextKind())
+                4 -> edit(rnd.nextKind(), if (rnd.nextBoolean()) names.random(rnd) else null)
                 5 -> if (on) { on = false; grace = false; run.unwatched(); voidAll() } else { on = true; visit++; tell(); run.seen(seenAs()) }
                 // The network lost: the engine waits a moment for it to come back; the switch by network must not.
                 6 -> here?.takeIf { on }?.let { n -> here = null; grace = true; tell(); run.lost(n.id) }
@@ -374,7 +386,7 @@ class NetSequencesTest {
                     run.renamed(old, new)
                     // Sometimes another profile is made under the old name, and a rule may name it: a decision for the
                     // renamed one is not for it.
-                    if (rnd.nextBoolean()) { names += old; if (rnd.nextBoolean()) rules[rnd.nextKind()] = old }
+                    if (rnd.nextBoolean()) { names += old; if (rnd.nextBoolean()) edit(rnd.nextKind(), old) }
                 }
                 12 -> shown = !shown
                 15 -> run.state.here?.takeIf { it.kind != null }?.let { timer = Triple(it, run.state.stay, visit) }
@@ -385,7 +397,7 @@ class NetSequencesTest {
                     done = done?.let { (st, r) -> st to r.filterValues { it != old } }
                     live.filter { it.first.profile == old }.forEach { live.remove(it); void += it.first }
                     run.deleted(old)
-                    if (rnd.nextBoolean()) { names += old; if (rnd.nextBoolean()) rules[rnd.nextKind()] = old }
+                    if (rnd.nextBoolean()) { names += old; if (rnd.nextBoolean()) edit(rnd.nextKind(), old) }
                 }
                 13, 14 -> if (live.isNotEmpty() || void.isNotEmpty()) {
                     val i = rnd.nextInt(live.size + void.size)
@@ -416,6 +428,10 @@ class NetSequencesTest {
         assertFalse(net.contains("AutoSwitch.net.value ="))
         val watch = java.io.File("src/main/java/app/unbraid/vpn/AutoSwitch.kt").readText().substringAfter("fun watch(")
         assertTrue(Regex("""store\.update \{ if \(run\.commit\(d, it\.onNet, Unbraid\.foreground\.value\)\) it\.use\(to, PREVIOUS\) else it \}""").containsMatchIn(watch))
+        // A rule edit reaches the model, and the card is re-judged when the setup or the accounts change.
+        val ui = java.io.File("src/main/java/app/unbraid/ui/Ui.kt").readText()
+        assertTrue(Regex("""fun setOnNet\([^\n]*store\.edit \{[^\n]*\}; app\.unbraid\.vpn\.AutoSwitch\.ruleEdited\(kind\)""").containsMatchIn(ui))
+        assertTrue(Regex("""combine\(notSwitched, store\.setup, store\.accounts, model\)[^\n]*\.current\(s, m, acc\)""").containsMatchIn(watch))
     }
 
     private fun Random.nextKind() = if (nextBoolean()) WIFI else MOBILE

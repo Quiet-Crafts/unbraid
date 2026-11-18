@@ -967,7 +967,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     }
 
     /** On [kind] of network ([app.unbraid.data.NET_KINDS]) the app switches to profile [name] by itself; null = it doesn't switch. */
-    fun setOnNet(kind: String, name: String?) = store.edit { s -> s.copy(onNet = if (name == null) s.onNet - kind else s.onNet + (kind to name)) }
+    fun setOnNet(kind: String, name: String?) { store.edit { s -> s.copy(onNet = if (name == null) s.onNet - kind else s.onNet + (kind to name)) }; app.unbraid.vpn.AutoSwitch.ruleEdited(kind) }
 
     fun forgetProfile(name: String) { store.edit { it.forget(name) }; app.unbraid.vpn.AutoSwitch.deleted(name); if (viewing.value == name) viewing.value = null }
     fun moveProfile(name: String, by: Int) = store.edit { it.move(name, by) }

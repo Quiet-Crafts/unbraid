@@ -83,6 +83,34 @@ class AutoSwitchTest {
         assertFalse(ns.holds(setup.copy(onNet = mapOf(MOBILE to "Home")), wifi)) // its rule now names another profile
     }
 
+    /** The card says to delete a profile only while that is still the reason: once the switch is possible it goes. */
+    @Test fun theNotSwitchedCardGoesOnceTheSwitchIsPossible() {
+        val loose = setup.copy(profile = null, defaultRoute = "us", apps = mapOf("org.a" to "nl"))
+        val full = loose.copy(profiles = loose.profiles + (1..MAX_PROFILES - 3).map { Profile("P$it", "nl") })
+        val here = AutoSwitch.State(true, AutoSwitch.Net(WIFI, 100))
+        val ns = AutoSwitch.NotSwitched("Trip", MOBILE, 100, AutoSwitch.decide(full, "Trip") { _, _ -> false }.blocked!!)
+        assertEquals(ns, ns.current(full, here, emptyMap())) // no room: still the reason
+        assertNull(ns.current(full.forget("P1"), here, emptyMap())) // a profile deleted: the switch is possible now
+        assertNull(ns.current(full.copy(profile = "Trip"), here, emptyMap())) // switched to
+        assertNull(ns.current(full, AutoSwitch.State(true, AutoSwitch.Net(MOBILE, 101)), emptyMap())) // the phone left that network
+    }
+
+    /** A rule edited for the network the phone is on is decided afresh; the pick made before it no longer holds. */
+    @Test fun aRuleEditForTheNetworkForgetsWhatWasActedOn() {
+        val wifi = AutoSwitch.Net(WIFI, 100)
+        val run = AutoSwitch.Run()
+        run.seen(wifi)
+        run.pick(setup.onNet) // Work by hand, under Wi-Fi -> Home
+        run.ruleEdited(WIFI) // the rule removed ...
+        assertNull(run.settle(wifi, emptyMap()))
+        run.ruleEdited(WIFI) // ... and set to Home again, after the app was left in between
+        assertEquals("Home", run.settle(wifi, setup.onNet)?.profile)
+        // An edit of another kind's rule leaves a pick alone.
+        run.pick(setup.onNet)
+        run.ruleEdited(MOBILE)
+        assertNull(run.settle(wifi, setup.onNet))
+    }
+
     @Test fun aSwitchThatCantHappenSaysWhy() {
         assertTrue(step(setup, MOBILE, over = true).let { it.to == null && it.blocked!!.startsWith("Not switched to Trip: it needs more connections than a provider allows.") })
         // A setup in no profile is kept as "Previous" first; with no room for it, nothing switches.
