@@ -56,8 +56,6 @@ data class Glance(
     val held: Boolean = false,
     /** Of the failing routes, those with no tunnel at all ([WidgetRoute.missing]). */
     val missing: Int = 0,
-    /** Connected, but no engine runs ([VpnState.down]): every app on the VPN is offline, whatever was checked before. */
-    val stopped: Boolean = false,
 ) {
     /** Tailscale as the tag shows it; [None] = not set up, no tag. */
     enum class Ts { None, Up, Down, Idle }
@@ -75,7 +73,6 @@ data class Glance(
 
     /** The count as TalkBack says it: only checks that happened are claimed. */
     val spoken get() = when {
-        stopped -> ", the connection engine stopped, apps on the VPN are offline"
         total == 0 && unchecked > 0 -> ", routes not checked"
         total == 0 -> ""
         else -> ", $ok of $all routes working" + listOf(down - missing to "not answering", missing to "not connected", unchecked to "not checked")
@@ -103,9 +100,6 @@ fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false
     // What the store holds then are defaults, not the user's setup: none of it shows.
     if (held) return Glance(vpn.phase, until = if (vpn.phase == Phase.Paused) vpn.pausedUntil else 0, held = vpn.phase == Phase.On)
     val on = vpn.phase == Phase.On
-    // No engine runs: one thing is true of every route, so nothing from the engine that stopped (Tailscale's status,
-    // checks, which tunnels it had) is shown.
-    val stopped = on && vpn.down
     val tsDown = vpn.tsState in setOf("NeedsLogin", "NeedsMachineAuth", "InUseOtherUser", "Stopped")
     // Evidence holds only for the engine running now, on the network the phone is on now (none: nothing works).
     val passed = vpn.passed?.takeIf { net != null && net != 0L && it.engine == vpn.engine && it.net == net }
@@ -115,11 +109,11 @@ fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false
     fun exit(r: app.unbraid.data.Route) = vpn.servers[r.id]?.host?.takeIf { it == r.tsExit }
         ?.let { ip -> vpn.tsExitNodes.firstOrNull { it.ip == ip } }?.takeIf { vpn.tsState == "Running" }?.let { if (!it.online) false else if (it.inUse) true else null }
     // Answered as saved now: a route saved since with another server or with its check off is not known to work.
-    fun working(r: app.unbraid.data.Route) = on && !stopped && if (r.tsExit != null) net != null && exit(r) == true else passed?.let { Health.answered(it, r) } == true
+    fun working(r: app.unbraid.data.Route) = on && if (r.tsExit != null) net != null && exit(r) == true else passed?.let { Health.answered(it, r) } == true
     // No tunnel (its provider gave no server, or its own server has no keys).
-    fun missing(id: String) = on && !stopped && id !in vpn.servers
-    // No engine, a failed check, or a Tailscale exit without Tailscale or whose device is offline.
-    fun failing(id: String) = on && (vpn.down || missing(id) || id in vpn.stalled || id in vpn.notAnswering || id in vpn.dropping ||
+    fun missing(id: String) = on && id !in vpn.servers
+    // No tunnel, a failed check, or a Tailscale exit without Tailscale or whose device is offline.
+    fun failing(id: String) = on && (missing(id) || id in vpn.stalled || id in vpn.notAnswering || id in vpn.dropping ||
         setup.route(id)?.takeIf { it.tsExit != null }?.let { tsDown || exit(it) == false } == true)
     // Only websites whose rule applies count, as in the engine.
     val applied = app.unbraid.data.Sites.applied(setup, reported = vpn.tsSuffix)
@@ -140,13 +134,13 @@ fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false
         vpn.phase, !setup.directOnly, known.count { it.working }, known.size, setup.profile,
         when {
             !setup.tailscale -> Glance.Ts.None
-            !on || stopped -> Glance.Ts.Idle
+            !on -> Glance.Ts.Idle
             vpn.tsState == "Running" -> Glance.Ts.Up
             tsDown -> Glance.Ts.Down
             else -> Glance.Ts.Idle
         },
         if (vpn.phase == Phase.Paused) vpn.pausedUntil else 0, default, setup.home.tsControlUrl != null, others, if (on) tunnels.size - known.size else 0,
-        missing = known.count { it.missing }, stopped = stopped,
+        missing = known.count { it.missing },
     )
 }
 
@@ -210,7 +204,7 @@ object Widgets {
     private class Act(val label: String, val short: String, val icon: Int, val fill: Int, val ink: Int, val does: String?)
 
     private fun act(g: Glance) = when {
-        g.held || g.stopped -> Act("Open $APP", "Open", R.drawable.ic_w_error, BAD_TINT, BAD, null)
+        g.held -> Act("Open $APP", "Open", R.drawable.ic_w_error, BAD_TINT, BAD, null)
         g.phase == Phase.On && g.down > 0 -> Act("View route", "View", R.drawable.ic_w_error, BAD_TINT, BAD, null)
         g.phase == Phase.On -> Act("Pause $PAUSE min", "Pause", R.drawable.ic_w_pause, TOP, TEXT, "pause")
         g.phase == Phase.Connecting -> Act("Connecting", "Connecting", R.drawable.ic_w_power, TOP, DIM, null)
@@ -221,7 +215,7 @@ object Widgets {
     private fun ink(g: Glance) = when (g.counted) { Glance.Count.Good -> GOOD; Glance.Count.Bad -> BAD; Glance.Count.Unknown -> DIM }
 
     private fun headline(g: Glance) = when (g.phase) {
-        Phase.On -> if (g.held || g.stopped) "Apps offline" else if (g.protects) "Protected" else "Connected"
+        Phase.On -> if (g.held) "Apps offline" else if (g.protects) "Protected" else "Connected"
         Phase.Connecting -> "Connecting"
         Phase.Paused -> "Paused"
         Phase.Off -> if (g.protects) "Not protected" else "Off"
@@ -231,7 +225,6 @@ object Widgets {
     private fun status(ctx: Context, g: Glance, short: Boolean): Pair<String, Int> = when (g.phase) {
         Phase.On -> when {
             g.held -> "Settings won't open" to BAD
-            g.stopped -> (if (short) "Restarting" else "Restarting the engine") to BAD
             g.all == 0 -> "No VPN routes" to DIM
             // Nothing known yet: no count, rather than one that calls unchecked routes OK.
             else -> (g.count(short) ?: if (short) "Not checked" else "Routes not checked") to ink(g)
@@ -307,7 +300,6 @@ object Widgets {
         chip(r)
         setTextViewText(R.id.name, r.name)
         val (text, color) = when {
-            g.stopped && r.failing -> "Offline" to BAD
             r.missing -> "Not connected" to BAD
             r.failing -> "Not answering" to BAD
             !r.live -> (when (g.phase) { Phase.Paused -> "Paused"; Phase.Connecting -> "Starting"; else -> "Off" }) to DIM
@@ -330,7 +322,7 @@ object Widgets {
         setTextViewText(R.id.profile, g.profile.orEmpty())
         setTextColor(R.id.profile, if (g.phase == Phase.Off) DIM else ACCENT)
         // How many routes work, out of all in use, as a bare count: green only when all do. Only while connected.
-        show(R.id.count, g.phase == Phase.On && g.total > 0 && !g.stopped)
+        show(R.id.count, g.phase == Phase.On && g.total > 0)
         setTextViewText(R.id.count, "${g.ok}/${g.all}")
         setTextColor(R.id.count, ink(g))
         bg(R.id.action, a.fill)

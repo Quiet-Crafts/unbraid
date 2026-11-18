@@ -467,7 +467,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 })
                 if (setup.tailscale) caption("Pick an exit node for a route in Routes. Reaching your home network through Tailscale is under Local & home access.")
                 // A Headscale server can name any domain: its devices' names answer apps only once the user allows that suffix.
-                val sfx = vpn.tsSuffix?.takeIf { home.tailscale && !app.unbraid.vpn.Compiler.officialTs(home) }
+                val sfx = vpn.tsAnnounced?.takeIf { home.tailscale && !app.unbraid.vpn.Compiler.officialTs(home) }
                 if (setup.tailscale) advanced(advOpen, { advOpen = !advOpen }, "Control server: ${home.tsControlUrl ?: "Tailscale"}", listOfNotNull(
                     Item("Control server", home.tsControlUrl ?: "Tailscale (default)", { tsKeyOpened = true; dialog = "tsserver" }, icon = Icons.dns) { Chevron() },
                     sfx?.let { d ->

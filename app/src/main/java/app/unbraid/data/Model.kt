@@ -436,8 +436,6 @@ data class Setup(
      * domain answers still keeps its route's tunnel, as before.
      */
     val activeRoutes get() = Sites.applied(this).let { sites -> routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) } }
-    @Deprecated("Tunnels go by the setup alone", ReplaceWith("activeRoutes"))
-    @Suppress("UNUSED_PARAMETER") fun activeRoutes(reported: String?) = activeRoutes
     /** The Tailscale exit node in use, if any active route goes out through one (Tailscale allows one at a time). */
     val tsExit get() = activeRoutes.firstNotNullOfOrNull { it.tsExit }
     /** Tailscale runs for home access or for an exit-node route. */

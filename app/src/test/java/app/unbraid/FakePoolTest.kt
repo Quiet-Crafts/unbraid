@@ -7,7 +7,15 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import app.unbraid.data.BLOCK
+import app.unbraid.data.DIRECT
+import app.unbraid.data.Home
+import app.unbraid.data.Location
+import app.unbraid.data.Route
+import app.unbraid.data.Setup
+import app.unbraid.data.VERSION
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -74,6 +82,188 @@ class FakePoolTest {
         }
         assertEquals(6, moves)
         assertEquals(1, block) // 3 → 4 → 5 → 6 → 7 → 0 → 1
+    }
+
+    /** A reload reopens the running table only while its file is there; missing (length 0) or empty, a new block. */
+    @Test fun aReloadKeepsTheTableOnlyWhileItsFileIsThere() {
+        assertTrue(FakePool.keeps(true, 32_768))
+        assertFalse(FakePool.keeps(true, 0)) // missing or emptied under the running engine
+        assertFalse(FakePool.keeps(false, 32_768)) // no engine has it open: a new table anyway
+        assertEquals(4, Compiler.nextBlock(3, FakePool.keeps(true, 0)))
+        assertEquals(3, Compiler.nextBlock(3, FakePool.keeps(true, 1)))
+    }
+
+    /**
+     * A move from block 3 whose start fails brings the last good config back on block 4, never on 3: apps may still hold
+     * 3's addresses, and the move already gave its table up.
+     */
+    @Test fun aFailedMoveNeverGoesBackToTheOldBlock() {
+        val spent = Compiler.nextBlock(3, false)
+        assertEquals(4, spent)
+        assertEquals(spent, FakePool.restoreBlock(3, spent))
+        assertEquals(spent, restore(input(3), null, spent).fakeBlock)
+        assertEquals(6, restore(input(3), 6, spent).fakeBlock) // a move names its block
+        // Without a move both are the same block; a process that never spent one keeps what ran.
+        assertEquals(5, FakePool.restoreBlock(5, 5))
+        assertEquals(5, FakePool.restoreBlock(5, null))
+        assertEquals(5, restore(input(5), null, null).fakeBlock)
+    }
+
+    private val setup = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands"))), defaultRoute = "nl",
+        apps = mapOf("com.b" to BLOCK), version = VERSION, home = Home(tsSuffixAllowed = "old.ts.net"))
+    private fun input(block: Int) = Compiler.Input(setup, emptyMap(), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", "old.ts.net",
+        1 to "old", block, setOf("nl"), tsLoginPending = true, blockedKin = setOf("com.b"))
+    private fun restore(last: Compiler.Input, block: Int?, spent: Int?, lockdown: Boolean = false, pending: Boolean = true, kin: (Setup) -> Set<String> = { setOf("com.b") }) =
+        FakePool.restoreInput(last, block, spent, 2 to "new", setup.copy(home = Home()), mapOf("nord" to "acc"), "new.ts.net", lockdown, pending, kin)
+
+    /**
+     * A restore (also every move) runs what ran, with what may have changed since read again: a sibling of the blocked
+     * app installed since is never left outside the VPN with it, Android's Block setting is today's, and tailnet DNS and
+     * the sign-in way around the exit can only have narrowed.
+     */
+    @Test fun aRestoreReadsAgainWhatMayHaveChanged() {
+        var askedFor: Setup? = null
+        val r = restore(input(3), null, 3, lockdown = true, pending = false) { askedFor = it; setOf("com.b", "com.b.sibling") }
+        assertEquals(setOf("com.b", "com.b.sibling"), r.blockedKin)
+        assertEquals(r.setup, askedFor) // of the setup that runs, not of whatever is being edited
+        assertTrue(r.lockdown)
+        assertEquals(null, r.setup.home.tsSuffixAllowed)
+        assertEquals("new.ts.net", r.tsSuffix)
+        assertEquals(false, r.tsLoginPending)
+        assertEquals(2 to "new", r.probe)
+        // What ran stays: its routes, its links, which routes were blocked.
+        assertEquals(setup.routes, r.setup.routes)
+        assertEquals(setOf("nl"), r.blocked)
+    }
+
+    /**
+     * What comes back after a failed restart, over random pairs of last good and saved setups and sign-ins: every app,
+     * website and app following the default either keeps exactly the choice it has in both, on a route still there and
+     * signed in, or has no connection. Protections take the stricter side. Every restored input still compiles.
+     */
+    @Test fun aRestoreKeepsOnlyWhatBothSetupsAgreeOn() = repeat(1000) { seed ->
+        val rnd = java.util.Random(seed.toLong())
+        val all = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands")), Route("us", Location("proton", 228, "US", "United States")),
+            Route("ts", tsExit = "100.64.0.9", tsName = "nas"))
+        fun <T> any(x: List<T>) = x[rnd.nextInt(x.size)]
+        fun random(): Setup {
+            val routes = all.filter { rnd.nextBoolean() }.ifEmpty { all.take(1) }
+            val to = all.map { it.id } + listOf(BLOCK, DIRECT) // a choice can name a route the setup no longer has
+            return Setup(routes = routes, defaultRoute = any(routes.map { it.id } + DIRECT), version = VERSION,
+                home = Home(tailscale = true, tsSuffixAllowed = any(listOf(null, "a.ts", "b.ts")), subnets = listOf("10.1.0.0/24", "10.2.0.0/24").filter { rnd.nextBoolean() }),
+                prefs = app.unbraid.data.Prefs(lan = rnd.nextBoolean(), blockLan = rnd.nextBoolean(), filter = any(listOf(app.unbraid.data.Filter(), app.unbraid.data.Filter("nextdns", "abc")))),
+                apps = (1..4).filter { rnd.nextBoolean() }.associate { "app$it" to any(to) },
+                sites = (1..3).filter { rnd.nextBoolean() }.associate { any(listOf("a.example", "b.example", "x.a.example")) to any(to) })
+        }
+        val last = random()
+        val now = random()
+        val accounts = listOf("nord", "proton").filter { rnd.nextBoolean() }.associateWith { "acc" }
+        val server = { id: String -> app.unbraid.data.Server("$id #1", "$id.example", "10.9.0.1", "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=", 10) }
+        val links = last.routes.associate { it.id to if (it.tsExit != null) app.unbraid.data.TsLink(server(it.id))
+            else app.unbraid.data.WgLink(server(it.id), app.unbraid.data.Nord.peer(server(it.id), "aGVsbG8taGVsbG8taGVsbG8taGVsbG8taGVsbG8tMTI=")) }
+        val ranLocked = rnd.nextBoolean()
+        val nowLocked = rnd.nextBoolean()
+        val r = FakePool.restoreInput(Compiler.Input(last, links, "app.unbraid", ranLocked, "/tmp/ts", "/tmp/cache.db", fakeBlock = 0),
+            null, 0, 2 to "p", now, accounts, null, nowLocked, false) { emptySet() }
+        val s = r.setup
+        fun lost(id: String?) = all.firstOrNull { it.id == id }?.let { now.route(it.id) == null || !it.imported && accounts[it.loc.provider] == null } == true
+        fun none(choice: String?) = choice == BLOCK || choice in r.blocked || choice in Compiler.missing(s) // the engine refuses all three
+        fun check(what: String, choice: (Setup) -> String?) {
+            val c = choice(s)
+            assertTrue("seed $seed: $what has $c, not in both (${choice(last)}, ${choice(now)}) or on a lost route",
+                none(c) || c == choice(last) && c == choice(now) && !lost(c))
+        }
+        (last.apps.keys + now.apps.keys + s.apps.keys + "follower").forEach { k -> check(k) { it.apps[k] ?: it.defaultRoute } }
+        (last.sites.keys + now.sites.keys + s.sites.keys).forEach { k -> check(k) { it.sites[k] } }
+        assertEquals(last.prefs.lan && now.prefs.lan, s.prefs.lan)
+        assertEquals(last.prefs.blockLan || now.prefs.blockLan, s.prefs.blockLan)
+        assertEquals(last.prefs.filter.id != null || now.prefs.filter.id != null, s.prefs.filter.id != null)
+        assertTrue(s.home.subnets.all { it in last.home.subnets && it in now.home.subnets })
+        assertTrue(s.home.tsSuffixAllowed == null || s.home.tsSuffixAllowed == last.home.tsSuffixAllowed && s.home.tsSuffixAllowed == now.home.tsSuffixAllowed)
+        assertEquals(ranLocked || nowLocked, r.lockdown)
+        Compiler.compile(r)
+    }
+
+    /**
+     * A restart saves a new block before anything is given up: a failed save keeps the running engine (the next check
+     * tries again), and only then does the old engine go and the new one start.
+     */
+    @Test fun aRestartGivesNothingUpBeforeTheBlockIsSaved() {
+        val log = mutableListOf<String>()
+        fun run(block: Int, spent: Int?, saveFails: Boolean = false, startFails: Boolean = false) = FakePool.restart(block, spent,
+            save = { log += "save $it"; if (saveFails) error("disk full") }, commit = { log += "commit" }) { log += "start"; if (startFails) error("no") }
+        assertEquals(FakePool.Outcome.Kept, run(4, 3, saveFails = true))
+        assertEquals(listOf("save 4"), log)
+        log.clear()
+        assertEquals(FakePool.Outcome.Failed, run(4, 3, startFails = true))
+        assertEquals(listOf("save 4", "commit", "start"), log)
+        log.clear()
+        assertEquals(FakePool.Outcome.Ran, run(4, 3))
+        assertEquals(listOf("save 4", "commit", "start"), log)
+        log.clear()
+        // The open table's own block was saved when it started: nothing to save, and a save failure can't stop it.
+        assertEquals(FakePool.Outcome.Ran, run(4, 4, saveFails = true))
+        assertEquals(listOf("commit", "start"), log)
+    }
+
+    /**
+     * The service's pool watcher and failed-reload path over random events, run through [FakePool]'s own decisions with
+     * an engine and a store that fail on demand, as the service does: a move whose start fails brings what ran back once,
+     * and if that fails too the connection ends. After every event: an engine runs only on the newest spent block, saved
+     * before it started; a table on a new block starts from a deleted file; no block comes back before seven others; a
+     * move that never got past saving gave nothing up.
+     */
+    @Test fun thePoolRulesHoldOverRandomEvents() = repeat(300) { seed ->
+        val rnd = java.util.Random(seed.toLong())
+        var saved: Int? = 3 // store.fakeBlock
+        var lastBlock: Int? = 3
+        var lastInput = input(3)
+        var ran: Int? = 3 // the block the engine runs, null when none does (the connection ended)
+        var file = 3 // the block the table file was started on
+        var probe = 1
+        var live: Int? = 1 // the probe pair the app's own tests use
+        var since = 0L
+        var now = 0L
+        val used = mutableListOf(3) // blocks in the order tables were opened on them
+        fun restoreLastGood(block: Int?, saveFails: Boolean, startFails: Boolean): FakePool.Outcome {
+            val input = FakePool.restoreInput(lastInput, block, lastBlock, ++probe to "p$probe", setup, mapOf("nord" to "acc"), null, false, false) { emptySet() }
+            return FakePool.restart(input.fakeBlock, lastBlock, save = { if (saveFails) error("disk full"); saved = it }, commit = {
+                live = null
+                if (input.fakeBlock != lastBlock) { since = now; used += input.fakeBlock; file = input.fakeBlock }
+                lastBlock = input.fakeBlock; lastInput = input
+            }) {
+                ran = null // libbox stops the old engine first
+                if (startFails) error("no start")
+                assertEquals("started on a block not saved", saved, input.fakeBlock)
+                assertEquals("a table opened on another block's file", input.fakeBlock, file)
+                ran = input.fakeBlock; live = input.probe!!.first
+            }
+        }
+        repeat(300) {
+            if (ran == null) return@repeat // torn down: the user connects again, which starts a new run
+            now += FakePool.EVERY
+            val before = Triple(ran, live, since)
+            when (rnd.nextInt(3)) {
+                0, 1 -> { // a pool check, as watchPool
+                    val remaining = listOf(0, 1, FakePool.LOW - 1, FakePool.CAPACITY)[rnd.nextInt(4)]
+                    if (FakePool.step(remaining, now - since) == Step.Rotate) {
+                        val f = { rnd.nextInt(4) == 0 }
+                        when (restoreLastGood(Compiler.nextBlock(lastBlock!!, false), f(), f()).let { if (it == FakePool.Outcome.Failed) restoreLastGood(null, f(), f()) else it }) {
+                            FakePool.Outcome.Kept -> assertEquals("a move that wasn't started gave something up", before, Triple(ran, live, since))
+                            FakePool.Outcome.Failed -> assertEquals(null, ran)
+                            FakePool.Outcome.Ran -> assertTrue(ran != before.first)
+                        }
+                    }
+                }
+                else -> { // a reload that restarts and fails: the last good config comes back on the newest block
+                    ran = null
+                    restoreLastGood(null, false, rnd.nextInt(3) == 0)
+                }
+            }
+            ran?.let { assertEquals("runs a block that isn't the newest spent", lastBlock, it) }
+            assertEquals("the block in use was never saved", lastBlock, saved)
+            used.windowed(Compiler.FAKE_RANGES.size).forEach { assertEquals(it.toString(), Compiler.FAKE_RANGES.size, it.toSet().size) }
+        }
     }
 
     @Test fun everyBlockRefusesTheOthersInTheBlockEverythingConfig() = Compiler.FAKE_RANGES.indices.forEach { b ->

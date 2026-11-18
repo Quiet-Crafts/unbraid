@@ -1,12 +1,13 @@
 package app.unbraid.vpn
 
+import app.unbraid.data.Setup
+
 /**
  * When the running engine moves to the next block of fake IPs ([Compiler.FAKE_RANGES]). The engine never hands an
  * address to a second name while its block stays (an app still holding it would have its connections routed as the
  * other name), so a block running low is replaced by the next, at most once per [SPACING]: a flood of lookups can then
  * only make lookups of new names fail until the next move is due, never move anyone's traffic, and a block comes back
- * only after the seven others. The engine also counts a block whose table it can't trust as used up (0 left). [Life]
- * carries the move out.
+ * only after the seven others. The engine also counts a table it had trouble with as used up (0 left).
  */
 object FakePool {
     enum class Step { Nothing, Rotate, Wait, Exhausted }
@@ -21,12 +22,72 @@ object FakePool {
 
     /**
      * [remaining]: what the engine can still hand out, negative while it runs none. [since]: milliseconds since the
-     * block last changed (a start or a move); a negative one (the clock moved back) counts as unknown, so the move
-     * can't wait forever.
+     * block last changed (a start or a move), null if unknown; a negative one (the clock moved back) counts as unknown,
+     * so the move can't wait forever.
      */
     fun step(remaining: Int, since: Long?): Step = when {
         remaining < 0 || remaining >= LOW -> Step.Nothing
         since != null && since in 0L until SPACING -> if (remaining == 0) Step.Exhausted else Step.Wait
         else -> Step.Rotate
+    }
+
+    /**
+     * A reload keeps the open table's block only while its file is there ([bytes] > 0; a missing file has 0): one that
+     * went missing or empty under a running engine would start an empty table on addresses apps still hold.
+     */
+    fun keeps(open: Boolean, bytes: Long) = open && bytes > 0
+
+    /**
+     * The block a failed reload brings the last good config back on: the newest one spent ([spent]), not the one that
+     * config [ran] on. After a move whose start failed they differ, and going back would start the old block afresh
+     * while apps still hold its addresses: the reuse this pool exists to prevent.
+     */
+    fun restoreBlock(ran: Int, spent: Int?) = spent ?: ran
+
+    /**
+     * What ran ([last]) as it may come back while [now], the setup saved now, couldn't start: every app and website whose
+     * choice differs between the two (changed, added or removed) gets no connection, and so does every app that follows
+     * the default if the default differs, until a reload applies the change. Unchanged choices stay. Routes [now] lost
+     * (removed, or a provider signed out of in [accounts]) and a differing default are returned, to run with no tunnel.
+     * Of protections with a stricter side, the stricter of the two; settings with no such order (a filter's server)
+     * stay as they ran.
+     */
+    @OptIn(app.unbraid.data.SavedSites::class) // saved against saved: the compiler then decides which rules apply
+    fun narrowed(last: Setup, now: Setup, accounts: Map<String, String>): Pair<Setup, Set<String>> {
+        fun same(old: Map<String, String>, new: Map<String, String>) = (old.keys + new.keys).associateWith { k -> old[k].takeIf { it == new[k] } ?: app.unbraid.data.BLOCK }
+        val lost = last.routes.filter { r -> now.route(r.id) == null || !r.imported && accounts[r.loc.provider] == null }.mapTo(HashSet()) { it.id }
+        val p = last.prefs
+        val prefs = p.copy(lan = p.lan && now.prefs.lan, blockLan = p.blockLan || now.prefs.blockLan, filter = if (p.filter.id != null) p.filter else now.prefs.filter)
+        val home = last.home.copy(tsSuffixAllowed = last.home.tsSuffixAllowed.takeIf { it == now.home.tsSuffixAllowed }, subnets = last.home.subnets.filter { it in now.home.subnets })
+        return last.copy(apps = same(last.apps, now.apps), sites = same(last.sites, now.sites), prefs = prefs, home = home) to
+            lost + listOfNotNull(last.defaultRoute.takeIf { it != now.defaultRoute })
+    }
+
+    /**
+     * What a restore or a move runs: what last ran ([last]), on [block] (a move) or else [restoreBlock], with a new
+     * probe pair, made no more open than the setup and accounts saved now ([narrowed]), and with what may have changed
+     * since read again: the sign-in way around the exit only ever narrowed, Android's Block setting, and the apps sharing
+     * a user id with a blocked one ([kin], asked of the setup that runs: one installed since must not be left outside).
+     */
+    fun restoreInput(last: Compiler.Input, block: Int?, spent: Int?, probe: Pair<Int, String>, now: Setup, accounts: Map<String, String>, tsSuffix: String?,
+                     lockdown: Boolean, tsLoginPending: Boolean, kin: (Setup) -> Set<String>): Compiler.Input {
+        val (setup, lost) = narrowed(last.setup, now, accounts)
+        return Compiler.Input(setup, last.links, last.selfPackage, lockdown || last.lockdown, last.tsDir, last.cacheFile, tsSuffix, probe,
+            block ?: restoreBlock(last.fakeBlock, spent), last.blocked + lost, last.tsLoginPending && tsLoginPending, kin(setup))
+    }
+
+    /** How a [restart] ended: [Ran]; [Kept], nothing given up (the engine runs as before); [Failed], none runs. */
+    enum class Outcome { Ran, Kept, Failed }
+
+    /**
+     * One engine restart onto [block], in the only safe order. A new block is saved first ([save], only when it isn't
+     * [spent] already), before the engine can hand out any of it and before anything is given up: a failure there
+     * keeps the running engine, and the next check tries again. [commit] then gives the old engine up (from here
+     * nothing goes back to the old block) and [start] runs the new one.
+     */
+    inline fun restart(block: Int, spent: Int?, save: (Int) -> Unit, commit: () -> Unit, start: () -> Unit): Outcome {
+        try { if (block != spent) save(block) } catch (e: Exception) { return Outcome.Kept }
+        commit()
+        return try { start(); Outcome.Ran } catch (e: Exception) { Outcome.Failed }
     }
 }

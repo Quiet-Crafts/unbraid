@@ -60,6 +60,9 @@ class StatsFixesTest {
         assertNull(SpeedTest.nodeExit(node.copy(phase = SpeedTest.Phase.Done), tag, 3)) // test over
         assertNull(SpeedTest.nodeExit(SpeedTest.Run("r1", SpeedTest.Phase.Download, engine = 3), tag, 3)) // a route test, not a node test
         assertNull(SpeedTest.nodeExit(null, tag, 3))
+        // Not switched yet (still waiting its turn, or the switch call under way): Tailscale still sends by the configured node.
+        assertNull(SpeedTest.nodeExit(node.copy(phase = SpeedTest.Phase.Preparing, engine = 0), tag, 3))
+        assertNull(SpeedTest.nodeExit(node.copy(engine = 0), tag, 0))
     }
 
     /** 6 GB through one exit and 2 GB direct: the exit is 75% everywhere; shares round to the nearest percent. */
