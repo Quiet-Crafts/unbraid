@@ -44,8 +44,11 @@ object Updates {
 
     fun due(s: UpdateState, now: Long) = s.enabled && (now < s.lastAttemptMs || now - s.lastAttemptMs >= if (s.failed) FAILURE_INTERVAL_MS else SUCCESS_INTERVAL_MS)
 
-    /** Sent instead of the system's own agent, which names the phone model and Android version. */
-    const val AGENT = "unbraid"
+    /**
+     * Sent instead of the system's own agent, which names the phone model and Android version: only the app and its
+     * version, so the site can tell how many installs run each version.
+     */
+    const val AGENT = "unbraid/${app.unbraid.BuildConfig.VERSION_NAME}"
 
     internal suspend fun fetchLatest(): String? = withContext(Dispatchers.IO) {
         runCatching {
