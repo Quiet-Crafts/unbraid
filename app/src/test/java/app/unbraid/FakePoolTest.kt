@@ -220,6 +220,28 @@ class FakePoolTest {
     }
 
     /**
+     * A Headscale DNS permission refused before the old engine was given up stays refused in Android's tunnel too: the
+     * search domain comes from the input being started, never from saved settings, and preparing a move reads no store.
+     */
+    @Test fun theTunnelSearchDomainIsTheStartingInputs() {
+        val hs = Home(tailscale = true, tsControlUrl = "https://hs.example", tsSuffixAllowed = null)
+        val running = Compiler.Input(setup.copy(home = hs), emptyMap(), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", "corp.example", 1 to "old", 3, emptySet())
+        val saved = hs.copy(tsSuffixAllowed = "corp.example") // the refused edit
+        for (block in listOf(4, null)) {
+            val r = FakePool.restoreInput(running, block, 4, 2 to "new", saved.tsSuffixAllowed, "corp.example", false, false, true) { emptySet() }
+            assertEquals(null, Compiler.searchDomain(r))
+        }
+        assertEquals("corp.example", Compiler.searchDomain(FakePool.restoreInput(running, null, 4, 2 to "new", saved.tsSuffixAllowed, "corp.example", false, false, false) { emptySet() }))
+        assertEquals(null, Compiler.searchDomain(Compiler.Input(setup.copy(home = saved.copy(tailscale = false)), emptyMap(), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", "corp.example")))
+        val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+        val tun = vpn.substringAfter("override fun openTun(").substringBefore("override fun ")
+        assertFalse("openTun reads saved settings", tun.contains("store."))
+        assertTrue(tun.contains("Compiler.searchDomain(tunInput)"))
+        assertEquals(2, Regex("""tunInput = input\b""").findAll(vpn).count()) // set by both starts of a compiled input
+        assertTrue(vpn.contains("if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix"))
+    }
+
+    /**
      * A restart saves a new block before anything is given up: a failed save keeps the running engine (the next check
      * tries again), and only then does the old engine go and the new one start.
      */

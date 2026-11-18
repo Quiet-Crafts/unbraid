@@ -392,6 +392,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var lastGood: String? = null
     /** What [lastGood] was compiled from, so a failed reload can bring exactly that back with a new probe pair. */
     @Volatile private var lastInput: Compiler.Input? = null
+    /** The input the engine is being started with, which [openTun] builds Android's tunnel for; none while on hold. */
+    @Volatile private var tunInput: Compiler.Input? = null
 
     @OptIn(FlowPreview::class)
     private fun connect(updated: Boolean = false) {
@@ -475,6 +477,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (block != lastBlock) { engine("$APP couldn't save its state. Try again.") { store.fakeBlock = block }; blockSince = SystemClock.elapsedRealtime() }
         lastBlock = block
         openTable(true)
+        tunInput = null
         engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
         starts++
         holding = true
@@ -535,6 +538,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // one already open through a tunnel that turns TCP-only is closed first.
             val udpless = Compiler.tcpOnly(json)
             Health.stun.udpless(udpless) { tcpOnly = tcpOnly + udpless }
+            tunInput = input
             engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
             tcpOnly = udpless
             restarting = false
@@ -597,8 +601,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      */
     private fun restoreLastGood(srv: CommandServer, block: Int? = null, gone: Boolean = true, move: Boolean = false): FakePool.Outcome = FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->
         runCatching {
-            val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, spent, newProbe(), store.setup.value.home.tsSuffixAllowed,
-                store.tsSuffix, isLockdownEnabled, tsLoginPending, move, ::blockedKin)
+            // A move runs what runs: saved settings aren't read for it.
+            val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, spent, newProbe(),
+                if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move, ::blockedKin)
             input to Compiler.compile(input).also(Libbox::checkConfig)
         }.onFailure { Log.e(TAG, "restore: ${logLine(it)}") }.getOrThrow()
     }, note = { store.fakeBlock = it }, commit = { input ->
@@ -611,6 +616,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         openTable(true)
     }) { input, json ->
         Compiler.tcpOnly(json).let { u -> Health.stun.udpless(u) { tcpOnly = tcpOnly + u } }
+        tunInput = input
         srv.startOrReloadService(json, OverrideOptions())
         tcpOnly = Compiler.tcpOnly(json)
         starts++
@@ -1178,8 +1184,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         o.inet6Address.forEach { b.addAddress(it.address(), it.prefix()) }
         if (o.autoRoute) {
             o.dnsServerAddress.forEachString { b.addDnsServer(it) }
-            // Short tailnet names ("nas") expand to the MagicDNS domain, as with the Tailscale app.
-            Compiler.trustedSuffix(store.tsSuffix, store.setup.value.home)?.takeIf { store.setup.value.home.tailscale }?.let { b.addSearchDomain(it) }
+            // From the input being started, not saved settings: a DNS permission the engine refused stays refused here too.
+            Compiler.searchDomain(tunInput)?.let { b.addSearchDomain(it) }
             val r4 = o.inet4RouteAddress.toList()
             if (r4.isEmpty()) b.addRoute("0.0.0.0", 0) else r4.forEach { b.addRoute(it.ipPrefix()) }
             o.inet6RouteAddress.forEach { b.addRoute(it.ipPrefix()) }

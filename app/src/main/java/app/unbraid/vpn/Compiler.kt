@@ -522,6 +522,9 @@ object Compiler {
      */
     fun trustedSuffix(raw: String?, h: Home) = tsSuffix(raw)?.takeIf { if (officialTs(h)) it.endsWith(".ts.net") else it == h.tsSuffixAllowed }
 
+    /** The DNS search domain Android's tunnel gets for [i]: short tailnet names ("nas") expand to it, as with the Tailscale app. */
+    fun searchDomain(i: Input?) = i?.let { trustedSuffix(it.tsSuffix, it.setup.home)?.takeIf { _ -> it.setup.home.tailscale } }
+
     /**
      * Domains whose lookups the tailnet's DNS answers while Reach your tailnet is on, [reported] being the tailnet domain
      * Tailscale gave: all of ts.net on Tailscale's own server, else only the allowed one. A website rule under them never applies then ([Sites.off]).
