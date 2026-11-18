@@ -457,7 +457,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
             apply(srv, setup, picked, accounts)
             ranRestores = seen
-            state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, stuck = stuck(setup, picked.blocked), engine = starts,
+            // With the tailnet domain the engine was just compiled with: a reload that changes nothing never sets it again.
+            state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), tsSuffix = lastInput?.tsSuffix, lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, stuck = stuck(setup, picked.blocked), engine = starts,
                 applied = if (picked.blocked.values.none { it is LinkPicker.Waiting }) setup.hashCode() else 0)
             stopWanted = false
             AfterUpdate.on(this)

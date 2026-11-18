@@ -64,6 +64,24 @@ class SitesStateTest {
     /**
      * On Headscale only once Tailscale reports the domain the user allowed; before, the website applies.
      */
+    /**
+     * After connect the lists and widgets judge by the tailnet domain the running config was compiled with: the first On
+     * state carries it, as a reload that changes nothing never sets it again. Without it this website counted on Italy
+     * while the engine sent it to the tailnet.
+     */
+    @Test fun connectShowsTheTailnetDomainItRunsWith() {
+        val s = base.copy(home = Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example"), sites = mapOf("box.corp.example" to "it"))
+        val compiled = Compiler.Input(s, emptyMap(), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", "corp.example")
+        val on = app.unbraid.vpn.VpnState(app.unbraid.vpn.VpnState.Phase.On, tsSuffix = compiled.tsSuffix)
+        assertEquals(emptyMap<String, String>(), Sites.applied(s, reported = on.tsSuffix))
+        assertEquals(s.sites, Sites.applied(s, reported = null)) // what the first On state said before
+        val connect = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+            .substringAfter("private fun connect(").substringBefore("\n    }\n")
+        val first = connect.indexOf("state.value = VpnState(VpnState.Phase.On,")
+        assertTrue(connect.substring(first).substringBefore("\n").contains("tsSuffix = lastInput?.tsSuffix"))
+        assertTrue(connect.indexOf("apply(srv, setup, picked, accounts)") in 0 until first)
+    }
+
     @Test fun answeredByAHeadscaleTailnet() {
         val s = base.copy(home = Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example"), sites = mapOf("box.corp.example" to "it"))
         cell(s, "box.corp.example", "Not applied: your tailnet answers this name while Reach your tailnet is on", false, "home-ts", "reject", reported = "corp.example")
