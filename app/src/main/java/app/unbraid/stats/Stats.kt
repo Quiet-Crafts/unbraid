@@ -369,6 +369,8 @@ internal object Collector {
      * still queued from the engine before are labelled by its setup, not the next one's.
      */
     private var engine = Triple(app.unbraid.data.Setup(), emptyMap<String, String>(), emptyMap<String, app.unbraid.data.Server>())
+    /** That engine's number ([VpnState.engine]): a node test's switch counts only for its own events. */
+    private var engineNo = 0
     private var interval = 0L
     private val seen = HashMap<String, Conn>()
     private var lastFlush = 0L
@@ -398,6 +400,7 @@ internal object Collector {
         countFrom = if (retime && client != null) minOf(countFrom, (heard.takeIf { it > 0 } ?: now) - 2_000) else Long.MAX_VALUE
         stopClient()
         engine = Triple(UnbraidVpn.running ?: Unbraid.store.setup.value, UnbraidVpn.tags, UnbraidVpn.state.value.servers)
+        engineNo = UnbraidVpn.state.value.engine
         startedAt = now
         interval = if (Stats.watching) 1_000_000_000L else 15_000_000_000L
         val c = Libbox.newCommandClient(Handler(Stats.gen), CommandClientOptions().apply {
@@ -485,7 +488,7 @@ internal object Collector {
             // A connection to a website with a route of its own counts under that website, not under the app that opened it.
             val site = if (e.own) null else e.host?.let { Sites.match(it, sites) }
             val app = if (e.own) Stats.ctx.packageName else site?.let { Stats.SITE + it } ?: appOf(e).also(Stats::noteApp).pkg
-            val exit = (if (e.own) SpeedTest.exitOn(e.tag) else SpeedTest.nodeExitOn(e.tag)) ?: exitOf(e.tag, site?.let(applied::get) ?: setup.routeOf(app), tags, e.byAddress)
+            val exit = (if (e.own) SpeedTest.exitOn(e.tag) else SpeedTest.nodeExitOn(e.tag, engineNo)) ?: exitOf(e.tag, site?.let(applied::get) ?: setup.routeOf(app), tags, e.byAddress)
             Conn(app, ids.getOrPut(exit) { Stats.note(exit, setup) }, servers[exit]?.name, 0, 0)
         }
         val replayed = HashSet<String>()

@@ -388,8 +388,8 @@ object SpeedTest {
     internal fun nodeExit(run: Run?, tag: String?, engine: Int): String? =
         run?.takeIf { it.phase.busy && it.exit.startsWith(NODE) && tag == Compiler.TS_TAG && it.engine > 0 && it.engine == engine }?.exit
 
-    /** [nodeExit] for the running test and engine. */
-    fun nodeExitOn(tag: String?): String? = nodeExit(_run.value, tag, UnbraidVpn.state.value.engine)
+    /** [nodeExit] for the running test, on [engine] (the running one unless the event came from another). */
+    fun nodeExitOn(tag: String?, engine: Int = UnbraidVpn.state.value.engine): String? = nodeExit(_run.value, tag, engine)
 
     private val Phase?.busy get() = this == Phase.Preparing || this == Phase.Download || this == Phase.Upload
 

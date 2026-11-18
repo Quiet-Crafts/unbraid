@@ -816,7 +816,7 @@ index 0000000..84b1b45
 +	}
 +}
 diff --git a/experimental/cachefile/cache.go b/experimental/cachefile/cache.go
-index 3cbec73..1510019 100644
+index 3cbec73..5b0f84f 100644
 --- a/experimental/cachefile/cache.go
 +++ b/experimental/cachefile/cache.go
 @@ -7,6 +7,7 @@ import (
@@ -827,17 +827,19 @@ index 3cbec73..1510019 100644
  	"time"
  
  	"github.com/sagernet/bbolt"
-@@ -65,6 +66,9 @@ type CacheFile struct {
+@@ -65,6 +66,11 @@ type CacheFile struct {
  	saveRDRC           map[saveCacheKey]bool
  	saveDNSCacheAccess sync.RWMutex
  	saveDNSCache       map[saveCacheKey]saveDNSCacheEntry
 +
 +	// See FakeIPTrouble.
 +	fakeIPTrouble atomic.Bool
++	// The background checkpoint save (check and write) against reading the checkpoint, which removes it.
++	checkpointAccess sync.Mutex
  }
  
  type saveCacheKey struct {
-@@ -191,6 +195,9 @@ func (c *CacheFile) start() error {
+@@ -191,6 +197,9 @@ func (c *CacheFile) start() error {
  				continue
  			}
  			if E.IsMulti(err, bboltErrors.ErrInvalid, bboltErrors.ErrChecksum, bboltErrors.ErrVersionMismatch) {
@@ -847,7 +849,7 @@ index 3cbec73..1510019 100644
  				rmErr := filemanager.Remove(c.ctx, c.path)
  				if rmErr != nil {
  					return err
-@@ -203,8 +210,11 @@ func (c *CacheFile) start() error {
+@@ -203,8 +212,11 @@ func (c *CacheFile) start() error {
  		if err == nil {
  			break
  		}
@@ -860,7 +862,7 @@ index 3cbec73..1510019 100644
  		rmErr := filemanager.Remove(c.ctx, c.path)
  		if rmErr != nil {
  			return err
-@@ -311,6 +321,15 @@ func (c *CacheFile) resetDB(failedDB *bbolt.DB, reason any) {
+@@ -311,6 +323,15 @@ func (c *CacheFile) resetDB(failedDB *bbolt.DB, reason any) {
  	if c.DB != failedDB {
  		return
  	}
@@ -877,7 +879,7 @@ index 3cbec73..1510019 100644
  	failedDB.Close()
  	filemanager.Remove(c.ctx, c.path)
 diff --git a/experimental/cachefile/fakeip.go b/experimental/cachefile/fakeip.go
-index 814c204..07cfe1f 100644
+index 814c204..edea335 100644
 --- a/experimental/cachefile/fakeip.go
 +++ b/experimental/cachefile/fakeip.go
 @@ -1,6 +1,7 @@
@@ -888,7 +890,7 @@ index 814c204..07cfe1f 100644
  	"net/netip"
  	"os"
  	"time"
-@@ -21,6 +22,19 @@ var (
+@@ -21,7 +22,22 @@ var (
  	keyMetadata         = []byte(fakeipBucketPrefix + "metadata")
  )
  
@@ -906,9 +908,12 @@ index 814c204..07cfe1f 100644
 +}
 +
  func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
++	c.checkpointAccess.Lock()
++	defer c.checkpointAccess.Unlock()
  	var metadata adapter.FakeIPMetadata
  	err := c.batch(func(tx *bbolt.Tx) error {
-@@ -39,13 +53,17 @@ func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
+ 		bucket := tx.Bucket(bucketFakeIP)
+@@ -39,13 +55,17 @@ func (c *CacheFile) FakeIPMetadata() *adapter.FakeIPMetadata {
  		return metadata.UnmarshalBinary(metadataBinary)
  	})
  	if err != nil {
@@ -927,7 +932,7 @@ index 814c204..07cfe1f 100644
  		bucket, err := tx.CreateBucketIfNotExists(bucketFakeIP)
  		if err != nil {
  			return err
-@@ -55,7 +73,7 @@ func (c *CacheFile) FakeIPSaveMetadata(metadata *adapter.FakeIPMetadata) error {
+@@ -55,7 +75,7 @@ func (c *CacheFile) FakeIPSaveMetadata(metadata *adapter.FakeIPMetadata) error {
  			return err
  		}
  		return bucket.Put(keyMetadata, metadataBinary)
@@ -936,7 +941,7 @@ index 814c204..07cfe1f 100644
  }
  
  func (c *CacheFile) FakeIPSaveMetadataAsync(metadata *adapter.FakeIPMetadata) {
-@@ -63,21 +81,25 @@ func (c *CacheFile) FakeIPSaveMetadataAsync(metadata *adapter.FakeIPMetadata) {
+@@ -63,21 +83,33 @@ func (c *CacheFile) FakeIPSaveMetadataAsync(metadata *adapter.FakeIPMetadata) {
  	defer c.saveMetadataAccess.Unlock()
  	c.saveMetadata = metadata
  	if c.saveMetadataTimer == nil {
@@ -960,10 +965,18 @@ index 814c204..07cfe1f 100644
 +	c.saveMetadataAccess.Lock()
 +	savedMetadata := c.saveMetadata
 +	c.saveMetadataAccess.Unlock()
++	// Check and write together, never around a troubled store's final reading of the checkpoint (FakeIPMetadata),
++	// which takes it away: a write the check let through before trouble lands before that reading, never after.
++	c.checkpointAccess.Lock()
++	defer c.checkpointAccess.Unlock()
 +	if savedMetadata != nil && !c.FakeIPTrouble() {
++		afterTroubleCheck()
 +		_ = c.FakeIPSaveMetadata(savedMetadata)
 +	}
 +}
++
++// Tests only: runs between the background save's trouble check and its write.
++var afterTroubleCheck = func() {}
 +
  func (c *CacheFile) FakeIPStore(address netip.Addr, domain string) error {
 -	return c.batch(func(tx *bbolt.Tx) error {
@@ -971,7 +984,7 @@ index 814c204..07cfe1f 100644
  		bucket, err := tx.CreateBucketIfNotExists(bucketFakeIP)
  		if err != nil {
  			return err
-@@ -101,7 +123,7 @@ func (c *CacheFile) FakeIPStore(address netip.Addr, domain string) error {
+@@ -101,7 +133,7 @@ func (c *CacheFile) FakeIPStore(address netip.Addr, domain string) error {
  			}
  		}
  		return bucket.Put([]byte(domain), address.AsSlice())
@@ -980,7 +993,7 @@ index 814c204..07cfe1f 100644
  }
  
  func (c *CacheFile) FakeIPStoreAsync(address netip.Addr, domain string, logger logger.Logger) {
-@@ -144,14 +166,14 @@ func (c *CacheFile) FakeIPLoad(address netip.Addr) (string, bool) {
+@@ -144,14 +176,14 @@ func (c *CacheFile) FakeIPLoad(address netip.Addr) (string, bool) {
  		return cachedDomain, true
  	}
  	var domain string
@@ -997,7 +1010,7 @@ index 814c204..07cfe1f 100644
  	return domain, domain != ""
  }
  
-@@ -171,7 +193,7 @@ func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bo
+@@ -171,7 +203,7 @@ func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bo
  		return cachedAddress, true
  	}
  	var address netip.Addr
@@ -1006,7 +1019,7 @@ index 814c204..07cfe1f 100644
  		var bucket *bbolt.Bucket
  		if isIPv6 {
  			bucket = tx.Bucket(bucketFakeIPDomain6)
-@@ -183,12 +205,12 @@ func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bo
+@@ -183,12 +215,12 @@ func (c *CacheFile) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bo
  		}
  		address = M.AddrFromIP(bucket.Get([]byte(domain)))
  		return nil
@@ -1021,7 +1034,7 @@ index 814c204..07cfe1f 100644
  		for _, bucketName := range [][]byte{bucketFakeIP, bucketFakeIPDomain4, bucketFakeIPDomain6} {
  			if tx.Bucket(bucketName) == nil {
  				continue
-@@ -199,5 +221,5 @@ func (c *CacheFile) FakeIPReset() error {
+@@ -199,5 +231,5 @@ func (c *CacheFile) FakeIPReset() error {
  			}
  		}
  		return nil
@@ -1030,10 +1043,10 @@ index 814c204..07cfe1f 100644
  }
 diff --git a/experimental/cachefile/fakeip_test.go b/experimental/cachefile/fakeip_test.go
 new file mode 100644
-index 0000000..11aebbc
+index 0000000..976d54d
 --- /dev/null
 +++ b/experimental/cachefile/fakeip_test.go
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,156 @@
 +package cachefile
 +
 +import (
@@ -1042,6 +1055,7 @@ index 0000000..11aebbc
 +	"net/netip"
 +	"os"
 +	"testing"
++	"time"
 +
 +	"github.com/sagernet/sing-box/adapter"
 +	"github.com/sagernet/sing-box/option"
@@ -1161,6 +1175,33 @@ index 0000000..11aebbc
 +		t.Fatal(err)
 +	}
 +	cache.database().Close()
++}
++
++// A background save whose trouble check passed just before trouble came can't land after a troubled store took the
++// checkpoint away (Store.Close reads it, which removes it): that reading waits for the write, and removes it too.
++func TestNoCheckpointSurvivesATroubledClose(t *testing.T) {
++	cache := open(t, t.TempDir()+"/cache.db")
++	defer cache.database().Close()
++	checked, release := make(chan struct{}), make(chan struct{})
++	afterTroubleCheck = func() { close(checked); <-release }
++	defer func() { afterTroubleCheck = func() {} }()
++	cache.saveMetadata = &adapter.FakeIPMetadata{Inet4Range: netip.MustParsePrefix("198.18.0.0/28"), Inet4Current: netip.MustParseAddr("198.18.0.2")}
++	saved := make(chan struct{})
++	go func() { cache.saveMetadataLater(); close(saved) }()
++	<-checked
++	cache.fakeIPTrouble.Store(true) // a failed allocation, while the database is still open
++	taken := make(chan struct{})
++	go func() { cache.FakeIPMetadata(); close(taken) }() // the troubled close's reading
++	select {
++	case <-taken:
++	case <-time.After(100 * time.Millisecond): // it waits for the write
++	}
++	close(release)
++	<-saved
++	<-taken
++	if cache.FakeIPMetadata() != nil {
++		t.Fatal("a checkpoint survived the troubled close")
++	}
 +}
 diff --git a/experimental/libbox/fakeip.go b/experimental/libbox/fakeip.go
 new file mode 100644
