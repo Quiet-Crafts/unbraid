@@ -183,6 +183,10 @@ object Compiler {
         val perApp = s.apps.entries.groupBy({ if (it.key in through) FILTERED else it.value }, { it.key }).toSortedMap()
             .filterKeys { id -> (id != s.defaultRoute || id == DIRECT && directFiltered) && when (id) { DIRECT -> i.lockdown; BLOCK -> false; else -> true } }
             .mapValues { (_, p) -> JsonArray(p.sorted().map(::JsonPrimitive)) }
+        // With Direct as the default, what Android can't name the app of may be an app kept on a VPN: refused, connections and lookups.
+        val unnamedRefused = s.defaultRoute == DIRECT && perApp.keys.any { it != DIRECT && it != FILTERED }
+        // A lookup of the phone's apps Android names no app for; the tailnet's own lookups come in another way and name none either.
+        val unnamedLookup = obj("type" to "logical", "mode" to "and", "rules" to JsonArray(listOf(obj("inbound" to arr("tun")), obj("package_name_regex" to arr("."), "invert" to true))), "action" to "reject")
         // Destination rules that beat any app rule. Repeated after every resolve, because fake-IP connections
         // only get a real address there.
         val network = buildList {
@@ -241,6 +245,8 @@ object Compiler {
                     // Block comes first: no name is looked up for a blocked app, nor a blocked website's for anyone, except a
                     // name under it with a route of its own, which its own rule below answers.
                     if (barred.isNotEmpty()) add(obj("package_name" to barred, "action" to "reject"))
+                    // So is one Android names no app for while an app is blocked: it may be that app's, as its connections may.
+                    if (barred.isNotEmpty()) add(unnamedLookup)
                     for ((id, names) in runs) if (id == BLOCK) add(except(names).let { own ->
                         if (own.isEmpty()) obj(*match(names), "action" to "reject")
                         else obj("type" to "logical", "mode" to "and", "rules" to JsonArray(listOf(obj(*match(names)), obj(*match(own), "invert" to true))), "action" to "reject")
@@ -257,6 +263,9 @@ object Compiler {
                         add(if (id in refused) obj(*names, "action" to "reject") else obj(*names, "server" to siteDns(id)))
                     }
                     for ((id, pkgs) in perApp) add(if (id in refused) obj("package_name" to pkgs, "action" to "reject") else obj("package_name" to pkgs, "server" to dnsFor(id)))
+                    // A lookup Android names no app for matches no app rule: an address one got a stand-in above (its connection
+                    // is decided by the app it is from), any other type would reach the phone's own resolver.
+                    if (unnamedRefused && barred.isEmpty()) add(unnamedLookup)
                     // A blocked default never falls back to another resolver: the phone's network would see the names.
                     if (defaultBlocked) add(obj("action" to "reject"))
                 }
@@ -408,8 +417,8 @@ object Compiler {
                     // A connection Android can't name the app of matches no app rule. With Direct as the default it may
                     // be one of an app kept on a VPN, so it is refused rather than sent out on the phone's own connection.
                     // After the LAN and home rules for addresses, before the default's lookup, so its name isn't asked
-                    // on the normal connection. Lookups were answered above, as for every app.
-                    if (s.defaultRoute == DIRECT && perApp.keys.any { it != DIRECT && it != FILTERED }) add(obj("package_name_regex" to arr("."), "invert" to true, "action" to "reject"))
+                    // on the normal connection. Lookups were answered above: a stand-in address as for every app, other types refused.
+                    if (unnamedRefused) add(obj("package_name_regex" to arr("."), "invert" to true, "action" to "reject"))
                     add(obj("action" to "resolve", "server" to defaultDns))
                     network.forEach { add(it) }
                     // Ping has no owner the engine can look up, so it never matches an app's rule and lands here: with

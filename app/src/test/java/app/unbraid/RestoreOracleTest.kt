@@ -133,6 +133,7 @@ class RestoreOracleTest {
             var rby = By.None
             if (name != null) when {
                 app in barred -> return Step(Outcome(REJECT), By.AppFirst, By.AppFirst)
+                app == null && barred.isNotEmpty() -> return Step(Outcome(RestoreTraffic.HELD), By.AppFirst, By.AppFirst)
                 blockedSite(name) -> return Step(Outcome(REJECT), By.Name, By.Name)
                 local(name) -> { real = true; ans = Outcome("direct", Resolver.Local); rby = By.Name }
             }
@@ -173,6 +174,7 @@ class RestoreOracleTest {
             if (app != null && leftOut(app)) return Step(Outcome("direct", Resolver.Local), By.AppFirst, By.AppFirst)
             val step = { o: Outcome, by: By -> Step(o, by, by) }
             if (app in barred) return step(Outcome(REJECT), By.AppFirst)
+            if (app == null && barred.isNotEmpty()) return step(Outcome(RestoreTraffic.HELD), By.AppFirst)
             if (blockedSite(name)) return step(Outcome(REJECT), By.Name)
             if (local(name)) return step(Outcome("direct", Resolver.Local), By.Name)
             site(name)?.let { sites.getValue(it) }?.let { id ->
@@ -180,6 +182,7 @@ class RestoreOracleTest {
                 return step(if (type == "HTTPS") Outcome(RestoreTraffic.EMPTY) else answer(id, siteKind(id)), By.Name)
             }
             app?.let(::group)?.let { g -> return step(if (refused(g)) Outcome(REJECT) else answer(g, kind(g)), By.App) }
+            if (s.defaultRoute == DIRECT && vpnApps && app == null) return step(Outcome(RestoreTraffic.HELD), By.App)
             if (defaultBlocked) return step(Outcome(REJECT), By.None)
             return step(answer(s.defaultRoute, defaultKind), By.None)
         }
@@ -293,7 +296,9 @@ class RestoreOracleTest {
                 if (p != PING) for (q in listOf("TXT", "HTTPS")) {
                     val ownL = duo(a, b, l, true) { it.lookup(p, "free.test", q) }
                     val peL = mine(ownL, dfltLookup.getValue(q))
-                    for (n in names - "free.test") each(duo(a, b, l, true) { it.lookup(p, n, q) }, ownL, peL) { d, o, e, x -> who(n, null, d, o, e, sites, x) }
+                    for (n in names - "free.test") each(duo(a, b, l, true) { it.lookup(p, n, q) }, ownL, peL) { d, o, e, x ->
+                        // A hold lifted at a local name is the local network's, as at its addresses.
+                        if (d.was.out.exit == RestoreTraffic.HELD && localOn && localSuffixes.any { under(n, it) }) null else who(n, null, d, o, e, sites, x) }
                 }
             }
         }

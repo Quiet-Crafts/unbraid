@@ -139,7 +139,7 @@ would cover every website that ends in it; add the website itself.
 
 An app on Block gets no internet connection while unbraid is connected: not through a route, not Direct, and no
 names are looked up for it. A switch decides whether it can still reach devices on your local network. While any
-app is blocked, unbraid refuses pings and connections that Android can't tie to an app. A blocked website can't be
+app is blocked, unbraid refuses pings, connections and lookups that Android can't tie to an app. A blocked website can't be
 looked up in the apps that go through unbraid. Block works only while unbraid is connected; for the time it is
 off, use Android's "Block connections without VPN".
 
