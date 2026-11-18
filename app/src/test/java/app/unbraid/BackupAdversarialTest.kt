@@ -337,6 +337,17 @@ class BackupAdversarialTest {
         val now = then.copy(routes = listOf(Route("r", ovpn = office("198.51.100.22"))))
         val restored = now.restoredFrom(o.setup, null, 0, o.keys)!!
         assertTrue(restored.route("r")!!.keyless && restored.servers.single().keyless)
+        // Everything the file keeps must match: a WireGuard route here with other allowed addresses is not taken for it.
+        assertTrue(here.copy(routes = listOf(Route("w", wg = wg.copy(allowedIps = listOf("10.0.0.0/8"))))).restoredFrom(c.setup, null, 0, c.keys)!!.servers.single().keyless)
+        // Nor a Shadowsocks route here without the plugin the file names: the route waits for its config, plugin intact.
+        val ss = app.unbraid.data.SsProfile("Box", "203.0.113.30", 8388, "aes-256-gcm", "secret", "obfs-local", "obfs=http")
+        val sThen = Setup(routes = listOf(Route("s", ss = ss)), defaultRoute = "s", version = VERSION)
+        val so = Backup.read(Backup.export(sThen, "3.0.2", 0, keys = false))
+        val bare = sThen.copy(routes = listOf(Route("s", ss = ss.copy(plugin = null, pluginOpts = null)))).restoredFrom(so.setup, null, 0, so.keys)!!.route("s")!!
+        assertTrue(bare.keyless)
+        assertEquals("obfs-local", bare.ss!!.plugin)
+        // The same route, plugin and all, still gives it back.
+        assertEquals(ss, sThen.restoredFrom(so.setup, null, 0, so.keys)!!.route("s")!!.ss)
     }
 
     @Test fun everySaveNeedsEightCharactersAndKeysNeedAHardOne() {

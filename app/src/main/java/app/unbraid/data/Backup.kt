@@ -498,11 +498,12 @@ const val WAIT_MS = 30 * 86_400_000L
 fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true): Setup? {
     // Saved without keys: an own server this phone still has gets its config back here, and the home peer stays as it is.
     // A route that had no own server here got one made up in the file: this phone's route of that id gives it back, only
-    // where the file carries that server's identity; an OpenVPN one holds just a name, so its route waits for its config.
+    // only where everything the file keeps of that server is the same here (plugin and allowed addresses too); an OpenVPN
+    // one holds just a name, so its route waits for its config.
     val byOwn = backup.routes.groupBy { it.own }
     val full = backup.servers.filter { it.keyless }.mapNotNull { k ->
         (servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) } ?: byOwn[k.id].orEmpty().firstNotNullOfOrNull { x ->
-            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf { k.ovpn == null && k.sameAs(it) }
+            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf { k.ovpn == null && it.withoutSecrets() == k }
         })?.let { k.id to it }
     }.toMap()
     val b = if (full.isEmpty()) backup else backup.copy(
