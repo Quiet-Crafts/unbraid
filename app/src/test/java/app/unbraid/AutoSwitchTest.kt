@@ -95,6 +95,36 @@ class AutoSwitchTest {
         assertNull(ns.current(full, AutoSwitch.State(true, AutoSwitch.Net(MOBILE, 101)), emptyMap())) // the phone left that network
     }
 
+    /** A switch blocked for lack of room, then possible once a profile is deleted: the card goes and the switch is decided afresh. */
+    @Test fun aBlockedSwitchThatBecomesPossibleIsDecidedAgain() {
+        val loose = setup.copy(profile = null, defaultRoute = "us", apps = mapOf("org.a" to "nl"))
+        val full = loose.copy(profiles = loose.profiles + (1..MAX_PROFILES - 3).map { Profile("P$it", "nl") })
+        val wifi = AutoSwitch.Net(WIFI, 100)
+        AutoSwitch.Run().run {
+            seen(wifi)
+            val d = settle(wifi, full.onNet)!!
+            assertEquals("Home", d.profile)
+            assertNull(AutoSwitch.decide(full, "Home") { _, _ -> false }.to)
+            assertTrue(commit(d, full.onNet, false, blocked = true))
+            assertNull(settle(wifi, full.onNet)) // acted on: nothing again while it stays blocked
+            val ns = AutoSwitch.NotSwitched("Home", WIFI, 100, "blocked", state.left)
+            val freed = full.forget("P1")
+            assertTrue(ns.freed(freed, state, emptyMap()))
+            assertFalse(ns.freed(full, state, emptyMap()))
+            unblocked(ns.net, ns.profile)
+            assertEquals("Home", settle(wifi, freed.onNet)?.profile)
+        }
+        // A hand pick since is not forgotten: only the blocked decision is.
+        AutoSwitch.Run().run {
+            seen(wifi)
+            val d = settle(wifi, full.onNet)!!
+            commit(d, full.onNet, false, blocked = true)
+            pick(full.onNet)
+            unblocked(100, "Home")
+            assertNull(settle(wifi, full.onNet))
+        }
+    }
+
     /** A rule edited for the network the phone is on is decided afresh; the pick made before it no longer holds. */
     @Test fun aRuleEditForTheNetworkForgetsWhatWasActedOn() {
         val wifi = AutoSwitch.Net(WIFI, 100)

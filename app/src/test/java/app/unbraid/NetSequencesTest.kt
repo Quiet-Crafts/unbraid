@@ -316,6 +316,7 @@ class NetSequencesTest {
         interleave(68, setOf(RESTORES)) // a settle timer from before the VPN went off and on decides for the new stay
         interleave(428, setOf(RESTORES)) // a profile deleted and another made under its name, which the old decision then applies to
         interleave(361, setOf(RESTORES)) // a rule removed and set again on the same network: decided afresh, not held as acted on
+        interleave(540, setOf(RESTORES)) // a blocked switch that became possible was never decided again
     }
 
     /**
@@ -337,6 +338,7 @@ class NetSequencesTest {
     private fun interleave(seed: Int, skip: Set<Int> = emptySet()) {
         val rnd = Random(seed)
         val restores = Random(seed + 1_000_003)
+        val frees = Random(seed + 2_000_003) // whether a save was of a blocked switch, and when it becomes possible
         val run = AutoSwitch.Run()
         fun kindOf(id: Long) = if (id % 2 == 0L) MOBILE else WIFI
         var nextId = 10L
@@ -348,6 +350,7 @@ class NetSequencesTest {
         var visit = 0 // a new visit as well each time the VPN comes on again: what a settle timer is armed for
         val names = mutableListOf("Home", "Trip", "Work")
         val rules = mutableMapOf(WIFI to "Home", MOBILE to "Trip")
+        var blocked: Pair<AutoSwitch.Decision, Int>? = null // the switch noted done because it was blocked, with its stay; none once anything else changed what was acted on
         var done: Pair<Int, Map<String, String>>? = null // saved, picked, or found without a rule on a stay, under the rules then
         var timer: Triple<Net, Int, Int>? = null // a settle timer armed on a network: the model's stay and the oracle's
         val live = mutableListOf<Pair<AutoSwitch.Decision, Int>>() // decisions the model may still save, with their stay
@@ -359,6 +362,7 @@ class NetSequencesTest {
         fun edit(kind: String, name: String?) {
             if (name == null) rules.remove(kind) else rules[kind] = name
             done = done?.let { (st, r) -> st to (r - kind) }
+            blocked = null
             run.ruleEdited(kind)
         }
         run.seen(here)
@@ -369,7 +373,12 @@ class NetSequencesTest {
             if (RESTORES !in skip && restores.nextInt(12) == 0) {
                 log.append(" R")
                 if (restores.nextBoolean()) rules[restores.nextKind()] = names.random(restores)
-                run.replaced(); stay++; visit++; voidAll(); done = null
+                run.replaced(); stay++; visit++; voidAll(); done = null; blocked = null
+            }
+            // The blocked switch becomes possible (the card found room): decided afresh as after any settle, a new stay.
+            if (frees.nextInt(8) == 0) blocked?.takeIf { it.second == stay }?.let { (d, _) ->
+                log.append(" U")
+                run.unblocked(d.net, d.profile); stay++; visit++; voidAll(); done = null; blocked = null
             }
             val e = rnd.nextInt(17).takeIf { it !in skip } ?: return@repeat
             log.append(" $e")
@@ -383,13 +392,13 @@ class NetSequencesTest {
                     val expect = when {
                         truth == null -> null
                         done?.first == stay && done!!.second[truth.kind] == want -> null
-                        want == null -> { done = stay to rules.toMap(); null }
+                        want == null -> { done = stay to rules.toMap(); blocked = null; null }
                         live.any { it.second == stay && it.first.profile == want } -> null
                         else -> want
                     }
                     val d = run.settle(n, rules, modelStay)
                     assertEquals("$log", expect, d?.profile)
-                    if (d != null) { assertEquals("$log", truth!!.id, d.net); voidAll(); live += d to stay }
+                    if (d != null) { assertEquals("$log", truth!!.id, d.net); voidAll(); live += d to stay; blocked = null }
                 }
                 // A handover: to another network, to one that stayed connected, or to handle 0.
                 2 -> {
@@ -403,6 +412,7 @@ class NetSequencesTest {
                     if (!on) tell()
                     voidAll()
                     done = here?.takeIf { it.id != 0L && (on || known) }?.let { stay to rules.toMap() }
+                    blocked = null
                 }
                 4 -> edit(rnd.nextKind(), if (rnd.nextBoolean()) names.random(rnd) else null)
                 5 -> if (on) { on = false; grace = false; run.unwatched(); voidAll() } else { on = true; visit++; tell(); run.seen(seenAs()) }
@@ -418,6 +428,7 @@ class NetSequencesTest {
                     names[names.indexOf(old)] = new
                     rules.replaceAll { _, v -> if (v == old) new else v }
                     done = done?.let { (st, r) -> st to r.mapValues { (_, v) -> if (v == old) new else v } }
+                    blocked = null
                     live.filter { it.first.profile == old }.forEach { live.remove(it); void += it.first }
                     run.renamed(old, new)
                     // Sometimes another profile is made under the old name, and a rule may name it: a decision for the
@@ -431,6 +442,7 @@ class NetSequencesTest {
                     val old = names.random(rnd)
                     names.remove(old); rules.values.removeAll { it == old }
                     done = done?.let { (st, r) -> st to r.filterValues { it != old } }
+                    blocked = null
                     live.filter { it.first.profile == old }.forEach { live.remove(it); void += it.first }
                     run.deleted(old)
                     if (rnd.nextBoolean()) { names += old; if (rnd.nextBoolean()) edit(rnd.nextKind(), old) }
@@ -440,8 +452,9 @@ class NetSequencesTest {
                     val (d, st) = if (i < live.size) live.removeAt(i) else void.removeAt(i - live.size) to -1
                     val n = here
                     val holds = st == stay && on && known && n != null && n.id == d.net && rules[n.kind] == d.profile && !shown
-                    assertEquals("$log", holds, run.commit(d, rules, shown))
-                    if (holds) done = stay to rules.toMap()
+                    val blk = holds && frees.nextBoolean()
+                    assertEquals("$log", holds, run.commit(d, rules, shown, blk))
+                    if (holds) { done = stay to rules.toMap(); blocked = if (blk) d to stay else null }
                 }
             }
         }
@@ -467,7 +480,7 @@ class NetSequencesTest {
         // A rule edit reaches the model, and the card is re-judged when the setup or the accounts change.
         val ui = java.io.File("src/main/java/app/unbraid/ui/Ui.kt").readText()
         assertTrue(Regex("""fun setOnNet\([^\n]*store\.edit \{[^\n]*\}; app\.unbraid\.vpn\.AutoSwitch\.ruleEdited\(kind\)""").containsMatchIn(ui))
-        assertTrue(Regex("""combine\(notSwitched, store\.setup, store\.accounts, model\)[^\n]*\.current\(s, m, acc\)""").containsMatchIn(watch))
+        assertTrue(Regex("""combine\(notSwitched, store\.setup, store\.accounts, model\)[^\n]*\.current\(s, m, acc\)[^\n]*unblocked\(c\.first\.net, c\.first\.profile\)""").containsMatchIn(watch))
     }
 
     private fun Random.nextKind() = if (nextBoolean()) WIFI else MOBILE

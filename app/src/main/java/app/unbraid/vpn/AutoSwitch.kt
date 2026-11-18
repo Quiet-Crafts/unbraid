@@ -67,6 +67,9 @@ object AutoSwitch {
             val now = decide(s, profile, over(accounts)).blocked ?: return null
             return if (now == why) this else copy(why = now)
         }
+
+        /** The card holds but the switch is possible after all: nothing stops it, so it is to be decided afresh ([Event.Unblocked]). */
+        fun freed(s: Setup, m: State, accounts: Map<String, String>) = holds(s, m) && decide(s, profile, over(accounts)).blocked == null
     }
 
     val notSwitched = MutableStateFlow<NotSwitched?>(null)
@@ -111,6 +114,8 @@ object AutoSwitch {
         val stay: Int = 0,
         /** Counts the departures seen: a network lost, or another one moved to, while the monitor ran. */
         val left: Int = 0,
+        /** The decision last noted as done but not carried out for lack of room or connections: [acted] is only that. */
+        val blocked: Decision? = null,
     )
 
     sealed interface Event {
@@ -135,7 +140,9 @@ object AutoSwitch {
         /** [net], in its visit number [stay], lasted long enough, with the VPN on and the app not on screen. */
         data class Settled(val net: Net, val rules: Map<String, String>, val stay: Int) : Event
         /** About to save [d] (or, with nothing to switch, to note it done) under [rules], with the app on screen or not ([shown]). */
-        data class Commit(val d: Decision, val rules: Map<String, String>, val shown: Boolean) : Event
+        data class Commit(val d: Decision, val rules: Map<String, String>, val shown: Boolean, val blocked: Boolean = false) : Event
+        /** The switch to [profile] on network [net], noted done because it was blocked, is possible now: decided afresh, as after any settle. */
+        data class Unblocked(val net: Long, val profile: String) : Event
     }
 
     /** Switch to [profile] on network [net]; [n] tells it from a decision made again for the same ones. */
@@ -152,21 +159,21 @@ object AutoSwitch {
             // Android's handle 0 names no network. The same network again (its kind reported, a repeat) is no move.
             val n = e.net?.takeIf { it.id != 0L }
             if (s.watched && n != null && n.id == s.here?.id) Out(s.copy(here = n))
-            else Out(State(true, n, s.acted?.takeIf { it.first == n?.id }, made = s.made, stay = s.stay + 1, left = s.left + if (s.watched && s.here != null) 1 else 0))
+            else Out(State(true, n, s.acted?.takeIf { it.first == n?.id }, blocked = s.blocked?.takeIf { it.net == n?.id }, made = s.made, stay = s.stay + 1, left = s.left + if (s.watched && s.here != null) 1 else 0))
         }
         is Event.Lost -> Out(if (s.watched && s.here?.id == e.id) State(true, made = s.made, stay = s.stay, left = s.left + 1) else s)
         Event.Unwatched -> Out(s.copy(watched = false, here = null, pending = null))
         is Event.Picked -> {
             // Picked with no network known, it is for none: the next network's rule applies.
             val at = (if (s.watched) s.here else e.own)?.takeIf { it.id != 0L }
-            Out(s.copy(acted = at?.let { it.id to e.rules.toMap() }, pending = null))
+            Out(s.copy(acted = at?.let { it.id to e.rules.toMap() }, pending = null, blocked = null))
         }
         // What was acted on follows a rename, so it is no change; a decision not saved yet is made again under the new name.
-        is Event.Renamed -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.renamed(e.old, e.new) }, pending = s.pending?.takeIf { it.profile != e.old }))
+        is Event.Renamed -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.renamed(e.old, e.new) }, pending = s.pending?.takeIf { it.profile != e.old }, blocked = null))
         // Whatever it is now, the rule as it stands is decided afresh once the app leaves the screen; other kinds' picks stay.
-        is Event.RuleEdited -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to (r - e.kind) }))
-        is Event.Deleted -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.filterValues { it != e.name } }, pending = s.pending?.takeIf { it.profile != e.name }))
-        Event.Replaced -> Out(s.copy(acted = null, pending = null, stay = s.stay + 1))
+        is Event.RuleEdited -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to (r - e.kind) }, blocked = null))
+        is Event.Deleted -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.filterValues { it != e.name } }, pending = s.pending?.takeIf { it.profile != e.name }, blocked = null))
+        Event.Replaced -> Out(s.copy(acted = null, pending = null, blocked = null, stay = s.stay + 1))
         is Event.Settled -> {
             val here = s.here
             val kind = here?.kind
@@ -177,16 +184,19 @@ object AutoSwitch {
                 // Acted on already, or a pick holds: only a new rule for this network applies over it.
                 s.acted?.let { it.first == here.id && it.second[kind] == rule } == true -> Out(s)
                 s.pending?.let { it.net == here.id && it.profile == rule } == true -> Out(s) // being saved
-                rule == null -> Out(s.copy(acted = here.id to e.rules.toMap()))
-                else -> Decision(here.id, rule, s.made + 1, s.left).let { Out(s.copy(pending = it, made = it.n), it) }
+                rule == null -> Out(s.copy(acted = here.id to e.rules.toMap(), blocked = null))
+                else -> Decision(here.id, rule, s.made + 1, s.left).let { Out(s.copy(pending = it, made = it.n, blocked = null), it) }
             }
         }
         is Event.Commit -> {
             // Still pending means still the VPN on and the same stay on its network: leaving it or stopping voids it.
             val ok = s.pending == e.d && s.here?.kind?.let { e.rules[it] } == e.d.profile && !e.shown
             // Not saved: the decision is dropped and the next settle decides again.
-            Out(if (ok) s.copy(acted = e.d.net to e.rules.toMap(), pending = null) else if (s.pending == e.d) s.copy(pending = null) else s, save = ok)
+            Out(if (ok) s.copy(acted = e.d.net to e.rules.toMap(), pending = null, blocked = e.d.takeIf { e.blocked }) else if (s.pending == e.d) s.copy(pending = null) else s, save = ok)
         }
+        // Only the blocked decision itself is forgotten (a pick, a rule edit or a restore since has cleared it): the stay
+        // starts again, so the collector arms a fresh settle.
+        is Event.Unblocked -> Out(if (s.blocked?.let { it.net == e.net && it.profile == e.profile } == true && s.acted?.first == e.net) s.copy(acted = null, blocked = null, stay = s.stay + 1) else s)
     }
 
     /** [step] applied one event at a time; [publish] gets the state after each. */
@@ -206,13 +216,17 @@ object AutoSwitch {
         fun replaced() = on(Event.Replaced)
         /** [stay] is the visit the timer started in; by default the one now. */
         fun settle(n: Net, rules: Map<String, String>, stay: Int = state.stay) = on(Event.Settled(n, rules, stay)).decision
-        fun commit(d: Decision, rules: Map<String, String>, shown: Boolean) = on(Event.Commit(d, rules, shown)).save
+        fun commit(d: Decision, rules: Map<String, String>, shown: Boolean, blocked: Boolean = false) = on(Event.Commit(d, rules, shown, blocked)).save
+        fun unblocked(net: Long, profile: String) = on(Event.Unblocked(net, profile))
     }
 
     private val run = Run { model.value = it; net.value = it.here }
 
     /** The network monitor's network now (null = none), from the step that moves the monitor to it. */
     fun seen(n: Net?) = run.seen(n)
+
+    /** The switch to [profile] on network [net] that was blocked is possible now: it is decided afresh, as after any settle. */
+    fun unblocked(net: Long, profile: String) = run.unblocked(net, profile)
 
     /** Android lost network [id] (its handle). */
     fun lost(id: Long) = run.lost(id)
@@ -263,7 +277,7 @@ object AutoSwitch {
         cm = ctx.getSystemService(ConnectivityManager::class.java)
         val store = Unbraid.store
         // The card for a switch that didn't happen goes once it no longer holds, and doesn't come back.
-        launch { combine(notSwitched, store.setup, store.accounts, model) { ns, s, acc, m -> ns?.let { it to it.current(s, m, acc) } }.collect { c -> if (c != null && c.first != c.second) notSwitched.compareAndSet(c.first, c.second) } }
+        launch { combine(notSwitched, store.setup, store.accounts, model) { ns, s, acc, m -> ns?.let { Triple(it, it.current(s, m, acc), it.freed(s, m, acc)) } }.collect { c -> if (c != null && c.first != c.second && notSwitched.compareAndSet(c.first, c.second) && c.third) unblocked(c.first.net, c.first.profile) } }
         combine(UnbraidVpn.state.map { it.phase == Phase.On }.distinctUntilChanged(), model.map { m -> m.here?.let { it to m.stay } }.distinctUntilChanged(), Unbraid.foreground, store.setup.map { it.onNet }.distinctUntilChanged()) { on, n, shown, rules ->
             n.takeIf { on && !shown && rules.isNotEmpty() && n?.first?.kind != null }
         }.collectLatest { visit ->
@@ -279,7 +293,7 @@ object AutoSwitch {
             val to = step.to
             // Nothing to switch (already in use, or blocked): noted as done, and said only if it still holds.
             if (to == null) {
-                if (run.commit(d, s.onNet, Unbraid.foreground.value)) step.blocked?.let { notSwitched.value = NotSwitched(d.profile, n.kind!!, n.id, it, d.left); UnbraidVpn.problem(ctx, it) }
+                if (run.commit(d, s.onNet, Unbraid.foreground.value, step.blocked != null)) step.blocked?.let { notSwitched.value = NotSwitched(d.profile, n.kind!!, n.id, it, d.left); UnbraidVpn.problem(ctx, it) }
                 return@collectLatest
             }
             // Saved off the main thread and never cut short: once the setup in use changed, the switch is followed (and
