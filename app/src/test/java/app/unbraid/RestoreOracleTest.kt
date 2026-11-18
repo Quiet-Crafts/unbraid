@@ -102,7 +102,7 @@ class RestoreOracleTest {
         val defaultKind = if (directFiltered && !defaultBlocked) Resolver.Filter else if (s.defaultRoute == DIRECT || defaultBlocked) Resolver.Local else kind(s.defaultRoute)
         val sites = Sites.applied(s)
         fun site(n: String) = Sites.match(n, sites.keys.filter { sites[it] != BLOCK })
-        fun blockedSite(n: String) = sites.any { (k, v) -> v == BLOCK && under(n, k) }
+        fun blockedSite(n: String) = Sites.match(n, sites.keys)?.let { sites[it] == BLOCK } == true // the most specific rule wins
         fun local(n: String) = s.prefs.lan && localSuffixes.any { under(n, it) }
         fun leftOut(p: String) = !lockdown && s.apps[p] == DIRECT && !through(p)
 

@@ -69,26 +69,26 @@ object Sites {
     }
 
     /**
-     * Why a website's rule doesn't apply now, in its row's words: a blocked website above it takes its name ([By.BLOCK]),
-     * or one of the engine's earlier lookup rules answers the name itself, so no connection carries a name a website rule
+     * Why a website's rule doesn't apply now, in its row's words: one of the engine's earlier lookup rules answers the
+     * name itself, so no connection carries a name a website rule
      * could match: the tailnet's while Reach your tailnet is on ([By.TAILNET]), the local network's while it bypasses the
      * VPN ([By.LOCAL]). The compiler's own domains, from its own functions.
      */
-    class Off(val by: By, val why: String) { enum class By { BLOCK, TAILNET, LOCAL } }
+    class Off(val by: By, val why: String) { enum class By { TAILNET, LOCAL } }
 
     /**
-     * The one decision whether website [name], set to route [id] among [sites] (a profile's, or [s]'s own), applies now;
-     * null when it does. A block always applies: it refuses the lookup before every other rule. [reported] is the tailnet
+     * The one decision whether website [name], set to route [id], applies now;
+     * null when it does. A block always applies: it refuses the lookup before every other rule. A blocked website above
+     * it never stops it: the most specific rule wins. [reported] is the tailnet
      * domain Tailscale gave, which a Headscale tailnet's own domain needs: without it only what holds whatever Tailscale
      * reports counts (all of ts.net on Tailscale's own server, local names), so it never leaves out more than the compiler.
      */
-    fun off(name: String, id: String?, s: Setup, sites: Map<String, String> = s.sites, reported: String? = null): Off? = when {
+    fun off(name: String, id: String?, s: Setup, reported: String? = null): Off? = when {
         id == BLOCK -> null
-        else -> sites.filter { (above, to) -> to == BLOCK && name.endsWith(".$above") }.keys.minOrNull()?.let { Off(Off.By.BLOCK, "it is under $it") }
-            ?: if (s.home.tailscale && Compiler.tsDomains(s.home, reported).any { under(name, it) })
-                Off(Off.By.TAILNET, if (Compiler.officialTs(s.home)) "Tailscale answers ts.net names while Reach your tailnet is on" else "your tailnet answers this name while Reach your tailnet is on")
-            else if (s.prefs.lan && Compiler.LOCAL_NAMES.any { under(name, it) }) Off(Off.By.LOCAL, "your network answers this name while Local network bypasses the VPN is on")
-            else null
+        s.home.tailscale && Compiler.tsDomains(s.home, reported).any { under(name, it) } ->
+            Off(Off.By.TAILNET, if (Compiler.officialTs(s.home)) "Tailscale answers ts.net names while Reach your tailnet is on" else "your tailnet answers this name while Reach your tailnet is on")
+        s.prefs.lan && Compiler.LOCAL_NAMES.any { under(name, it) } -> Off(Off.By.LOCAL, "your network answers this name while Local network bypasses the VPN is on")
+        else -> null
     }
 
     /**
@@ -96,7 +96,7 @@ object Sites {
      * every count go by it; the list and the editing go by what is saved.
      */
     fun applied(s: Setup, sites: Map<String, String> = s.sites, reported: String? = null): Map<String, String> =
-        sites.filter { (name, id) -> off(name, id, s, sites, reported) == null }
+        sites.filter { (name, id) -> off(name, id, s, reported) == null }
 
     /**
      * Whether [name] is a key a saved setup may hold: what any version's [clean] gave (letters, digits and inner hyphens in

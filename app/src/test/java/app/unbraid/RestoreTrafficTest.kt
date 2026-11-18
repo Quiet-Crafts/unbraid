@@ -59,7 +59,7 @@ class RestoreTrafficTest {
         assertEquals(Outcome("r-m1", Resolver.Route), walk(s, "org.m", OTHER_NAME))
         // A route waiting for its config refuses its apps.
         assertEquals(Outcome(REJECT), walk(s, "org.k", OTHER_NAME))
-        // Websites: a block holds for everyone and under it; a website's route beats its app's.
+        // Websites: the most specific rule holds for everyone, Block included; a website's route beats its app's.
         assertEquals(Outcome(REJECT), walk(s, null, "x.tracker.example"))
         assertEquals(Outcome("direct", Resolver.Filter), walk(s, null, "example.com"))
         assertEquals(Outcome("r-w", Resolver.Route), walk(s, "org.m", "a.work.example"))
@@ -92,8 +92,8 @@ class RestoreTrafficTest {
         if (byApp == BLOCK) return REJECT
         if (app != null && s.outside(app)) return "direct"
         if (name != null) {
-            if (s.sites.any { (k, v) -> v == BLOCK && (name == k || name.endsWith(".$k")) }) return REJECT
-            Sites.match(name, s.sites.keys)?.let { return routeExit(s.sites.getValue(it)) }
+            // The most specific website rule wins, Block included.
+            Sites.match(name, s.sites.keys)?.let { s.sites.getValue(it) }?.let { return if (it == BLOCK) REJECT else routeExit(it) }
         }
         return routeExit(byApp)
     }
@@ -145,8 +145,8 @@ class RestoreTrafficTest {
             else -> vpn(id)
         }
         if (name == null) return forApp
-        if (s.sites.any { (k, v) -> v == BLOCK && (name == k || name.endsWith(".$k")) }) return Treat("blocked")
         val id = Sites.match(name, s.sites.keys)?.let(s.sites::getValue) ?: return forApp
+        if (id == BLOCK) return Treat("blocked")
         return if (id == DIRECT) Treat("direct", filter = server && ((f.direct && s.defaultRoute == DIRECT) || through)) else vpn(id)
     }
 
@@ -214,8 +214,8 @@ class RestoreTrafficTest {
         val here = base.copy(sites = mapOf("example.com" to "w", "ads.example.com" to BLOCK))
         assertTrue(notes(here, here.copy(sites = mapOf("example.com" to "w", "ads.example.com" to BLOCK, "cdn.example.com" to DIRECT))).contains("1 website goes from a VPN route to Direct."))
         assertTrue(notes(here, here.copy(sites = mapOf("example.com" to "w"))).contains("1 website that is blocked now won't be."))
-        // A rule under a blocked website never opens it: Block comes first.
-        assertEquals(emptyList<String>(), notes(here, here.copy(sites = here.sites + ("x.ads.example.com" to DIRECT))))
+        // A rule under a blocked website opens that name: the most specific rule wins.
+        assertTrue(notes(here, here.copy(sites = here.sites + ("x.ads.example.com" to DIRECT))).contains("1 website that is blocked now goes Direct."))
     }
 
     @Test fun anAppMovedOutOfAFilterScopeIsSaid() {

@@ -72,8 +72,6 @@ internal fun siteState(s: Setup, site: String, reported: String? = null): String
     val off = Sites.off(site, id, s, reported = reported)
     return when {
         id == BLOCK -> "Blocked, no traffic"
-        // Block reaches every address under a blocked website, whatever route one of them has.
-        off?.by == Sites.Off.By.BLOCK -> "Blocked: ${off.why}"
         off != null -> "Not applied: ${off.why}"
         id == DIRECT -> "Direct, skips the VPN"
         else -> s.route(id)?.name ?: "A route that no longer exists"
@@ -91,7 +89,7 @@ internal fun websitesText(s: Setup, sites: Map<String, String>, reported: String
 
 /** Said in the Add website sheet under the address: what the rule covers, and why it won't apply now when a lookup rule comes first. */
 internal fun siteHint(s: Setup, site: String, to: String, reported: String? = null) =
-    "Covers ${Sites.shown(site)} and every address under it" + (Sites.off(site, to, s, reported = reported)?.let { ". ${if (it.by == Sites.Off.By.BLOCK) "Blocked" else "Not applied"} now: ${it.why}" } ?: "")
+    "Covers ${Sites.shown(site)} and every address under it" + (Sites.off(site, to, s, reported = reported)?.let { ". Not applied now: ${it.why}" } ?: "")
 
 /** [name] cut in the middle when it is too long for two lines of a row, so its start and its end both show. */
 internal fun shortName(name: String) = if (name.length <= 56) name else name.take(26) + "…" + name.takeLast(26)

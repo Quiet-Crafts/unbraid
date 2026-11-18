@@ -181,7 +181,12 @@ object Compiler {
         // Websites with a route of their own: each run matches its names and every name under them. A rule for a name the
         // tailnet's or the local network's lookup rule answers first is left out: it could never apply.
         val match = { names: List<String> -> arrayOf<Pair<String, Any>>("domain" to JsonArray(names.map(::JsonPrimitive)), "domain_suffix" to JsonArray(names.map { JsonPrimitive(".$it") })) }
-        val sites = Sites.runs(Sites.applied(s, reported = i.tsSuffix)).map { (id, names) -> id to match(names) }
+        val runs = Sites.runs(Sites.applied(s, reported = i.tsSuffix))
+        val sites = runs.map { (id, names) -> id to match(names) }
+        // The most specific rule wins, Block included: a name with a route or Direct of its own under a blocked website is
+        // left to its own rule, as a blocked name under a routed website is blocked.
+        val routed = runs.filter { it.first != BLOCK }.flatMap { it.second }
+        val except = { names: List<String> -> routed.filter { r -> names.any { r.endsWith(".$it") } } }
         // Where a saved website and an ending the tailnet's or the local network's lookup rule answers overlap (the website
         // itself, or such an ending under it), lookups get a plain address there. A connection that still carries such a
         // name came by a stand-in address handed out while a website rule covered it (the domain table outlives a reload):
@@ -218,9 +223,13 @@ object Compiler {
                     if (homeTs) add(obj("type" to "tailscale", "tag" to "dns-tailnet", "endpoint" to TS_TAG, "accept_default_resolvers" to false))
                 }
                 putJsonArray("rules") {
-                    // Block comes first: no name is looked up for a blocked app, nor a blocked website's for anyone.
+                    // Block comes first: no name is looked up for a blocked app, nor a blocked website's for anyone, except a
+                    // name under it with a route of its own, which its own rule below answers.
                     if (barred.isNotEmpty()) add(obj("package_name" to barred, "action" to "reject"))
-                    for ((id, names) in sites) if (id == BLOCK) add(obj(*names, "action" to "reject"))
+                    for ((id, names) in runs) if (id == BLOCK) add(except(names).let { own ->
+                        if (own.isEmpty()) obj(*match(names), "action" to "reject")
+                        else obj("type" to "logical", "mode" to "and", "rules" to JsonArray(listOf(obj(*match(names)), obj(*match(own), "invert" to true))), "action" to "reject")
+                    })
                     if (homeTs && tsDomains.isNotEmpty()) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
                     if (s.prefs.lan) add(obj("domain_suffix" to arr(*LOCAL_NAMES.toTypedArray()), "server" to "local"))
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
@@ -359,8 +368,9 @@ object Compiler {
                         // one read off the connection: an app could write any name there and take a website's route, Direct
                         // included, to an address of its choosing. So an app that looks names up itself keeps its own route.
                         // A website's route beats its app's. Looked up at its exit, then the home and LAN rules, as for an app.
-                        // Block before any website's route: a name under a blocked website goes nowhere, whatever else is set for it.
-                        for ((id, names) in sites.sortedBy { it.first != BLOCK }) {
+                        // The most specific first, Block included: a blocked website's names go nowhere, except one under it
+                        // with a route of its own, which comes before it.
+                        for ((id, names) in sites) {
                             if (id in refused) { add(obj(*names, "action" to "reject", "no_drop" to true)); continue }
                             // A website on a Tailscale exit that is itself a sign-in page skips the exit while the sign-in waits, as for an app.
                             if (onTs(id)) tsLogin.forEach { add(obj("type" to "logical", "mode" to "and", "rules" to JsonArray(listOf(obj(*names), obj(it))), "outbound" to "direct")) }

@@ -73,12 +73,33 @@ class BlockTest {
         assertTrue(look < dns.indexOfFirst { it.text("server") == "fake" }) // before any address is handed out for it
         val rule = c.rules().single { it.strings("domain") == listOf("ads.example") }
         assertEquals("reject", rule.text("action")); assertEquals("true", rule.text("no_drop"))
-        // A name under a blocked website can't take the route set for it: its rule is left out, the block covers it.
-        val nested = compile(setup.copy(sites = mapOf("ads.example" to BLOCK, "cdn.ads.example" to "us"))).rules()
-        assertTrue(nested.single { it.strings("domain") == listOf("ads.example") }.text("action") == "reject")
-        assertTrue(nested.none { it.strings("domain")?.contains("cdn.ads.example") == true })
+        // A name under a blocked website with a route of its own takes that route: the most specific rule wins. Its
+        // route comes before the block, and the block's lookup refusal leaves it out.
+        val under = setup.copy(sites = mapOf("ads.example" to BLOCK, "cdn.ads.example" to "us"))
+        val nested = compile(under).rules()
+        val own = nested.indexOfFirst { it.strings("domain") == listOf("cdn.ads.example") && it["outbound"] != null }
+        assertEquals("r-us", nested[own].text("outbound"))
+        assertTrue(own < nested.indexOfFirst { it.strings("domain") == listOf("ads.example") && it.text("action") == "reject" })
+        val (probeDns, probeRoute) = RoutingProbe.compiled(under, null)
+        assertEquals("r-us", RoutingProbe.connect(probeRoute, probeDns, "com.a", "cdn.ads.example"))
+        assertEquals("r-us", RoutingProbe.connect(probeRoute, probeDns, "com.a", "x.cdn.ads.example"))
+        assertEquals("none", RoutingProbe.connect(probeRoute, probeDns, "com.a", "www.ads.example"))
         // The website with a route keeps it.
         assertEquals("r-us", c.rules().single { it.strings("domain") == listOf("example.com") && it["outbound"] != null }.text("outbound"))
+    }
+
+    /** The engine accepts a blocked website with a route of its own under it: a lookup refusal that leaves names out. */
+    @Test fun theEngineAcceptsABlockWithARouteUnderIt() {
+        val bin = java.io.File(System.getenv("SING_BOX_CLI") ?: "${System.getenv("WORK") ?: "${System.getProperty("user.home")}/.cache/unbraid-libbox"}/sing-box-cli")
+        org.junit.Assume.assumeTrue("sing-box-cli not found", bin.canExecute())
+        val f = java.io.File.createTempFile("block-under", ".json")
+        try {
+            f.writeText(compile(setup.copy(sites = mapOf("ads.example" to BLOCK, "cdn.ads.example" to "us"))).toString())
+            val p = ProcessBuilder(bin.path, "check", "-c", f.path).redirectErrorStream(true).start()
+            val out = p.inputStream.bufferedReader().readText()
+            assertTrue("sing-box check timed out", p.waitFor(60, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals("sing-box check: $out", 0, p.exitValue())
+        } finally { f.delete() }
     }
 
     /** With an app on Block, what can't be told apart from its traffic is refused too: connections of no known app, and pings. */

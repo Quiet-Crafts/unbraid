@@ -299,8 +299,8 @@ class SitesTest {
         assertEquals("A profile holds up to 50 websites", siteError(setup.copy(sites = (1..50).associate { "s$it.example" to "it" }), "rai.it"))
         assertEquals("Italy", siteState(setup, "example.com")); assertEquals("Direct, skips the VPN", siteState(setup, "bank.example"))
         assertEquals("A route that no longer exists", siteState(setup.copy(routes = emptyList()), "example.com"))
-        // A website under a blocked one is blocked with it, whatever route it has, and its row says so.
-        assertEquals("Blocked: it is under example.com", siteState(setup.copy(sites = mapOf("example.com" to app.unbraid.data.BLOCK, "api.example.com" to "us")), "api.example.com"))
+        // A website under a blocked one keeps its own route: the most specific rule wins.
+        assertEquals(siteState(setup.copy(sites = mapOf("api.example.com" to "us")), "api.example.com"), siteState(setup.copy(sites = mapOf("example.com" to app.unbraid.data.BLOCK, "api.example.com" to "us")), "api.example.com"))
         assertEquals("Blocked, no traffic", siteState(setup.copy(sites = mapOf("example.com" to app.unbraid.data.BLOCK)), "example.com"))
         assertTrue(sitesNote(true).endsWith("Apps set to Direct are outside unbraid: websites opened in them aren't re-routed."))
         assertFalse("Direct" in sitesNote(false))

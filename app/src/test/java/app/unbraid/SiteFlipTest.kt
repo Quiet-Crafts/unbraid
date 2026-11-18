@@ -28,7 +28,6 @@ class SiteFlipTest {
         Triple("x.fritz.box", base.copy(prefs = base.prefs.copy(lan = false)) to null, base to null), // Local network bypasses the VPN turned on
         Triple("nas.tail1234.ts.net", base to null, base.copy(home = Home(tailscale = true)) to null), // Reach your tailnet turned on
         Triple("box.corp.example", base.copy(home = headscale) to null, base.copy(home = headscale) to "corp.example"), // Headscale reports its domain
-        Triple("api.example.com", base to null, base.copy(sites = mapOf("example.com" to BLOCK)) to null), // the website above it blocked
     ).map { (name, a, b) -> Triple(name, a.first.copy(sites = a.first.sites + (name to "it")) to a.second, b.first.copy(sites = b.first.sites + (name to "it")) to b.second) }
 
     @Test fun anAddressKeptAcrossAFlipNeverTakesAWeakerWay() {

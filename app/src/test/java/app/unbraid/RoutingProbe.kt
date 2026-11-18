@@ -52,12 +52,18 @@ object RoutingProbe {
 
     /** The resolver or action that answers [app]'s lookup of [name] for record [type]. */
     fun lookup(dns: JsonObject, app: String, name: String, type: String): String {
-        for (r in dns["rules"]!!.jsonArray.map { it.jsonObject }) {
-            val unknown = r.keys - setOf("domain", "domain_suffix", "package_name", "query_type", "server", "action", "rcode", "rewrite_ttl")
+        fun match(r: JsonObject): Boolean {
+            if (r.text("type") == "logical") {
+                val all = r["rules"]!!.jsonArray.map { match(it.jsonObject) }
+                return (if (r.text("mode") == "and") all.all { it } else all.any { it }) != (r.text("invert") == "true")
+            }
+            val unknown = r.keys - setOf("domain", "domain_suffix", "package_name", "query_type", "invert", "server", "action", "rcode", "rewrite_ttl")
             check(unknown.isEmpty()) { "DNS rule field the probe can't read: $unknown" }
-            if (named(r, name) == false) continue
-            if (r.list("package_name")?.contains(app) == false) continue
-            if (r.list("query_type")?.contains(type) == false) continue
+            val checks = listOfNotNull(named(r, name), r.list("package_name")?.contains(app), r.list("query_type")?.contains(type))
+            return checks.all { it } != (r.text("invert") == "true")
+        }
+        for (r in dns["rules"]!!.jsonArray.map { it.jsonObject }) {
+            if (!match(r)) continue
             return when (r.text("action")) { null, "route" -> r.text("server")!!; "predefined" -> "empty"; else -> r.text("action")!! }
         }
         return dns.text("final")!!

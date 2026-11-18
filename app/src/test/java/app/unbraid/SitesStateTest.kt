@@ -73,12 +73,20 @@ class SitesStateTest {
         assertEquals("Direct · no apps elsewhere · 1 website", summary(s, Profile("P", DIRECT, sites = s.sites)))
     }
 
-    /** Under a blocked website: the block takes the name, so its own route carries none of it; an address from before is refused by the block. */
+    /**
+     * Under a blocked website: the most specific rule wins, so a name with a route of its own takes that route, with every
+     * name under it, while the rest of the blocked website stays blocked.
+     */
     @Test fun underABlockedWebsite() {
         val s = base.copy(sites = mapOf("example.com" to BLOCK, "api.example.com" to "it"))
-        cell(s, "api.example.com", "Blocked: it is under example.com", false, "none", "reject")
-        assertEquals(mapOf("example.com" to BLOCK), Sites.applied(s))
-        assertEquals("Covers api.example.com and every address under it. Blocked now: it is under example.com", siteHint(s - "api.example.com", "api.example.com", "it"))
+        cell(s, "api.example.com", "Italy", true, "r-it", "r-it")
+        assertEquals(s.sites, Sites.applied(s))
+        assertEquals("Covers api.example.com and every address under it", siteHint(s - "api.example.com", "api.example.com", "it"))
+        val (dns, route) = RoutingProbe.compiled(s, null, emptySet())
+        assertEquals("r-it", RoutingProbe.connect(route, dns, browser, "cdn.api.example.com"))
+        assertEquals("none", RoutingProbe.connect(route, dns, browser, "www.example.com"))
+        assertEquals("none", RoutingProbe.connect(route, dns, browser, "example.com"))
+        assertEquals("reject", RoutingProbe.connect(route, dns, browser, "www.example.com", kept = "fake"))
         // A block under a block, and a block under a route, stay blocks.
         assertEquals("Blocked, no traffic", siteState(s.copy(sites = s.sites + ("ads.api.example.com" to BLOCK)), "ads.api.example.com"))
         assertEquals(mapOf("x.example.org" to BLOCK, "example.org" to "it"), Sites.applied(base.copy(sites = mapOf("x.example.org" to BLOCK, "example.org" to "it"))))
