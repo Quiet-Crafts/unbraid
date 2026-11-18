@@ -153,8 +153,8 @@ object AutoSwitch {
         data class Unblocked(val net: Long, val profile: String) : Event
     }
 
-    /** Switch to [profile] on network [net]; [n] tells it from a decision made again for the same ones. */
-    data class Decision(val net: Long, val profile: String, val n: Int, val left: Int = 0)
+    /** Switch to [profile] on network [net], of [kind]; [n] tells it from a decision made again for the same ones. */
+    data class Decision(val net: Long, val profile: String, val n: Int, val left: Int = 0, val kind: String? = null)
 
     /** The state after an event, a decision to carry out, and for [Event.Commit] whether to save it. */
     data class Out(val state: State, val decision: Decision? = null, val save: Boolean = false)
@@ -177,10 +177,12 @@ object AutoSwitch {
             Out(s.copy(acted = at?.let { it.id to e.rules.toMap() }, pending = null, blocked = null, held = e.rules.toMap().takeIf { at == null && e.unknown }))
         }
         // What was acted on follows a rename, so it is no change; a decision not saved yet is made again under the new name.
-        is Event.Renamed -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.renamed(e.old, e.new) }, held = s.held?.renamed(e.old, e.new), pending = s.pending?.takeIf { it.profile != e.old }, blocked = null))
-        // Whatever it is now, the rule as it stands is decided afresh once the app leaves the screen; other kinds' picks stay.
-        is Event.RuleEdited -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to (r - e.kind) }, held = s.held?.minus(e.kind), blocked = null))
-        is Event.Deleted -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.filterValues { it != e.name } }, held = s.held?.filterValues { it != e.name }, pending = s.pending?.takeIf { it.profile != e.name }, blocked = null))
+        // A blocked decision stays unless it is about the renamed profile: freeing room elsewhere still lets it go ahead.
+        is Event.Renamed -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.renamed(e.old, e.new) }, held = s.held?.renamed(e.old, e.new), pending = s.pending?.takeIf { it.profile != e.old }, blocked = s.blocked?.takeIf { it.profile != e.old }))
+        // Whatever it is now, the rule as it stands is decided afresh once the app leaves the screen; other kinds' picks
+        // stay, and so does a blocked decision for another kind.
+        is Event.RuleEdited -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to (r - e.kind) }, held = s.held?.minus(e.kind), blocked = s.blocked?.takeIf { it.kind != e.kind }))
+        is Event.Deleted -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.filterValues { it != e.name } }, held = s.held?.filterValues { it != e.name }, pending = s.pending?.takeIf { it.profile != e.name }, blocked = s.blocked?.takeIf { it.profile != e.name }))
         Event.Replaced -> Out(s.copy(acted = null, pending = null, blocked = null, held = null, stay = s.stay + 1))
         is Event.Settled -> {
             val here = s.here
@@ -193,7 +195,7 @@ object AutoSwitch {
                 s.acted?.let { it.first == here.id && it.second[kind] == rule } == true -> Out(s)
                 s.pending?.let { it.net == here.id && it.profile == rule } == true -> Out(s) // being saved
                 rule == null -> Out(s.copy(acted = here.id to e.rules.toMap(), blocked = null))
-                else -> Decision(here.id, rule, s.made + 1, s.left).let { Out(s.copy(pending = it, made = it.n, blocked = null), it) }
+                else -> Decision(here.id, rule, s.made + 1, s.left, kind).let { Out(s.copy(pending = it, made = it.n, blocked = null), it) }
             }
         }
         is Event.Commit -> {

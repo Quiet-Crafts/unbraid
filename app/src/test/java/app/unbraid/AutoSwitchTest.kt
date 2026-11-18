@@ -125,6 +125,34 @@ class AutoSwitchTest {
         }
     }
 
+    /**
+     * Wi-Fi -> Home blocked for lack of room (20 profiles, an unsaved setup): deleting Trip, as the Profiles screen does
+     * ([AutoSwitch.Run.deleted]), frees the room and Home is then switched to. A rename or a rule edit for the other kind
+     * of network keeps the blocked decision too; one that concerns it doesn't.
+     */
+    @Test fun freeingRoomByDeletingAnotherProfileSwitches() {
+        val loose = setup.copy(profile = null, defaultRoute = "us", apps = mapOf("org.a" to "nl"))
+        val full = loose.copy(profiles = loose.profiles + (1..MAX_PROFILES - 3).map { Profile("P$it", "nl") })
+        assertEquals(MAX_PROFILES, full.profiles.size)
+        val wifi = AutoSwitch.Net(WIFI, 100)
+        fun blocked(then: AutoSwitch.Run.(AutoSwitch.NotSwitched) -> Setup): String? = AutoSwitch.Run().run {
+            seen(wifi)
+            val d = settle(wifi, full.onNet)!!
+            val why = AutoSwitch.decide(full, d.profile) { _, _ -> false }.blocked!!
+            assertTrue(commit(d, full.onNet, false, blocked = true))
+            val ns = AutoSwitch.NotSwitched(d.profile, WIFI, wifi.id, why, d.left)
+            val now = then(ns)
+            // The card as the app runs it: gone once the switch is possible, and then decided afresh.
+            if (ns.current(now, state, emptyMap()) == null && ns.freed(now, state, emptyMap())) unblocked(ns.net, ns.profile)
+            settle(wifi, now.onNet)?.profile
+        }
+        assertEquals("Home", blocked { deleted("Trip"); full.forget("Trip") })
+        assertEquals("Home", blocked { renamed("Trip", "Away"); deleted("Away"); full.rename("Trip", "Away").forget("Away") })
+        assertEquals("Home", blocked { ruleEdited(MOBILE); deleted("P1"); full.copy(onNet = mapOf(WIFI to "Home")).forget("P1") })
+        // Still blocked with no room: nothing.
+        assertNull(blocked { deleted("Trip"); full.forget("Trip").copy(profiles = full.forget("Trip").profiles + Profile("New", "nl")) })
+    }
+
     /** A rule edited for the network the phone is on is decided afresh; the pick made before it no longer holds. */
     @Test fun aRuleEditForTheNetworkForgetsWhatWasActedOn() {
         val wifi = AutoSwitch.Net(WIFI, 100)

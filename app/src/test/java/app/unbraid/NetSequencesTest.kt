@@ -342,6 +342,7 @@ class NetSequencesTest {
         interleave(428, setOf(RESTORES)) // a profile deleted and another made under its name, which the old decision then applies to
         interleave(361, setOf(RESTORES)) // a rule removed and set again on the same network: decided afresh, not held as acted on
         interleave(540, setOf(RESTORES)) // a blocked switch that became possible was never decided again
+        interleave(6652) // a blocked switch made possible by deleting another profile was never decided again
     }
 
     /**
@@ -387,7 +388,7 @@ class NetSequencesTest {
         fun edit(kind: String, name: String?) {
             if (name == null) rules.remove(kind) else rules[kind] = name
             done = done?.let { (st, r) -> st to (r - kind) }
-            blocked = null
+            blocked = blocked?.takeIf { kindOf(it.first.net) != kind } // an edit for the other kind doesn't concern it
             run.ruleEdited(kind)
         }
         run.seen(here)
@@ -453,7 +454,7 @@ class NetSequencesTest {
                     names[names.indexOf(old)] = new
                     rules.replaceAll { _, v -> if (v == old) new else v }
                     done = done?.let { (st, r) -> st to r.mapValues { (_, v) -> if (v == old) new else v } }
-                    blocked = null
+                    blocked = blocked?.takeIf { it.first.profile != old } // another profile renamed doesn't concern it
                     live.filter { it.first.profile == old }.forEach { live.remove(it); void += it.first }
                     run.renamed(old, new)
                     // Sometimes another profile is made under the old name, and a rule may name it: a decision for the
@@ -467,7 +468,7 @@ class NetSequencesTest {
                     val old = names.random(rnd)
                     names.remove(old); rules.values.removeAll { it == old }
                     done = done?.let { (st, r) -> st to r.filterValues { it != old } }
-                    blocked = null
+                    blocked = blocked?.takeIf { it.first.profile != old } // another profile deleted (room freed) doesn't concern it
                     live.filter { it.first.profile == old }.forEach { live.remove(it); void += it.first }
                     run.deleted(old)
                     if (rnd.nextBoolean()) { names += old; if (rnd.nextBoolean()) edit(rnd.nextKind(), old) }
