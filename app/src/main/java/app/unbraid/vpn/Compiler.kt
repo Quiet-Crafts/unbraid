@@ -179,7 +179,7 @@ object Compiler {
         // A Direct website is looked up like other Direct traffic that passes through: with the filter where one applies to it.
         val siteDns = { id: String -> if (id == DIRECT && filter != null && (directFiltered || through.isNotEmpty())) "dns-filter" else dnsFor(id) }
         // Websites with a route of their own: each run matches its names and every name under them. A rule for a name the
-        // tailnet's or the local network's lookup rule answers first is left out: it could never apply, and its route needs no tunnel.
+        // tailnet's or the local network's lookup rule answers first is left out: it could never apply.
         val match = { names: List<String> -> arrayOf<Pair<String, Any>>("domain" to JsonArray(names.map(::JsonPrimitive)), "domain_suffix" to JsonArray(names.map { JsonPrimitive(".$it") })) }
         val sites = Sites.runs(Sites.applied(s, reported = i.tsSuffix)).map { (id, names) -> id to match(names) }
         // Where a saved website and an ending the tailnet's or the local network's lookup rule answers overlap (the website
