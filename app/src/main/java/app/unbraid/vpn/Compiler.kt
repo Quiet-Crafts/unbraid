@@ -75,12 +75,24 @@ object Compiler {
         /** Tailscale asks the user to sign in (it gave a login link): only then do its sign-in pages skip the exit. */
         val tsLoginPending: Boolean = false,
         /**
-         * Apps that share their Android user id with an app on Block. Android leaves an app outside the VPN by user id,
-         * so none of these may be left outside (a Direct one would take the blocked app out with it); inside, the engine
-         * refuses the whole id, as the blocked app's rule matches any app of it.
+         * Apps on Direct that share their Android user id with an app that keeps them from going Direct alone ([keptIn]).
+         * Android leaves an app outside the VPN by user id, so none of these may be left outside (it would take a blocked
+         * or routed app out with it); inside, the engine knows the user id, not which of its apps asked, so they go as that app does.
          */
         val blockedKin: Set<String> = emptySet(),
     )
+
+    /**
+     * Whether [other], an app of Direct app [p]'s Android user id, keeps [p] from going Direct on its own: it goes through
+     * a route, is blocked or follows a VPN default; or [p] would be left outside and take [other] out of unbraid with it.
+     */
+    fun keeps(s: Setup, p: String, other: String) = s.routeOf(other) != DIRECT || s.outside(p) && !s.outside(other)
+
+    /**
+     * The apps on Direct that another app of their Android user id [keeps], as [Input.blockedKin]. [kin] gives every app
+     * of an app's user id, null when that can't be told: then it is kept too.
+     */
+    fun keptIn(s: Setup, kin: (String) -> Set<String>?): Set<String> = s.apps.keys.filterTo(HashSet()) { p -> s.apps[p] == DIRECT && kin(p)?.any { keeps(s, p, it) } != false }
 
     /**
      * Inbound tag of the app's own way into a chosen exit, for speed and health tests: a proxy on 127.0.0.1 whose
@@ -121,7 +133,9 @@ object Compiler {
     }
 
     fun compile(i: Input): String {
-        val s = i.setup
+        // An app on Direct kept inside for another app of its user id ([Input.blockedKin]) has no rule of its own, filtered or
+        // not: the engine knows the user id, not which of its apps asked, so its rule would take the other app Direct too.
+        val s = i.setup.let { it.copy(apps = it.apps.filter { (p, r) -> r != DIRECT || p !in i.blockedKin }) }
         if (s.defaultMissing) throw MissingDefault()
         // Blocked routes get no tunnel, DNS server or probe; their apps still match, to be refused. So do apps on a route
         // that no longer exists.

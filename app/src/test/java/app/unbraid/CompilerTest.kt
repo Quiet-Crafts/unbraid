@@ -483,6 +483,37 @@ class CompilerTest {
         assertEquals(0, has(directDefault.copy(apps = emptyMap())))
     }
 
+    /**
+     * Android leaves apps out of the VPN by user id: a Direct app that shares one with an app on a VPN route stays inside,
+     * with no rule of its own, so the user id goes as that app does instead of taking it out (U-02).
+     */
+    @Test fun aDirectAppSharingAUserIdWithARoutedAppStaysInside() {
+        val s = example.copy(apps = mapOf("com.a" to "us", "com.x" to DIRECT, "com.y" to DIRECT))
+        val kin = { p: String -> if (p == "com.a" || p == "com.x") setOf("com.a", "com.x") else setOf(p) }
+        val kept = Compiler.keptIn(s, kin)
+        assertEquals(setOf("com.x"), kept)
+        // A failed lookup keeps the app inside too; one with no other app on its user id (or not installed) is left out.
+        assertEquals(setOf("com.x", "com.y"), Compiler.keptIn(s) { p -> if (p == "com.y") null else kin(p) })
+        assertEquals(emptySet<String>(), Compiler.keptIn(s) { emptySet() })
+        for (lockdown in listOf(false, true)) {
+            val c = Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links(s), "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db", blockedKin = kept))).jsonObject
+            assertEquals(if (lockdown) listOf("app.unbraid") else listOf("com.y", "app.unbraid"), c.excluded())
+            assertFalse("lockdown=$lockdown", c.toString().contains("\"com.x\""))
+        }
+        // The engine sees the user id's apps together: com.x's connections take com.a's exit.
+        val walked = app.unbraid.data.RestoreTraffic.compile(s.copy(home = Home()), kin)!!
+        assertEquals("r-us", app.unbraid.data.RestoreTraffic.connect(walked, setOf("com.a", "com.x"), "example.org")!!.exit)
+        // With its lookups filtered it passes through anyway, but its own filtered Direct rule would take com.a along: none either.
+        val filtered = s.copy(prefs = Prefs(filter = Filter("quad9", apps = mapOf("com.x" to true))))
+        assertEquals(setOf("com.x"), Compiler.keptIn(filtered, kin))
+        val f = Json.parseToJsonElement(Compiler.compile(Compiler.Input(filtered, links(filtered), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", blockedKin = setOf("com.x")))).jsonObject
+        assertFalse(f.toString().contains("\"com.x\""))
+        assertEquals(listOf("com.y", "app.unbraid"), f.excluded())
+        assertEquals("r-us", app.unbraid.data.RestoreTraffic.connect(app.unbraid.data.RestoreTraffic.compile(filtered.copy(home = Home()), kin)!!, setOf("com.a", "com.x"), "example.org")!!.exit)
+        // Next to an app that only follows a Direct default, a filtered one keeps its filter: both go Direct anyway.
+        assertEquals(emptySet<String>(), Compiler.keptIn(filtered.copy(defaultRoute = DIRECT, apps = mapOf("com.x" to DIRECT)), kin))
+    }
+
     /** Over plain HTTP the Headscale key exchange could be faked, so such a control URL is refused, not used. */
     @Test fun headscaleNeedsHttps() {
         fun with(url: String) = example.copy(home = example.home.copy(tailscale = true, tsControlUrl = url))

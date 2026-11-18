@@ -22,6 +22,7 @@ import app.unbraid.data.WgConf
 import app.unbraid.data.withoutSecrets
 import app.unbraid.vpn.Compiler
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Random
@@ -67,7 +68,13 @@ class RestoreOracleTest {
     private fun under(n: String, s: String) = n == s || n.endsWith(".$s")
 
     /** The setup, read as the compiler states it decides. [given]: routes waiting for their config have it. */
-    private inner class Model(val s: Setup, val lockdown: Boolean, val given: Boolean = false) {
+    private inner class Model(setup: Setup, val lockdown: Boolean, val given: Boolean = false) {
+        /**
+         * An app on Direct goes as another app of its user id when that one goes through a route, is blocked or follows a
+         * VPN default, or would be taken out of unbraid with it: as if it had no choice of its own.
+         */
+        // Typed: the model's own `filter` would otherwise make this read itself.
+        val s: Setup = setup.copy(apps = setup.apps.filter { (p, r) -> r != DIRECT || kin(p).none { k -> setup.routeOf(k) != DIRECT || setup.outside(p) && !setup.outside(k) } })
         val f = s.prefs.filter
         val filter = f.server() != null
         val barred = s.apps.filterValues { it == BLOCK }.keys
@@ -372,18 +379,17 @@ class RestoreOracleTest {
             base.copy(defaultRoute = DIRECT, sites = mapOf("s.example" to DIRECT)) to base.copy(defaultRoute = DIRECT),
             // UDP refused by a plugin's exit, then carried.
             base.copy(apps = mapOf(appKeys[1] to "ss")) to base.copy(apps = mapOf(appKeys[1] to "w")),
-            // An app sharing its user id goes with the app.
-            base.copy() to base.copy(apps = mapOf(appKeys[0] to DIRECT)),
             // A website that could not be reached, blocked or on a route waiting for its config, goes Direct.
             base.copy(sites = mapOf("s.example" to BLOCK)) to base.copy(sites = mapOf("s.example" to DIRECT)),
             base.copy(sites = mapOf("s.example" to "k1")) to base.copy(sites = mapOf("s.example" to DIRECT)),
         )
-        val want = listOf(Loss.Blocking, Loss.Filter, Loss.Lookups, Loss.Lookups, Loss.Udp, Loss.ToDirect, Loss.ToDirect, Loss.ToDirect)
+        val want = listOf(Loss.Blocking, Loss.Filter, Loss.Lookups, Loss.Lookups, Loss.Udp, Loss.ToDirect, Loss.ToDirect)
         for ((i, c) in cases.withIndex()) {
             assertTrue("case $i", agree(c.first, c.second, "case $i"))
             val got = RestoreTraffic.found(c.first, c.second, kin)!!
             assertTrue("case $i: $got", (got.losses.values + got.later.values).any { want[i] in it })
         }
-        assertEquals(setOf(Who.App(appKeys[0]), Who.App(KIN, appKeys[0])), RestoreTraffic.found(cases[5].first, cases[5].second, kin)!!.losses.keys.filterIsInstance<Who.App>().toSet())
+        // An app set to Direct whose user id it shares with one that isn't stays inside with it: nothing goes Direct, nothing is said.
+        assertFalse(agree(base, base.copy(apps = mapOf(appKeys[0] to DIRECT)), "kin"))
     }
 }

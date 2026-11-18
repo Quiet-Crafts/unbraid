@@ -246,9 +246,8 @@ object RestoreTraffic {
         val p = LinkPicker.pick(s, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { Providers.get(it) }
         val providers = s.activeRoutes.filter { !it.imported || (given && p.blocked[it.id] is LinkPicker.KeyLeftOut) }
         val links = p.links + providers.mapIndexed { n, r -> r.id to standIn(r, n) }
-        val kinOfBlocked = s.apps.filterValues { it == BLOCK }.keys.flatMapTo(HashSet()) { kin(it) + it }
         Config(Compiler.compile(Compiler.Input(s, links, "app.unbraid", at.lockdown, "", "", at.suffix, blocked = p.blocked.keys - providers.map { it.id }.toSet(),
-            tsLoginPending = at.signIn, blockedKin = kinOfBlocked)), s)
+            tsLoginPending = at.signIn, blockedKin = Compiler.keptIn(s, kin))), s)
     }.getOrNull()
 
     /** About how many entries [s]'s config holds, known before it is built: the address rules come again after every app group and website. */

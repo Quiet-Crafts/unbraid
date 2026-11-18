@@ -348,9 +348,9 @@ class FakePoolTest {
         assertTrue(vpn.contains("FakePool.spend(input.fakeBlock, lastBlock, filesDir) { store.fakeBlock = it }"))
         assertTrue(vpn.contains("FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->"))
         assertTrue(vpn.contains("FakePool.restoreInput(lastInput ?: error(\"nothing ran\"), block, spent, "))
-        assertTrue(vpn.contains("tsLoginPending, move) { blockedKin(it, strict = false) }"))
-        // One blocked app whose lookup fails must not cost the other blocked apps their siblings on a restore.
-        assertTrue(vpn.contains("catch (e: RuntimeException) { if (strict) throw e else emptyList() }"))
+        assertTrue(vpn.contains("tsLoginPending, move) { blockedKin(it) }"))
+        // An app whose lookup fails stays inside, at a start and on a restore alike; it costs no other app its own.
+        assertTrue(vpn.contains("catch (e: RuntimeException) { null }"))
         assertTrue(vpn.contains("restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone, move = true)"))
         assertFalse(vpn.contains("\"cache.db\").length()"))
         assertEquals(2, Regex("""\.restarted\(starts\)""").findAll(vpn).count())

@@ -197,8 +197,11 @@ Each TCP and UDP connection is routed by the app that owns it, which Android rep
 for a download, a browser tab or a push message, that connection follows the other app or service's route. Ping has no owning app, so it follows the default route (when Direct is the default and other apps use VPN routes, internet ping is blocked instead). DNS is answered with fake addresses and looked up again on the exit
 the app really uses, so a site sees the country you picked for that app, or for that website when it has a route of its own. Apps you set to Direct are left out of the
 VPN by Android itself, unless you turn on "Block connections without VPN" or set the DNS filter to cover Direct
-traffic. Then they go through unbraid and are sent straight out from inside the app. Apps that only follow a
-Direct default route always go through unbraid. Only the default route and the routes your apps and websites use are connected.
+traffic. Then they go through unbraid and are sent straight out from inside the app. Android does this by user id,
+which a few apps share (such as Google Play services and Google Services Framework): an app set to Direct that shares
+one with an app that uses a VPN route or Block goes as that app does, filtered or not, and its Apps menu says so
+(apps are matched up when unbraid applies your setup: after you install or remove an app while connected, reconnect
+for this to follow). Apps that only follow a Direct default route always go through unbraid. Only the default route and the routes your apps and websites use are connected.
 
 A website rule matches the name unbraid itself answered with a fake address, never a name read from the connection,
 so an app can't claim another site's route. Blocked apps are refused before any other rule, DNS included.

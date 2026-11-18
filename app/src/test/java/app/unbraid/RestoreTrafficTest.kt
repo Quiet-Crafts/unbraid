@@ -242,7 +242,8 @@ class RestoreTrafficTest {
         val here = base.copy(apps = mapOf("org.b" to BLOCK, "org.c" to DIRECT))
         // org.c loses nothing while org.b stays blocked: the block refuses the whole user id.
         assertEquals(emptyList<String>(), notes(here, here.copy(apps = mapOf("org.b" to BLOCK)), kin))
-        assertEquals(listOf("2 apps that are blocked now go Direct."), notes(here, here.copy(apps = mapOf("org.c" to DIRECT)), kin))
+        // org.c alone on Direct stays inside with org.b, which now follows the default: both open, neither goes Direct.
+        assertEquals(listOf("2 apps that are blocked now won't be."), notes(here, here.copy(apps = mapOf("org.c" to DIRECT)), kin))
         // Without knowing they share one, only org.b would seem to open.
         assertEquals(listOf("1 app that is blocked now won't be."), notes(here, here.copy(apps = mapOf("org.c" to DIRECT))))
     }

@@ -85,7 +85,8 @@ sealed interface Fetch {
 /** [fetches] with [provider]'s marked as loading, or null while one is under way already (a Retry then starts no second one). */
 internal fun startFetch(fetches: Map<String, Fetch>, provider: String) = if (fetches[provider] == Fetch.Loading) null else fetches + (provider to Fetch.Loading)
 
-data class AppInfo(val pkg: String, val label: String, val system: Boolean)
+/** [uid]: its Android user id, which Android and the engine decide by: apps that share one go together. */
+data class AppInfo(val pkg: String, val label: String, val system: Boolean, val uid: Int)
 
 /** Removed routes' apps follow the default. The default itself never moves: check [Setup.refusesRemoving] first. */
 private fun Setup.without(gone: Set<String>) = copy(routes = routes.filter { it.id !in gone }, apps = apps.filterValues { it !in gone })
@@ -557,7 +558,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                 // One query for every app allowed online, not one permission check per app.
                 val online = pm.getPackagesHoldingPermissions(arrayOf(android.Manifest.permission.INTERNET), 0).mapTo(HashSet()) { it.packageName }
                 all.filter { it.packageName != self && it.packageName in online }
-                    .map { AppInfo(it.packageName, it.loadLabel(pm).toString(), it.flags and ApplicationInfo.FLAG_SYSTEM != 0 && pm.getLaunchIntentForPackage(it.packageName) == null) }
+                    .map { AppInfo(it.packageName, it.loadLabel(pm).toString(), it.flags and ApplicationInfo.FLAG_SYSTEM != 0 && pm.getLaunchIntentForPackage(it.packageName) == null, it.uid) }
                     .sortedBy { it.label.lowercase() } to knownApps(all.map { it.packageName }, archived)
             }.getOrNull()
         } ?: return@launch
