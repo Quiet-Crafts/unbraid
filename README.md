@@ -228,17 +228,16 @@ crashes and across any error the engine's cache reports (a failed read or write,
 hands out no more addresses, and the app moves on. A cache file changed without any error is not covered: it is the
 app's own private file, deleted at every connect, app start and move. A block apps were using comes back only after
 the seven others, so an address an app kept longer than that (across eight moves, reconnects or pauses) can name
-another site by then; apps that keep an old block's address are refused until they look the name up again.
+another site by then; apps that keep an old block's address are refused until they look the name up again. A move
+runs the setup in force at that moment on the next block; one that can't get ready (its block not saved, the old
+table not deleted) changes nothing and is tried again at the next check, 15 seconds later.
 
-When the engine can't start a change, the setup that ran before comes back and the app says the change was not
-applied. A change that could not be applied is not in force until it is; the notice says so. Meanwhile every app
-and website whose choice changed has no connection, and so has every app following the default if the default
-changed; a route you removed or signed out of has none either. Protections take the stricter of the two setups;
-settings with no stricter side (another filter server, another DNS, a Tailscale on/off switch) stay as they ran. If
-the setup from before can't start either, the connection ends, as after any lost connection: with Android's "Block
-connections without VPN" off, apps then go online without the VPN. The same holds when a move to the next block
-fails to start twice. A release build is signed only if `.secrets/signing.properties` exists, so a plain checkout
-builds an unsigned APK.
+When the engine can't start a change, the setup that ran before comes back as it was, on the newest block, and the
+app says the change was not applied: until a later change applies, the earlier setup stays in force, also for the
+apps, websites and settings the change was about. If the setup from before can't start either, the connection ends,
+as after any lost connection: with Android's "Block connections without VPN" off, apps then go online without the
+VPN. The same holds when a move's start fails and the setup from before then can't start on the new block either. A
+release build is signed only if `.secrets/signing.properties` exists, so a plain checkout builds an unsigned APK.
 
 ## Privacy
 
