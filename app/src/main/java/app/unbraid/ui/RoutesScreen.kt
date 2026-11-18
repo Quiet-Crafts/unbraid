@@ -151,12 +151,15 @@ internal fun dropText(draft: String, chose: Int, elsewhere: Boolean = true, remo
 internal fun dropLabel(draft: String, removes: Boolean) = if (removes) "Remove route" else "Remove from $draft"
 
 /**
- * The warning on a route's card: a provider route the service stopped moving because no server works on this network
- * ([stalled]), or an own server whose internet check fails ([notAnswering]); null when neither.
+ * The warning on a route's card: its Tailscale exit device is offline ([offline], the device's name), a provider route
+ * the service stopped moving because no server works on this network ([stalled]), or an own server whose internet check
+ * fails ([notAnswering]); null when none.
  */
-internal fun routeWarning(stalled: Boolean, notAnswering: Boolean) = when {
+internal fun routeWarning(stalled: Boolean, notAnswering: Boolean, offline: String? = null) = when {
+    offline != null -> "$offline is offline: its apps have no internet. Tap to choose another exit."
     stalled -> "Doesn't work on this network"
-    notAnswering -> "Not answering"
+    // Own servers only: a provider's downloaded file (PureVPN's, unused for a while) may simply have expired.
+    notAnswering -> "Not answering. If this file came from a provider, it may have expired: download a new one."
     else -> null
 }
 
@@ -338,7 +341,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
             Screen(
                 state = scroll,
                 overline = "",
-                overlineContent = { Status(vpn, switching != null) },
+                overlineContent = { Status(vpn, switching != null, setup.activeRoutes.count { offlineExit(vpn, it) != null }) },
                 title = if (switching != null) "Switching" else when (vpn.phase) {
                     Phase.On -> if (setup.directOnly) "Connected" else "Protected"
                     Phase.Paused -> "Paused"; Phase.Connecting -> "Connecting"; Phase.Off -> "Unprotected"
@@ -432,7 +435,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         title = route?.name ?: "Direct", meta = route?.let { place(it, live) } ?: "No VPN for these apps",
                         extra = if (route != null && server != null) serverId(route, server) else null,
                         border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
-                        exit = exitOf(shown.defaultRoute)?.let { it to pendingOf(it) }, warning = routeWarning(lit && shown.defaultRoute in vpn.stalled, lit && shown.defaultRoute in vpn.notAnswering),
+                        exit = exitOf(shown.defaultRoute)?.takeIf { offlineExit(vpn, route) == null }?.let { it to pendingOf(it) },
+                        warning = routeWarning(lit && shown.defaultRoute in vpn.stalled, lit && shown.defaultRoute in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }),
                     ) { sheet = shown.defaultRoute } }
                 }
                 // Android refused the VPN: most often another VPN app holds Always-on.
@@ -456,7 +460,8 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     val route = shown.route(id)
                     Rise("routes", i + 1, reveal) { RouteRow(
                         ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size), sites = sitesBy[id].orEmpty(),
-                        exit = if (route == null) null else exitOf(id)?.let { it to pendingOf(it) }, warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering), blocked = id == BLOCK,
+                        exit = if (route == null || offlineExit(vpn, route) != null) null else exitOf(id)?.let { it to pendingOf(it) },
+                        warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }), blocked = id == BLOCK,
                     ) { sheet = id } }
                 }
                 // Nothing set apart yet: say what that means instead of leaving the page empty.
@@ -653,20 +658,30 @@ private fun SheetAction(text: String, color: Color = Ink.text, onClick: () -> Un
     contentAlignment = Alignment.CenterStart,
 ) { Text(text, style = Type.body, color = color) }
 
+/**
+ * The Tailscale exit device route [r] goes through now, when Tailscale is running and says that device is offline: its
+ * apps get no internet (nothing leaks) until it is back or the route gets another exit. Null otherwise.
+ */
+internal fun offlineExit(vpn: VpnState, r: Route?) = r?.tsExit?.takeIf { vpn.tsState == "Running" && vpn.servers[r.id]?.host == it }
+    ?.let { ip -> vpn.tsExitNodes.firstOrNull { it.ip == ip } }?.takeIf { !it.online }
+
+/** The header line while connected: how long, or how many routes wait for their exit device ([waiting]). */
+internal fun connectedLabel(elapsed: String, waiting: Int) = if (waiting == 0) "Connected · $elapsed" else "Connected · ${if (waiting == 1) "1 route" else "$waiting routes"} waiting"
+
 /** Header overline. Owns the once-a-second clock so that tick recomposes only this line, not the whole screen. */
 @Composable
-private fun Status(vpn: VpnState, switching: Boolean = false) {
+private fun Status(vpn: VpnState, switching: Boolean = false, waiting: Int = 0) {
     val on = vpn.phase == Phase.On
     val now by produceState(System.currentTimeMillis(), on) { while (on) { value = System.currentTimeMillis(); delay(1000) } }
     val elapsed = ((now - vpn.since) / 1000).coerceAtLeast(0).let { "%02d:%02d:%02d".format(it / 3600, it / 60 % 60, it % 60) }
     val label = if (switching) "Switching profile" else when (vpn.phase) {
-        Phase.On -> "Connected · $elapsed"
+        Phase.On -> connectedLabel(elapsed, waiting)
         Phase.Connecting -> "Connecting"
         Phase.Off -> "Not connected"
         Phase.Paused -> pausedLabel(vpn.pausedUntil.takeIf { it > 0 }?.let { java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(it)) }, vpn.pausedAbout)
     }
     // Two lines rather than a cut: the time a pause ends is the one thing this line must show.
-    Text(label.uppercase(), style = Type.overline, color = if (switching) Ink.dim else stateColor(vpn.phase), maxLines = 2, overflow = TextOverflow.Ellipsis)
+    Text(label.uppercase(), style = Type.overline, color = if (switching) Ink.dim else if (on && waiting > 0) Ink.accent else stateColor(vpn.phase), maxLines = 2, overflow = TextOverflow.Ellipsis)
 }
 
 /** Green protected, orange paused, red unprotected: the button and the status line say the same thing. */

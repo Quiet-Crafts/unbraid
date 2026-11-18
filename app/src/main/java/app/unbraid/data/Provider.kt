@@ -165,7 +165,8 @@ object Plans {
 }
 
 /** Providers that only offer downloadable configs: the user imports one file per location. */
-data class ImportGuide(val id: String, val name: String, val openVpn: Boolean, val where: String, val url: String)
+/** How to bring in another provider's config: where to download it, and [note], what to know before downloading. */
+data class ImportGuide(val id: String, val name: String, val openVpn: Boolean, val where: String, val url: String, val note: String? = null)
 
 object Providers {
     /** Provider id → when it was last signed in to (ms), in this process: its new key may still be spreading ([Provider.keySetup]). */
@@ -183,7 +184,8 @@ object Providers {
     fun short(id: String) = mapOf("nord" to "Nord", "pia" to "PIA", "proton" to "Proton", "proton-free" to "Proton Free")[id] ?: get(id)?.name ?: id
 
     val imports = listOf(
-        ImportGuide("purevpn", "PureVPN", false, "Member Area → Manual configuration → WireGuard", "https://my.purevpn.com/"),
+        ImportGuide("purevpn", "PureVPN", false, "Member Area → Manual configuration → WireGuard", "https://my.purevpn.com/",
+            "Import and connect within about 30 minutes of downloading: PureVPN files that aren't used soon stop working."),
         ImportGuide("cyberghost", "CyberGhost", true, "My Devices → Configure new device → OpenVPN", "https://my.cyberghostvpn.com/"),
     )
 }

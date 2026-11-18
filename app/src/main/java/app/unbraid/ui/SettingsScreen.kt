@@ -745,6 +745,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = Gutter).padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(g.name, style = Type.title, modifier = Modifier.padding(horizontal = 8.dp))
                             Text(g.where, style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 8.dp))
+                            g.note?.let { Text(it, style = Type.sub, color = Ink.accent, modifier = Modifier.padding(horizontal = 8.dp)) }
                             Primary("Download the config from ${g.name}", { context.openUrl(g.url) })
                             Secondary("Import file", { importer.file(if (g.openVpn) "ovpn" else "wg", g.name) }, Modifier.fillMaxWidth())
                             importer.error?.let { Text(it, style = Type.caption, color = Ink.bad, modifier = Modifier.padding(horizontal = 8.dp)) }

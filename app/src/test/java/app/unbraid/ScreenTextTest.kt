@@ -17,6 +17,7 @@ import app.unbraid.ui.emptyApps
 import app.unbraid.ui.systemLine
 import app.unbraid.ui.noLocations
 import app.unbraid.ui.routeWarning
+import app.unbraid.ui.connectedLabel
 import app.unbraid.ui.missingAppsText
 import app.unbraid.ui.summary
 import app.unbraid.ui.pausedLabel
@@ -142,8 +143,12 @@ class ScreenTextTest {
 
     @Test fun routeCardWarnings() {
         assertEquals("Doesn't work on this network", routeWarning(stalled = true, notAnswering = true))
-        assertEquals("Not answering", routeWarning(stalled = false, notAnswering = true))
+        assertEquals("Not answering. If this file came from a provider, it may have expired: download a new one.", routeWarning(stalled = false, notAnswering = true))
         assertEquals(null, routeWarning(stalled = false, notAnswering = false))
+        assertEquals("home-mac is offline: its apps have no internet. Tap to choose another exit.", routeWarning(stalled = false, notAnswering = false, offline = "home-mac"))
+        assertEquals("Connected · 00:01:02", connectedLabel("00:01:02", 0))
+        assertEquals("Connected · 1 route waiting", connectedLabel("00:01:02", 1))
+        assertEquals("Connected · 2 routes waiting", connectedLabel("00:01:02", 2))
         assertEquals("1 app uses a route that no longer exists, so it's offline. Choose a route for it.", missingAppsText(1))
         assertEquals("3 apps use a route that no longer exists, so they're offline. Choose a route for them.", missingAppsText(3))
     }
