@@ -1,0 +1,1442 @@
+--- a/option/tailscale.go
++++ b/option/tailscale.go
+@@ -14,28 +14,38 @@
+ 
+ type TailscaleEndpointOptions struct {
+ 	DialerOptions
+-	StateDirectory             string                     `json:"state_directory,omitempty"`
+-	AuthKey                    string                     `json:"auth_key,omitempty"`
+-	ControlURL                 string                     `json:"control_url,omitempty"`
+-	Ephemeral                  bool                       `json:"ephemeral,omitempty"`
+-	Hostname                   string                     `json:"hostname,omitempty"`
+-	AcceptRoutes               bool                       `json:"accept_routes,omitempty"`
+-	ExitNode                   string                     `json:"exit_node,omitempty"`
+-	ExitNodeAllowLANAccess     bool                       `json:"exit_node_allow_lan_access,omitempty"`
+-	AdvertiseRoutes            []netip.Prefix             `json:"advertise_routes,omitempty"`
+-	AdvertiseExitNode          bool                       `json:"advertise_exit_node,omitempty"`
+-	AdvertiseTags              badoption.Listable[string] `json:"advertise_tags,omitempty"`
+-	ListenPort                 uint16                     `json:"listen_port,omitempty"`
+-	RelayServerPort            *uint16                    `json:"relay_server_port,omitempty"`
+-	RelayServerStaticEndpoints []netip.AddrPort           `json:"relay_server_static_endpoints,omitempty"`
+-	SystemInterface            bool                       `json:"system_interface,omitempty"`
+-	SystemInterfaceName        string                     `json:"system_interface_name,omitempty"`
+-	SystemInterfaceMTU         uint32                     `json:"system_interface_mtu,omitempty"`
+-	UDPTimeout                 UDPTimeoutCompat           `json:"udp_timeout,omitempty"`
+-	SSHServer                  *TailscaleSSHServerOptions `json:"ssh_server,omitempty"`
+-	TaildropDirectory          string                     `json:"taildrop_directory,omitempty"`
++	StateDirectory             string                      `json:"state_directory,omitempty"`
++	AuthKey                    string                      `json:"auth_key,omitempty"`
++	ControlURL                 string                      `json:"control_url,omitempty"`
++	Ephemeral                  bool                        `json:"ephemeral,omitempty"`
++	Hostname                   string                      `json:"hostname,omitempty"`
++	AcceptRoutes               bool                        `json:"accept_routes,omitempty"`
++	ExitNode                   string                      `json:"exit_node,omitempty"`
++	ExitNodeAllowLANAccess     bool                        `json:"exit_node_allow_lan_access,omitempty"`
++	AdvertiseRoutes            []netip.Prefix              `json:"advertise_routes,omitempty"`
++	AdvertiseExitNode          bool                        `json:"advertise_exit_node,omitempty"`
++	AdvertiseTags              badoption.Listable[string]  `json:"advertise_tags,omitempty"`
++	ListenPort                 uint16                      `json:"listen_port,omitempty"`
++	RelayServerPort            *uint16                     `json:"relay_server_port,omitempty"`
++	RelayServerStaticEndpoints []netip.AddrPort            `json:"relay_server_static_endpoints,omitempty"`
++	SystemInterface            bool                        `json:"system_interface,omitempty"`
++	SystemInterfaceName        string                      `json:"system_interface_name,omitempty"`
++	SystemInterfaceMTU         uint32                      `json:"system_interface_mtu,omitempty"`
++	UDPTimeout                 UDPTimeoutCompat            `json:"udp_timeout,omitempty"`
++	SSHServer                  *TailscaleSSHServerOptions  `json:"ssh_server,omitempty"`
++	TaildropDirectory          string                      `json:"taildrop_directory,omitempty"`
++	TUNHandoff                 *TailscaleTUNHandoffOptions `json:"tun_handoff,omitempty"`
+ }
+ 
++// TailscaleTUNHandoffOptions hands inbound tailnet TCP on the given ports to the system through the TUN (unbraid
++// patch). The TUN must carry this node's tailnet address. Only connections whose receiving app is allowed and not
++// blocked get any data.
++type TailscaleTUNHandoffOptions struct {
++	TCPPorts      badoption.Listable[string] `json:"tcp_ports,omitempty"`
++	AllowPackages badoption.Listable[string] `json:"allow_packages,omitempty"`
++	BlockPackages badoption.Listable[string] `json:"block_packages,omitempty"`
++}
++
+ type _TailscaleSSHServerOptions struct {
+ 	Enabled           bool `json:"enabled,omitempty"`
+ 	DisablePTY        bool `json:"disable_pty,omitempty"`
+--- a/protocol/tailscale/endpoint.go
++++ b/protocol/tailscale/endpoint.go
+@@ -28,6 +28,7 @@
+ 	"github.com/sagernet/sing-box/adapter/endpoint"
+ 	"github.com/sagernet/sing-box/common/dialer"
+ 	"github.com/sagernet/sing-box/common/iponly"
++	"github.com/sagernet/sing-box/common/tunhandoff"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/dns"
+ 	"github.com/sagernet/sing-box/log"
+@@ -128,6 +129,8 @@
+ 	keyAuth             bool
+ 	started             atomic.Bool
+ 	systemDialer        *dialer.DefaultDialer
++	handoff             *handoff
++	handoffBinding      *tunhandoff.Binding
+ }
+ 
+ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TailscaleEndpointOptions) (adapter.Endpoint, error) {
+@@ -192,7 +195,7 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	return &Endpoint{
++	ep := &Endpoint{
+ 		Adapter:           endpoint.NewAdapter(C.TypeTailscale, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, nil),
+ 		ctx:               ctx,
+ 		router:            router,
+@@ -251,7 +254,9 @@
+ 		systemInterfaceName:        options.SystemInterfaceName,
+ 		systemInterfaceMTU:         options.SystemInterfaceMTU,
+ 		keyAuth:                    options.AuthKey != "",
+-	}, nil
++	}
++	ep.setupHandoff(options.TUNHandoff)
++	return ep, nil
+ }
+ 
+ func (t *Endpoint) References() []string {
+@@ -474,6 +479,7 @@
+ 	wgEngine := localBackend.ExportEngine().(wgengine.ExportedUserspaceEngine)
+ 	wgEngine.SetOnReconfigListener(t.onReconfig)
+ 	t.wgEngine = wgEngine
++	t.startHandoff(scope)
+ 
+ 	ipStack := t.server.ExportNetstack().ExportIPStack()
+ 	gErr := ipStack.SetSpoofing(tun.DefaultNIC, true)
+@@ -1011,6 +1017,9 @@
+ 
+ 	domains := newTailnetDomains(dnsCfg)
+ 	t.domains.Store(&domains)
++	if t.handoff != nil {
++		go t.refreshHandoff() // reads the backend's state: not from inside the engine's reconfiguration
++	}
+ 
+ 	if t.onReconfigHook != nil {
+ 		t.onReconfigHook(cfg, routerCfg, dnsCfg)
+--- a/protocol/tun/inbound.go
++++ b/protocol/tun/inbound.go
+@@ -13,6 +13,7 @@
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/adapter/inbound"
+ 	"github.com/sagernet/sing-box/common/taskmonitor"
++	"github.com/sagernet/sing-box/common/tunhandoff"
+ 	C "github.com/sagernet/sing-box/constant"
+ 	"github.com/sagernet/sing-box/log"
+ 	"github.com/sagernet/sing-box/option"
+@@ -452,6 +453,30 @@
+ 		scope.Add(tunInterface.Close)
+ 		t.logger.Trace("creating stack")
+ 		t.tunIf = tunInterface
++		// An endpoint of this engine that hands inbound packets to the system writes them through here, and sees the
++		// system's packets first; with none, nothing is installed (unbraid patch).
++		var interceptor tun.PacketInterceptor
++		if binding := tunhandoff.Acquire(t.router); binding.Wanted() {
++			headroom := 0
++			if h, ok := tunInterface.(interface{ FrontHeadroom() int }); ok {
++				headroom = h.FrontHeadroom()
++			}
++			token := binding.SetWriter(func(packet []byte) error {
++				if headroom > 0 {
++					packet = append(make([]byte, headroom, headroom+len(packet)), packet...)
++				}
++				_, err := tunInterface.Write(packet)
++				return err
++			})
++			interceptor = binding
++			scope.Add(func() error {
++				binding.ClearWriter(token)
++				tunhandoff.Release(t.router, binding)
++				return nil
++			})
++		} else {
++			tunhandoff.Release(t.router, binding)
++		}
+ 		if t.platformInterface != nil {
+ 			err = t.platformInterface.ProcessPlatformOptions(t.platformOptions)
+ 			if err != nil {
+@@ -476,6 +501,7 @@
+ 			ForwarderBindInterface: C.IsDarwin,
+ 			InterfaceFinder:        t.networkManager.InterfaceFinder(),
+ 			IncludeAllNetworks:     includeAllNetworks,
++			PacketInterceptor:      interceptor,
+ 		})
+ 		if err != nil {
+ 			return err
+--- /dev/null
++++ b/common/tunhandoff/tunhandoff.go
+@@ -0,0 +1,97 @@
++// Package tunhandoff links the TUN inbound and an endpoint that hands inbound packets to the system through the TUN
++// (unbraid patch). One Binding per engine instance, keyed by its router, so an engine that is shutting down never
++// reaches the TUN of the engine that replaced it.
++package tunhandoff
++
++import (
++	"net/netip"
++	"sync"
++	"sync/atomic"
++)
++
++// Handler takes packets the system writes into the TUN before they reach the stack.
++type Handler interface {
++	// Intercept is called once per packet; packet returns the whole IP packet. True means it was taken.
++	Intercept(source netip.Addr, packet func() ([]byte, bool)) bool
++}
++
++type handlerBox struct{ Handler }
++
++type writerBox struct{ write func([]byte) error }
++
++// Binding is what one engine instance's TUN and endpoint share.
++type Binding struct {
++	refs    int // guarded by bindingsAccess
++	wanted  atomic.Bool
++	handler atomic.Pointer[handlerBox]
++	writer  atomic.Pointer[writerBox]
++}
++
++var (
++	bindingsAccess sync.Mutex
++	bindings       = map[any]*Binding{}
++)
++
++// Acquire returns the binding of the engine instance identified by owner (its router); Release drops it.
++func Acquire(owner any) *Binding {
++	bindingsAccess.Lock()
++	defer bindingsAccess.Unlock()
++	b := bindings[owner]
++	if b == nil {
++		b = &Binding{}
++		bindings[owner] = b
++	}
++	b.refs++
++	return b
++}
++
++func Release(owner any, b *Binding) {
++	bindingsAccess.Lock()
++	defer bindingsAccess.Unlock()
++	if b.refs--; b.refs <= 0 && bindings[owner] == b {
++		delete(bindings, owner)
++	}
++}
++
++// Want marks that an endpoint of this instance hands packets off, so its TUN installs the interceptor.
++func (b *Binding) Want() { b.wanted.Store(true) }
++
++func (b *Binding) Wanted() bool { return b.wanted.Load() }
++
++// SetHandler registers h and returns a token for ClearHandler, which removes it only if it is still the one.
++func (b *Binding) SetHandler(h Handler) any {
++	box := &handlerBox{h}
++	b.handler.Store(box)
++	return box
++}
++
++func (b *Binding) ClearHandler(token any) {
++	if box, ok := token.(*handlerBox); ok {
++		b.handler.CompareAndSwap(box, nil)
++	}
++}
++
++// SetWriter registers the TUN's raw writer and returns a token for ClearWriter.
++func (b *Binding) SetWriter(w func([]byte) error) any {
++	box := &writerBox{w}
++	b.writer.Store(box)
++	return box
++}
++
++func (b *Binding) ClearWriter(token any) {
++	if box, ok := token.(*writerBox); ok {
++		b.writer.CompareAndSwap(box, nil)
++	}
++}
++
++// Write writes one IP packet into the TUN, towards the system. False when there is no TUN or the write failed.
++func (b *Binding) Write(packet []byte) bool {
++	w := b.writer.Load()
++	return w != nil && w.write(packet) == nil
++}
++
++// InterceptPacket is the TUN stack's interceptor: the handler is loaded once per packet.
++func (b *Binding) InterceptPacket(source netip.Addr, packet func() ([]byte, bool)) bool {
++	h := b.handler.Load()
++	return h != nil && h.Intercept(source, packet)
++}
+--- /dev/null
++++ b/protocol/tailscale/handoff.go
+@@ -0,0 +1,750 @@
++//go:build with_gvisor
++
++package tailscale
++
++// Hand-off of inbound tailnet TCP to the system through the TUN (unbraid patch). A connection a peer opens to this
++// node's own tailnet address, on an allowed port, is written into the TUN, so the system delivers it to the listening
++// app with the peer's real address; the app's packets for it are taken back from the TUN before the stack and sent to
++// Tailscale. No byte of payload passes in either direction until the system has named the app holding the
++// connection; unless that app is allowed and none of its user id is blocked, both ends are reset.
++//
++// Locking: handoff.access guards the table; each flow's mu orders its state and delivery. access is always taken
++// before a flow's mu, and never while holding one. No I/O happens under access.
++
++import (
++	"encoding/binary"
++	"net/netip"
++	"strconv"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++)
++
++const (
++	handoffMaxFlows     = 512
++	handoffMaxPerPeer   = 64
++	handoffMaxHeldFlow  = 64 << 10
++	handoffMaxHeldTotal = 4 << 20
++	handoffOpenWait     = 10 * time.Second // SYN to the final ACK
++	handoffCheckWait    = 3 * time.Second  // final ACK to the decision
++	handoffIdle         = 2 * time.Hour    // an allowed connection silent this long is closed
++	handoffTombstone    = 30 * time.Second // a refused or closed tuple stays dead this long
++	handoffChecks       = 4                // owner lookups at once
++
++	tcpFIN = 0x01
++	tcpSYN = 0x02
++	tcpRST = 0x04
++	tcpPSH = 0x08
++	tcpACK = 0x10
++)
++
++type handoffState uint8
++
++const (
++	flowOpening  handoffState = iota // SYN seen, handshake under way
++	flowChecking                     // handshake done, owner check running
++	flowAllowed
++	flowClosing // reset or closed both ways: dropped until removed
++	flowDenied  // refused: dropped until removed
++)
++
++type flowKey struct {
++	peer netip.AddrPort
++	port uint16
++}
++
++type handoffFlow struct {
++	key   flowKey
++	gen   uint64     // the table it belongs to
++	local netip.Addr // this node's address when it opened
++
++	mu           sync.Mutex
++	state        handoffState
++	revoked      bool // the table it belonged to is gone: never deliver again
++	peerISN      uint32
++	localISN     uint32
++	haveLocalISN bool
++	peerNext     uint32 // next sequence number after what was delivered to the system
++	localNext    uint32 // next sequence number after what was delivered to the peer
++	peerSent     bool
++	localSent    bool
++	finIn        bool
++	finOut       bool
++	in, out      [][]byte // held: towards the system, towards the peer
++	held         int
++	deadline     time.Time // opening and checking
++	expires      time.Time // closing and denied
++	lastActive   time.Time
++}
++
++type handoffTable struct {
++	gen     uint64
++	local   netip.Addr // invalid: nothing is handed off
++	closed  bool
++	flows   map[flowKey]*handoffFlow
++	perPeer map[netip.Addr]int
++}
++
++func newHandoffTable(gen uint64, local netip.Addr) *handoffTable {
++	return &handoffTable{gen: gen, local: local, flows: map[flowKey]*handoffFlow{}, perPeer: map[netip.Addr]int{}}
++}
++
++// handoffDeps is the outside world, replaced in tests.
++type handoffDeps struct {
++	owner    func(local, peer netip.AddrPort) ([]string, error) // packages of the user id holding the connection
++	toPeer   func(packet []byte)                                // into Tailscale, towards the peer
++	toSystem func(packet []byte) bool                           // into the TUN, towards the system
++}
++
++type portRange struct{ from, to uint16 }
++
++type handoff struct {
++	logger    log.ContextLogger
++	ports     []portRange
++	allow     map[string]bool
++	block     map[string]bool
++	deps      handoffDeps
++	heldTotal atomic.Int64
++	checks    chan struct{}
++	done      chan struct{}
++	closeOnce sync.Once
++	local     atomic.Pointer[netip.Addr] // lock-free first test for packets from the system
++	peers     atomic.Pointer[map[netip.Addr]struct{}]
++
++	access sync.Mutex
++	tab    *handoffTable
++}
++
++func newHandoff(logger log.ContextLogger, options *option.TailscaleTUNHandoffOptions, deps handoffDeps) *handoff {
++	h := &handoff{
++		logger: logger, deps: deps, allow: map[string]bool{}, block: map[string]bool{},
++		checks: make(chan struct{}, handoffChecks), done: make(chan struct{}), tab: newHandoffTable(1, netip.Addr{}),
++	}
++	for _, p := range options.TCPPorts {
++		from, to, _ := strings.Cut(p, ":")
++		a, err1 := strconv.ParseUint(from, 10, 16)
++		b := a
++		var err2 error
++		if to != "" {
++			b, err2 = strconv.ParseUint(to, 10, 16)
++		}
++		// Ports below 1024 are never handed off: system services and Tailscale's own peer API live there.
++		if err1 == nil && err2 == nil && a >= 1024 && b >= a {
++			h.ports = append(h.ports, portRange{uint16(a), uint16(b)})
++		}
++	}
++	for _, p := range options.AllowPackages {
++		h.allow[p] = true
++	}
++	for _, p := range options.BlockPackages {
++		h.block[p] = true
++	}
++	return h
++}
++
++func (h *handoff) portAllowed(port uint16) bool {
++	for _, r := range h.ports {
++		if port >= r.from && port <= r.to {
++			return true
++		}
++	}
++	return false
++}
++
++// setLocal installs this node's IPv4 tailnet address (invalid: off) and the peers' own node addresses. A new address
++// starts an empty table; flows of peers that left are revoked.
++func (h *handoff) setLocal(local netip.Addr, peers map[netip.Addr]struct{}) {
++	h.peers.Store(&peers)
++	h.access.Lock()
++	old := h.tab
++	if old.closed {
++		h.access.Unlock()
++		return
++	}
++	var revoked []*handoffFlow
++	if old.local != local {
++		h.tab = newHandoffTable(old.gen+1, local)
++		if local.IsValid() {
++			h.local.Store(&local)
++		} else {
++			h.local.Store(nil)
++		}
++		for _, f := range old.flows {
++			revoked = append(revoked, f)
++		}
++	} else {
++		for _, f := range old.flows {
++			if _, ok := peers[f.key.peer.Addr()]; !ok {
++				h.retireLocked(old, f)
++				revoked = append(revoked, f)
++			}
++		}
++	}
++	h.access.Unlock()
++	for _, f := range revoked {
++		h.revoke(f)
++	}
++}
++
++// close stops the hand-off: nothing is delivered any more once it returns.
++func (h *handoff) close() {
++	h.access.Lock()
++	old := h.tab
++	h.tab = &handoffTable{gen: old.gen + 1, closed: true, flows: map[flowKey]*handoffFlow{}, perPeer: map[netip.Addr]int{}}
++	h.local.Store(nil)
++	h.access.Unlock()
++	for _, f := range old.flows {
++		h.revoke(f) // waits for a delivery in progress on that flow
++	}
++	h.closeOnce.Do(func() { close(h.done) })
++}
++
++func (h *handoff) retireLocked(tab *handoffTable, f *handoffFlow) {
++	if tab.flows[f.key] != f {
++		return
++	}
++	delete(tab.flows, f.key)
++	if tab.perPeer[f.key.peer.Addr()]--; tab.perPeer[f.key.peer.Addr()] <= 0 {
++		delete(tab.perPeer, f.key.peer.Addr())
++	}
++}
++
++func (h *handoff) revoke(f *handoffFlow) {
++	f.mu.Lock()
++	f.revoked = true
++	h.dropHeldLocked(f)
++	f.mu.Unlock()
++}
++
++// Inbound sees a packet from a peer after Tailscale's access rules; true means it was taken.
++func (h *handoff) Inbound(b []byte) bool {
++	h.access.Lock()
++	tab := h.tab
++	if tab.closed || !tab.local.IsValid() {
++		h.access.Unlock()
++		return false
++	}
++	p, ok := parseTCP4(b)
++	if !ok {
++		return h.inboundICMPLocked(tab, b) // unlocks
++	}
++	if p.dst.Addr() != tab.local || !h.portAllowed(p.dst.Port()) {
++		h.access.Unlock()
++		return false
++	}
++	// From here the packet is ours: taken or dropped, never left to the stack.
++	peers := h.peers.Load()
++	if peers == nil || p.src.Addr() == tab.local {
++		h.access.Unlock()
++		return true
++	}
++	if _, ok := (*peers)[p.src.Addr()]; !ok {
++		h.access.Unlock() // not a peer's own node address (a routed one, say)
++		return true
++	}
++	key := flowKey{p.src, p.dst.Port()}
++	opening := p.flags&(tcpSYN|tcpACK|tcpRST|tcpFIN) == tcpSYN
++	f := tab.flows[key]
++	var replaced *handoffFlow
++	if f != nil && opening && p.seq != f.peerISN {
++		h.retireLocked(tab, f) // a new connection on the same tuple: nothing carries over
++		replaced, f = f, nil
++	}
++	if f == nil {
++		if !opening || p.payload != 0 || len(tab.flows) >= handoffMaxFlows || tab.perPeer[p.src.Addr()] >= handoffMaxPerPeer {
++			h.access.Unlock()
++			if replaced != nil {
++				h.revoke(replaced)
++			}
++			return true
++		}
++		now := time.Now()
++		f = &handoffFlow{key: key, gen: tab.gen, local: tab.local, state: flowOpening, peerISN: p.seq, deadline: now.Add(handoffOpenWait), lastActive: now}
++		tab.flows[key] = f
++		tab.perPeer[p.src.Addr()]++
++	}
++	h.access.Unlock()
++	if replaced != nil {
++		h.revoke(replaced)
++	}
++	pkt := append([]byte(nil), b...)
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	if !f.revoked {
++		h.fromPeerLocked(f, p, pkt)
++	}
++	return true
++}
++
++func (h *handoff) fromPeerLocked(f *handoffFlow, p tcp4, pkt []byte) {
++	switch f.state {
++	case flowAllowed:
++		f.lastActive = time.Now()
++		if !h.deliverSystemLocked(f, pkt) {
++			h.denyLocked(f)
++			return
++		}
++		if p.flags&tcpRST != 0 {
++			h.closeLocked(f)
++		} else if p.flags&tcpFIN != 0 {
++			if f.finIn = true; f.finOut {
++				h.closeLocked(f)
++			}
++		}
++	case flowOpening:
++		switch {
++		case p.flags&tcpRST != 0:
++			if p.payload == 0 {
++				h.deliverSystemLocked(f, pkt)
++			}
++			h.closeLocked(f)
++		case p.flags&tcpSYN != 0:
++			if p.flags&tcpACK == 0 && p.seq == f.peerISN && p.payload == 0 {
++				h.deliverSystemLocked(f, pkt) // retransmitted SYN
++			}
++		case p.flags&tcpACK != 0 && f.haveLocalISN && p.seq == f.peerISN+1 && p.ack == f.localISN+1:
++			// The final ACK. Data on it is held; the system gets a bare ACK so its socket can be established.
++			if p.payload > 0 || p.flags&tcpFIN != 0 {
++				if !h.deliverSystemLocked(f, bareACK(pkt)) || !h.holdLocked(f, &f.in, pkt) {
++					h.denyLocked(f)
++					return
++				}
++			} else if !h.deliverSystemLocked(f, pkt) {
++				h.denyLocked(f)
++				return
++			}
++			f.state = flowChecking
++			f.deadline = time.Now().Add(handoffCheckWait)
++			go h.check(f)
++		}
++	case flowChecking:
++		switch {
++		case p.flags&tcpRST != 0:
++			if p.payload == 0 {
++				h.deliverSystemLocked(f, pkt)
++			}
++			h.closeLocked(f)
++		case p.payload > 0 || p.flags&tcpFIN != 0:
++			h.holdLocked(f, &f.in, pkt)
++		default:
++			h.deliverSystemLocked(f, pkt)
++		}
++	}
++}
++
++// inboundICMPLocked hands an ICMP error about an allowed connection to the system, which owns that connection.
++// Called with access held; unlocks it.
++func (h *handoff) inboundICMPLocked(tab *handoffTable, b []byte) bool {
++	key, ok := icmpQuote(b, tab.local)
++	if !ok || !h.portAllowed(key.port) {
++		h.access.Unlock()
++		return false
++	}
++	f := tab.flows[key]
++	h.access.Unlock()
++	if f == nil {
++		return false
++	}
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	if f.revoked || f.state != flowAllowed {
++		return true
++	}
++	h.deps.toSystem(append([]byte(nil), b...))
++	return true
++}
++
++// Intercept sees a packet the system writes into the TUN; true means it was taken (tunhandoff.Handler).
++func (h *handoff) Intercept(source netip.Addr, packet func() ([]byte, bool)) bool {
++	if local := h.local.Load(); local == nil || *local != source {
++		return false
++	}
++	b, ok := packet()
++	if !ok {
++		return false
++	}
++	p, ok := parseTCP4(b)
++	if !ok || p.flags&(tcpSYN|tcpACK) == tcpSYN {
++		return false // not TCP, or the system opening a connection of its own: normal routing and policy
++	}
++	h.access.Lock()
++	tab := h.tab
++	if tab.closed || p.src.Addr() != tab.local {
++		h.access.Unlock()
++		return false
++	}
++	f := tab.flows[flowKey{p.dst, p.src.Port()}]
++	h.access.Unlock()
++	if f == nil {
++		return false
++	}
++	pkt := append([]byte(nil), b...)
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	if f.revoked {
++		return true
++	}
++	switch f.state {
++	case flowOpening:
++		switch {
++		case p.flags&(tcpSYN|tcpACK) == tcpSYN|tcpACK && p.ack == f.peerISN+1 && p.payload == 0:
++			f.localISN, f.haveLocalISN = p.seq, true
++			h.deliverPeerLocked(f, pkt)
++		case p.flags&tcpRST != 0:
++			h.deliverPeerLocked(f, rstOnly(pkt))
++			h.closeLocked(f)
++		}
++	case flowChecking:
++		switch {
++		case p.flags&tcpRST != 0:
++			h.deliverPeerLocked(f, rstOnly(pkt))
++			h.closeLocked(f)
++		case p.payload > 0 || p.flags&tcpFIN != 0:
++			h.holdLocked(f, &f.out, pkt)
++		default:
++			h.deliverPeerLocked(f, pkt)
++		}
++	case flowAllowed:
++		f.lastActive = time.Now()
++		h.deliverPeerLocked(f, pkt)
++		if p.flags&tcpRST != 0 {
++			h.closeLocked(f)
++		} else if p.flags&tcpFIN != 0 {
++			if f.finOut = true; f.finIn {
++				h.closeLocked(f)
++			}
++		}
++	}
++	return true
++}
++
++func (h *handoff) deliverSystemLocked(f *handoffFlow, pkt []byte) bool {
++	p, ok := parseTCP4(pkt)
++	if !ok || !h.deps.toSystem(pkt) {
++		return false
++	}
++	if next := p.next(); !f.peerSent || seqAfter(next, f.peerNext) {
++		f.peerNext, f.peerSent = next, true
++	}
++	return true
++}
++
++func (h *handoff) deliverPeerLocked(f *handoffFlow, pkt []byte) {
++	p, ok := parseTCP4(pkt)
++	if !ok {
++		return
++	}
++	h.deps.toPeer(pkt)
++	if next := p.next(); !f.localSent || seqAfter(next, f.localNext) {
++		f.localNext, f.localSent = next, true
++	}
++}
++
++// holdLocked queues a packet while the check runs; past the limits the flow is refused.
++func (h *handoff) holdLocked(f *handoffFlow, q *[][]byte, pkt []byte) bool {
++	if f.held+len(pkt) > handoffMaxHeldFlow || h.heldTotal.Load()+int64(len(pkt)) > handoffMaxHeldTotal {
++		h.denyLocked(f)
++		return false
++	}
++	f.held += len(pkt)
++	h.heldTotal.Add(int64(len(pkt)))
++	*q = append(*q, pkt)
++	return true
++}
++
++func (h *handoff) dropHeldLocked(f *handoffFlow) {
++	h.heldTotal.Add(-int64(f.held))
++	f.in, f.out, f.held = nil, nil, 0
++}
++
++func (h *handoff) closeLocked(f *handoffFlow) {
++	h.dropHeldLocked(f)
++	f.state = flowClosing
++	f.expires = time.Now().Add(handoffTombstone)
++}
++
++// denyLocked drops what is held, resets both ends at the position each actually received, and keeps a tombstone.
++func (h *handoff) denyLocked(f *handoffFlow) {
++	if f.state == flowDenied || f.state == flowClosing {
++		return
++	}
++	h.dropHeldLocked(f)
++	f.state = flowDenied
++	f.expires = time.Now().Add(handoffTombstone)
++	me := netip.AddrPortFrom(f.local, f.key.port)
++	if f.peerSent {
++		h.deps.toSystem(rst4(f.key.peer, me, f.peerNext))
++	}
++	if f.localSent {
++		h.deps.toPeer(rst4(me, f.key.peer, f.localNext))
++	}
++}
++
++// check asks the system which app holds the connection, then lets it through or refuses it.
++func (h *handoff) check(f *handoffFlow) {
++	f.mu.Lock()
++	deadline := f.deadline
++	f.mu.Unlock()
++	select {
++	case h.checks <- struct{}{}:
++		defer func() { <-h.checks }()
++	case <-time.After(time.Until(deadline)):
++		h.decide(f, nil)
++		return
++	case <-h.done:
++		return
++	}
++	var packages []string
++	var err error
++	for {
++		packages, err = h.deps.owner(netip.AddrPortFrom(f.local, f.key.port), f.key.peer)
++		if err == nil || !time.Now().Add(50*time.Millisecond).Before(deadline) {
++			break
++		}
++		select {
++		case <-time.After(50 * time.Millisecond):
++		case <-h.done:
++			return
++		}
++	}
++	if err != nil {
++		packages = nil
++	}
++	h.decide(f, packages)
++}
++
++// allowed: every package of the user id is chosen and none is blocked.
++func (h *handoff) allowed(packages []string) bool {
++	if len(packages) == 0 {
++		return false
++	}
++	for _, name := range packages {
++		if h.block[name] || !h.allow[name] {
++			return false
++		}
++	}
++	return true
++}
++
++func (h *handoff) decide(f *handoffFlow, packages []string) {
++	h.access.Lock()
++	current := h.tab.gen == f.gen && h.tab.flows[f.key] == f
++	h.access.Unlock()
++	if !current {
++		return // a result for a flow that is gone never applies to its successor
++	}
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	if f.revoked || f.state != flowChecking {
++		return
++	}
++	if !h.allowed(packages) || time.Now().After(f.deadline) {
++		h.denyLocked(f)
++		h.logger.Info("tun hand-off: refused ", f.key.peer, " -> port ", f.key.port)
++		return
++	}
++	in, out := f.in, f.out
++	h.dropHeldLocked(f)
++	f.state = flowAllowed
++	f.lastActive = time.Now()
++	for _, pkt := range in {
++		if !h.deliverSystemLocked(f, pkt) {
++			h.denyLocked(f)
++			return
++		}
++	}
++	for _, pkt := range out {
++		h.deliverPeerLocked(f, pkt)
++	}
++	h.logger.Info("tun hand-off: allowed ", f.key.peer, " -> port ", f.key.port, " (", strings.Join(packages, ","), ")")
++}
++
++// sweep enforces deadlines and removes dead flows.
++func (h *handoff) sweep() {
++	t := time.NewTicker(time.Second)
++	defer t.Stop()
++	for {
++		select {
++		case <-h.done:
++			return
++		case now := <-t.C:
++			h.sweepOnce(now)
++		}
++	}
++}
++
++func (h *handoff) sweepOnce(now time.Time) {
++	h.access.Lock()
++	tab := h.tab
++	flows := make([]*handoffFlow, 0, len(tab.flows))
++	for _, f := range tab.flows {
++		flows = append(flows, f)
++	}
++	h.access.Unlock()
++	var dead []*handoffFlow
++	for _, f := range flows {
++		f.mu.Lock()
++		switch f.state {
++		case flowOpening, flowChecking:
++			if now.After(f.deadline) {
++				h.denyLocked(f)
++			}
++		case flowAllowed:
++			if now.Sub(f.lastActive) > handoffIdle {
++				h.denyLocked(f) // closed on purpose rather than left half-known
++			}
++		case flowClosing, flowDenied:
++			if now.After(f.expires) {
++				dead = append(dead, f)
++			}
++		}
++		f.mu.Unlock()
++	}
++	if len(dead) > 0 {
++		h.access.Lock()
++		if h.tab == tab {
++			for _, f := range dead {
++				h.retireLocked(tab, f)
++			}
++		}
++		h.access.Unlock()
++	}
++}
++
++func seqAfter(a, b uint32) bool { return int32(a-b) > 0 }
++
++// tcp4 is the part of an IPv4 TCP packet the hand-off needs.
++type tcp4 struct {
++	src, dst netip.AddrPort
++	seq, ack uint32
++	flags    uint8
++	payload  int
++}
++
++func parseTCP4(b []byte) (tcp4, bool) {
++	if len(b) < 20 || b[0]>>4 != 4 || b[9] != 6 {
++		return tcp4{}, false
++	}
++	ihl := int(b[0]&0x0f) * 4
++	total := int(binary.BigEndian.Uint16(b[2:4]))
++	if ihl < 20 || total > len(b) || total < ihl+20 || binary.BigEndian.Uint16(b[6:8])&0x3fff != 0 {
++		return tcp4{}, false // fragments are not handed off
++	}
++	t := b[ihl:total]
++	off := int(t[12]>>4) * 4
++	if off < 20 || off > len(t) {
++		return tcp4{}, false
++	}
++	return tcp4{
++		src:     netip.AddrPortFrom(netip.AddrFrom4([4]byte(b[12:16])), binary.BigEndian.Uint16(t[0:2])),
++		dst:     netip.AddrPortFrom(netip.AddrFrom4([4]byte(b[16:20])), binary.BigEndian.Uint16(t[2:4])),
++		seq:     binary.BigEndian.Uint32(t[4:8]),
++		ack:     binary.BigEndian.Uint32(t[8:12]),
++		flags:   t[13],
++		payload: len(t) - off,
++	}, true
++}
++
++// next is the sequence number that follows this segment.
++func (p tcp4) next() uint32 {
++	n := p.seq + uint32(p.payload)
++	if p.flags&tcpSYN != 0 {
++		n++
++	}
++	if p.flags&tcpFIN != 0 {
++		n++
++	}
++	return n
++}
++
++// icmpQuote finds the hand-off tuple an ICMPv4 error to local is about (destination unreachable, time exceeded).
++func icmpQuote(b []byte, local netip.Addr) (flowKey, bool) {
++	if len(b) < 20 || b[0]>>4 != 4 || b[9] != 1 {
++		return flowKey{}, false
++	}
++	ihl := int(b[0]&0x0f) * 4
++	total := int(binary.BigEndian.Uint16(b[2:4]))
++	if ihl < 20 || total > len(b) || total < ihl+8+20+8 || binary.BigEndian.Uint16(b[6:8])&0x3fff != 0 {
++		return flowKey{}, false
++	}
++	if netip.AddrFrom4([4]byte(b[16:20])) != local || (b[ihl] != 3 && b[ihl] != 11) {
++		return flowKey{}, false
++	}
++	in := b[ihl+8 : total]
++	inIHL := int(in[0]&0x0f) * 4
++	if in[0]>>4 != 4 || in[9] != 6 || inIHL < 20 || len(in) < inIHL+8 || netip.AddrFrom4([4]byte(in[12:16])) != local {
++		return flowKey{}, false
++	}
++	peer := netip.AddrPortFrom(netip.AddrFrom4([4]byte(in[16:20])), binary.BigEndian.Uint16(in[inIHL+2:inIHL+4]))
++	return flowKey{peer, binary.BigEndian.Uint16(in[inIHL : inIHL+2])}, true
++}
++
++// bareACK is the packet's headers alone, without data or FIN, checksums recomputed.
++func bareACK(pkt []byte) []byte {
++	ihl := int(pkt[0]&0x0f) * 4
++	off := int(pkt[ihl+12]>>4) * 4
++	b := append([]byte(nil), pkt[:ihl+off]...)
++	binary.BigEndian.PutUint16(b[2:4], uint16(ihl+off))
++	b[ihl+13] &^= tcpFIN | tcpPSH
++	fixChecksums(b, ihl)
++	return b
++}
++
++// rstOnly keeps a reset's headers and drops any data on it.
++func rstOnly(pkt []byte) []byte {
++	ihl := int(pkt[0]&0x0f) * 4
++	off := int(pkt[ihl+12]>>4) * 4
++	if len(pkt) == ihl+off {
++		return pkt
++	}
++	b := append([]byte(nil), pkt[:ihl+off]...)
++	binary.BigEndian.PutUint16(b[2:4], uint16(ihl+off))
++	fixChecksums(b, ihl)
++	return b
++}
++
++// rst4 builds an IPv4 TCP RST from src to dst with the given sequence number.
++func rst4(src, dst netip.AddrPort, seq uint32) []byte {
++	b := make([]byte, 40)
++	b[0], b[8], b[9] = 0x45, 64, 6
++	binary.BigEndian.PutUint16(b[2:4], 40)
++	s4, d4 := src.Addr().As4(), dst.Addr().As4()
++	copy(b[12:16], s4[:])
++	copy(b[16:20], d4[:])
++	t := b[20:]
++	binary.BigEndian.PutUint16(t[0:2], src.Port())
++	binary.BigEndian.PutUint16(t[2:4], dst.Port())
++	binary.BigEndian.PutUint32(t[4:8], seq)
++	t[12], t[13] = 5<<4, tcpRST
++	fixChecksums(b, 20)
++	return b
++}
++
++func fixChecksums(b []byte, ihl int) {
++	b[10], b[11] = 0, 0
++	binary.BigEndian.PutUint16(b[10:12], checksum(b[:ihl], 0))
++	t := b[ihl:]
++	t[16], t[17] = 0, 0
++	pseudo := uint32(6) + uint32(len(t))
++	for i := 12; i < 20; i += 2 {
++		pseudo += uint32(binary.BigEndian.Uint16(b[i:]))
++	}
++	binary.BigEndian.PutUint16(t[16:18], checksum(t, pseudo))
++}
++
++func checksum(b []byte, sum uint32) uint16 {
++	for i := 0; i+1 < len(b); i += 2 {
++		sum += uint32(binary.BigEndian.Uint16(b[i:]))
++	}
++	if len(b)%2 == 1 {
++		sum += uint32(b[len(b)-1]) << 8
++	}
++	for sum>>16 != 0 {
++		sum = sum&0xffff + sum>>16
++	}
++	return ^uint16(sum)
++}
+--- /dev/null
++++ b/protocol/tailscale/handoff_endpoint.go
+@@ -0,0 +1,92 @@
++//go:build with_gvisor
++
++package tailscale
++
++// The Tailscale endpoint's side of the TUN hand-off (unbraid patch).
++
++import (
++	"net/netip"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/tunhandoff"
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++	"github.com/sagernet/tailscale/net/packet"
++)
++
++// setupHandoff runs in NewEndpoint: it tells this engine instance's TUN to install the interceptor.
++func (t *Endpoint) setupHandoff(options *option.TailscaleTUNHandoffOptions) {
++	if options == nil {
++		return
++	}
++	t.handoffBinding = tunhandoff.Acquire(t.router)
++	t.handoffBinding.Want()
++	t.handoff = newHandoff(t.logger, options, handoffDeps{
++		owner:    t.handoffOwner,
++		toPeer:   t.handoffToPeer,
++		toSystem: t.handoffBinding.Write,
++	})
++}
++
++// startHandoff runs in postStart, once the engine exists; scope undoes it.
++func (t *Endpoint) startHandoff(scope *adapter.Scope) {
++	if t.handoff == nil {
++		return
++	}
++	ns := t.server.ExportNetstack()
++	take := func(p *packet.Parsed) bool { return t.handoff.Inbound(p.Buffer()) }
++	ns.InboundHandoff.Store(&take)
++	token := t.handoffBinding.SetHandler(t.handoff)
++	t.refreshHandoff()
++	go t.handoff.sweep()
++	scope.Add(func() error {
++		ns.InboundHandoff.Store(nil)
++		t.handoffBinding.ClearHandler(token)
++		t.handoff.close()
++		tunhandoff.Release(t.router, t.handoffBinding)
++		return nil
++	})
++}
++
++// refreshHandoff takes this node's IPv4 address and every peer's own node addresses from the current netmap.
++func (t *Endpoint) refreshHandoff() {
++	if t.handoff == nil {
++		return
++	}
++	addr4, _ := t.server.TailscaleIPs()
++	peers := map[netip.Addr]struct{}{}
++	if nm := t.server.ExportLocalBackend().NetMap(); nm != nil {
++		for _, node := range nm.Peers {
++			addresses := node.Addresses()
++			for i := 0; i < addresses.Len(); i++ {
++				if prefix := addresses.At(i); prefix.IsSingleIP() && prefix.Addr().Is4() {
++					peers[prefix.Addr()] = struct{}{}
++				}
++			}
++		}
++	}
++	t.handoff.setLocal(addr4, peers)
++}
++
++func (t *Endpoint) handoffOwner(local, peer netip.AddrPort) ([]string, error) {
++	if t.platformInterface == nil {
++		return nil, E.New("no platform to name the app")
++	}
++	owner, err := t.platformInterface.FindConnectionOwner(&adapter.FindConnectionOwnerRequest{
++		IpProtocol:         6,
++		SourceAddress:      local.Addr().String(),
++		SourcePort:         int32(local.Port()),
++		DestinationAddress: peer.Addr().String(),
++		DestinationPort:    int32(peer.Port()),
++	})
++	if err != nil {
++		return nil, err
++	}
++	return owner.AndroidPackageNames, nil
++}
++
++func (t *Endpoint) handoffToPeer(pkt []byte) {
++	if engine := t.wgEngine; engine != nil {
++		_, _ = engine.InputPackets([][]byte{pkt})
++	}
++}
+--- /dev/null
++++ b/protocol/tailscale/handoff_test.go
+@@ -0,0 +1,324 @@
++//go:build with_gvisor
++
++package tailscale
++
++import (
++	"encoding/binary"
++	"errors"
++	"net/netip"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++)
++
++var (
++	hoLocal = netip.MustParseAddr("100.64.0.5")
++	hoPeer  = netip.MustParseAddr("100.64.0.6")
++)
++
++type hoWorld struct {
++	mu       sync.Mutex
++	system   [][]byte
++	peer     [][]byte
++	owner    func() ([]string, error)
++	writeErr bool
++}
++
++func (w *hoWorld) deps() handoffDeps {
++	return handoffDeps{
++		owner: func(local, peer netip.AddrPort) ([]string, error) { return w.owner() },
++		toPeer: func(p []byte) {
++			w.mu.Lock()
++			w.peer = append(w.peer, p)
++			w.mu.Unlock()
++		},
++		toSystem: func(p []byte) bool {
++			w.mu.Lock()
++			defer w.mu.Unlock()
++			if w.writeErr {
++				return false
++			}
++			w.system = append(w.system, p)
++			return true
++		},
++	}
++}
++
++func (w *hoWorld) seen() (system, peer []tcp4) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	for _, b := range w.system {
++		p, _ := parseTCP4(b)
++		system = append(system, p)
++	}
++	for _, b := range w.peer {
++		p, _ := parseTCP4(b)
++		peer = append(peer, p)
++	}
++	return
++}
++
++func newTestHandoff(t *testing.T, w *hoWorld, allow, block []string) *handoff {
++	h := newHandoff(log.NewNOPFactory().NewLogger(""), &option.TailscaleTUNHandoffOptions{
++		TCPPorts: []string{"1714:1764", "22"}, AllowPackages: allow, BlockPackages: block,
++	}, w.deps())
++	h.setLocal(hoLocal, map[netip.Addr]struct{}{hoPeer: {}})
++	t.Cleanup(h.close)
++	return h
++}
++
++func tcpPacket(src, dst netip.AddrPort, seq, ack uint32, flags uint8, payload []byte) []byte {
++	b := make([]byte, 40+len(payload))
++	b[0], b[8], b[9] = 0x45, 64, 6
++	binary.BigEndian.PutUint16(b[2:4], uint16(len(b)))
++	s, d := src.Addr().As4(), dst.Addr().As4()
++	copy(b[12:16], s[:])
++	copy(b[16:20], d[:])
++	tcp := b[20:]
++	binary.BigEndian.PutUint16(tcp[0:2], src.Port())
++	binary.BigEndian.PutUint16(tcp[2:4], dst.Port())
++	binary.BigEndian.PutUint32(tcp[4:8], seq)
++	binary.BigEndian.PutUint32(tcp[8:12], ack)
++	tcp[12], tcp[13] = 5<<4, flags
++	copy(tcp[20:], payload)
++	fixChecksums(b, 20)
++	return b
++}
++
++func fromSystem(h *handoff, b []byte) bool {
++	return h.Intercept(hoLocal, func() ([]byte, bool) { return b, true })
++}
++
++var (
++	hoPeerEnd  = netip.AddrPortFrom(hoPeer, 40000)
++	hoLocalEnd = netip.AddrPortFrom(hoLocal, 1716)
++)
++
++// handshake opens a flow: SYN, SYN-ACK, final ACK (with data on it).
++func handshake(t *testing.T, h *handoff, data []byte) {
++	t.Helper()
++	if !h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1000, 0, tcpSYN, nil)) {
++		t.Fatal("SYN not taken")
++	}
++	if !fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5000, 1001, tcpSYN|tcpACK, nil)) {
++		t.Fatal("SYN-ACK not taken")
++	}
++	if !h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1001, 5001, tcpACK|tcpPSH, data)) {
++		t.Fatal("final ACK not taken")
++	}
++}
++
++func waitState(t *testing.T, h *handoff, want handoffState) {
++	t.Helper()
++	deadline := time.Now().Add(3 * time.Second)
++	for time.Now().Before(deadline) {
++		h.access.Lock()
++		f := h.tab.flows[flowKey{hoPeerEnd, 1716}]
++		h.access.Unlock()
++		if f != nil {
++			f.mu.Lock()
++			s := f.state
++			f.mu.Unlock()
++			if s == want {
++				return
++			}
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	t.Fatalf("flow never reached state %d", want)
++}
++
++func payloadTo(ps []tcp4) int {
++	n := 0
++	for _, p := range ps {
++		n += p.payload
++	}
++	return n
++}
++
++func TestHandoffAllowsChosenApp(t *testing.T) {
++	w := &hoWorld{owner: func() ([]string, error) { return []string{"org.kde.kdeconnect_tp"}, nil }}
++	h := newTestHandoff(t, w, []string{"org.kde.kdeconnect_tp"}, nil)
++	handshake(t, h, []byte("hello"))
++	waitState(t, h, flowAllowed)
++	system, peer := w.seen()
++	if len(system) != 3 || system[2].payload != 0 && system[1].payload != 0 {
++		t.Fatalf("system got %d packets", len(system))
++	}
++	if payloadTo(system) != 5 || len(peer) != 1 || peer[0].flags != tcpSYN|tcpACK {
++		t.Fatalf("payload %d, peer %d", payloadTo(system), len(peer))
++	}
++	// The bare ACK came before the data.
++	if system[1].payload != 0 || system[2].payload != 5 {
++		t.Fatal("data was not held behind a bare ACK")
++	}
++	// Both directions now pass.
++	fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5001, 1006, tcpACK|tcpPSH, []byte("hi")))
++	if _, peer = w.seen(); payloadTo(peer) != 2 {
++		t.Fatal("reply not sent to the peer")
++	}
++}
++
++func TestHandoffRefusesOthersAndBlock(t *testing.T) {
++	for name, tc := range map[string]struct {
++		owner []string
++		err   error
++		block []string
++	}{
++		"not chosen":    {owner: []string{"com.other"}},
++		"shared uid":    {owner: []string{"org.kde.kdeconnect_tp", "com.other"}},
++		"blocked":       {owner: []string{"org.kde.kdeconnect_tp"}, block: []string{"org.kde.kdeconnect_tp"}},
++		"unknown owner": {err: errors.New("owner not found")},
++	} {
++		t.Run(name, func(t *testing.T) {
++			w := &hoWorld{owner: func() ([]string, error) { return tc.owner, tc.err }}
++			h := newTestHandoff(t, w, []string{"org.kde.kdeconnect_tp"}, tc.block)
++			handshake(t, h, []byte("secret"))
++			fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5001, 1001, tcpACK|tcpPSH, []byte("banner")))
++			waitState(t, h, flowDenied)
++			system, peer := w.seen()
++			if payloadTo(system) != 0 || payloadTo(peer) != 0 {
++				t.Fatal("payload passed a refused connection")
++			}
++			last := system[len(system)-1]
++			if last.flags != tcpRST || last.seq != 1001 {
++				t.Fatalf("system reset %x seq %d, want RST at 1001", last.flags, last.seq)
++			}
++			if p := peer[len(peer)-1]; p.flags != tcpRST || p.seq != 5001 {
++				t.Fatalf("peer reset %x seq %d, want RST at 5001", p.flags, p.seq)
++			}
++			// Later packets of the tuple go nowhere.
++			h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1007, 5001, tcpACK|tcpPSH, []byte("more")))
++			if system, _ = w.seen(); payloadTo(system) != 0 {
++				t.Fatal("payload after refusal")
++			}
++		})
++	}
++}
++
++func TestHandoffNewConnectionOnSameTupleStartsOver(t *testing.T) {
++	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	handshake(t, h, nil)
++	waitState(t, h, flowAllowed)
++	// A new SYN (new ISN) on the same tuple must not inherit the approval.
++	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 90000, 0, tcpSYN, nil))
++	waitState(t, h, flowOpening)
++	before := payloadTo(func() []tcp4 { s, _ := w.seen(); return s }())
++	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 90001, 7, tcpACK|tcpPSH, []byte("sneak")))
++	if s, _ := w.seen(); payloadTo(s) != before {
++		t.Fatal("data passed on a reused tuple before any check")
++	}
++}
++
++func TestHandoffStaleCheckNeverAppliesToSuccessor(t *testing.T) {
++	release := make(chan struct{})
++	w := &hoWorld{owner: func() ([]string, error) { <-release; return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	handshake(t, h, []byte("x"))
++	waitState(t, h, flowChecking)
++	// The peer resets and opens again before the first lookup returns.
++	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1002, 5001, tcpRST, nil))
++	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 7000, 0, tcpSYN, nil))
++	close(release)
++	time.Sleep(200 * time.Millisecond)
++	h.access.Lock()
++	f := h.tab.flows[flowKey{hoPeerEnd, 1716}]
++	h.access.Unlock()
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	if f.state != flowOpening {
++		t.Fatalf("successor state %d, want opening", f.state)
++	}
++}
++
++func TestHandoffIgnoresWhatIsNotItsOwn(t *testing.T) {
++	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	// Another port: left to the stack.
++	if h.Inbound(tcpPacket(hoPeerEnd, netip.AddrPortFrom(hoLocal, 5555), 1, 0, tcpSYN, nil)) {
++		t.Fatal("took a port outside the list")
++	}
++	// Below 1024 is never handed off, even if listed.
++	if h.Inbound(tcpPacket(hoPeerEnd, netip.AddrPortFrom(hoLocal, 22), 1, 0, tcpSYN, nil)) {
++		t.Fatal("took a port below 1024")
++	}
++	// A source that is not a peer's own address: taken and dropped.
++	stranger := netip.AddrPortFrom(netip.MustParseAddr("100.70.0.9"), 1)
++	if !h.Inbound(tcpPacket(stranger, hoLocalEnd, 1, 0, tcpSYN, nil)) {
++		t.Fatal("left a non-peer packet for the stack")
++	}
++	if s, _ := w.seen(); len(s) != 0 {
++		t.Fatal("a non-peer packet reached the system")
++	}
++	// The system opening a connection of its own: normal routing.
++	if fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 1, 0, tcpSYN, nil)) {
++		t.Fatal("took the system's own SYN")
++	}
++}
++
++func TestHandoffHoldLimitRefuses(t *testing.T) {
++	release := make(chan struct{})
++	w := &hoWorld{owner: func() ([]string, error) { <-release; return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	defer close(release)
++	handshake(t, h, nil)
++	waitState(t, h, flowChecking)
++	chunk := make([]byte, 1200)
++	for i := uint32(0); i < 80; i++ {
++		h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1001+i*1200, 5001, tcpACK, chunk))
++	}
++	waitState(t, h, flowDenied)
++	if h.heldTotal.Load() != 0 {
++		t.Fatalf("held bytes not released: %d", h.heldTotal.Load())
++	}
++}
++
++func TestHandoffAddressChangeRevokes(t *testing.T) {
++	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	handshake(t, h, nil)
++	waitState(t, h, flowAllowed)
++	h.setLocal(netip.MustParseAddr("100.64.0.9"), map[netip.Addr]struct{}{hoPeer: {}})
++	before, _ := w.seen()
++	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1001, 5001, tcpACK|tcpPSH, []byte("late")))
++	if after, _ := w.seen(); len(after) != len(before) {
++		t.Fatal("a flow of the old address still delivered")
++	}
++}
++
++func TestChecksumsAndHelpers(t *testing.T) {
++	r := rst4(hoPeerEnd, hoLocalEnd, 42)
++	if checksum(r[:20], 0) != 0 {
++		t.Fatal("bad IP checksum")
++	}
++	pkt := tcpPacket(hoPeerEnd, hoLocalEnd, 1, 2, tcpACK|tcpPSH|tcpFIN, []byte("data"))
++	bare := bareACK(pkt)
++	p, ok := parseTCP4(bare)
++	if !ok || p.payload != 0 || p.flags != tcpACK || p.seq != 1 || p.ack != 2 {
++		t.Fatalf("bare ACK %+v", p)
++	}
++	// The TCP checksum of a valid segment, with the pseudo header, sums to zero.
++	sum := uint32(6) + uint32(len(bare)-20)
++	for i := 12; i < 20; i += 2 {
++		sum += uint32(binary.BigEndian.Uint16(bare[i:]))
++	}
++	if checksum(bare[20:], sum) != 0 {
++		t.Fatal("bad TCP checksum on the bare ACK")
++	}
++	icmp := make([]byte, 28+40)
++	icmp[0], icmp[9] = 0x45, 1
++	binary.BigEndian.PutUint16(icmp[2:4], uint16(len(icmp)))
++	l4, p4 := hoLocal.As4(), hoPeer.As4()
++	copy(icmp[12:16], p4[:])
++	copy(icmp[16:20], l4[:])
++	icmp[20] = 3
++	copy(icmp[28:], tcpPacket(hoLocalEnd, hoPeerEnd, 1, 1, tcpACK, nil))
++	key, ok := icmpQuote(icmp, hoLocal)
++	if !ok || key != (flowKey{hoPeerEnd, 1716}) {
++		t.Fatalf("icmp quote %v %v", key, ok)
++	}
++}

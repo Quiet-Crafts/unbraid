@@ -1,0 +1,85 @@
+--- a/stack.go
++++ b/stack.go
+@@ -32,8 +32,18 @@
+ 	ForwarderBindInterface bool
+ 	IncludeAllNetworks     bool
+ 	InterfaceFinder        control.InterfaceFinder
++	// PacketInterceptor, when set, sees IP packets the system writes into the TUN before the flow dispatcher and the
++	// gVisor stack (gVisor stack only).
++	PacketInterceptor PacketInterceptor
+ }
+ 
++// PacketInterceptor takes packets the system writes into the TUN before they reach the stack.
++type PacketInterceptor interface {
++	// InterceptPacket is called once per packet with its source address; packet returns the whole IP packet and is
++	// only to be called for packets that may be taken. True means the packet was taken and must not reach the stack.
++	InterceptPacket(source netip.Addr, packet func() ([]byte, bool)) bool
++}
++
+ func NewStack(
+ 	stack string,
+ 	options StackOptions,
+--- a/stack_gvisor.go
++++ b/stack_gvisor.go
+@@ -43,6 +43,7 @@
+ 	stack                *stack.Stack
+ 	endpoint             stack.LinkEndpoint
+ 	dispatcher           *ForwardDispatcher
++	interceptor          PacketInterceptor
+ 	icmpForwarder        *ICMPForwarder
+ 	udpForwarder         *UDPForwarder
+ }
+@@ -91,6 +92,7 @@
+ 		broadcastAddr: BroadcastAddr(options.TunOptions.Inet4Address),
+ 		handler:       options.Handler,
+ 		logger:        options.Logger,
++		interceptor:   options.PacketInterceptor,
+ 	}
+ 	return gStack, nil
+ }
+@@ -112,6 +114,7 @@
+ 		Inet6Address:         t.inet6Address,
+ 		Inet4LoopbackAddress: t.inet4LoopbackAddress,
+ 		Inet6LoopbackAddress: t.inet6LoopbackAddress,
++		Interceptor:          t.interceptor,
+ 	}
+ 	ipStack, err := newGVisorStack(linkEndpoint, nicOptions, false, true)
+ 	if err != nil {
+--- a/stack_gvisor_filter.go
++++ b/stack_gvisor_filter.go
+@@ -21,6 +21,7 @@
+ 	Inet6Address         netip.Addr
+ 	Inet4LoopbackAddress []netip.Addr
+ 	Inet6LoopbackAddress []netip.Addr
++	Interceptor          PacketInterceptor
+ }
+ 
+ func (w *LinkEndpointFilter) Attach(dispatcher stack.NetworkDispatcher) {
+@@ -37,6 +38,7 @@
+ 		inet6Address:         w.Inet6Address,
+ 		inet4LoopbackAddress: w.Inet4LoopbackAddress,
+ 		inet6LoopbackAddress: w.Inet6LoopbackAddress,
++		interceptor:          w.Interceptor,
+ 	})
+ }
+ 
+@@ -51,6 +53,7 @@
+ 	inet6Address         netip.Addr
+ 	inet4LoopbackAddress []netip.Addr
+ 	inet6LoopbackAddress []netip.Addr
++	interceptor          PacketInterceptor
+ }
+ 
+ func (w *networkDispatcherFilter) DeliverNetworkPacket(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+@@ -68,6 +71,11 @@
+ 		w.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
+ 		return
+ 	}
++	if w.interceptor != nil && w.interceptor.InterceptPacket(AddrFromAddress(network.SourceAddress()), func() ([]byte, bool) {
++		return pkt.Data().PullUp(pkt.Data().Size())
++	}) {
++		return
++	}
+ 	destination := AddrFromAddress(network.DestinationAddress())
+ 	if destination == w.broadcastAddress || !destination.IsGlobalUnicast() {
+ 		w.writer.WritePacket(pkt)

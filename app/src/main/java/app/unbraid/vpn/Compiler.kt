@@ -80,7 +80,16 @@ object Compiler {
          * refuses the whole id, as the blocked app's rule matches any app of it.
          */
         val blockedKin: Set<String> = emptySet(),
+        /** Tailnet devices may reach these apps on this phone with their real address; null = off. */
+        val inbound: Inbound? = null,
     )
+
+    /**
+     * Inbound from the tailnet: the engine writes connections to this node's tailnet address [address4] on [tcpPorts]
+     * into the TUN, which then carries that address too, and holds their data until Android names the receiving app:
+     * only one of [allow], and none on Block, gets any.
+     */
+    class Inbound(val address4: String, val tcpPorts: List<String>, val allow: List<String>)
 
     /**
      * Inbound tag of the app's own way into a chosen exit, for speed and health tests: a proxy on 127.0.0.1 whose
@@ -149,6 +158,8 @@ object Compiler {
         val ts = s.tailscale
         // An exit keeps the endpoint running, but only the home toggle grants every app tailnet access.
         val homeTs = s.home.tailscale
+        // Inbound needs the tailnet reachable: the receiving app's own new connections back to the peer go that way.
+        val inbound = i.inbound?.takeIf { ts && homeTs }
         // A filter that lives in a home network is asked through that tunnel, as any connection to its address goes.
         val filterVia = filter?.let { homeVia(s, it, tsDomains) }
         // A route on its OpenVPN server's pushed DNS asks that tunnel's one DNS server (the engine allows one per tunnel).
@@ -256,8 +267,11 @@ object Compiler {
             putJsonArray("inbounds") {
                 add(buildJsonObject {
                     put("type", "tun"); put("tag", "tun")
-                    put("address", arr("172.19.0.1/30"))
-                    put("mtu", 9000)
+                    // With inbound on, the tailnet address too: Android then hands its connections to the listening app.
+                    put("address", JsonArray((listOf("172.19.0.1/30") + listOfNotNull(inbound?.let { "${it.address4}/32" })).map(::JsonPrimitive)))
+                    // With inbound on, Tailscale's 1280: Android then splits big datagrams itself (a sender that closes its
+                    // socket at once never learns a smaller size), and its replies to handed-off connections need no clamping.
+                    put("mtu", if (inbound != null) 1280 else 9000)
                     put("auto_route", true)
                     put("strict_route", true)
                     // gVisor: on Android 17 the kernel TCP path of "mixed" never answered (Direct and Shadowsocks timed
@@ -308,6 +322,14 @@ object Compiler {
                     // Over plain HTTP a network attacker could hand Tailscale a fake control-server key.
                     s.home.tsControlUrl?.let { require(it.startsWith("https://")) { "Headscale needs an https:// address. Change it in Settings." }; put("control_url", it) }
                     s.tsExit?.let { put("exit_node", it); put("exit_node_allow_lan_access", s.prefs.lan) }
+                    inbound?.let { ib ->
+                        putJsonObject("tun_handoff") {
+                            put("tcp_ports", JsonArray(ib.tcpPorts.map(::JsonPrimitive)))
+                            // An app outside the VPN never sends its replies through unbraid and can't be named by it: not allowed.
+                            put("allow_packages", JsonArray(ib.allow.filter { i.lockdown || !s.outside(it) }.sorted().map(::JsonPrimitive)))
+                            put("block_packages", JsonArray((s.apps.filterValues { it == BLOCK }.keys + i.blockedKin).sorted().map(::JsonPrimitive)))
+                        }
+                    }
                 })
             }
             putJsonArray("outbounds") {

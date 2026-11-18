@@ -73,7 +73,8 @@ object FakePool {
                      lockdown: Boolean, tsLoginPending: Boolean, move: Boolean, kin: (Setup) -> Set<String>): Compiler.Input {
         val setup = if (move) last.setup else last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = tsSuffixAllowed))
         return Compiler.Input(setup, last.links, last.selfPackage, if (move) last.lockdown else lockdown, last.tsDir, last.cacheFile, if (move) last.tsSuffix else tsSuffix, probe,
-            block ?: restoreBlock(last.fakeBlock, spent), last.blocked, last.tsLoginPending && tsLoginPending, last.blockedKin + runCatching { kin(setup) }.getOrDefault(emptySet()))
+            block ?: restoreBlock(last.fakeBlock, spent), last.blocked, last.tsLoginPending && tsLoginPending, last.blockedKin + runCatching { kin(setup) }.getOrDefault(emptySet()),
+            last.inbound) // inbound as it ran: the status watcher reloads if the node's address has moved since
     }
 
     /**

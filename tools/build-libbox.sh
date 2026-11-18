@@ -25,6 +25,24 @@ go install github.com/sagernet/gomobile/cmd/gomobile@v0.1.13 github.com/sagernet
 for h in gomobile gobind; do
   go version -m "$BIN/$h" | grep -q "mod[[:space:]]*github.com/sagernet/gomobile[[:space:]]*v0.1.13" || { echo "$h in $BIN is not v0.1.13"; exit 1; }
 done
+# Dependencies with unbraid patches: the version sing-box pins is copied out of the module cache, patched, and used in
+# its place (the reset checkout above drops the replace again on the next run). The copies live at one fixed path on
+# every host, because the library records a replaced module's path: a per-user path would change its bytes.
+DEPS=/tmp/unbraid-libbox-deps
+# /tmp is shared: use the folder only if it is ours and not a link, so no other user can plant code in the build.
+if [ -e "$DEPS" ] || [ -L "$DEPS" ]; then
+  [ -d "$DEPS" ] && [ ! -L "$DEPS" ] && [ -O "$DEPS" ] || { echo "$DEPS exists and is not a folder of $(id -un)"; exit 1; }
+else
+  mkdir -m 700 "$DEPS"
+fi
+chmod 700 "$DEPS"
+for MOD in sing-tun tailscale; do
+  ls "$ROOT"/tools/"$MOD"-*.patch >/dev/null 2>&1 || continue
+  SRC=$(go mod download -json "github.com/sagernet/$MOD" | python3 -c 'import json, sys; print(json.load(sys.stdin)["Dir"])')
+  rm -rf "${DEPS:?}/$MOD" && mkdir -p "$DEPS" && cp -R "$SRC" "$DEPS/$MOD" && chmod -R u+w "$DEPS/$MOD"
+  for p in "$ROOT"/tools/"$MOD"-*.patch; do patch -s -p1 -d "$DEPS/$MOD" < "$p"; done
+  go mod edit -replace "github.com/sagernet/$MOD=$DEPS/$MOD"
+done
 # Build beside the real AAR and swap only on success: a failed bind truncates its output file.
 OUT="$ROOT/app/libs/libbox.new.aar" # gomobile insists on the .aar suffix
 "$BIN/gomobile" bind -o "$OUT" -target android/arm64 -androidapi 33 -javapkg=io.nekohasekai -libname=box -trimpath -buildvcs=false \

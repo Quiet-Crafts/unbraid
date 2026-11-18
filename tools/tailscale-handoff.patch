@@ -1,0 +1,33 @@
+--- a/wgengine/netstack/netstack.go
++++ b/wgengine/netstack/netstack.go
+@@ -241,6 +241,10 @@
+ 
+ 	atomicIsVIPServiceIPFunc syncs.AtomicValue[func(netip.Addr) bool]
+ 
++	// InboundHandoff, when set, sees every packet that passed the inbound filter before netstack does; returning true
++	// means it took the packet (unbraid patch: hands connections to the system's own stack).
++	InboundHandoff atomic.Pointer[func(*packet.Parsed) bool]
++
+ 	atomicIPVIPServiceMap syncs.AtomicValue[netmap.IPServiceMappings]
+ 	// make this a set of strings for faster lookup
+ 	atomicActiveVIPServices syncs.AtomicValue[set.Set[tailcfg.ServiceName]]
+@@ -442,10 +446,18 @@
+ 	ns.ctx, ns.ctxCancel = context.WithCancel(context.Background())
+ 	ns.atomicIsLocalIPFunc.Store(ipset.FalseContainsIPFunc())
+ 	ns.atomicIsVIPServiceIPFunc.Store(ipset.FalseContainsIPFunc())
+-	ns.tundev.PostFilterPacketInboundFromWireGuard = ns.injectInbound
++	ns.tundev.PostFilterPacketInboundFromWireGuard = ns.injectInboundOrHandoff
+ 	ns.tundev.PreFilterPacketOutboundToWireGuardNetstackIntercept = ns.handleLocalPackets
+ 	stacksForMetrics.Store(ns, struct{}{})
+ 	return ns, nil
++}
++
++// injectInboundOrHandoff offers the packet to InboundHandoff first (unbraid patch).
++func (ns *Impl) injectInboundOrHandoff(p *packet.Parsed, t *tstun.Wrapper, gro *gro.GRO) (filter.Response, *gro.GRO) {
++	if h := ns.InboundHandoff.Load(); h != nil && (*h)(p) {
++		return filter.DropSilently, gro
++	}
++	return ns.injectInbound(p, t, gro)
+ }
+ 
+ func (ns *Impl) Close() error {

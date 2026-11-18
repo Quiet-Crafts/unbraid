@@ -946,7 +946,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var portNet: android.net.Network? = null
 
     private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
-        Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(setup))
+        Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(setup), inbound())
 
     /**
      * The apps that share their Android user id with an app on Block ([Compiler.Input.blockedKin]). A blocked app that
@@ -968,6 +968,21 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress()).use { it.localPort } to
             java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(24).also { java.security.SecureRandom().nextBytes(it) })
 
+    /** This node's tailnet IPv4 address, once Tailscale reported it. */
+    @Volatile private var tsSelf4: String? = null
+    /** The address a reload was last asked for, so inbound gets it installed. */
+    @Volatile private var inboundAsked: String? = null
+
+    /** TEST ONLY (debug builds): apps tailnet devices may reach, set with the debug hook "inbound"; null = off. */
+    private fun inboundApps(): List<String>? = if (!app.unbraid.BuildConfig.DEBUG) null else
+        getSharedPreferences("debug", MODE_PRIVATE).getString("inbound", null)?.split(',')?.map(String::trim)?.filter(String::isNotEmpty)?.ifEmpty { null }
+
+    private fun inbound(): Compiler.Inbound? {
+        val apps = inboundApps() ?: return null
+        val self4 = tsSelf4 ?: return null
+        return Compiler.Inbound(self4, listOf("1714:1764"), apps)
+    }
+
     private fun watchTailscale() {
         ts = runCatching {
             Libbox.newStandaloneCommandClient().subscribeTailscaleStatus(object : TailscaleStatusHandler {
@@ -987,6 +1002,16 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                             }
                         }
                     }.sortedBy { it.name.lowercase() }
+                    // This node's tailnet IPv4: inbound carries it on the TUN, so a new one needs a reload.
+                    val self4 = ep.self?.tailscaleIPs()?.let { ips -> generateSequence { if (ips.hasNext()) ips.next() else null }.firstOrNull { '.' in it } }
+                    if (ep.backendState == "Running" && self4 != null) {
+                        tsSelf4 = self4
+                        // Compared with what the engine runs, so a restore that kept an older address is put right too.
+                        if (inboundApps() != null && lastInput?.inbound?.address4 != self4 && inboundAsked != self4) {
+                            inboundAsked = self4 // once per address: status comes often, a reload takes a while
+                            scope.launch { reload() }
+                        }
+                    } else if (ep.backendState != "Running") tsSelf4 = null
                     val suffix = Compiler.tsSuffix(ep.magicDNSSuffix)
                     val reported = if (ep.backendState == "Running") suffix else store.tsSuffix
                     state.update { s -> s.copy(tsLoginUrl = ep.authURL.ifEmpty { null }, tsState = ep.backendState, tsExitNodes = nodes, tsAnnounced = reported) }
@@ -1017,6 +1042,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** Stops the engine and the tunnel; the service itself stays. Caller holds [lock]. */
     private fun stopEngine() {
+        tsSelf4 = null; inboundAsked = null // the next engine learns its tailnet address afresh: never installs a stale one
         watch?.cancel(); watch = null
         health?.cancel(); health = null
         pool?.cancel(); pool = null; exhaustedSaid = false
