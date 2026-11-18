@@ -18,6 +18,8 @@ import app.unbraid.data.Server
 import app.unbraid.data.Setup
 import app.unbraid.data.VERSION
 import app.unbraid.data.WgConf
+import app.unbraid.data.favKey
+import app.unbraid.data.ident
 import app.unbraid.data.restoredFrom
 import app.unbraid.ui.WEAK_TITLE
 import app.unbraid.ui.homeNote
@@ -221,8 +223,9 @@ class BackupAdversarialTest {
     }
 
     /**
-     * Texts from a file that are only shown (places and pinned servers of routes and favourites, Tailscale names) open,
-     * restore and are stored cleaned and bounded, so no route name in the app, a widget or the notification carries them.
+     * Texts from a file that are only shown (pinned servers' cities and countries, Tailscale names) open, restore and
+     * are stored cleaned and bounded; those that also match a provider's list (a place, a pin's name) open and restore
+     * as the file has them ([placesFromAFileStillMatchTheirProvider]).
      */
     @Test fun displayOnlyTextsAreCleanedOnRead() {
         val clean = { t: String? -> t == null || (t.none { it.isISOControl() || Character.getType(it) == Character.FORMAT.toInt() && it != '‌' && it != '‍' ||
@@ -233,14 +236,15 @@ class BackupAdversarialTest {
             for (keys in listOf(true, false)) for (keep in listOf(null, PREVIOUS)) {
                 val c = Backup.read(Backup.export(b, "3.0.2", 0, keys))
                 val r = phone.restoredFrom(c.setup, keep, 0, c.keys)!!
-                val texts = (r.routes.map { it.loc } + r.favorites).flatMap { listOf(it.countryCode, it.country, it.city) + listOfNotNull(it.pinned).flatMap { p -> listOf(p.name, p.city, p.country) } } + r.routes.map { it.tsName }
+                val texts = (r.routes.map { it.loc } + r.favorites).flatMap { listOfNotNull(it.pinned).flatMap { p -> listOf(p.city, p.country) } } + r.routes.map { it.tsName }
                 assertTrue(texts.filterNot(clean).toString().take(200), texts.all(clean))
+                assertEquals(listOf("Sweden$n", n, n), r.route("p")!!.loc.let { listOf(it.country, it.city, it.pinned!!.name) })
                 assertEquals("se-got", r.route("p")!!.loc.region)
                 assertEquals(evil.host, r.route("p")!!.loc.pinned!!.host)
                 Backup.valid(r)
             }
         }
-        // A provider's own names are unchanged by the cleaning, so a cleaned route or favourite still matches its list.
+        // A provider's own names are unchanged by the cleaning, so a pinned server's place reads as its provider names it.
         val names = mutableListOf<String>()
         fun walk(e: kotlinx.serialization.json.JsonElement, k: String?) {
             when (e) {
@@ -254,6 +258,28 @@ class BackupAdversarialTest {
             walk(kotlinx.serialization.json.Json.parseToJsonElement(javaClass.classLoader!!.getResource("$f.json")!!.readText()), null)
         assertTrue(names.size > 1000)
         assertEquals(emptyList<String>(), names.filter { Backup.safe(it, Backup.SHOWN) != it })
+    }
+
+    /**
+     * A place or pinned server name from a file still matches its provider's list, its favourite and the same route here
+     * whatever it holds: a list that names a place with an invisible character, a decomposed accent, another script or
+     * more than [Backup.SHOWN] characters.
+     */
+    @Test fun placesFromAFileStillMatchTheirProvider() {
+        for (place in listOf("Bosnia­and Herzegovina‎", "Côte d'Ivoire", "東京", "Россия", "ایران‌زمین", "Ville ".repeat(20))) {
+            val e = app.unbraid.data.Catalog.Entry("wireguard", country = place, city = place, serverName = place, hostname = "a.example.net", wgpubkey = "k", ips = listOf("203.0.113.5"))
+            val l = Location("mullvad", countryCode = place, country = place, city = place, region = "se-got", pinned = evil.copy(name = place))
+            val here = phone.copy(routes = phone.routes + Route("p", l), favorites = listOf(l))
+            for (keys in listOf(true, false)) {
+                val c = Backup.read(Backup.export(here, "3.0.2", 0, keys))
+                val r = here.restoredFrom(c.setup, null, 0, c.keys)!!
+                val got = r.route("p")!!.loc
+                assertEquals(place, 1, app.unbraid.data.Catalog.pick(listOf(e), got.copy(region = null)).size)
+                assertEquals(place, l.ident(), got.ident())
+                assertEquals(place, l.favKey(), r.favorites.single().favKey())
+                assertEquals(place, Backup.bare(l), got)
+            }
+        }
     }
 
     /** A website an older version saved, that the stricter reader of today refuses, keeps the backup restorable: it stays as this phone keeps it. */
