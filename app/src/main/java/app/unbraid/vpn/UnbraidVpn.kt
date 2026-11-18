@@ -943,9 +943,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
         Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(setup))
 
-    /** The apps that share their Android user id with an app on Block ([Compiler.Input.blockedKin]). */
+    /**
+     * The apps that share their Android user id with an app on Block ([Compiler.Input.blockedKin]). A blocked app that
+     * isn't installed shares none; any other failed lookup throws, so the start fails instead of reading as "none" and
+     * leaving a sibling (and with it the blocked app) outside the VPN. A restore keeps the set that ran ([FakePool.restoreInput]).
+     */
     private fun blockedKin(setup: Setup): Set<String> = setup.apps.filterValues { it == app.unbraid.data.BLOCK }.keys.flatMapTo(HashSet()) { pkg ->
-        runCatching { packageManager.getPackagesForUid(packageManager.getPackageUid(pkg, 0))?.toList() }.getOrNull().orEmpty()
+        val uid = try { packageManager.getPackageUid(pkg, 0) } catch (e: android.content.pm.PackageManager.NameNotFoundException) { return@flatMapTo emptyList() }
+        packageManager.getPackagesForUid(uid)?.toList().orEmpty()
     }
 
     /** The open table's fake-IP block for a reload, while its file is there ([FakePool.keeps]); else the next one, refusing the rest. */

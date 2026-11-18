@@ -203,6 +203,23 @@ class FakePoolTest {
     }
 
     /**
+     * A move, its retry and a failed change's fallback never lose a sibling of a blocked app: a lookup that fails or
+     * finds fewer keeps the running set (a sibling left outside the VPN takes the blocked app's user id with it).
+     */
+    @Test fun aRestoreNeverLosesASiblingOfABlockedApp() {
+        val last = input(3).let { Compiler.Input(it.setup, it.links, it.selfPackage, false, it.tsDir, it.cacheFile, it.tsSuffix, it.probe, 3, it.blocked, true, setOf("com.b", "com.b.sibling")) }
+        for (move in listOf(true, false)) for (block in listOf(4, null)) {
+            assertEquals(setOf("com.b", "com.b.sibling"), restore(last, block, 4, move = move) { emptySet() }.blockedKin)
+            assertEquals(setOf("com.b", "com.b.sibling"), restore(last, block, 4, move = move) { error("package lookup failed") }.blockedKin)
+            assertEquals(setOf("com.b", "com.b.sibling", "com.b.new"), restore(last, block, 4, move = move) { setOf("com.b", "com.b.new") }.blockedKin)
+        }
+        // Compiled: the sibling stays out of the apps Android lets bypass the VPN.
+        val app = Setup(routes = setup.routes, defaultRoute = "nl", apps = mapOf("com.b" to BLOCK, "com.b.sibling" to app.unbraid.data.DIRECT), version = VERSION)
+        val l = last.let { Compiler.Input(app, it.links, it.selfPackage, false, it.tsDir, it.cacheFile, it.tsSuffix, it.probe, 3, it.blocked, true, it.blockedKin) }
+        assertFalse(Compiler.compile(restore(l, 4, 4, move = true) { emptySet() }).contains("\"com.b.sibling\""))
+    }
+
+    /**
      * A restart saves a new block before anything is given up: a failed save keeps the running engine (the next check
      * tries again), and only then does the old engine go and the new one start.
      */
