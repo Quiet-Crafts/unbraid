@@ -519,6 +519,8 @@ object RestoreTraffic {
             val lists = cidrLists.map(::Ranges)
             val poolRanges = Ranges(pool)
             // The stand-in pool (a benchmark range) is no real destination: only lookups' stand-ins point there.
+            // Paid before it is done: every address against every range list, and against each config's routes and exclusions.
+            if (!budget.take(bounds.size * (cidrLists.size + all.sumOf { it.included.size + it.excluded.size } + 1L))) { cut = true; break@sides }
             val addresses = bounds.zipWithNext().filter { (a, _) -> !poolRanges.has(a) }.map { (a, b) -> Address(if (b - a > 2) a + 1 else a, homeRanges.has(a), localRanges.has(a)) }
                 .groupBy { a -> "${a.home}${a.local}" + lists.map { it.has(a.ip) } + all.map { it.inside(a.ip) } }.values
                 .map { g -> g.firstOrNull { it.ip == ip(PUBLIC) } ?: g.first() }

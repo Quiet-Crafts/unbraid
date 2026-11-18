@@ -520,6 +520,20 @@ class RestoreTrafficTest {
         assertEquals(listOf("1 app goes from a VPN route to Direct.", "Traffic Android can't tie to an app is no longer refused and goes Direct."), notes(here, next))
     }
 
+    /** Sorting addresses into classes is paid before it is done: a very long list of home subnets is cut, not scanned for seconds. */
+    @Test fun manyHomeSubnetsArePaidForBeforeTheyAreScanned() {
+        val subnets = (0 until 24_000).map { "10.${40 + it / 65_536}.${it / 256 % 256}.${it % 256}/32" }
+        val here = base.copy(home = Home(tailscale = true, subnets = subnets), prefs = Prefs(lan = true))
+        assertTrue(RestoreTraffic.size(here) <= RestoreTraffic.MAX_ENTRIES)
+        val budget = RestoreTraffic.Budget()
+        val t = System.nanoTime()
+        val said = RestoreTraffic.check(here, here.copy(defaultRoute = DIRECT), budget = budget)
+        val ms = (System.nanoTime() - t) / 1_000_000
+        println("RESTORE-CHECK 24000 home subnets: $ms ms, $said")
+        assertTrue("$ms ms", ms < 1500)
+        assertEquals(RestoreTraffic.CUT, said.last().text)
+    }
+
     /** The largest setups a backup may hold, built to cost the most: bounded before anything is walked, and stopped when cancelled. */
     @Test fun aHostileBackupIsBoundedBeforeItIsWalked() {
         val box = { n: Int -> WgConf.parse("[Interface]\nPrivateKey = ${"A".repeat(42)}E=\nAddress = 10.9.0.2/32\n[Peer]\nPublicKey = ${"B".repeat(42)}E=\nEndpoint = 203.0.113.7:51820\nAllowedIPs = " +
