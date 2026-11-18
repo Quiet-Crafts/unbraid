@@ -216,13 +216,22 @@ Tailscale node state with an Android Keystore key, refuse files sent through Tai
 resolver inside it when its server pushes none, let the app's connection checks look up their servers through
 the tunnel being checked, release every network part a tunnel built when it stops or fails to start, and never
 hand a stand-in (fake) address to a second name while its table lives: a used-up block of them answers new names
-with a failure, a table with any doubt about its cache (a failed read or write, a damaged file) stops handing out
-addresses, a damaged cache is never replaced by an empty one, and the app moves to the next of eight blocks in time.
-If the engine can't start again, apps on the VPN stay offline while every new try takes a new block with a new table,
-built from the setup you have then. A block apps were using comes back only after the seven others, so an address
-an app kept longer than that (across eight moves, reconnects, pauses or failed starts) can name another site by then;
-apps that keep an old block's address are refused until they look the name up again. A release build is signed only if `.secrets/signing.properties`
-exists, so a plain checkout builds an unsigned APK.
+with a failure, and the app moves to the next of eight blocks in time, with a new table. That promise holds across
+crashes and across any error the engine's cache reports (a failed read or write, a damaged file): the table then
+hands out no more addresses, and the app moves on. A cache file changed without any error is not covered: it is the
+app's own private file, deleted at every connect, app start and move. A block apps were using comes back only after
+the seven others, so an address an app kept longer than that (across eight moves, reconnects or pauses) can name
+another site by then; apps that keep an old block's address are refused until they look the name up again.
+
+When the engine can't start a change, the setup that ran before comes back and the app says the change was not
+applied. A change that could not be applied is not in force until it is; the notice says so. Meanwhile every app
+and website whose choice changed has no connection, and so has every app following the default if the default
+changed; a route you removed or signed out of has none either. Protections take the stricter of the two setups;
+settings with no stricter side (another filter server, another DNS, a Tailscale on/off switch) stay as they ran. If
+the setup from before can't start either, the connection ends, as after any lost connection: with Android's "Block
+connections without VPN" off, apps then go online without the VPN. The same holds when a move to the next block
+fails to start twice. A release build is signed only if `.secrets/signing.properties` exists, so a plain checkout
+builds an unsigned APK.
 
 ## Privacy
 
