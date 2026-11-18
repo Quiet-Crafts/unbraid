@@ -37,6 +37,17 @@ object FakePool {
         if ((step == Step.Wait || step == Step.Exhausted) && since != null && since >= 0) (SPACING - since).coerceIn(1, EVERY) else EVERY
 
     /**
+     * One check: [step] and [nextCheck] on what is left ([remaining]) and the time since the block changed ([since]),
+     * read after the count: a slow count (it can wait behind a database write) never adds a wait past the deadline.
+     */
+    inline fun poll(remaining: () -> Int, since: () -> Long?): Pair<Step, Long> {
+        val left = remaining()
+        val s = since()
+        val step = step(left, s)
+        return step to nextCheck(step, s)
+    }
+
+    /**
      * A reload keeps the open table's block only while its file is there ([bytes] > 0; a missing file has 0): one that
      * went missing or empty under a running engine would start an empty table on addresses apps still hold.
      */

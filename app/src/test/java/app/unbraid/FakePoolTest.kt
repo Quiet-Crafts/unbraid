@@ -241,6 +241,17 @@ class FakePoolTest {
         assertTrue(vpn.contains("if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix"))
     }
 
+    /** A slow count (the engine's lock taken by a database write) is read before the clock: no second wait after the deadline. */
+    @Test fun aSlowCountNeverAddsAWaitAfterTheDeadline() {
+        var now = 590_000L
+        val (step, next) = FakePool.poll({ now = 601_000L; 0 }) { now }
+        assertEquals(FakePool.Step.Rotate, step)
+        assertEquals(FakePool.EVERY, next)
+        assertEquals(FakePool.Step.Wait to 10_000L, FakePool.poll({ 1 }) { 590_000L })
+        val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+        assertTrue(vpn.contains("FakePool.poll(Libbox::fakeIPRemaining) { blockSince?.let { SystemClock.elapsedRealtime() - it } }"))
+    }
+
     /**
      * A restart saves a new block before anything is given up: a failed save keeps the running engine (the next check
      * tries again), and only then does the old engine go and the new one start.

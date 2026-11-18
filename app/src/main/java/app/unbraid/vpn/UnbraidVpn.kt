@@ -645,9 +645,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 if (destroyed || state.value.phase != VpnState.Phase.On || holding) return@withLock
                 val srv = server ?: return@withLock
                 val last = lastBlock ?: return@withLock
-                val since = blockSince?.let { SystemClock.elapsedRealtime() - it }
-                val step = FakePool.step(Libbox.fakeIPRemaining(), since)
-                wait = FakePool.nextCheck(step, since)
+                val (step, next) = FakePool.poll(Libbox::fakeIPRemaining) { blockSince?.let { SystemClock.elapsedRealtime() - it } }
+                wait = next
                 when (step) {
                     FakePool.Step.Nothing, FakePool.Step.Wait -> {}
                     FakePool.Step.Exhausted -> if (!exhaustedSaid) { exhaustedSaid = true; Log.w(TAG, "fake IPs: block used up before the next move is due, new lookups fail until then") }
