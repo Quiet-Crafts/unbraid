@@ -116,6 +116,11 @@ object AutoSwitch {
         val left: Int = 0,
         /** The decision last noted as done but not carried out for lack of room or connections: [acted] is only that. */
         val blocked: Decision? = null,
+        /**
+         * The rules of a pick made with the VPN off while the phone's own network couldn't be told (another VPN on top of
+         * it): it holds on the first network seen, which becomes [acted] then.
+         */
+        val held: Map<String, String>? = null,
     )
 
     sealed interface Event {
@@ -125,8 +130,11 @@ object AutoSwitch {
         data class Lost(val id: Long) : Event
         /** The monitor stopped (the VPN off): no departure is seen until it runs again. */
         data object Unwatched : Event
-        /** A profile picked by hand under [rules]; [own] is the phone's own network read from Android, for a pick made while unwatched. */
-        data class Picked(val rules: Map<String, String>, val own: Net? = null) : Event
+        /**
+         * A profile picked by hand under [rules]; [own] is the phone's own network read from Android, for a pick made while
+         * unwatched, and [unknown] says there is one but it couldn't be told.
+         */
+        data class Picked(val rules: Map<String, String>, val own: Net? = null, val unknown: Boolean = false) : Event
         data class Renamed(val old: String, val new: String) : Event
         /** The rule for [kind] of network was set, changed or removed by the user: what was acted on for that kind is forgotten. */
         data class RuleEdited(val kind: String) : Event
@@ -159,21 +167,21 @@ object AutoSwitch {
             // Android's handle 0 names no network. The same network again (its kind reported, a repeat) is no move.
             val n = e.net?.takeIf { it.id != 0L }
             if (s.watched && n != null && n.id == s.here?.id) Out(s.copy(here = n))
-            else Out(State(true, n, s.acted?.takeIf { it.first == n?.id }, blocked = s.blocked?.takeIf { it.net == n?.id }, made = s.made, stay = s.stay + 1, left = s.left + if (s.watched && s.here != null) 1 else 0))
+            else Out(State(true, n, s.acted?.takeIf { it.first == n?.id } ?: if (n != null) s.held?.let { n.id to it } else null, blocked = s.blocked?.takeIf { it.net == n?.id }, made = s.made, stay = s.stay + 1, left = s.left + if (s.watched && s.here != null) 1 else 0, held = s.held.takeIf { n == null }))
         }
-        is Event.Lost -> Out(if (s.watched && s.here?.id == e.id) State(true, made = s.made, stay = s.stay, left = s.left + 1) else s)
+        is Event.Lost -> Out(if (s.watched && s.here?.id == e.id) State(true, made = s.made, stay = s.stay, left = s.left + 1, held = s.held) else s)
         Event.Unwatched -> Out(s.copy(watched = false, here = null, pending = null))
         is Event.Picked -> {
             // Picked with no network known, it is for none: the next network's rule applies.
             val at = (if (s.watched) s.here else e.own)?.takeIf { it.id != 0L }
-            Out(s.copy(acted = at?.let { it.id to e.rules.toMap() }, pending = null, blocked = null))
+            Out(s.copy(acted = at?.let { it.id to e.rules.toMap() }, pending = null, blocked = null, held = e.rules.toMap().takeIf { at == null && e.unknown }))
         }
         // What was acted on follows a rename, so it is no change; a decision not saved yet is made again under the new name.
-        is Event.Renamed -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.renamed(e.old, e.new) }, pending = s.pending?.takeIf { it.profile != e.old }, blocked = null))
+        is Event.Renamed -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.renamed(e.old, e.new) }, held = s.held?.renamed(e.old, e.new), pending = s.pending?.takeIf { it.profile != e.old }, blocked = null))
         // Whatever it is now, the rule as it stands is decided afresh once the app leaves the screen; other kinds' picks stay.
-        is Event.RuleEdited -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to (r - e.kind) }, blocked = null))
-        is Event.Deleted -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.filterValues { it != e.name } }, pending = s.pending?.takeIf { it.profile != e.name }, blocked = null))
-        Event.Replaced -> Out(s.copy(acted = null, pending = null, blocked = null, stay = s.stay + 1))
+        is Event.RuleEdited -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to (r - e.kind) }, held = s.held?.minus(e.kind), blocked = null))
+        is Event.Deleted -> Out(s.copy(acted = s.acted?.let { (n, r) -> n to r.filterValues { it != e.name } }, held = s.held?.filterValues { it != e.name }, pending = s.pending?.takeIf { it.profile != e.name }, blocked = null))
+        Event.Replaced -> Out(s.copy(acted = null, pending = null, blocked = null, held = null, stay = s.stay + 1))
         is Event.Settled -> {
             val here = s.here
             val kind = here?.kind
@@ -209,7 +217,7 @@ object AutoSwitch {
         fun seen(n: Net?) = on(Event.Seen(n))
         fun lost(id: Long) = on(Event.Lost(id))
         fun unwatched() = on(Event.Unwatched)
-        fun pick(rules: Map<String, String>, own: Net? = null) = on(Event.Picked(rules, own))
+        fun pick(rules: Map<String, String>, own: Net? = null, unknown: Boolean = false) = on(Event.Picked(rules, own, unknown))
         fun renamed(old: String, new: String) = on(Event.Renamed(old, new))
         fun deleted(name: String) = on(Event.Deleted(name))
         fun ruleEdited(kind: String) = on(Event.RuleEdited(kind))
@@ -239,7 +247,8 @@ object AutoSwitch {
      */
     fun pickedByHand() {
         notSwitched.value = null
-        run.pick(Unbraid.store.setup.value.onNet, if (run.state.watched) null else cm?.let(::underlying))
+        val own = if (run.state.watched) null else cm?.let(::underlying)
+        run.pick(Unbraid.store.setup.value.onNet, own?.net, own?.unknown == true)
     }
 
     /** Profile [old] was renamed [new]. */

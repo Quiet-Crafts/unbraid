@@ -93,10 +93,33 @@ private fun net(n: Network, caps: NetworkCapabilities?) = n.networkHandle.takeIf
     AutoSwitch.Net(caps?.let { c -> if (c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) app.unbraid.data.MOBILE else app.unbraid.data.WIFI }, it)
 }
 
-/** The phone's own network now, never a VPN; null with none. unbraid itself is left outside its VPN, so this holds while connected too. */
-fun underlying(cm: ConnectivityManager): AutoSwitch.Net? = runCatching {
-    cm.activeNetwork?.let { n -> cm.getNetworkCapabilities(n)?.takeIf { !it.hasTransport(NetworkCapabilities.TRANSPORT_VPN) }?.let { net(n, it) } }
-}.getOrNull()
+/** What choosing the phone's own network needs of one network: Android's handle, whether it is a VPN, has internet, is unrestricted, and is mobile data. */
+internal data class Link(val handle: Long, val vpn: Boolean, val internet: Boolean, val unrestricted: Boolean, val mobile: Boolean)
+
+/**
+ * The network under the phone's default one, never a VPN: the default itself unless it is a VPN (another one, with unbraid
+ * off), then the best of the [all] networks the monitor would follow (internet, unrestricted, not a VPN), Wi-Fi before
+ * mobile data as Android prefers it. Null with no default, or when none qualifies.
+ */
+internal fun choose(default: Link?, all: List<Link>): Link? =
+    if (default == null || !default.vpn) default
+    else all.filter { !it.vpn && it.internet && it.unrestricted }.minByOrNull { it.mobile }
+
+/** The phone's own network now ([net], never a VPN; null with none), and [unknown]: a default network is there but the one under it can't be told. */
+data class Own(val net: AutoSwitch.Net?, val unknown: Boolean)
+
+private fun link(cm: ConnectivityManager, n: Network) = cm.getNetworkCapabilities(n)?.let { c ->
+    Link(n.networkHandle, c.hasTransport(NetworkCapabilities.TRANSPORT_VPN), c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET),
+        c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED), c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))
+}
+
+/** The phone's own network now. unbraid itself is left outside its VPN, so this holds while connected too. */
+@Suppress("DEPRECATION")
+fun underlying(cm: ConnectivityManager): Own = runCatching {
+    val default = cm.activeNetwork?.let { link(cm, it) }
+    val own = choose(default, if (default?.vpn == true) cm.allNetworks.mapNotNull { link(cm, it) } else emptyList())
+    Own(own?.takeIf { it.handle != 0L }?.let { AutoSwitch.Net(if (it.mobile) app.unbraid.data.MOBILE else app.unbraid.data.WIFI, it.handle) }, default != null && own == null)
+}.getOrDefault(Own(null, false))
 
 /**
  * Hands the engine the current default interface ([current]: name and index, "" and -1 for none): only a change, unless

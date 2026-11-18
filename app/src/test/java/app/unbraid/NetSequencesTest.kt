@@ -307,6 +307,31 @@ class NetSequencesTest {
         assertTrue(Regex("""Unbraid\.store\.setup\.value != t\)[\s\S]*?return\s*\}[\s\S]*?AutoSwitch\.replaced\(\)""").containsMatchIn(apply))
     }
 
+    /** The phone's own network under another VPN: the one the monitor would follow, else the pick waits for the first network seen. */
+    @Test fun aPickUnderAnotherVpnKeepsItsNetwork() {
+        fun link(h: Long, vpn: Boolean = false, internet: Boolean = true, free: Boolean = true, mobile: Boolean = false) = app.unbraid.vpn.Link(h, vpn, internet, free, mobile)
+        val other = link(9, vpn = true)
+        val wifi = link(21); val cell = link(22, mobile = true)
+        assertEquals(wifi, app.unbraid.vpn.choose(wifi, listOf(wifi, cell))) // no VPN: the default itself
+        assertEquals(wifi, app.unbraid.vpn.choose(other, listOf(other, cell, wifi))) // under the VPN: Wi-Fi before mobile data
+        assertEquals(cell, app.unbraid.vpn.choose(other, listOf(other, link(30, internet = false), link(31, free = false), cell)))
+        assertNull(app.unbraid.vpn.choose(other, listOf(other, link(30, internet = false)))) // none to follow
+        assertNull(app.unbraid.vpn.choose(null, listOf(wifi))) // no default network: offline
+        // Found under the VPN: the pick is for that network, and holds when unbraid starts on it.
+        val here = Net(WIFI, 21)
+        val rules = mapOf(WIFI to "Home")
+        AutoSwitch.Run().run { pick(rules, here); seen(here); assertNull(decide(here, rules)) }
+        // Not found: the pick is kept for the first network seen, even after nothing was seen for a while.
+        AutoSwitch.Run().run { pick(rules, null, unknown = true); seen(null); seen(here); assertNull(decide(here, rules)) }
+        // Only a pick made with nothing known at all is for none.
+        AutoSwitch.Run().run { pick(rules, null); seen(here); assertEquals("Home", decide(here, rules)) }
+        // What a later edit or restore changed is not held.
+        AutoSwitch.Run().run { pick(rules, null, unknown = true); ruleEdited(WIFI); seen(here); assertEquals("Home", decide(here, rules)) }
+        AutoSwitch.Run().run { pick(rules, null, unknown = true); replaced(); seen(here); assertEquals("Home", decide(here, rules)) }
+        AutoSwitch.Run().run { pick(rules, null, unknown = true); pick(rules, null); seen(here); assertEquals("Home", decide(here, rules)) }
+        AutoSwitch.Run().run { pick(rules, null, unknown = true); renamed("Home", "H2"); seen(here); assertNull(decide(here, mapOf(WIFI to "H2"))) }
+    }
+
     /** The seeds that found the round-two findings before the model was fixed, each with the events that make it shortest. */
     @Test fun theSeedsThatFoundTheFindings() {
         interleave(8, setOf(5, 8, 9, 11, RETURNS, RESTORES)) // a decision made on a network already lost
@@ -475,6 +500,9 @@ class NetSequencesTest {
         assertTrue(net.contains("AutoSwitch.seen(net(n, cm.getNetworkCapabilities(n)))"))
         assertTrue(Regex("""fun stop\(\) \{[^\n]*AutoSwitch\.unwatched\(\)""").containsMatchIn(net))
         assertFalse(net.contains("AutoSwitch.net.value ="))
+        // A pick made with the VPN off says whether the phone's own network couldn't be told; the note lists a restore among the ends of a pick.
+        assertTrue(java.io.File("src/main/java/app/unbraid/vpn/AutoSwitch.kt").readText().contains("own?.net, own?.unknown == true"))
+        assertTrue(app.unbraid.ui.ON_NET_NOTE.contains("when you restore a backup"))
         val watch = java.io.File("src/main/java/app/unbraid/vpn/AutoSwitch.kt").readText().substringAfter("fun watch(")
         assertTrue(Regex("""store\.update \{ if \(run\.commit\(d, it\.onNet, Unbraid\.foreground\.value\)\) it\.use\(to, PREVIOUS\) else it \}""").containsMatchIn(watch))
         // A rule edit reaches the model, and the card is re-judged when the setup or the accounts change.
