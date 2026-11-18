@@ -80,7 +80,7 @@ internal fun siteState(s: Setup, site: String, reported: String? = null): String
         off != null -> "Not applied: ${off.why}"
         id == DIRECT -> "Direct, skips the VPN"
         else -> s.route(id)?.name ?: "A route that no longer exists"
-    } + if (Sites.clean(site) != site) " · not an address browsers open" else ""
+    } + if (!Sites.opens(site)) " · not an address browsers open" else ""
 }
 
 /** The website rows of a Routes page: each route's websites whose rule applies, A to Z. */
