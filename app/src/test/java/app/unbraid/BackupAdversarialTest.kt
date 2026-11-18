@@ -294,7 +294,7 @@ class BackupAdversarialTest {
     }
 
     @Test fun codesAndGroupsFromAFileNeverCarryARequest() {
-        for ((code, kept) in listOf("SE" to "SE", "se" to "se", "GBR" to "GBR", "S\r\nX-Injected: 1" to null, "SE\n" to null, "" to "", "S" to "S", "SÉ" to "SÉ", "S1" to "S1", "··" to "··", "a&b=" to null)) {
+        for ((code, kept) in listOf("SE" to "SE", "se" to "se", "GBR" to "GBR", "S\r\nX-Injected: 1" to null, "SE\n" to null, "" to "", "S" to "S", "SÉ" to "SÉ", "S1" to "S1", "··" to "··", "a&b=" to null, "a&b" to null, "a/b" to null, "a b" to null, "%0A" to null)) {
             for ((group, g) in listOf("legacy_p2p" to "legacy_p2p", "legacy_p2p\r\nX: y" to null, "a&limit=1" to null)) {
                 val l = Location("nord", 208, code, "Sweden", group = group)
                 val c = Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("p", l), favorites = listOf(l)), "3.0.2", 0))
