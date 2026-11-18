@@ -497,6 +497,19 @@ class RestoreTrafficTest {
         assertEquals(listOf("1 app goes from a VPN route to Direct."), notes(vpn, vpn.copy(apps = mapOf("org.a" to DIRECT))))
     }
 
+    /** A route's own DNS server at the address of a provider's blocking resolver is not that provider's blocking. */
+    @Test fun providerBlockingIsCreditedOnlyWhereItsPolicyChoseTheResolver() {
+        val iv = Route("iv", Location("ivpn", countryCode = "NL", country = "Netherlands"))
+        val lab = wg(9, dns = "10.0.254.2")
+        // An app keeps IVPN's route in use after the restore, so its blocking resolver is in both configs.
+        val here = base.copy(routes = base.routes + iv, defaultRoute = "iv", apps = mapOf("org.keep" to "iv"), opts = mapOf("ivpn" to mapOf("protect" to "on")))
+        val next = here.copy(routes = here.routes + Route("x", wg = lab, own = "sx"), servers = here.servers + OwnServer("sx", wg = lab), defaultRoute = "x")
+        assertEquals(listOf("The default route loses the provider's ad and tracker blocking it has now."), notes(here, next))
+        // IVPN's own route asks the same address and keeps it.
+        assertEquals(Resolver.Provider, walk(here, null, OTHER_NAME).resolver)
+        assertEquals(Resolver.Route, walk(next, null, OTHER_NAME).resolver)
+    }
+
     /** The largest setups a backup may hold, built to cost the most: bounded before anything is walked, and stopped when cancelled. */
     @Test fun aHostileBackupIsBoundedBeforeItIsWalked() {
         val box = { n: Int -> WgConf.parse("[Interface]\nPrivateKey = ${"A".repeat(42)}E=\nAddress = 10.9.0.2/32\n[Peer]\nPublicKey = ${"B".repeat(42)}E=\nEndpoint = 203.0.113.7:51820\nAllowedIPs = " +

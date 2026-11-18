@@ -134,8 +134,16 @@ object RestoreTraffic {
         val excludedRanges = excluded.mapNotNull(Compiler::ipv4)
         /** Exits that carry TCP only: UDP is refused there. */
         val tcpOnly = Compiler.tcpOnly(text)
-        /** What the providers' own blocking resolvers block, by address, with this setup's choices; and what the filter blocks. */
-        val blocking = Providers.all.mapNotNull { p -> p.blockingDns { setup.opt(p.id, it) }?.let { it to providerBlocks(p, setup) } }.toMap()
+        /**
+         * What a provider's own blocking blocks, with this setup's choices, by the tag of the route resolver it answers as:
+         * only where that route's provider policy chose it, as the compiler does. Another resolver at the same address (a
+         * WireGuard config's own DNS server) blocks nothing known. And what the filter blocks.
+         */
+        val blocking = setup.routes.mapNotNull { r ->
+            val p = Providers.get(r.loc.provider)?.takeIf { !r.imported && setup.protects(r) } ?: return@mapNotNull null
+            val tag = "dns-r-${r.id}"
+            tag.takeIf { p.blockingDns { setup.opt(p.id, it) }.let { it != null && it == servers[tag]?.str("server") } }?.let { it to providerBlocks(p, setup) }
+        }.toMap()
         val filterBlocks = setup.prefs.filter.server()?.let { blocks(it.blocks) }.orEmpty()
         val dnsBy = decided(dnsRules)
         val routeBy = decided(rules)
@@ -364,12 +372,12 @@ object RestoreTraffic {
         "local" -> Resolver.Local
         "dns-tailnet" -> Resolver.Home
         // The filter is written with its own port (and TLS or a path); a route's resolver with neither.
-        else -> c.servers[tag]?.let { d -> if ("server_port" in d) Resolver.Filter else if (d.str("server") in c.blocking) Resolver.Provider else null } ?: Resolver.Route
+        else -> c.servers[tag]?.let { d -> if ("server_port" in d) Resolver.Filter else if (tag in c.blocking) Resolver.Provider else null } ?: Resolver.Route
     }
 
     private fun blocksOf(c: Config, tag: String) = when (kind(c, tag)) {
         Resolver.Filter -> c.filterBlocks
-        Resolver.Provider -> c.blocking[c.servers[tag]?.str("server")].orEmpty()
+        Resolver.Provider -> c.blocking[tag].orEmpty()
         else -> emptySet()
     }
 
