@@ -775,8 +775,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (ready.blocked.values.none { it is LinkPicker.Waiting } || setup.defaultMissing) { install(srv, setup, ready, accounts, seen); return }
             // While a provider is asked for a server, apps moving off Direct already leave through their new route, or
             // wait blocked if that is the one still waiting: never on their real address for the time it takes. A tunnel
-            // whose account was signed out or refused stops now too, not once the others are found.
-            val stopNow = ready.blocked.any { (id, e) -> e is AuthException && id in links }
+            // whose account was signed out or refused, or that a provider setting now rules out, stops now too, not once the others are found.
+            val stopNow = ready.blocked.any { (id, e) -> (e is AuthException || e is LinkPicker.Unsuited) && id in links }
             // So does an app installed into what Android may leave out: applied now, not once the provider answers.
             if ((stopNow || installs.get() != builtInstalls || LinkPicker.leavesDirect(applied, setup, setup.activeRoutes.mapTo(HashSet()) { it.id }, lastInput?.tsSuffix, store.tsSuffix)) && !install(srv, setup, ready, accounts, seen)) return
             Ask(srv, setup, accounts, ready, applied, appliedAccounts, refusedFor(setup, accounts), store.lastLinks, generation, seen)

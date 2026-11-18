@@ -18,7 +18,10 @@ import app.unbraid.data.WgLink
 /** Chooses the tunnel each active route runs. Kept free of Android so it can be tested. */
 object LinkPicker {
     /** An offline pick's route that needs its provider for a tunnel. */
-    class Waiting : Fail("waiting for a server")
+    open class Waiting : Fail("waiting for a server")
+
+    /** A running tunnel a provider setting now rules out (Mullvad-owned only): its apps wait blocked, not on it. */
+    class Unsuited : Waiting()
 
     /** A route restored without its keys: blocked, never retried, until its own server gets its config again. */
     class KeyLeftOut(name: String) : AuthException("Add the config for $name again in Settings, Providers & servers")
@@ -86,7 +89,8 @@ object LinkPicker {
                 else -> keep[r.id]?.takeIf {
                     applied?.route(r.id)?.let { a -> !a.imported && a.loc == r.loc } == true && appliedAccounts[r.loc.provider] == accounts[r.loc.provider] &&
                         trusted(it, r, accounts, providers) && Addr.usable(it)
-                } ?: if (offline) throw if (accounts[r.loc.provider] == null) AuthException("Sign in to ${providers(r.loc.provider)?.name ?: r.loc.provider} for ${r.name}") else Waiting()
+                } ?: if (offline) throw if (accounts[r.loc.provider] == null) AuthException("Sign in to ${providers(r.loc.provider)?.name ?: r.loc.provider} for ${r.name}")
+                        else if (keep[r.id]?.let { suits(it, r, providers) } == false) Unsuited() else Waiting()
                     else fresh(r, accounts, last, used, providers).also { if (!Addr.usable(it)) throw Addr.refused(it.server.name) }
             } } catch (e: Exception) { blocked[r.id] = e; continue }
             if (!r.imported) used += "${r.loc.provider}|${serverId(link.server)}"
@@ -98,6 +102,9 @@ object LinkPicker {
         // A provider that refused its account refuses it for every route: none of them keeps a tunnel on it.
         val refusedBy = blocked.entries.filter { it.value is AuthException }.mapNotNull { (id, e) -> setup.route(id)?.takeIf { !it.imported }?.let { it.loc.provider to e } }.toMap()
         setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> refusedBy[r.loc.provider]?.let { blocked[r.id] = it; out.remove(r.id) } }
+        // A list read for a later route can rule out an earlier one's server: every unpinned route is checked against the last.
+        setup.activeRoutes.filter { !it.imported && it.loc.pinned == null && out[it.id]?.let { l -> suits(l, it, providers) } == false }
+            .forEach { r -> out.remove(r.id); blocked[r.id] = unsuited(providers(r.loc.provider)?.name ?: r.loc.provider, r) }
         // A tunnel that would clash with another one's identity is blocked, never started beside it.
         Compiler.clashes(setup, out).forEach { id -> out.remove(id); blocked[id] = Fail(Compiler.CLASH) }
         val remember = setup.activeRoutes.filter { !it.imported }.mapNotNull { r -> out[r.id]?.let { cacheKey(r) to it } }.toMap()
@@ -141,9 +148,19 @@ object LinkPicker {
     /** A kept or cached tunnel is reused only if its provider still vouches for its server key ([Provider.trusts]). */
     private fun trusted(l: Link, r: Route, accounts: Map<String, String>, providers: (String) -> Provider?): Boolean {
         val p = providers(r.loc.provider) ?: return true
+        // A page setting can rule out the server of an unpinned route: it is picked again, or blocked, never kept.
+        if (!suits(l, r, providers)) return false
         val acc = accounts[p.id] ?: return true
         return p.trusts(l, acc)
     }
+
+    /** A pinned server always suits; an unpinned route's must suit its provider's page settings ([Provider.suits]). */
+    private fun suits(l: Link, r: Route, providers: (String) -> Provider?) = r.loc.pinned != null || providers(r.loc.provider)?.suits(l.server) != false
+
+    /** The first of [links] for unpinned route [r] whose server suits [p]'s settings as its last list confirmed; none is refused. */
+    private fun suited(p: Provider, r: Route, vararg links: Link?) = links.filterNotNull().firstOrNull { p.suits(it.server) } ?: throw unsuited(p.name, r)
+
+    private fun unsuited(provider: String, r: Route) = Fail("No $provider server for ${r.name} suits your settings right now")
 
     private fun fresh(r: Route, accounts: Map<String, String>, last: Map<String, Link>, used: Set<String>, providers: (String) -> Provider?): Link {
         val p = providers(r.loc.provider) ?: error("Unknown provider ${r.loc.provider}")
@@ -160,11 +177,13 @@ object LinkPicker {
             if (cached != null && !Addr.usable(cached)) throw Addr.refused(cached.server.name)
             cached ?: throw if (pinned != null) Fail("${r.name}: ${pinned.name} is unreachable") else e
         }
-        if (pinned != null || "${p.id}|${serverId(l.server)}" !in used) return l
+        if (pinned != null) return l
+        if ("${p.id}|${serverId(l.server)}" !in used) return suited(p, r, l)
         val other = runCatching {
             p.servers(r.loc, acc, 10).firstOrNull { "${p.id}|${serverId(it)}" !in used }?.let { p.connect(r.loc.copy(pinned = it), acc) }
         }.onFailure { if (it is AuthException) throw it }.getOrNull()
-        return other ?: l
+        // Another server, else the one already found (shared with the route that has it), whichever still suits.
+        return suited(p, r, other, l)
     }
 
     /**

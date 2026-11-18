@@ -252,6 +252,12 @@ object Mullvad : Provider {
 
     private fun ownedOnly() = Providers.opt(id, OWNED) == "on"
 
+    /** The relays Mullvad owns (host name, address, key), as the last list read said; null until one is read. */
+    @Volatile internal var ownedRelays: Set<Triple<String, String, String>>? = null
+
+    /** With Mullvad-owned only, a server suits only as the last list confirmed a relay Mullvad owns: name, address and key. */
+    override fun suits(server: Server) = !ownedOnly() || ownedRelays?.contains(Triple(server.host, server.ip, server.publicKey)) == true
+
     /** A pinned server is looked up in the fresh list so a changed IP or key is picked up; if the list is unreachable the pinned values are used. */
     override fun connect(loc: Location, account: String): Link {
         val list = if (loc.pinned == null) fetch() else try { fetch() } catch (e: IOException) { null }
@@ -263,7 +269,7 @@ object Mullvad : Provider {
         return l.match(loc, ownedOnly()).sortedWith(compareByDescending<Relay> { it.weight }.thenBy { it.hostname }).take(limit).map { server(it, l) }
     }
 
-    private fun fetch() = parse(Http.get("$API/public/relays/wireguard/v2"))
+    private fun fetch() = parse(Http.get("$API/public/relays/wireguard/v2")).also { l -> ownedRelays = l.usable.filter { it.owned }.mapTo(HashSet()) { Triple(it.hostname, it.ip, it.publicKey) } }
 
     internal fun parse(body: String) = Http.parsed("Mullvad") { NordApi.json.decodeFromString(RelayList.serializer(), body) }
 
