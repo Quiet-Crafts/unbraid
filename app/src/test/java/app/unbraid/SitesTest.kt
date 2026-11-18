@@ -212,6 +212,14 @@ class SitesTest {
         assertEquals(listOf("xn--ax-iuk.com"), s.site(null, "x.0xff", null).sites.keys.toList())
     }
 
+    /** A digit-leading label beside a right-to-left one: new input is refused, but a saved name browsers open is not called unopenable. */
+    @Test fun aSavedNameOnlyTheDirectionRuleRefusesIsNotCalledUnopenable() {
+        val n = "123.xn--mgbh0fb.com"
+        assertNull(Sites.clean(n)); assertTrue(Sites.stored(n)); assertTrue(Sites.opens(n))
+        assertEquals("Italy", siteState(setup.copy(sites = mapOf(n to "it")), n))
+        assertFalse(Sites.opens("xn--ax-iuk.com")); assertFalse(Sites.opens("x.0xff"))
+    }
+
     /** A website that doesn't apply opens no tunnel, protects nothing, and is in no count of what a route carries. */
     @Test fun aWebsiteNotAppliedIsNotInUse() {
         val s = setup.copy(defaultRoute = DIRECT, apps = emptyMap(), sites = mapOf("printer.lan" to "it"))

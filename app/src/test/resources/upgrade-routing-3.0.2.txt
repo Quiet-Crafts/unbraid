@@ -862,3 +862,15 @@ private-zone-in-parent-lan-off com.chat www.example.org A=fake TXT=dns-r-us go=r
 private-zone-in-parent-lan-off com.chat storage.googleapis.com A=fake TXT=dns-r-it go=r-it
 private-zone-in-parent-lan-off com.chat raw.githubusercontent.com A=fake TXT=local go=direct
 private-zone-in-parent-lan-off com.chat www.gob.mx A=fake TXT=dns-r-us go=r-us
+wg-clash-lan-true org.browser printer.lan A=local TXT=local go=direct
+wg-clash-lan-true org.browser other.example A=fake TXT=reject go=reject
+wg-clash-lan-true org.browser bank.example A=fake TXT=dns-r-c go=r-a
+wg-clash-lan-true com.chat printer.lan A=local TXT=local go=direct
+wg-clash-lan-true com.chat other.example A=fake TXT=reject go=reject
+wg-clash-lan-true com.chat bank.example A=fake TXT=dns-r-c go=r-a
+wg-clash-lan-false org.browser printer.lan A=fake TXT=dns-r-a go=r-a
+wg-clash-lan-false org.browser other.example A=fake TXT=reject go=reject
+wg-clash-lan-false org.browser bank.example A=fake TXT=dns-r-c go=r-a
+wg-clash-lan-false com.chat printer.lan A=fake TXT=dns-r-a go=r-a
+wg-clash-lan-false com.chat other.example A=fake TXT=reject go=reject
+wg-clash-lan-false com.chat bank.example A=fake TXT=dns-r-c go=r-a

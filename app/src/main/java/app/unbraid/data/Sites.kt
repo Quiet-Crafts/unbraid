@@ -160,12 +160,22 @@ object Sites {
         // Read back in its own letters, as a browser checks it: letters both rules write alike, in the one form, each
         // label starting with a letter or digit and written in a direction browsers accept. Else a browser opens another
         // name or none.
-        if ("xn--" in name) {
-            val read = IDN.toUnicode(name)
-            if (!read.codePoints().allMatch { letter(it) } || !Normalizer.isNormalized(read, Normalizer.Form.NFC) || IDN.toASCII(read).lowercase() != name || !bidi(read.split('.'))) return null to NOT_A_NAME
-        }
+        if ("xn--" in name && !readsBack(name, directions = true)) return null to NOT_A_NAME
         return name to ""
     }
+
+    /** Whether the "xn--" name [name] reads back as itself in its own letters; [directions]: also keeping to the rules for mixed directions. */
+    private fun readsBack(name: String, directions: Boolean): Boolean {
+        val read = IDN.toUnicode(name)
+        return read.codePoints().allMatch { letter(it) } && Normalizer.isNormalized(read, Normalizer.Form.NFC) && IDN.toASCII(read).lowercase() == name && (!directions || bidi(read.split('.')))
+    }
+
+    /**
+     * Whether a browser opens the name [saved] as saved. [clean] may refuse a name browsers open (it also holds new input
+     * to the rules for names that mix directions, which browsers don't check), so a saved name only fails here when it is
+     * no name a browser reads as written.
+     */
+    fun opens(saved: String) = clean(saved) == saved || (stored(saved) && "xn--" in saved && readsBack(saved, directions = false))
 
     private val R = setOf(Character.DIRECTIONALITY_RIGHT_TO_LEFT, Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC).map { it.toInt() }.toSet()
     private val NEUTRAL = setOf(Character.DIRECTIONALITY_EUROPEAN_NUMBER_SEPARATOR, Character.DIRECTIONALITY_COMMON_NUMBER_SEPARATOR, Character.DIRECTIONALITY_EUROPEAN_NUMBER_TERMINATOR,
