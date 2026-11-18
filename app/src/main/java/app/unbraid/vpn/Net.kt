@@ -66,7 +66,7 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     // The switch by network learns of a new network in the same step as everything else here, so a pick made meanwhile
     // can't be noted for the network the phone just left. Without its capabilities yet, it is this network of a kind not
     // known yet (they follow in onCapabilitiesChanged).
-    override fun onAvailable(n: Network) { handler.removeCallbacks(lose); network = n; AutoSwitch.seen(net(n, cm.getNetworkCapabilities(n))); push() }
+    override fun onAvailable(n: Network) { handler.removeCallbacks(lose); val was = network; network = n; AutoSwitch.seen(net(n, cm.getNetworkCapabilities(n))); push(was = was?.networkHandle, now = n.networkHandle) }
     override fun onLinkPropertiesChanged(n: Network, lp: LinkProperties) { if (n == network) push() }
     // Only the engine waits for a lost network to come back; for the switch by network the phone has left it.
     override fun onLost(n: Network) { if (n == network) { lost = n; AutoSwitch.lost(n.networkHandle); handler.postDelayed(lose, 3_000) } }
@@ -77,11 +77,11 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
         AutoSwitch.seen(net(n, caps))
     }
 
-    /** Not [force]d: a real move to another network, which may fix blocked routes ([onChange]). */
-    private fun push(force: Boolean = false) {
+    /** Not [force]d: a real move to another network ([was] → [now], by Android's handle, when known), which may fix blocked routes ([onChange]). */
+    private fun push(force: Boolean = false, was: Long? = null, now: Long? = null) {
         val l = listener ?: return
-        val now = pusher.push(force) { l.updateDefaultInterface(it.first, it.second, false, false) } ?: return
-        if (!force && now.second >= 0) onChange?.invoke()
+        val sent = pusher.push(force) { l.updateDefaultInterface(it.first, it.second, false, false) }
+        if (!force && netMoved(sent, was, now)) onChange?.invoke()
     }
 }
 
@@ -125,6 +125,13 @@ fun underlying(cm: ConnectivityManager): Own = runCatching {
 internal fun own(active: Boolean, default: Link?, all: List<Link>) = choose(default, all).let { o ->
     Own(o?.takeIf { it.handle != 0L }?.let { AutoSwitch.Net(if (it.mobile) app.unbraid.data.MOBILE else app.unbraid.data.WIFI, it.handle) }, active && o == null)
 }
+
+/**
+ * Whether a push is a move that may fix blocked routes ([NetMonitor.onChange]): another interface the engine was handed
+ * ([sent], never none), or another network straight after one on the same interface ([was] → [now], Android's handles),
+ * which the engine isn't told of again: another Wi-Fi on wlan0. A network after none gets its interface handed over.
+ */
+internal fun netMoved(sent: Pair<String, Int>?, was: Long?, now: Long?) = if (sent != null) sent.second >= 0 else was != null && now != null && now != was
 
 /**
  * Hands the engine the current default interface ([current]: name and index, "" and -1 for none): only a change, unless
