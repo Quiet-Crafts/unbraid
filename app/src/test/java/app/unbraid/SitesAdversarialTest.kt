@@ -128,6 +128,8 @@ class SitesAdversarialTest {
         // Leading and trailing C0 controls and spaces are stripped before parsing; inside the name they are not.
         "https://example.com:443\u0000" to "example.com",
         "\u0001 https://example.com/\u001f" to "example.com",
+        // Stripping the control must not then strip a no-break space it uncovered: a browser refuses this.
+        "https://example.com\u00a0\u0000" to null,
     )
 
     /** What a browser opens, as a rule keeps it: no trailing dot, no leading "www.". */

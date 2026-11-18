@@ -603,7 +603,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         runCatching {
             // A move runs what runs: saved settings aren't read for it.
             val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, spent, newProbe(),
-                if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move, ::blockedKin)
+                if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move) { blockedKin(it, strict = false) }
             input to Compiler.compile(input).also(Libbox::checkConfig)
         }.onFailure { Log.e(TAG, "restore: ${logLine(it)}") }.getOrThrow()
     }, note = { store.fakeBlock = it }, commit = { input ->
@@ -953,9 +953,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * isn't installed shares none; any other failed lookup throws, so the start fails instead of reading as "none" and
      * leaving a sibling (and with it the blocked app) outside the VPN. A restore keeps the set that ran ([FakePool.restoreInput]).
      */
-    private fun blockedKin(setup: Setup): Set<String> = setup.apps.filterValues { it == app.unbraid.data.BLOCK }.keys.flatMapTo(HashSet()) { pkg ->
+    private fun blockedKin(setup: Setup, strict: Boolean = true): Set<String> = setup.apps.filterValues { it == app.unbraid.data.BLOCK }.keys.flatMapTo(HashSet()) { pkg ->
         val uid = try { packageManager.getPackageUid(pkg, 0) } catch (e: android.content.pm.PackageManager.NameNotFoundException) { return@flatMapTo emptyList() }
-        packageManager.getPackagesForUid(uid)?.toList().orEmpty()
+        // On a restore ([strict] false) one app's failed lookup must not cost the others theirs: the set that ran is kept anyway.
+        try { packageManager.getPackagesForUid(uid)?.toList().orEmpty() } catch (e: RuntimeException) { if (strict) throw e else emptyList() }
     }
 
     /** The open table's fake-IP block for a reload, while its file is there ([FakePool.keeps]); else the next one, refusing the rest. */

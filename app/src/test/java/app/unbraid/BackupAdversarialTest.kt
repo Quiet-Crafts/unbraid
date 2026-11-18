@@ -283,11 +283,18 @@ class BackupAdversarialTest {
     }
 
     /**
-     * A country code and a group go into provider and speed-test requests: from a file they are kept only in the shape
-     * every provider uses, so no line break or other text can reach a request; the route still restores.
+     * A country code and a group go into provider and speed-test requests: from a file they are kept only in a shape
+     * that can't carry one (a code that also matches the route to the provider's list stays as saved), so no line break
+     * or other text can reach a request; the route still restores.
      */
+    /** A saved protocol goes into NordVPN's request: anything that isn't an identifier counts as none saved. */
+    @Test fun aProtocolFromAFileNeverCarriesARequest() {
+        assertEquals("openvpn_tcp", app.unbraid.data.Nord.tech(Location("nord", protocol = "openvpn_tcp")))
+        for (bad in listOf("wireguard_udp&limit=9", "openvpn_udp\r\nX: y", "", "WireGuard UDP")) assertEquals(bad, "wireguard_udp", app.unbraid.data.Nord.tech(Location("nord", protocol = bad)))
+    }
+
     @Test fun codesAndGroupsFromAFileNeverCarryARequest() {
-        for ((code, kept) in listOf("SE" to "SE", "se" to "se", "GBR" to "GBR", "S\r\nX-Injected: 1" to null, "SE\n" to null, "" to null, "S" to null, "SÉ" to null, "S1" to null)) {
+        for ((code, kept) in listOf("SE" to "SE", "se" to "se", "GBR" to "GBR", "S\r\nX-Injected: 1" to null, "SE\n" to null, "" to "", "S" to "S", "SÉ" to "SÉ", "S1" to "S1", "··" to "··", "a&b=" to null)) {
             for ((group, g) in listOf("legacy_p2p" to "legacy_p2p", "legacy_p2p\r\nX: y" to null, "a&limit=1" to null)) {
                 val l = Location("nord", 208, code, "Sweden", group = group)
                 val c = Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("p", l), favorites = listOf(l)), "3.0.2", 0))

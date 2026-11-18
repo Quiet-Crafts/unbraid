@@ -32,9 +32,9 @@ object Nord : Provider {
 
     override fun countries(account: String) = NordApi.countries().sortedBy { it.name }
 
-    fun tech(loc: Location) = when {
-        loc.group in openVpnOnly -> loc.protocol?.takeIf { it.startsWith("openvpn") } ?: "openvpn_udp"
-        else -> loc.protocol ?: "wireguard_udp"
+    /** The technology asked of the API; a saved one counts only as an identifier, since it goes into the request. */
+    fun tech(loc: Location) = loc.protocol?.takeIf { p -> p.isNotEmpty() && p.all { it in 'a'..'z' || it in '0'..'9' || it == '_' } }.let { p ->
+        if (loc.group in openVpnOnly) p?.takeIf { it.startsWith("openvpn") } ?: "openvpn_udp" else p ?: "wireguard_udp"
     }
 
     /** Every NordVPN server carries its load, and the recommendations come lowest load first. */

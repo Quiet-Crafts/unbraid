@@ -329,13 +329,13 @@ object Backup {
      * holds: a place's country, code and city and a pin's name (a location's identity, its favourite and its provider's
      * lookup), own servers' names (a server saved without keys gets its config back by its name), a pin's host, region,
      * group and the Tailscale address. The two that also go into a provider's or the speed test's request are kept only
-     * in the shape every provider uses, else left out: a country code of two or three letters, a group as an identifier.
+     * in a shape that can't carry a request, else left out: a country code of at most three visible characters (it also
+     * matches a route to the provider's list, so it is otherwise kept as saved; the speed test checks it again), a group as an identifier.
      */
     fun shown(s: Setup) = s.copy(routes = s.routes.map(::shown), favorites = s.favorites.map(::shown))
     fun shown(r: Route) = r.copy(loc = shown(r.loc), tsName = r.tsName?.let { safe(it, SHOWN) })
-    fun shown(l: Location) = l.copy(countryCode = l.countryCode?.takeIf(CODE::matches), group = l.group?.takeIf(ID::matches),
+    fun shown(l: Location) = l.copy(countryCode = l.countryCode?.takeIf { it.length <= 3 && safe(it) == it }, group = l.group?.takeIf(ID::matches),
         pinned = l.pinned?.run { copy(city = safe(city, SHOWN), country = safe(country, SHOWN)) })
-    private val CODE = Regex("[A-Za-z]{2,3}")
 
     /** [plain] read back as a restore would read it, so a file that restoring would refuse is never written. Throws [Failed]. */
     fun readBack(plain: ByteArray) {

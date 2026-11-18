@@ -137,7 +137,7 @@ object Sites {
         if (raw.length > PASTE) return null to "That is too long for an address. Paste the link alone"
         // Control characters and spaces at either end go, as a browser strips them; tabs and line breaks anywhere are
         // dropped and a backslash is a slash, so "example.com\@evil.com" opens example.com.
-        var host = raw.trim { it <= ' ' || it.isWhitespace() }.filter { it !in "\t\n\r" }.replace('\\', '/').replace(SCHEME, "")
+        var host = raw.trim().trim { it <= ' ' }.filter { it !in "\t\n\r" }.replace('\\', '/').replace(SCHEME, "")
         // The host ends where the path, query or fragment starts; only an "@" before that ends a user name.
         host = host.substringBefore('/').substringBefore('?').substringBefore('#').substringAfterLast('@')
         // An IPv6 address, bracketed in a link or bare.
