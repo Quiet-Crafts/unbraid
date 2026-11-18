@@ -369,7 +369,11 @@ object Backup {
     fun safe(s: String, n: Int = 40) = s.filterNot { it.isISOControl() || format(it) }.takeGraphemes(n)
 
     /** A name from the file as the restore sheet prints it, every name it prints: [safe], trimmed, and [or] when nothing visible is left. */
-    fun label(name: String?, or: String, n: Int = 60) = name?.let { safe(it, n).trim() }?.takeIf { it.isNotEmpty() } ?: or
+    fun label(name: String?, or: String, n: Int = 60) = name?.let { safe(it, n).trim() }?.takeIf { it.codePoints().anyMatch { c -> !blank(c) } } ?: or
+
+    /** Characters that show nothing on their own: spaces, joiners and the other default-ignorable ones (fillers, variation selectors, tags). */
+    private fun blank(c: Int) = Character.isWhitespace(c) || Character.isSpaceChar(c) || Character.getType(c) == Character.FORMAT.toInt() || c == 0x34F ||
+        c in 0x115F..0x1160 || c in 0x17B4..0x17B5 || c in 0x180B..0x180F || c == 0x3164 || c in 0xFE00..0xFE0F || c == 0xFFA0 || c in 0xE0000..0xE0FFF
 
     /**
      * A name as the importers leave it, the rule every earlier version checked: no control or direction characters, not

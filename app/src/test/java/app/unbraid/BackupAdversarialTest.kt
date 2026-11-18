@@ -295,6 +295,22 @@ class BackupAdversarialTest {
         for (bad in listOf("Example.com", "x..com", "-x.com", "x.123", "com", "a b.com")) assertEquals(bad, Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(sites = mapOf(bad to "nl")), "3.0.2", 0)) })
     }
 
+    /** A name with nothing visible in it, joiners and other invisible characters only, is printed as the sheet's fallback; joiners inside a name stay. */
+    @Test fun aNameWithNothingVisibleGetsTheFallback() {
+        val invisible = listOf("‍", "‌", "⁠", "­", "﻿", "‍‌", " ‍ ", "⁠­﻿‍", "͏️", "ㅤ", "󠀁")
+        for (n in invisible) assertEquals(n.map { "%04x".format(it.code) }.toString(), "a VPN", Backup.label(n, "a VPN"))
+        for (n in listOf("👩‍💻", "می‌خواهم", "Lab‍VPN")) assertEquals(n, Backup.label(n, "a VPN"))
+        assertEquals("LabVPN", Backup.label("⁠Lab­VPN﻿", "a VPN"))
+        // The own-server sentences fall back to "An own server" on an empty label.
+        assertEquals("", Backup.label("‍‌", "", 256))
+        // The sentence the reviewer saw: an own server named only a joiner, the default route restored to Direct.
+        val joined = wg.copy(name = "‍")
+        val here = phone.copy(routes = phone.routes.map { if (it.id == "w") it.copy(wg = joined) else it }, servers = listOf(OwnServer("s", wg = joined)), defaultRoute = "w")
+        val c = Backup.read(Backup.export(here, "3.0.2", 0))
+        assertEquals("‍", c.setup.servers.single().name)
+        assertEquals("The default route goes from a VPN to Direct.", RestoreTraffic.notes(here, here.copy(defaultRoute = DIRECT)).first())
+    }
+
     /** Counting in another script is a pattern too: one through eight in Chinese numerals is not a hard passphrase. */
     @Test fun countingInAnyScriptIsAPattern() {
         for (p in listOf("一二三四五六七八", "八七六五四三二一", "壹贰叁肆伍陆柒捌", "甲乙丙丁戊己庚辛", "あいうえおかきく", "αβγδεζηθ", "абвгдежз", "ⅠⅡⅢⅣⅤⅥⅦⅧ", "가나다라마바사아", "一二三四五六七八九十"))
