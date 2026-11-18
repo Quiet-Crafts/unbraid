@@ -50,7 +50,7 @@ object Nord : Provider {
         // A pinned server as Nord lists it now (address and key can change); as saved when the list can't be read.
         val sv = loc.pinned?.let { p ->
             // A Dedicated IP server comes from the account's own list, which a refused login must not hide.
-            val list = try { if (loc.group == DEDICATED_IP) NordApi.dedicated(a.token, tech) else loc.countryId?.let { NordApi.inPlace(it, loc.cityId, tech) } } catch (e: AuthException) { throw e } catch (e: Exception) { null }
+            val list = try { if (loc.group == DEDICATED_IP) NordApi.dedicated(a.token, tech) else NordApi.inPlace(loc.countryId ?: countryOf(p), loc.cityId, tech) } catch (e: AuthException) { throw e } catch (e: Exception) { null }
             p.asListed(list)
         }
             ?: if (loc.group == DEDICATED_IP) dedicated(a, loc, tech).firstOrNull() ?: throw IOException("Your Dedicated IP isn't in ${loc.label}")
@@ -66,6 +66,15 @@ object Nord : Provider {
         require(sv.host.matches(Regex("[a-z0-9-]+\\.nordvpn\\.com"))) { "Unexpected server name" }
         val text = Http.get("https://downloads.nordcdn.com/configs/files/ovpn_$proto/servers/${sv.host}.$proto.ovpn")
         return OvpnLink(sv, Manual.parseOvpn(withLegacyCiphers(text), sv.name, user, pass))
+    }
+
+    /**
+     * A pin made from Fastest anywhere has no country of its own: its server's country code (a backup keeps it) finds the
+     * list, else the whole list has it by its exact host name ([Server.asListed]).
+     */
+    private fun countryOf(p: Server) = p.country.takeIf { it.isNotEmpty() }?.let { c ->
+        // Only narrows the list: when the countries can't be read, the whole list still has it.
+        runCatching { NordApi.countries() }.getOrNull()?.firstOrNull { it.code.equals(c, true) }?.id
     }
 
     /** Country codes that have servers in a specialty [group] (P2P, Double VPN, Onion…). */
