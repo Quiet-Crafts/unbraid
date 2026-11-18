@@ -316,8 +316,23 @@ object Backup {
             fail(Reason.Invalid, "its contents can't be read")
         }
         if (c.format > CONTENTS || c.setup.version > VERSION) fail(Reason.Newer)
-        return c.copy(app = c.app.takeIf { APP_VERSION.matches(it) }.orEmpty(), setup = valid(named(c.setup.migrated())))
+        return c.copy(app = c.app.takeIf { APP_VERSION.matches(it) }.orEmpty(), setup = valid(shown(named(c.setup.migrated()))))
     }
+
+    /** The characters people see that a text from a file that is only shown keeps: no place or server a provider lists comes near it. */
+    const val SHOWN = 64
+
+    /**
+     * [s] with every text from a file that is only shown cleaned ([safe], at most [SHOWN]), so the app, its widgets and
+     * its notification never show what an older version let through: the places and pinned servers of routes and
+     * favourites, and Tailscale nodes' names. A provider's own names hold nothing [safe] takes out, so a route or a
+     * favourite still matches its provider's list. Texts that pick something stay as they are: own servers' names (a
+     * server saved without keys gets its config back by its name), a pin's host, region, group and the Tailscale address.
+     */
+    fun shown(s: Setup) = s.copy(routes = s.routes.map(::shown), favorites = s.favorites.map(::shown))
+    fun shown(r: Route) = r.copy(loc = shown(r.loc), tsName = r.tsName?.let { safe(it, SHOWN) })
+    fun shown(l: Location) = l.copy(countryCode = l.countryCode?.let { safe(it, SHOWN) }, country = l.country?.let { safe(it, SHOWN) }, city = l.city?.let { safe(it, SHOWN) },
+        pinned = l.pinned?.run { copy(name = safe(name, SHOWN), city = safe(city, SHOWN), country = safe(country, SHOWN)) })
 
     /** [plain] read back as a restore would read it, so a file that restoring would refuse is never written. Throws [Failed]. */
     fun readBack(plain: ByteArray) {
@@ -390,7 +405,7 @@ object Backup {
             val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.tsExit).size
             need(n <= 1, "a route has more than one exit")
             if (n == 0) need(Providers.get(r.loc.provider) != null, "a route uses a provider this unbraid doesn't know")
-            // Its node's name and its place are kept as Tailscale and the provider gave them; the sheet shows them cleaned ([safe]).
+            // Its node's name and its place are cleaned when a file is read ([shown]), never refused: older versions kept them unchecked.
             r.tsExit?.let { need(tsAddress(it), "a Tailscale route is damaged") }
             // A route saved without keys gets them back only through its own server, which must be saved without them too.
             val own = r.own?.let(serverById::get)
@@ -522,10 +537,10 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val addRoutes = used.mapNotNull { x ->
         val c = x.copy(own = x.own?.let { sv[it] ?: it })
         val there = r.route(x.id)
-        // The same route as the file holds it ([Backup.named]); one tied here to no own server is the same as the file's tied one.
-        val same = there != null && c.copy(loc = Backup.bare(c.loc)).let { f -> there == f || (f.own == null && there.copy(own = null) == f) }
+        // The same route as the file holds it ([Backup.named], [Backup.shown]); one tied here to no own server is the same as the file's tied one.
+        val same = there != null && Backup.shown(c.copy(loc = Backup.bare(c.loc))).let { f -> there == f || (f.own == null && there.copy(own = null) == f) }
         // Shared, it keeps the pin this phone trusts (address and key from the provider's list), not the file's name alone.
-        if (same) { rt[x.id] = x.id; if (c.loc != there!!.loc) pins[x.id] = c.loc; return@mapNotNull null }
+        if (same) { rt[x.id] = x.id; Backup.shown(c.loc).let { if (it != there!!.loc) pins[x.id] = it }; return@mapNotNull null }
         val id = if (there == null) x.id else fresh("r", routeIds)
         rt[x.id] = id; routeIds += id; c.copy(id = id)
     }

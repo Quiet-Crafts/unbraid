@@ -174,7 +174,7 @@ class BackupAdversarialTest {
         // As the exit in use too: the compiler would pass it to Tailscale, which finds no node by that text.
         assertEquals(Reason.Invalid, reason { Backup.read(Backup.export(ts(":::").copy(defaultRoute = "t"), "3.0.2", 0)) })
         Backup.read(Backup.export(ts("::ffff:100.64.0.1").copy(defaultRoute = "t"), "3.0.2", 0))
-        // A place keeps its texts as the provider gave them, as 3.0.2 kept them ([OlderBackupsTest]).
+        // A place with texts 3.0.2 let through still opens, cleaned ([OlderBackupsTest], [displayOnlyTextsAreCleanedOnRead]).
         for (n in listOf("Box\u2028x", "Box\u200B", "Box\u2060x", "Box\uFEFF", "Team \uD83D\uDC69\u200D\uD83D\uDCBB")) Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", n))), "3.0.2", 0))
         // An error that names a server from the file shows it without its direction marks or line breaks.
         val damaged = Backup.export(phone.copy(servers = phone.servers + OwnServer("k", wg = wg.copy(name = "‮evil\nname", privateKey = ""), keyless = true)), "3.0.2", 0)
@@ -189,7 +189,8 @@ class BackupAdversarialTest {
     /**
      * Every name 3.0.2 let through, by its own rule (not blank, at most 256 characters, unchanged by the importers'
      * cleaning), opens in a backup: own servers saved without keys of each kind, a Tailscale route's name and a place, with
-     * formatting, direction, zero-width and control characters and long names. Stored as it was; shown without them.
+     * formatting, direction, zero-width and control characters and long names. Own servers' names are stored as they were
+     * and shown without them; a Tailscale route's name, only shown, is stored cleaned.
      */
     @Test fun everyNameAnOlderVersionAcceptedOpens() {
         val accepted = { n: String -> n.isNotBlank() && n.length <= 256 && Manual.cleanName(n, 256) == n }
@@ -208,7 +209,7 @@ class BackupAdversarialTest {
             val s = phone.copy(servers = phone.servers + wgK + ov + ss, routes = phone.routes + Route("t", tsExit = "100.101.102.103", tsName = n) + Route("c", Location("nord", 153, "NL", "Netherlands", city = n)))
             val c = try { Backup.read(Backup.export(s, "3.0.2", 0, keys = false)) } catch (e: Backup.Failed) { fail("${n.map { "%04x".format(it.code) }}: ${e.message}"); return }
             assertEquals(listOf(n, n, n), c.setup.servers.filter { it.id in setOf("w", "o", "x") }.map { it.name })
-            assertEquals(n, c.setup.route("t")!!.tsName)
+            assertEquals(Backup.safe(n, Backup.SHOWN), c.setup.route("t")!!.tsName)
             assertTrue(Backup.safe(n, 300).none { it.isISOControl() || Character.getType(it) == Character.FORMAT.toInt() && it != '‌' && it != '‍' })
         }
         assertTrue("$hidden", hidden > 100)
@@ -217,6 +218,42 @@ class BackupAdversarialTest {
         val here = phone.copy(servers = listOf(OwnServer("s", wg = lab)), routes = phone.routes.map { if (it.id == "w") it.copy(wg = lab) else it })
         val moved = here.copy(servers = listOf(OwnServer("s", wg = lab.copy(endpoint = "198.51.100.66:51820"))))
         assertTrue(RestoreTraffic.notes(here, moved).toString(), "\"LabVPN\" connects to 198.51.100.66 instead of 203.0.113.1." in RestoreTraffic.notes(here, moved))
+    }
+
+    /**
+     * Texts from a file that are only shown (places and pinned servers of routes and favourites, Tailscale names) open,
+     * restore and are stored cleaned and bounded, so no route name in the app, a widget or the notification carries them.
+     */
+    @Test fun displayOnlyTextsAreCleanedOnRead() {
+        val clean = { t: String? -> t == null || (t.none { it.isISOControl() || Character.getType(it) == Character.FORMAT.toInt() && it != '‌' && it != '‍' ||
+            Character.getType(it) == Character.LINE_SEPARATOR.toInt() || Character.getType(it) == Character.PARAGRAPH_SEPARATOR.toInt() } && app.unbraid.data.graphemes(t) <= Backup.SHOWN) }
+        for (n in listOf("Den\u0000Haag\n", "‮Haag⁦", "Ha\u200Bag\uFEFF", "Den\u2028Haag\u2029", "x".repeat(10_000))) {
+            val l = Location("mullvad", countryCode = "S$n", country = "Sweden$n", city = n, region = "se-got", pinned = evil.copy(name = n, city = n, country = n))
+            val b = phone.copy(routes = phone.routes + Route("p", l) + Route("t", tsExit = "100.101.102.103", tsName = n), favorites = listOf(l))
+            for (keys in listOf(true, false)) for (keep in listOf(null, PREVIOUS)) {
+                val c = Backup.read(Backup.export(b, "3.0.2", 0, keys))
+                val r = phone.restoredFrom(c.setup, keep, 0, c.keys)!!
+                val texts = (r.routes.map { it.loc } + r.favorites).flatMap { listOf(it.countryCode, it.country, it.city) + listOfNotNull(it.pinned).flatMap { p -> listOf(p.name, p.city, p.country) } } + r.routes.map { it.tsName }
+                assertTrue(texts.filterNot(clean).toString().take(200), texts.all(clean))
+                assertEquals("se-got", r.route("p")!!.loc.region)
+                assertEquals(evil.host, r.route("p")!!.loc.pinned!!.host)
+                Backup.valid(r)
+            }
+        }
+        // A provider's own names are unchanged by the cleaning, so a cleaned route or favourite still matches its list.
+        val names = mutableListOf<String>()
+        fun walk(e: kotlinx.serialization.json.JsonElement, k: String?) {
+            when (e) {
+                is kotlinx.serialization.json.JsonObject -> e.forEach { (a, v) -> walk(v, a) }
+                is kotlinx.serialization.json.JsonArray -> e.forEach { walk(it, k) }
+                is kotlinx.serialization.json.JsonPrimitive -> if (e.isString && k != null && (k.contains("country", true) || k.contains("city", true) || k.lowercase() in setOf("name", "hostname", "region", "place"))) names += e.content
+                else -> {}
+            }
+        }
+        for (f in listOf("mullvad_relays", "ivpn_servers", "windscribe_serverlist", "surfshark_clusters", "airvpn_status", "catalog_airvpn", "catalog_expressvpn", "catalog_protonvpn", "catalog_surfshark"))
+            walk(kotlinx.serialization.json.Json.parseToJsonElement(javaClass.classLoader!!.getResource("$f.json")!!.readText()), null)
+        assertTrue(names.size > 1000)
+        assertEquals(emptyList<String>(), names.filter { Backup.safe(it, Backup.SHOWN) != it })
     }
 
     /** A website an older version saved, that the stricter reader of today refuses, keeps the backup restorable: it stays as this phone keeps it. */

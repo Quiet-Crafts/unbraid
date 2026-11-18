@@ -36,6 +36,7 @@ class OlderBackupsTest {
      *    phone's same route, when the file carries that server's identity: WireGuard's address and key, Shadowsocks'
      *    address, port and method. An OpenVPN file carries only a name, so the route waits for its config, as in 3.0.2.
      * 3. Then the kept current setup shares that route ([shared]).
+     * 4. Display-only texts are cleaned on read ([Backup.shown]; compared cleaned, [plain]).
      */
     private fun intended(expected: Setup, file: Setup, phone: Setup): Setup = file.servers.filter { k ->
         k.keyless && phone.servers.none { !it.keyless && it.id == k.id && k.sameAs(it) }
@@ -59,8 +60,9 @@ class OlderBackupsTest {
             p.copy(defaultRoute = m(p.defaultRoute), apps = p.apps.mapValues { m(it.value) }, sites = p.sites.mapValues { m(it.value) }, added = p.added.map(m)) })
     }
 
-    /** [s] without what difference 1 changes, and with ids made up by the restore numbered in order. */
-    private fun plain(s: Setup, known: Set<String>): Setup {
+    /** [s] without what differences 1 and 4 change, and with ids made up by the restore numbered in order. */
+    private fun plain(raw: Setup, known: Set<String>): Setup {
+        val s = Backup.shown(raw)
         val made = (s.routes.map { it.id } + s.servers.map { it.id }).filter { it !in known }.withIndex().associate { (i, id) -> id to "made$i" }
         val m = { id: String -> made[id] ?: id }
         return s.copy(
