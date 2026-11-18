@@ -512,6 +512,58 @@ class RestoreTrafficTest {
         assertEquals(Resolver.Route, walk(next, null, OTHER_NAME).resolver)
     }
 
+    /** A name with nothing visible in it is said as what it is. */
+    @Test fun aNameWithNothingVisibleIsSaidAsAVpn() {
+        val blank = wg(3).copy(name = "⁠")
+        val here = base.copy(routes = base.routes + Route("b", wg = blank, own = "sb"), servers = base.servers + OwnServer("sb", wg = blank), defaultRoute = "b")
+        assertEquals("The default route goes from a VPN to Direct.", notes(here, here.copy(defaultRoute = DIRECT)).first())
+        val moved = here.copy(servers = here.servers.map { if (it.id == "sb") it.copy(wg = blank.copy(endpoint = "198.51.100.9:51820")) else it })
+        assertEquals("An own server connects to 198.51.100.9 instead of 203.0.113.3.", notes(here, moved).first())
+    }
+
+    /** A Shadowsocks route waiting for its config keeps its plugin's limit: UDP stays refused once the config is added. */
+    @Test fun aWaitingShadowsocksRouteKeepsItsPluginsLimit() {
+        val ss = Manual.parseSs("ss://chacha20-ietf-poly1305:secret@203.0.113.30:8388/?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dexample.com", "Obfs")
+        val here = base.copy(routes = base.routes + Route("x", ss = ss, own = "sx"), servers = base.servers + OwnServer("sx", ss = ss), defaultRoute = "x")
+        val waiting = ss.withoutSecrets()
+        val next = here.copy(routes = here.routes.map { if (it.id == "x") it.copy(ss = waiting, keyless = true) else it },
+            servers = here.servers.map { if (it.id == "sx") it.copy(ss = waiting, keyless = true) else it })
+        val said = notes(here, next)
+        assertTrue(said.toString(), said.none { "UDP" in it })
+        assertEquals(RestoreTraffic.TCP_ONLY, RestoreTraffic.connect(RestoreTraffic.compile(next, { emptySet() }, given = true)!!, setOf(OTHER), null, net = "udp")!!.exit)
+    }
+
+    /** A provider's blocking choice turned off is said only where its resolver answered something before. */
+    @Test fun aProvidersBlockingChoiceIsSaidOnlyWhereItAnswered() {
+        val iv = Route("iv", Location("ivpn", countryCode = "NL", country = "Netherlands"))
+        val on = mapOf("ivpn" to mapOf("protect" to "on", "hardcore" to "on"))
+        val here = base.copy(routes = base.routes + iv, defaultRoute = "iv", opts = base.opts + on)
+        val off = { s: Setup -> s.copy(opts = s.opts + ("ivpn" to on.getValue("ivpn") + ("hardcore" to "off"))) }
+        assertTrue(notes(here, off(here)).toString(), "IVPN stops blocking Google and Facebook." in notes(here, off(here)))
+        // The DNS filter answers for VPN routes: IVPN's resolver answered nothing, so nothing of it is said.
+        val filtered = here.copy(prefs = Prefs(filter = Filter("adguard", routes = true)))
+        assertEquals(emptyList<String>(), notes(filtered, off(filtered)))
+        // The same for its block list, which a backup never carries.
+        val listed = { s: Setup -> s.copy(opts = s.opts + ("ivpn" to on.getValue("ivpn") + ("list" to "198.51.100.53|198.51.100.54"))) }
+        assertTrue(notes(listed(here), here).toString(), "IVPN's block list goes back to the standard one." in notes(listed(here), here))
+        assertTrue(notes(listed(filtered), filtered).none { "block list" in it })
+    }
+
+    /**
+     * A switch by network the phone refuses now (no room to keep the setup in use as a profile) and makes after the
+     * restore: the walk follows what really runs on both sides.
+     */
+    @Test fun aSwitchRefusedNowAndMadeAfterIsWalked() {
+        val work = app.unbraid.data.Profile("Work", DIRECT)
+        val full = (1 until app.unbraid.data.MAX_PROFILES).map { app.unbraid.data.Profile("P$it", "w") }
+        val here = base.copy(profiles = full + work, onNet = mapOf(app.unbraid.data.WIFI to "Work"))
+        assertEquals(null, here.use("Work", app.unbraid.data.PREVIOUS).profile)
+        val next = here.copy(profiles = listOf(work))
+        assertEquals(listOf("On Wi-Fi unbraid runs the profile Work instead of your current setup. Compared with now there:", "The default route goes from Netherlands to Direct."), notes(here, next))
+        // Room on both sides: Work runs on both, alike.
+        assertEquals(emptyList<String>(), notes(here.copy(profiles = listOf(work)), next))
+    }
+
     /** Traffic Android ties to no app, held off Direct now and out Direct after, is said in a sentence of its own. */
     @Test fun heldTrafficWithNoAppThatGoesDirectIsSaid() {
         val here = base.copy(defaultRoute = DIRECT, apps = mapOf("com.example.private" to "nl"))
