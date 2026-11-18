@@ -14,8 +14,6 @@ object FakePool {
 
     /** Addresses one block hands out: all but the network address, the engine's starting point and the broadcast address. */
     val CAPACITY = (1 shl (32 - Compiler.FAKE_RANGES[0].substringAfter('/').toInt())) - 3
-    /** Below this many left, the block is replaced. */
-    val LOW = CAPACITY / 4
     const val SPACING = 600_000L
     /** How often the engine is asked how many are left. */
     const val EVERY = 15_000L
@@ -26,10 +24,17 @@ object FakePool {
      * so the move can't wait forever.
      */
     fun step(remaining: Int, since: Long?): Step = when {
-        remaining < 0 || remaining >= LOW -> Step.Nothing
+        remaining < 0 || 4L * remaining >= CAPACITY -> Step.Nothing // a quarter or more left
         since != null && since in 0L until SPACING -> if (remaining == 0) Step.Exhausted else Step.Wait
         else -> Step.Rotate
     }
+
+    /**
+     * Milliseconds to the next check after [step] at [since]: [EVERY], or less when a low block waits for the spacing,
+     * so the move comes as soon as it is due.
+     */
+    fun nextCheck(step: Step, since: Long?) =
+        if ((step == Step.Wait || step == Step.Exhausted) && since != null && since >= 0) (SPACING - since).coerceIn(1, EVERY) else EVERY
 
     /**
      * A reload keeps the open table's block only while its file is there ([bytes] > 0; a missing file has 0): one that
@@ -46,15 +51,16 @@ object FakePool {
 
     /**
      * What a restore or a move runs: what last ran ([last]) as it was compiled, on [block] (a move) or else
-     * [restoreBlock], with a new probe pair, and with what may have changed since read again as [Compiler.Input] reads it
-     * now: tailnet DNS authority as saved ([tsSuffixAllowed]) and the tailnet's DNS suffix, the sign-in way around the
-     * exit only ever narrowed, Android's Block setting, and the apps sharing a user id with a blocked one ([kin], asked of
-     * the setup that runs: one installed since must not be left outside).
+     * [restoreBlock], with a new probe pair, the sign-in way around the exit only ever narrowed, and the apps sharing a
+     * user id with a blocked one ([kin], asked of the setup that runs: one installed since must not be left outside).
+     * After a failed change ([move] false) what may have changed since is read again as [Compiler.Input] reads it now:
+     * tailnet DNS authority as saved ([tsSuffixAllowed]), the tailnet's DNS suffix and Android's Block setting. A move
+     * and its retry keep what runs: a change the engine refused before the old one was given up stays refused.
      */
     fun restoreInput(last: Compiler.Input, block: Int?, spent: Int?, probe: Pair<Int, String>, tsSuffixAllowed: String?, tsSuffix: String?,
-                     lockdown: Boolean, tsLoginPending: Boolean, kin: (Setup) -> Set<String>): Compiler.Input {
-        val setup = last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = tsSuffixAllowed))
-        return Compiler.Input(setup, last.links, last.selfPackage, lockdown, last.tsDir, last.cacheFile, tsSuffix, probe,
+                     lockdown: Boolean, tsLoginPending: Boolean, move: Boolean, kin: (Setup) -> Set<String>): Compiler.Input {
+        val setup = if (move) last.setup else last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = tsSuffixAllowed))
+        return Compiler.Input(setup, last.links, last.selfPackage, if (move) last.lockdown else lockdown, last.tsDir, last.cacheFile, if (move) last.tsSuffix else tsSuffix, probe,
             block ?: restoreBlock(last.fakeBlock, spent), last.blocked, last.tsLoginPending && tsLoginPending, kin(setup))
     }
 
@@ -65,11 +71,15 @@ object FakePool {
     enum class Outcome { Ran, Kept, Failed }
 
     /**
-     * Every start on [block], before the engine can hand out any of it: unless it is [spent] already, it is noted down
-     * as spent ([note]) and the old table in [dir] deleted, so a new block starts from no file (an old one would carry a
-     * missing or bad table into it). Throws if either fails; true if the block is new.
+     * Every start on [block], before the engine can hand out any of it: unless it is [spent] already, the old table in
+     * [dir] is deleted, so a new block starts from no file (an old one would carry a missing or bad table into it), and
+     * only then is the block noted down as spent ([note]). A block number is saved as spent only when a start on it is
+     * about to happen with no table file present: a failed delete saves nothing, so a block that never ran is not
+     * skipped by the next start, also after the app dies. A failed save leaves the running engine on its old block with
+     * its table deleted, which the next reload takes as a new block ([keeps]). Throws if either fails; true if the
+     * block is new.
      */
-    fun spend(block: Int, spent: Int?, dir: java.io.File, note: (Int) -> Unit) = (block != spent).also { if (it) { note(block); LookupTable.clear(dir) } }
+    fun spend(block: Int, spent: Int?, dir: java.io.File, note: (Int) -> Unit) = (block != spent).also { if (it) { LookupTable.clear(dir); note(block) } }
 
     /**
      * One engine restart, in the only safe order. [prepare] builds what to run (input and its config) from the newest

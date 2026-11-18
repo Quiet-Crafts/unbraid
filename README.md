@@ -226,15 +226,16 @@ resolver inside it when its server pushes none, let the app's connection checks 
 the tunnel being checked, release every network part a tunnel built when it stops or fails to start, and never
 hand a stand-in (fake) address to a second name while its table lives: a used-up block of them answers new names
 with a failure, and the app moves to the next of eight blocks, with a new table, when less than a quarter of the block
-is left, at most once every 10 minutes. That promise holds across crashes and across any error the engine's cache reports (a
+is left, at most once every 10 minutes (a block that runs low sooner moves at the first check after those 10 minutes). That promise holds across crashes and across any error the engine's cache reports (a
 failed read or write, a damaged file): the table then hands out no more addresses, as if used up. After such an error
 within 10 minutes of the last block change, new names fail until those 10 minutes are up; then the app moves to a new
 block. A fresh connect is not affected: it always starts on the next block. A cache file changed without any error is
-not covered: it is the app's own private file, deleted at every connect, app start and new block. A block apps were using comes back only after
+not covered: it is the app's own private file, deleted at every connect, app start and new block (only the engine that keeps
+apps offline while the saved settings can't be read starts even when that delete failed). A block apps were using comes back only after
 the seven others, so an address an app kept longer than that (across eight moves, reconnects or pauses) can name
 another site by then; apps that keep an old block's address are refused until they look the name up again. A move
-runs the setup in force at that moment on the next block; one that can't get ready (its block not saved, the old
-table not deleted) changes nothing and is tried again at the next check, 15 seconds later.
+restarts the setup the engine runs on the next block, so a change it refused before stays refused; one that can't get
+ready (the old table not deleted, its block not saved) changes nothing and is tried again at the next check, 15 seconds later.
 
 When a change can't be made ready or the engine can't start it, the setup that ran before stays or comes back as it
 was, on the newest block, and the app shows why the change was not applied: until a later change applies, the earlier setup stays in force, also for the

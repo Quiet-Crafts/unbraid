@@ -65,6 +65,23 @@ class StatsFixesTest {
         assertNull(SpeedTest.nodeExit(node.copy(engine = 0), tag, 0))
     }
 
+    /**
+     * The app's own probe traffic of a node test is attributed by the engine its event came from, as other apps' is: one
+     * queued on engine 3 and read after engine 4 started still counts to the tested node.
+     */
+    @Test fun ownProbeTrafficUsesTheEventsEngine() {
+        val tag = app.unbraid.vpn.Compiler.TS_TAG
+        @Suppress("UNCHECKED_CAST")
+        val run = SpeedTest::class.java.getDeclaredField("_run").apply { isAccessible = true }.get(null) as kotlinx.coroutines.flow.MutableStateFlow<SpeedTest.Run?>
+        run.value = SpeedTest.Run(SpeedTest.NODE + "100.64.0.5", SpeedTest.Phase.Download, engine = 3)
+        try {
+            assertEquals("ts:100.64.0.5", SpeedTest.exitOn(tag, 3))
+            assertNull(SpeedTest.exitOn(tag, 4))
+        } finally { run.value = null }
+        val stats = java.io.File("src/main/java/app/unbraid/stats/Stats.kt").readText()
+        assertTrue(stats.contains("SpeedTest.exitOn(e.tag, engineNo) else SpeedTest.nodeExitOn(e.tag, engineNo)"))
+    }
+
     /** 6 GB through one exit and 2 GB direct: the exit is 75% everywhere; shares round to the nearest percent. */
     @Test fun sharesDivideBySameTotalAndRound() {
         assertEquals(75, sharePct(6_000_000_000, 8_000_000_000))

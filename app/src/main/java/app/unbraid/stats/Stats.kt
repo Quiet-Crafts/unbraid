@@ -488,7 +488,7 @@ internal object Collector {
             // A connection to a website with a route of its own counts under that website, not under the app that opened it.
             val site = if (e.own) null else e.host?.let { Sites.match(it, sites) }
             val app = if (e.own) Stats.ctx.packageName else site?.let { Stats.SITE + it } ?: appOf(e).also(Stats::noteApp).pkg
-            val exit = (if (e.own) SpeedTest.exitOn(e.tag) else SpeedTest.nodeExitOn(e.tag, engineNo)) ?: exitOf(e.tag, site?.let(applied::get) ?: setup.routeOf(app), tags, e.byAddress)
+            val exit = (if (e.own) SpeedTest.exitOn(e.tag, engineNo) else SpeedTest.nodeExitOn(e.tag, engineNo)) ?: exitOf(e.tag, site?.let(applied::get) ?: setup.routeOf(app), tags, e.byAddress)
             Conn(app, ids.getOrPut(exit) { Stats.note(exit, setup) }, servers[exit]?.name, 0, 0)
         }
         val replayed = HashSet<String>()
