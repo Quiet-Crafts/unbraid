@@ -268,7 +268,7 @@ class BackupAdversarialTest {
     @Test fun placesFromAFileStillMatchTheirProvider() {
         for (place in listOf("Bosnia­and Herzegovina‎", "Côte d'Ivoire", "東京", "Россия", "ایران‌زمین", "Ville ".repeat(20))) {
             val e = app.unbraid.data.Catalog.Entry("wireguard", country = place, city = place, serverName = place, hostname = "a.example.net", wgpubkey = "k", ips = listOf("203.0.113.5"))
-            val l = Location("mullvad", countryCode = place, country = place, city = place, region = "se-got", pinned = evil.copy(name = place))
+            val l = Location("mullvad", countryCode = "SE", country = place, city = place, region = "se-got", pinned = evil.copy(name = place))
             val here = phone.copy(routes = phone.routes + Route("p", l), favorites = listOf(l))
             for (keys in listOf(true, false)) {
                 val c = Backup.read(Backup.export(here, "3.0.2", 0, keys))
@@ -280,6 +280,26 @@ class BackupAdversarialTest {
                 assertEquals(place, Backup.bare(l), got)
             }
         }
+    }
+
+    /**
+     * A country code and a group go into provider and speed-test requests: from a file they are kept only in the shape
+     * every provider uses, so no line break or other text can reach a request; the route still restores.
+     */
+    @Test fun codesAndGroupsFromAFileNeverCarryARequest() {
+        for ((code, kept) in listOf("SE" to "SE", "se" to "se", "GBR" to "GBR", "S\r\nX-Injected: 1" to null, "SE\n" to null, "" to null, "S" to null, "SÉ" to null, "S1" to null)) {
+            for ((group, g) in listOf("legacy_p2p" to "legacy_p2p", "legacy_p2p\r\nX: y" to null, "a&limit=1" to null)) {
+                val l = Location("nord", 208, code, "Sweden", group = group)
+                val c = Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("p", l), favorites = listOf(l)), "3.0.2", 0))
+                assertEquals(code, l.copy(countryCode = kept, group = g), c.setup.route("p")!!.loc)
+                assertEquals(code, l.copy(countryCode = kept, group = g), c.setup.favorites.single())
+            }
+        }
+        // At the speed test's own request, whatever the source: only two letters, and no path with a line break.
+        assertEquals("SE", app.unbraid.stats.Ndt7.code("se"))
+        for (bad in listOf("SWE", "S\r\nX", "S", "", null)) assertNull(app.unbraid.stats.Ndt7.code(bad))
+        val e = try { app.unbraid.vpn.Probe.get("none", "example.net", "/a?country=S\r\nX: y"); null } catch (e: IllegalArgumentException) { e }
+        assertEquals("Bad request path", e?.message)
     }
 
     /** A website an older version saved, that the stricter reader of today refuses, keeps the backup restorable: it stays as this phone keeps it. */

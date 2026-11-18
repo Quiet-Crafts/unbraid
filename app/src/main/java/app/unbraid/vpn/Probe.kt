@@ -55,6 +55,8 @@ object Probe {
 
     /** A small HTTPS GET through [tag]; the body as text, at most [max] bytes (the server is trusted no further). */
     fun get(tag: String, host: String, path: String, max: Int = 256 * 1024, accept: String = "application/json", raw: Socket = Socket()): String {
+        // A control character in the path would end the request line and start a header of its own.
+        require(path.none(Char::isISOControl)) { "Bad request path" }
         val c = open(tag, host, raw = raw)
         try {
             c.output.write("GET $path HTTP/1.0\r\nHost: $host\r\nUser-Agent: unbraid\r\nAccept: $accept\r\n\r\n".toByteArray())

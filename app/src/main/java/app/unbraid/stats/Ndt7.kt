@@ -35,12 +35,16 @@ object Ndt7 {
     /** The status code in an "HTTP 500 ..." failure message, or null. */
     internal fun status(message: String?) = message?.takeIf { it.startsWith("HTTP ") }?.split(' ')?.getOrNull(1)?.toIntOrNull()
 
+    /** [c] as the request may carry it: a two-letter country code, upper-cased, else none (a saved code is never put in a URL unchecked). */
+    internal fun code(c: String?) = c?.uppercase()?.takeIf { Regex("[A-Z]{2}").matches(it) }
+
     /**
-     * The M-Lab server nearest the exit's own address, inside [country] when given; null if M-Lab has none there
-     * (it answers HTTP 500 for a country without servers).
+     * The M-Lab server nearest the exit's own address, inside [wanted]'s country when given ([code]); null if M-Lab has
+     * none there (it answers HTTP 500 for a country without servers).
      * Throws [Limited] when M-Lab is rate-limiting the exit's address.
      */
-    fun locate(tag: String, country: String?): Server? {
+    fun locate(tag: String, wanted: String?): Server? {
+        val country = code(wanted)
         val q = CLIENT + (country?.let { "&country=$it&strict=true" } ?: "")
         val body = try { Probe.get(tag, LOCATE, "/v2/nearest/ndt/ndt7?$q") }
         catch (e: IllegalStateException) {
