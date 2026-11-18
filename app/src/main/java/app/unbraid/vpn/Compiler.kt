@@ -179,7 +179,7 @@ object Compiler {
         // A Direct website is looked up like other Direct traffic that passes through: with the filter where one applies to it.
         val siteDns = { id: String -> if (id == DIRECT && filter != null && (directFiltered || through.isNotEmpty())) "dns-filter" else dnsFor(id) }
         // Websites with a route of their own: each run matches its names and every name under them. A rule for a name the
-        // tailnet's or the local network's lookup rule answers first is left out: it could never apply, and its route needs no tunnel.
+        // tailnet's or the local network's lookup rule answers first is left out: it could never apply.
         val match = { names: List<String> -> arrayOf<Pair<String, Any>>("domain" to JsonArray(names.map(::JsonPrimitive)), "domain_suffix" to JsonArray(names.map { JsonPrimitive(".$it") })) }
         val sites = Sites.runs(Sites.applied(s, reported = i.tsSuffix)).map { (id, names) -> id to match(names) }
         // Where a saved website and an ending the tailnet's or the local network's lookup rule answers overlap (the website
@@ -566,13 +566,11 @@ object Compiler {
 
     /**
      * Routes whose WireGuard identity (client key on one server) is already taken, with other settings, by an earlier
-     * route or the home tunnel: one identity can be one tunnel only, two would knock each other off. Decided in the saved
-     * order among every route the setup names, also one whose only use is a website another resolver answers (give its
-     * link in [links] too): the first of two clashing routes wins whatever answers a website.
+     * route or the home tunnel: one identity can be one tunnel only, two would knock each other off.
      */
     fun clashes(s: Setup, links: Map<String, Link>): Set<String> {
         val seen = HashMap<String, String>().apply { s.home.wg?.let { put(wgIdentity(it), "home") } }
-        return s.namedRoutes.filter { it.tsExit == null }.mapNotNullTo(HashSet()) { r ->
+        return s.activeRoutes.filter { it.tsExit == null }.mapNotNullTo(HashSet()) { r ->
             val p = (links[r.id] as? WgLink)?.peer ?: return@mapNotNullTo null
             r.id.takeIf { seen.getOrPut(wgIdentity(p)) { wgKey(p) }.let { it == "home" || it != wgKey(p) } }
         }

@@ -49,15 +49,15 @@ class SiteFlipTest {
     }
 
     /**
-     * The website applies, or a lookup rule answers its name first; both ways, for every flip. Its route opens no tunnel
-     * then, except for a Headscale domain: tunnels go by the setup alone, never by the domain Tailscale reports.
+     * The website applies, or a lookup rule answers its name first; both ways, for every flip. Its route keeps its tunnel
+     * either way: routes in use go by the saved websites, never by what answers a name.
      */
     @Test fun eachFlipChangesWhatIsInUse() {
         for ((name, x, y) in flips) {
             assertEquals(name, mapOf(name to "it"), Sites.applied(x.first, reported = x.second).filterKeys { it == name })
             assertTrue(name, Sites.applied(y.first, reported = y.second).isEmpty() || Sites.applied(y.first, reported = y.second).values.all { it == BLOCK })
             assertEquals(name, listOf("it"), x.first.activeRoutes.map { it.id })
-            assertEquals(name, if (y.second != null) listOf("it") else emptyList(), y.first.activeRoutes.map { it.id })
+            assertEquals(name, listOf("it"), y.first.activeRoutes.map { it.id })
         }
     }
 }

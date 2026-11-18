@@ -83,9 +83,7 @@ object LinkPicker {
         val refusedBy = blocked.entries.filter { it.value is AuthException }.mapNotNull { (id, e) -> setup.route(id)?.takeIf { !it.imported }?.let { it.loc.provider to e } }.toMap()
         setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> refusedBy[r.loc.provider]?.let { blocked[r.id] = it; out.remove(r.id) } }
         // A tunnel that would clash with another one's identity is blocked, never started beside it.
-        // A route only a website uses that another resolver answers has no tunnel, but still takes its place in the order.
-        val idle = setup.namedRoutes.filter { r -> r.wg != null && r.id !in out && r.id !in blocked && setup.activeRoutes.none { it.id == r.id } }.associate { r -> r.id to WgLink(Server(r.wg!!.name, r.wg.endpoint.substringBeforeLast(':'), "", r.wg.publicKey, 0), r.wg) }
-        Compiler.clashes(setup, out + idle).filter { it in out }.forEach { id -> out.remove(id); blocked[id] = Fail(Compiler.CLASH) }
+        Compiler.clashes(setup, out).forEach { id -> out.remove(id); blocked[id] = Fail(Compiler.CLASH) }
         val remember = setup.activeRoutes.filter { !it.imported }.mapNotNull { r -> out[r.id]?.let { cacheKey(r) to it } }.toMap()
         return Result(out, remember, blocked)
     }

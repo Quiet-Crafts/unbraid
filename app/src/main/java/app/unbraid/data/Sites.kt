@@ -8,7 +8,8 @@ import java.text.Normalizer
 
 /**
  * The websites as saved ([Setup.sites], [Profile.sites]), whether or not their rule applies now. Reading them needs this
- * opt-in, so a count, a tunnel or a protection can't go by them unseen: those go by [Sites.applied].
+ * opt-in, so a count or a label can't go by them unseen: those go by [Sites.applied]. Routes in use go by them as saved
+ * ([Setup.activeRoutes]).
  */
 @RequiresOptIn("These are the websites as saved; what applies now is Sites.applied", RequiresOptIn.Level.ERROR)
 @Retention(AnnotationRetention.BINARY)
@@ -140,6 +141,9 @@ object Sites {
         host = host.substringBefore('/').substringBefore('?').substringBefore('#').substringAfterLast('@')
         // An IPv6 address, bracketed in a link or bare.
         if (host.startsWith("[") || host.count { it == ':' } > 1) return null to ADDRESS
+        // A port is read as a browser reads it before it is dropped: digits only, at most 65535, else no address at all.
+        val port = host.substringAfter(':', "").trimStart('0')
+        if (!port.all { it in '0'..'9' } || port.length > 5 || (port.toIntOrNull() ?: 0) > 65535) return null to NOT_A_NAME
         host = host.substringBefore(':').trim('.')
         // Only letters, marks and digits that the older rule for international names writes as browsers do: any other
         // character could save as another site.
@@ -160,22 +164,15 @@ object Sites {
         // Read back in its own letters, as a browser checks it: letters both rules write alike, in the one form, each
         // label starting with a letter or digit and written in a direction browsers accept. Else a browser opens another
         // name or none.
-        if ("xn--" in name && !readsBack(name, directions = true)) return null to NOT_A_NAME
+        if ("xn--" in name && !readsBack(name)) return null to NOT_A_NAME
         return name to ""
     }
 
-    /** Whether the "xn--" name [name] reads back as itself in its own letters; [directions]: also keeping to the rules for mixed directions. */
-    private fun readsBack(name: String, directions: Boolean): Boolean {
+    /** Whether the "xn--" name [name] reads back as itself in its own letters, keeping to the rules for mixed directions. */
+    private fun readsBack(name: String): Boolean {
         val read = IDN.toUnicode(name)
-        return read.codePoints().allMatch { letter(it) } && Normalizer.isNormalized(read, Normalizer.Form.NFC) && IDN.toASCII(read).lowercase() == name && (!directions || bidi(read.split('.')))
+        return read.codePoints().allMatch { letter(it) } && Normalizer.isNormalized(read, Normalizer.Form.NFC) && IDN.toASCII(read).lowercase() == name && bidi(read.split('.'))
     }
-
-    /**
-     * Whether a browser opens the name [saved] as saved. [clean] may refuse a name browsers open (it also holds new input
-     * to the rules for names that mix directions, which browsers don't check), so a saved name only fails here when it is
-     * no name a browser reads as written.
-     */
-    fun opens(saved: String) = clean(saved) == saved || (stored(saved) && "xn--" in saved && readsBack(saved, directions = false))
 
     private val R = setOf(Character.DIRECTIONALITY_RIGHT_TO_LEFT, Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC).map { it.toInt() }.toSet()
     private val NEUTRAL = setOf(Character.DIRECTIONALITY_EUROPEAN_NUMBER_SEPARATOR, Character.DIRECTIONALITY_COMMON_NUMBER_SEPARATOR, Character.DIRECTIONALITY_EUROPEAN_NUMBER_TERMINATOR,
