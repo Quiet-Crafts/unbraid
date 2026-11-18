@@ -181,6 +181,9 @@ class SitesAdversarialTest {
         for (raw in listOf("straße.de", "faß.de", "ας.gr", "a\u200db.com", "a\u200cb.com")) {
             assertEquals(raw, letters, Sites.refusal(raw)); assertNull(raw, Sites.clean(raw))
         }
+        // Without the list of shared endings no new name can be checked, so none is taken; names refused anyway say why.
+        assertEquals("unbraid can't check website names right now, so it can't add one. Reinstall unbraid to fix this", Sites.refusal("example.com", null))
+        assertEquals("localhost is this phone itself, so unbraid can't give it a rule", Sites.refusal("localhost", null))
         // Names a rule can work for in some setup are taken: local and tailnet names (marked "Not applied" while a lookup
         // rule answers them first), someone's Funnel site, a company's internal names on its VPN. And registrable names
         // that only look like a shared ending.

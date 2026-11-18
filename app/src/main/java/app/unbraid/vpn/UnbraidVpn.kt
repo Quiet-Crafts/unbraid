@@ -112,6 +112,9 @@ data class VpnState(
     val refused: Int = 0,
 ) {
     enum class Phase { Off, Connecting, On, Paused }
+
+    /** After every engine start, numbered [engine]: nothing checked through the old engine holds for this one. */
+    fun restarted(engine: Int) = copy(engine = engine, passed = null, notAnswering = emptySet())
 }
 
 class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
@@ -520,10 +523,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // The block is spent before the engine can hand out any of it, also if the start fails or the app dies now:
             // a new table that couldn't be noted down doesn't start, or the next process would hand it out again.
             // A new block starts from a deleted table: never an old file, which a missing or bad one would follow into it.
-            if (input.fakeBlock != lastBlock) {
-                engine("$APP couldn't save its state. Try again.") { store.fakeBlock = input.fakeBlock; LookupTable.clear(filesDir) }
+            if (engine("$APP couldn't save its state. Try again.") { FakePool.spend(input.fakeBlock, lastBlock, filesDir) { store.fakeBlock = it } })
                 blockSince = SystemClock.elapsedRealtime()
-            }
             lastBlock = input.fakeBlock
             // The point of no return: the old engine's way in goes now, as it may be closed by the time the start fails.
             probe = null
@@ -548,10 +549,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val was = running
         running = setup
         val eligibleImports = setup.activeRoutes.filter { it.imported && Health.eligible(it) && it.id in links }.map { it.id }.toSet()
-        state.update { it.copy(notAnswering = if (fresh) emptySet() else it.notAnswering intersect eligibleImports, passed = it.passed.takeIf { !fresh }) }
         // Published after tags and running: whoever sees this engine number also sees the tunnels it runs. The new
         // engine numbers its connections afresh; stats read the new servers when they first see them.
-        if (fresh) state.update { it.copy(servers = links.mapValues { l -> l.value.server }, engine = starts) }
+        state.update { if (fresh) it.restarted(starts).copy(servers = links.mapValues { l -> l.value.server }) else it.copy(notAnswering = it.notAnswering intersect eligibleImports) }
         // After tags and running, which stats label new connections by; also when only the setup changed (a city that
         // resolves to the same server is still another place in the history).
         if (fresh || was != setup) app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() }
@@ -595,13 +595,13 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * have changed since read again), on [block] (a move to the next fake-IP block) or else the newest block spent. Until
      * it runs the app's own tests have no way in. [gone]: the old engine was already given up ([FakePool.restart]).
      */
-    private fun restoreLastGood(srv: CommandServer, block: Int? = null, gone: Boolean = true): FakePool.Outcome = FakePool.restart(gone, lastBlock, prepare = {
+    private fun restoreLastGood(srv: CommandServer, block: Int? = null, gone: Boolean = true): FakePool.Outcome = FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->
         runCatching {
-            val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, lastBlock, newProbe(), store.setup.value.home.tsSuffixAllowed,
+            val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, spent, newProbe(), store.setup.value.home.tsSuffixAllowed,
                 store.tsSuffix, isLockdownEnabled, tsLoginPending, ::blockedKin)
             input to Compiler.compile(input).also(Libbox::checkConfig)
         }.onFailure { Log.e(TAG, "restore: ${logLine(it)}") }.getOrThrow()
-    }, save = { store.fakeBlock = it; LookupTable.clear(filesDir) }, commit = { input ->
+    }, note = { store.fakeBlock = it }, commit = { input ->
         probe = null // the old engine's way in goes with it
         lastGood = null
         if (input.fakeBlock != lastBlock) blockSince = SystemClock.elapsedRealtime()
@@ -614,8 +614,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         srv.startOrReloadService(json, OverrideOptions())
         tcpOnly = Compiler.tcpOnly(json)
         starts++
-        // Nothing checked through the old engine holds for this one.
-        state.update { it.copy(engine = starts, passed = null, notAnswering = emptySet()) }
+        state.update { it.restarted(starts) }
         probe = input.probe
         lastGood = json
     }
@@ -655,12 +654,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun retime() = app.unbraid.stats.Stats.post { app.unbraid.stats.Collector.retimeNow() }
 
     /** Engine errors can quote the config, keys included: log them cleaned, show a fixed text, and drop the cause. */
-    private inline fun engine(failure: String, f: () -> Unit) {
+    private inline fun <T> engine(failure: String, f: () -> T): T =
         try { f() } catch (e: Exception) {
             Log.e(TAG, "engine: ${logLine(e)}")
             throw Fail(failure)
         }
-    }
 
     /**
      * Applies the newest setup without dropping the tunnel; routes whose location is unchanged keep their server. Takes

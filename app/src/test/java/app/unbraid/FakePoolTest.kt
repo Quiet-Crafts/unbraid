@@ -143,9 +143,10 @@ class FakePoolTest {
      * tries again), and only then does the old engine go and the new one start.
      */
     private val log = mutableListOf<String>()
+    private val dir = kotlin.io.path.createTempDirectory().toFile().apply { deleteOnExit() }
     private fun run(block: Int, spent: Int?, gone: Boolean = false, prepareFails: Boolean = false, saveFails: Boolean = false, startFails: Boolean = false) =
-        FakePool.restart(gone, spent, prepare = { log += "prepare"; if (prepareFails) error("no probe"); input(block) to "json" },
-            save = { log += "save $it"; if (saveFails) error("disk full") }, commit = { log += "commit ${it.fakeBlock}" }) { _, j -> log += "start $j"; if (startFails) error("no") }
+        FakePool.restart(gone, spent, dir, prepare = { log += "prepare"; if (prepareFails) error("no probe"); input(block) to "json" },
+            note = { log += "save $it"; if (saveFails) error("disk full") }, commit = { log += "commit ${it.fakeBlock}" }) { _, j -> log += "start $j"; if (startFails) error("no") }
 
     @Test fun aRestartGivesNothingUpBeforeTheBlockIsSaved() {
         assertEquals(FakePool.Outcome.Kept, run(4, 3, prepareFails = true))
@@ -193,18 +194,47 @@ class FakePoolTest {
         assertEquals(Ran, FakePool.move { gone -> run(4, if (gone) 4 else 3, gone, startFails = !gone) })
     }
 
-    /** A new block starts from no table file: one that can't be deleted stops the move before anything is given up. */
-    @Test fun aTableThatCannotBeDeletedStopsTheMove() {
+    /**
+     * Every start on a new block (a reload, a move, a restore after a failed one) notes it down and starts from no table
+     * file; the block already open keeps its file. One that can't be deleted stops the move before anything is given up.
+     */
+    @Test fun aNewBlockStartsFromNoTableFile() {
         val dir = kotlin.io.path.createTempDirectory().toFile()
+        val table = java.io.File(dir, "cache.db")
+        val noted = mutableListOf<Int>()
         try {
-            app.unbraid.vpn.LookupTable.clear(dir) // already gone is fine
-            java.io.File(dir, "cache.db").writeText("x")
-            app.unbraid.vpn.LookupTable.clear(dir)
-            assertFalse(java.io.File(dir, "cache.db").exists())
+            assertTrue(FakePool.spend(4, 3, dir) { noted += it }) // already gone is fine
+            table.writeText("x")
+            assertFalse(FakePool.spend(4, 4, dir) { noted += it })
+            assertTrue(table.exists())
+            assertTrue(FakePool.spend(5, 4, dir) { noted += it })
+            assertFalse(table.exists())
+            assertEquals(listOf(4, 5), noted)
             java.io.File(dir, "cache.db/inside").apply { parentFile!!.mkdirs(); writeText("x") } // a delete that fails
-            assertEquals(FakePool.Outcome.Kept, FakePool.restart(false, 3, prepare = { input(4) to "json" }, save = { app.unbraid.vpn.LookupTable.clear(dir) },
+            assertEquals(FakePool.Outcome.Kept, FakePool.restart(false, 3, dir, prepare = { input(4) to "json" }, note = {},
                 commit = { error("gave the old engine up") }) { _, _ -> error("started") })
         } finally { dir.deleteRecursively() }
+    }
+
+    /** Every engine start clears what was checked through the old engine: a route that answered it proves nothing now. */
+    @Test fun aRestartForgetsWhatTheOldEngineShowed() {
+        val s = app.unbraid.vpn.VpnState(notAnswering = setOf("own"), passed = app.unbraid.vpn.Health.Passed(3, 1, emptyMap()), engine = 3)
+        assertEquals(app.unbraid.vpn.VpnState(engine = 4), s.restarted(4))
+    }
+
+    /**
+     * The service can't run in a unit test, so this checks that it takes every restart through the pieces above: each
+     * new block through [FakePool.spend] (no table deleted anywhere else), each restore on the block [FakePool.restart]
+     * names as spent, and each engine start through [app.unbraid.vpn.VpnState.restarted].
+     */
+    @Test fun theServiceRestartsOnlyThroughThesePieces() {
+        val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+        assertFalse(vpn.contains("LookupTable.clear("))
+        assertTrue(vpn.contains("FakePool.spend(input.fakeBlock, lastBlock, filesDir) { store.fakeBlock = it }"))
+        assertTrue(vpn.contains("FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->"))
+        assertTrue(vpn.contains("FakePool.restoreInput(lastInput ?: error(\"nothing ran\"), block, spent, "))
+        assertEquals(2, Regex("""\.restarted\(starts\)""").findAll(vpn).count())
+        assertFalse(Regex("""copy\(engine = starts|passed = it\.passed""").containsMatchIn(vpn))
     }
 
     /**
@@ -220,25 +250,27 @@ class FakePoolTest {
         var lastBlock: Int? = 3
         var lastInput = input(3)
         var ran: Int? = 3 // the block the engine runs, null when none does (the connection ended)
-        var file = 3 // the block the table file was started on
+        val table = java.io.File(dir, "cache.db").apply { writeText("3") } // the table file, holding the block it was started on
         var probe = 1
         var live: Int? = 1 // the probe pair the app's own tests use
         var since = 0L
         var now = 0L
         val used = mutableListOf(3) // blocks in the order tables were opened on them
         fun restoreLastGood(block: Int?, gone: Boolean, prepareFails: Boolean, saveFails: Boolean, startFails: Boolean): FakePool.Outcome =
-            FakePool.restart(gone, lastBlock, prepare = {
+            FakePool.restart(gone, lastBlock, dir, prepare = { spent ->
                 if (prepareFails) error("no probe")
-                FakePool.restoreInput(lastInput, block, lastBlock, ++probe to "p$probe", null, null, false, false) { emptySet() } to "json"
-            }, save = { if (saveFails) error("disk full"); saved = it; file = -1 /* deleted */ }, commit = { input ->
+                FakePool.restoreInput(lastInput, block, spent, ++probe to "p$probe", null, null, false, false) { emptySet() } to "json"
+            }, note = { if (saveFails) error("disk full"); saved = it }, commit = { input ->
                 live = null
-                if (input.fakeBlock != lastBlock) { since = now; used += input.fakeBlock; assertEquals("a new block's table not deleted", -1, file); file = input.fakeBlock }
+                if (input.fakeBlock != lastBlock) { since = now; used += input.fakeBlock; assertFalse("a new block's table not deleted", table.exists()) }
                 lastBlock = input.fakeBlock; lastInput = input
             }) { input, _ ->
                 ran = null // libbox stops the old engine first
                 if (startFails) error("no start")
                 assertEquals("started on a block not saved", saved, input.fakeBlock)
-                assertEquals("a table opened on another block's file", input.fakeBlock, file)
+                // The engine opens the table, making it on its own block when there is none.
+                assertEquals("a table opened on another block's file", "${input.fakeBlock}", if (table.exists()) table.readText() else "${input.fakeBlock}")
+                table.writeText("${input.fakeBlock}")
                 ran = input.fakeBlock; live = input.probe!!.first
             }
         repeat(300) {
