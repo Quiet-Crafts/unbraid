@@ -108,10 +108,13 @@ class BackupAdversarialTest {
         assertEquals("Your home WireGuard stays as it is on this phone.", homeNote(keys = false, backupHas = false))
         assertEquals("Your home WireGuard is replaced by the one in this backup.", homeNote(keys = true, backupHas = true))
         val s = Setup(routes = listOf(Route("nl", Location("nord"))), defaultRoute = "nl", version = VERSION)
-        val many = (0 until Backup.MAX_APPS).associate { "org.example.a$it" to DIRECT }
+        // More app choices than the restore sheet checks in full still open, as 3.0.2 opened them; the sheet says it was cut.
+        val many = (0..Backup.MAX_APPS).associate { "org.example.a$it" to DIRECT }
         Backup.valid(s.copy(apps = many))
-        assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(apps = many + ("org.example.more" to DIRECT))) })
-        assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(profiles = listOf(Profile("P", "nl", many + ("org.example.more" to DIRECT))))) })
+        Backup.valid(s.copy(profiles = listOf(Profile("P", "nl", many))))
+        assertEquals(RestoreTraffic.CUT, RestoreTraffic.notes(s, s.copy(apps = many)).last())
+        assertEquals(RestoreTraffic.CUT, RestoreTraffic.notes(s, s.copy(prefs = s.prefs.copy(filter = s.prefs.filter.copy(apps = many.mapValues { true })))).last())
+        assertFalse(RestoreTraffic.CUT in RestoreTraffic.notes(s, s.copy(apps = many - "org.example.a0")))
     }
 
     /** The sheet's sentences: plain words, no dash used as punctuation. */
@@ -163,8 +166,6 @@ class BackupAdversarialTest {
 
     /** The filter's own app choices count as app choices; a Tailscale exit is an address; file text never brings invisible characters. */
     @Test fun fileTextIsBoundedWhereverItIsShown() {
-        val tooMany = phone.copy(prefs = phone.prefs.copy(filter = phone.prefs.filter.copy(apps = (0..Backup.MAX_APPS).associate { "a.b$it" to true })))
-        assertEquals(Reason.Invalid, reason { Backup.read(Backup.export(tooMany, "3.0.2", 0)) })
         assertEquals(Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(prefs = phone.prefs.copy(filter = phone.prefs.filter.copy(apps = mapOf("not a package" to true)))), "3.0.2", 0)) })
         val ts = { exit: String -> phone.copy(routes = phone.routes + Route("t", tsExit = exit)) }
         for (ok in listOf("100.101.102.103", "fd7a:115c:a1e0::1")) Backup.read(Backup.export(ts(ok), "3.0.2", 0))
@@ -173,10 +174,8 @@ class BackupAdversarialTest {
         // As the exit in use too: the compiler would pass it to Tailscale, which finds no node by that text.
         assertEquals(Reason.Invalid, reason { Backup.read(Backup.export(ts(":::").copy(defaultRoute = "t"), "3.0.2", 0)) })
         Backup.read(Backup.export(ts("::ffff:100.64.0.1").copy(defaultRoute = "t"), "3.0.2", 0))
-        // A line separator in a name is refused, as the importers take it out; zero-width and other formatting characters
-        // pass, as the importers keep them ([everyNameAnOlderVersionAcceptedOpens]).
-        assertEquals(Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", "Box\u2028x"))), "3.0.2", 0)) })
-        for (n in listOf("Box\u200B", "Box\u2060x", "Box\uFEFF", "Team \uD83D\uDC69\u200D\uD83D\uDCBB")) Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", n))), "3.0.2", 0))
+        // A place keeps its texts as the provider gave them, as 3.0.2 kept them ([OlderBackupsTest]).
+        for (n in listOf("Box\u2028x", "Box\u200B", "Box\u2060x", "Box\uFEFF", "Team \uD83D\uDC69\u200D\uD83D\uDCBB")) Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", n))), "3.0.2", 0))
         // An error that names a server from the file shows it without its direction marks or line breaks.
         val damaged = Backup.export(phone.copy(servers = phone.servers + OwnServer("k", wg = wg.copy(name = "‮evil\nname", privateKey = ""), keyless = true)), "3.0.2", 0)
         val e = try { Backup.read(damaged); null } catch (x: Backup.Failed) { x }!!
@@ -258,14 +257,15 @@ class BackupAdversarialTest {
         // The version that made it: a short version string or nothing.
         assertEquals("3.0.2-beta+1", Backup.read(Backup.export(s, "3.0.2-beta+1", 0)).app)
         for (app in listOf("x".repeat(1 shl 20), "3.0‮", "<b>3</b>", "", " 3.0", "3".repeat(33))) assertEquals("", Backup.read(Backup.export(s, app, 0)).app)
+        // Places and Tailscale node names open as 3.0.2 opened them, unchanged; the sheet shows them cleaned.
         val nl = s.routes[0]
-        for (bad in listOf(
+        for (odd in listOf(
             nl.copy(loc = nl.loc.copy(country = "Nether‮lands")), nl.copy(loc = nl.loc.copy(city = "x".repeat(300))), nl.copy(loc = nl.loc.copy(region = "a\nb")),
             nl.copy(loc = nl.loc.copy(country = " ")), nl.copy(loc = nl.loc.copy(pinned = evil.copy(name = "⁦evil"))), nl.copy(loc = nl.loc.copy(group = "g\u0000")),
-        )) assertEquals(bad.loc.toString(), Reason.Invalid, reason { Backup.valid(s.copy(routes = listOf(bad))) })
-        assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(routes = s.routes + Route("t", tsExit = "100.64.0.1", tsName = "node‮"))) })
-        assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(favorites = listOf(Location("nord", country = "x".repeat(257))))) })
-        Backup.valid(s.copy(routes = s.routes + Route("t", tsExit = "100.64.0.1", tsName = "Home node"), favorites = listOf(Location("nord", city = "São Paulo"))))
+        )) assertEquals(odd, Backup.valid(s.copy(routes = listOf(odd))).routes.single())
+        val ts = Route("t", tsExit = "100.64.0.1", tsName = "node‮ ")
+        assertEquals(ts, Backup.valid(s.copy(routes = s.routes + ts, favorites = listOf(Location("nord", country = "x".repeat(257))))).route("t"))
+        assertEquals("The default route goes from node to Direct.", RestoreTraffic.notes(s.copy(routes = s.routes + ts, defaultRoute = "t"), s.copy(defaultRoute = DIRECT)).first())
     }
 
     @Test fun aBackupThatCouldNotBeRestoredIsNeverSaved() {
@@ -293,6 +293,13 @@ class BackupAdversarialTest {
         assertTrue(other.restoredFrom(c.setup, null, 0, c.keys)!!.servers.single().keyless)
         // Nor is one tied to an own server of its own.
         assertTrue(here.copy(routes = listOf(Route("w", wg = wg, own = "x")), servers = listOf(OwnServer("x", wg = wg))).restoredFrom(c.setup, null, 0, c.keys)!!.servers.any { it.keyless })
+        // An OpenVPN file holds only a name: a route of that name here, pointing at another server now, is not taken for it.
+        val office = { host: String -> app.unbraid.data.Manual.parseOvpn("client\ndev tun\nremote $host 1194\n<ca>\n-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n</ca>\n", "Office", "", "") }
+        val then = Setup(routes = listOf(Route("r", ovpn = office("198.51.100.21"))), defaultRoute = "r", version = VERSION)
+        val o = Backup.read(Backup.export(then, "3.0.2", 0, keys = false))
+        val now = then.copy(routes = listOf(Route("r", ovpn = office("198.51.100.22"))))
+        val restored = now.restoredFrom(o.setup, null, 0, o.keys)!!
+        assertTrue(restored.route("r")!!.keyless && restored.servers.single().keyless)
     }
 
     @Test fun everySaveNeedsEightCharactersAndKeysNeedAHardOne() {

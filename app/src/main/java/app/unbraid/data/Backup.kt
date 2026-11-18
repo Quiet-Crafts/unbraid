@@ -39,7 +39,7 @@ object Backup {
     private val HEAD = MAGIC.size + 5 + SALT + NONCE + CHECK + 4
     /** No setup comes near this; a larger file is refused before it is read whole. */
     const val MAX = 4 shl 20
-    /** The most app choices a backup's setup or one of its profiles may hold. */
+    /** The most app choices a setup may hold for the restore sheet to check it in full; a backup with more still opens. */
     const val MAX_APPS = 5000
 
     enum class Reason(val text: String) {
@@ -353,6 +353,9 @@ object Backup {
     /** Text from a file as the app shows it: no control, direction or other invisible formatting characters, at most [n] characters. */
     fun safe(s: String, n: Int = 40) = s.filterNot { it.isISOControl() || format(it) }.takeGraphemes(n)
 
+    /** A name from the file as the restore sheet prints it, every name it prints: [safe], trimmed, and [or] when nothing visible is left. */
+    fun label(name: String?, or: String, n: Int = 60) = name?.let { safe(it, n).trim() }?.takeIf { it.isNotEmpty() } ?: or
+
     /**
      * A name as the importers leave it, the rule every earlier version checked: no control or direction characters, not
      * padded. Other invisible formatting characters pass, as the importers keep them, so a backup an older version wrote
@@ -368,18 +371,15 @@ object Backup {
     private val LABEL = Regex("[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
     private fun savedSite(k: String) = Sites.clean(k) == k || k.split('.').let { l -> k.length <= 253 && l.size >= 2 && l.all(LABEL::matches) && !l.last().all(Char::isDigit) }
 
-    /** A place's texts, shown as route names in the app and on widgets: each empty or a plain name. */
-    private fun plainPlace(l: Location) = listOfNotNull(l.provider, l.countryCode, l.country, l.city, l.region, l.group, l.protocol,
-        l.pinned?.name, l.pinned?.host, l.pinned?.city, l.pinned?.country).all { it.isEmpty() || plainName(it) }
-
     /**
      * [s] if every part of it is as unbraid itself would save it: own servers pass the same checks as an import, every
      * reference names something that exists, profiles follow their rules, and the engine can build it. Throws [Failed].
      */
     fun valid(s: Setup): Setup {
-        // App choices: far more than any phone has apps, and few enough for the restore sheet's check to stay quick.
-        need(s.routes.size <= 500 && s.servers.size <= 500 && s.favorites.size <= 2000 && s.profiles.size <= MAX_PROFILES &&
-            (listOf(s.apps) + s.profiles.map { it.apps }).all { it.size <= MAX_APPS }, "it holds more than unbraid keeps")
+        // As many app choices as the file holds: the restore sheet checks as many as it can ([MAX_APPS]) and says so.
+        need(s.routes.size <= 500 && s.servers.size <= 500 && s.favorites.size <= 2000 && s.profiles.size <= MAX_PROFILES, "it holds more than unbraid keeps")
+        val routeIds = s.routes.mapTo(HashSet()) { it.id }
+        val serverById = s.servers.associateBy { it.id }
         need(s.routes.all { ID.matches(it.id) && !builtIn(it.id) } && s.routes.map { it.id }.toSet().size == s.routes.size, "a route has a missing or repeated name")
         need(s.servers.all { ID.matches(it.id) } && s.servers.map { it.id }.toSet().size == s.servers.size, "an own server has a missing or repeated name")
         s.servers.forEach { sv ->
@@ -390,24 +390,23 @@ object Backup {
             val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.tsExit).size
             need(n <= 1, "a route has more than one exit")
             if (n == 0) need(Providers.get(r.loc.provider) != null, "a route uses a provider this unbraid doesn't know")
-            r.tsExit?.let { need(tsAddress(it) && r.tsName.let { n -> n == null || plainName(n) }, "a Tailscale route is damaged") }
-            need(plainPlace(r.loc), "a route's place is damaged")
+            // Its node's name and its place are kept as Tailscale and the provider gave them; the sheet shows them cleaned ([safe]).
+            r.tsExit?.let { need(tsAddress(it), "a Tailscale route is damaged") }
             // A route saved without keys gets them back only through its own server, which must be saved without them too.
-            val own = s.servers.firstOrNull { it.id == r.own }
+            val own = r.own?.let(serverById::get)
             need(r.keyless == (own?.keyless == true) && (!r.keyless || (n == 1 && r.tsExit == null)), "a route and its own server don't match")
             if (r.keyless) keyless(r.name, r.wg, r.ovpn, r.ss) else server(r.name, r.wg, r.ovpn, r.ss)
         }
         s.home.wg?.let { server(it.name, it, null, null) }
-        need(s.favorites.all(::plainPlace), "a favourite is damaged")
         // An app or a website may be on Block; a default route never is.
-        val ok = { id: String -> builtIn(id) || s.route(id) != null }
+        val ok = { id: String -> builtIn(id) || id in routeIds }
         val pkgs = { m: Map<String, String> -> m.keys.all { it.length <= 255 && PKG.matches(it) } }
         // A website an older version kept stays as this phone keeps it: one name the browser can't open never costs the whole backup.
         val sites = { m: Map<String, String> -> m.size <= Sites.MAX && m.all { (site, id) -> savedSite(site) && ok(id) } }
         need(s.defaultRoute != BLOCK && s.profiles.none { it.defaultRoute == BLOCK }, "a default route can't be Block")
         need(s.defaultRoute.let(ok) && s.apps.values.all(ok) && s.added.all(ok) && pkgs(s.apps), "an app or the default route names a route that isn't there")
         // The filter's own choices per app are app choices too: as many at most, and package names.
-        need(s.prefs.filter.apps.size <= MAX_APPS && s.prefs.filter.apps.keys.all { it.length <= 255 && PKG.matches(it) }, "the Protection filter's app choices are damaged")
+        need(s.prefs.filter.apps.keys.all { it.length <= 255 && PKG.matches(it) }, "the Protection filter's app choices are damaged")
         need(sites(s.sites), "a website's route is damaged")
         need(s.onNet.all { (kind, name) -> kind in NET_KINDS && s.profiles.any { it.name == name } }, "a profile to switch to isn't there")
         s.profiles.forEach { p ->
@@ -436,7 +435,7 @@ object Backup {
         return (s.servers.filter { !it.keyless }.map { Triple(it.name, it.ovpn, it.ss) } + s.routes.filter { !it.keyless }.map { Triple(it.name, it.ovpn, it.ss) }).mapNotNull { (name, o, x) ->
             val why = o?.takeIf { it !in known }?.let { runCatching { Manual.weakness(it) }.getOrNull() } ?: x?.takeIf { it !in known }?.let(Manual::weakness) ?: return@mapNotNull null
             // The import's first sentence says what is weak; the sheet says what it risks once for all.
-            "${safe(name, 60)}: " + why.substringBefore(". ").removeSuffix(".").removePrefix("This config ")
+            "${label(name, "An own server")}: " + why.substringBefore(". ").removeSuffix(".").removePrefix("This config ")
         }.distinct()
     }
 
@@ -450,7 +449,7 @@ object Backup {
                 (ss.plugin?.length ?: 0) <= 64 && (ss.server + ss.method + ss.plugin.orEmpty()).none(Char::isISOControl)
             else -> false
         }
-        need(ok, "own server ${safe(name)} is damaged")
+        need(ok, "own server ${label(name, "with no visible name", 40)} is damaged")
     }
 
     /** Checks an own server's config as an import would; its reason names the server, never a key or a password. */
@@ -460,7 +459,7 @@ object Backup {
             ovpn?.let { require(plainName(it.name) && it.config.length <= 256 * 1024 && it.username.length <= 1024 && it.password.length <= 1024) { "it is damaged" }; Manual.parseOvpn(it.config, it.name, it.username, it.password) }
             ss?.let { require(plainName(it.name) && Manual.parseSs(Manual.ssLink(it), it.name) == it) { "its Shadowsocks settings are damaged" } }
         }.exceptionOrNull() ?: return
-        bad("own server ${safe(name)}: ${(why.message ?: "it is damaged").replaceFirstChar(Char::lowercase).removeSuffix(".")}")
+        bad("own server ${label(name, "with no visible name", 40)}:${(why.message ?: "it is damaged").replaceFirstChar(Char::lowercase).removeSuffix(".")}")
     }
 }
 
@@ -483,11 +482,12 @@ const val WAIT_MS = 30 * 86_400_000L
  */
 fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true): Setup? {
     // Saved without keys: an own server this phone still has gets its config back here, and the home peer stays as it is.
-    // A route that had no own server here got one made up in the file: this phone's route of that name gives it back.
+    // A route that had no own server here got one made up in the file: this phone's route of that id gives it back, only
+    // where the file carries that server's identity; an OpenVPN one holds just a name, so its route waits for its config.
     val byOwn = backup.routes.groupBy { it.own }
     val full = backup.servers.filter { it.keyless }.mapNotNull { k ->
         (servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) } ?: byOwn[k.id].orEmpty().firstNotNullOfOrNull { x ->
-            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf(k::sameAs)
+            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf { k.ovpn == null && k.sameAs(it) }
         })?.let { k.id to it }
     }.toMap()
     val b = if (full.isEmpty()) backup else backup.copy(
@@ -501,7 +501,8 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     if (r.profiles.size >= MAX_PROFILES) return null
     val name = (listOf(keepAs) + (2..MAX_PROFILES + 1).map { "$keepAs $it" }).firstNotNullOfOrNull { r.profileName(it) } ?: return null
     val fresh = { prefix: String, taken: Set<String> -> generateSequence { prefix + java.util.UUID.randomUUID().toString().take(8) }.first { it !in taken } }
-    val ok = { id: String -> builtIn(id) || route(id) != null }
+    val here = routes.mapTo(HashSet()) { it.id }
+    val ok = { id: String -> builtIn(id) || id in here }
     val apps = apps.filterValues(ok)
     val sites = sites.filterValues(ok)
     // Without profiles every route here shows, those no app uses too: all of them are kept, as saving a first profile does.
@@ -509,7 +510,8 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val used = (setOf(defaultRoute) + apps.values + sites.values + listed).mapNotNull(::route)
     val serverIds = r.servers.map { it.id }.toMutableSet()
     val sv = HashMap<String, String>()
-    val addServers = servers.filter { s -> used.any { it.own == s.id } }.mapNotNull { s ->
+    val owns = used.mapNotNullTo(HashSet()) { it.own }
+    val addServers = servers.filter { it.id in owns }.mapNotNull { s ->
         val there = r.servers.firstOrNull { it.id == s.id }
         val id = if (there == null) s.id else if (there == s) { sv[s.id] = s.id; return@mapNotNull null } else fresh("s", serverIds)
         sv[s.id] = id; serverIds += id; s.copy(id = id)
