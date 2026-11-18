@@ -236,7 +236,13 @@ apps offline while the saved settings can't be read starts even when that delete
 the seven others, so an address an app kept longer than that (across eight moves, reconnects or pauses) can name
 another site by then; apps that keep an old block's address are refused until they look the name up again. A move
 restarts the setup the engine runs on the next block, so a change it refused before stays refused; one that can't get
-ready (the old table not deleted, its block not saved) changes nothing and is tried again at the next check, 15 seconds later.
+ready (the old table not deleted, its block not saved) leaves the current engine running and is tried again at the next
+check, 15 seconds later; if the old table was deleted but the block could not be saved, a settings change made meanwhile
+takes a new block. If the app is killed in the instant between saving a new block's number and starting on it, that
+block is skipped, so in that rare case a block can come back after six others, not seven. After a cache error, new
+names fail until the next block move, except that if removing the cache's saved position also fails and the storage
+recovers at once, a settings change may resume handing out addresses on the same block sooner (still never giving an
+address to a second name).
 
 When a change can't be made ready or the engine can't start it, the setup that ran before stays or comes back as it
 was, on the newest block, and the app shows why the change was not applied: until a later change applies, the earlier setup stays in force, also for the
