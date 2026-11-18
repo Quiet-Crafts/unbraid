@@ -595,10 +595,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * have changed since read again), on [block] (a move to the next fake-IP block) or else the newest block spent. Until
      * it runs the app's own tests have no way in. [gone]: the old engine was already given up ([FakePool.restart]).
      */
-    private fun restoreLastGood(srv: CommandServer, block: Int? = null, gone: Boolean = true): FakePool.Outcome = FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->
+    private fun restoreLastGood(srv: CommandServer, block: Int? = null, gone: Boolean = true, move: Boolean = false): FakePool.Outcome = FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->
         runCatching {
             val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, spent, newProbe(), store.setup.value.home.tsSuffixAllowed,
-                store.tsSuffix, isLockdownEnabled, tsLoginPending, ::blockedKin)
+                store.tsSuffix, isLockdownEnabled, tsLoginPending, move, ::blockedKin)
             input to Compiler.compile(input).also(Libbox::checkConfig)
         }.onFailure { Log.e(TAG, "restore: ${logLine(it)}") }.getOrThrow()
     }, note = { store.fakeBlock = it }, commit = { input ->
@@ -631,16 +631,21 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * the new block, or the connection ends.
      */
     private suspend fun watchPool() {
+        var wait = FakePool.EVERY
         while (true) {
-            kotlinx.coroutines.delay(FakePool.EVERY)
+            kotlinx.coroutines.delay(wait)
+            wait = FakePool.EVERY
             lock.withLock {
                 if (destroyed || state.value.phase != VpnState.Phase.On || holding) return@withLock
                 val srv = server ?: return@withLock
                 val last = lastBlock ?: return@withLock
-                when (FakePool.step(Libbox.fakeIPRemaining(), blockSince?.let { SystemClock.elapsedRealtime() - it })) {
+                val since = blockSince?.let { SystemClock.elapsedRealtime() - it }
+                val step = FakePool.step(Libbox.fakeIPRemaining(), since)
+                wait = FakePool.nextCheck(step, since)
+                when (step) {
                     FakePool.Step.Nothing, FakePool.Step.Wait -> {}
                     FakePool.Step.Exhausted -> if (!exhaustedSaid) { exhaustedSaid = true; Log.w(TAG, "fake IPs: block used up before the next move is due, new lookups fail until then") }
-                    FakePool.Step.Rotate -> when (FakePool.move { gone -> restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone) }) {
+                    FakePool.Step.Rotate -> when (FakePool.move { gone -> restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone, move = true) }) {
                         FakePool.Outcome.Ran -> { exhaustedSaid = false; Log.i(TAG, "fake IPs: moved to the next block"); retime() }
                         FakePool.Outcome.Kept -> Log.w(TAG, "fake IPs: move not started, tried again at the next check")
                         FakePool.Outcome.Failed -> teardown("Connection lost")
@@ -944,7 +949,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     /** The open table's fake-IP block for a reload, while its file is there ([FakePool.keeps]); else the next one, refusing the rest. */
-    private fun fakeBlock() = Compiler.nextBlock(lastBlock ?: store.fakeBlock, FakePool.keeps(LookupTable.isOpen(), File(filesDir, "cache.db").length()))
+    private fun fakeBlock() = Compiler.nextBlock(lastBlock ?: store.fakeBlock, FakePool.keeps(LookupTable.isOpen(), LookupTable.bytes(filesDir)))
 
 
     /** The app's own way into each exit ([Compiler.PROBE]): a free loopback port and a 24-byte random password. */
@@ -1291,7 +1296,9 @@ internal object LookupTable {
      * Deletes the table in [dir] also while an engine has it open, just before that engine gives way to one on a new
      * block, which must start from no file; fails unless the file is gone (already gone is fine).
      */
-    @Synchronized fun clear(dir: File) = File(dir, "cache.db").let { check(it.delete() || !it.exists()) { "old table not deleted" } }
+    @Synchronized fun clear(dir: File) { java.nio.file.Files.deleteIfExists(File(dir, "cache.db").toPath()) } // throws unless deleted or never there
+    /** The table's size in [dir], 0 when there is none; throws when it can't be read (neither missing nor fine). */
+    fun bytes(dir: File): Long = try { java.nio.file.Files.size(File(dir, "cache.db").toPath()) } catch (e: java.nio.file.NoSuchFileException) { 0 }
 }
 
 /** One line for Routes: which routes' apps are blocked and why, and that apps on a route that is gone are blocked too. */
