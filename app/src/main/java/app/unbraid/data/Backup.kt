@@ -41,6 +41,8 @@ object Backup {
     const val MAX = 4 shl 20
     /** The most app choices a setup may hold for the restore sheet to check it in full; a backup with more still opens. */
     const val MAX_APPS = 5000
+    /** The most routes, and the most own servers, a setup may hold ([valid]). */
+    const val MAX_EACH = 500
 
     enum class Reason(val text: String) {
         NotBackup("This file isn't an unbraid backup."),
@@ -401,7 +403,7 @@ object Backup {
      */
     fun valid(s: Setup): Setup {
         // As many app choices as the file holds: the restore sheet checks as many as it can ([MAX_APPS]) and says so.
-        need(s.routes.size <= 500 && s.servers.size <= 500 && s.favorites.size <= 2000 && s.profiles.size <= MAX_PROFILES, "it holds more than unbraid keeps")
+        need(s.routes.size <= MAX_EACH && s.servers.size <= MAX_EACH && s.favorites.size <= 2000 && s.profiles.size <= MAX_PROFILES, "it holds more than unbraid keeps")
         val routeIds = s.routes.mapTo(HashSet()) { it.id }
         val serverById = s.servers.associateBy { it.id }
         need(s.routes.all { ID.matches(it.id) && !builtIn(it.id) } && s.routes.map { it.id }.toSet().size == s.routes.size, "a route has a missing or repeated name")
@@ -502,7 +504,8 @@ const val WAIT_MS = 30 * 86_400_000L
  * This phone's setup replaced by backup [b] ([Backup.valid]). Tailscale and the statistics consent stay as they are
  * here. Apps in it wait for [WAIT_MS] to be installed. With [keepAs] (and something set up here), the setup in use is
  * kept as a profile of that name (or that name and a number), with its routes and own servers: a route or server
- * whose name the backup uses for something else gets a new one. Null when there is no room for that profile.
+ * whose name the backup uses for something else gets a new one. Null when there is no room for that profile, or the two
+ * together hold more routes or own servers than a setup may ([Backup.MAX_EACH]).
  */
 fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true): Setup? {
     // Saved without keys: an own server this phone still has gets its config back here, and the home peer stays as it is.
@@ -535,8 +538,8 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val used = (setOf(defaultRoute) + apps.values + sites.values + listed).mapNotNull(::route)
     val serverIds = r.servers.map { it.id }.toMutableSet()
     val sv = HashMap<String, String>()
-    val owns = used.mapNotNullTo(HashSet()) { it.own }
-    val addServers = servers.filter { it.id in owns }.mapNotNull { s ->
+    // Every own server here stays, one no route uses too: keeping replaces only profiles, favourites and settings.
+    val addServers = servers.mapNotNull { s ->
         val there = r.servers.firstOrNull { it.id == s.id }
         val id = if (there == null) s.id else if (there == s) { sv[s.id] = s.id; return@mapNotNull null } else fresh("s", serverIds)
         sv[s.id] = id; serverIds += id; s.copy(id = id)
@@ -554,6 +557,9 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
         val id = if (there == null) x.id else fresh("r", routeIds)
         rt[x.id] = id; routeIds += id; c.copy(id = id)
     }
+    // More than a setup may hold would restore, then fail every backup of it: counted as a backup without keys holds it,
+    // with an own server made for every imported route that has none.
+    if (Backup.contents(r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers), keys = false).let { it.routes.size > Backup.MAX_EACH || it.servers.size > Backup.MAX_EACH }) return null
     if (pins.isNotEmpty()) r = r.copy(routes = r.routes.map { x -> pins[x.id]?.let { x.copy(loc = it) } ?: x })
     val m = { id: String -> rt[id] ?: id }
     // The first profile: every route shown until now stays listed, as when the first profile is saved ([Setup.saveAs]).

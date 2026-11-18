@@ -56,7 +56,8 @@ import kotlinx.coroutines.withContext
 private const val KEYS_OFF = "Off: own servers are saved without keys or passwords, and home WireGuard is left out. On another phone, add each server's config again; until then its apps stay offline."
 private const val KEYS_ON = "The file holds your own servers' keys and passwords, so it needs a strong passphrase."
 private const val KEYS_NONE = "You have no own servers or home WireGuard, so there are no keys or passwords to include."
-private const val KEEP_NO_ROOM = "There's no room for another profile. Turn off keeping your current setup, or cancel."
+private const val KEEP_TOO_MUCH = "Your current setup can't be kept beside this backup: together they hold more profiles, routes or own servers than unbraid keeps."
+private const val KEEP_NO_ROOM = "$KEEP_TOO_MUCH Turn off keeping your current setup, or cancel."
 
 /** What a backup file holds, for the captions. */
 const val BACKUP_HOLDS = "Your routes, app and website choices, favourites, profiles, own servers and your settings. Keys and passwords of your own servers and home WireGuard only if you choose."
@@ -422,6 +423,7 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
     if (notes != null && flow.weak.isNotEmpty()) Switch(WEAK_TITLE, weakCaption(flow.weak), flow.acceptWeak) { flow.acceptWeak = it }
     if (vpn.phase == VpnState.Phase.On) Text("unbraid is connected. It reconnects with the restored setup, and apps may be offline for a few seconds.", style = Type.caption, color = Ink.dim)
     if (canKeep) Switch("Keep my current setup", "Saved as the profile $PREVIOUS, to switch back later. Your other profiles here are replaced.", flow.keep) { flow.keep = it }
+    else if (flow.keepable == false && !here.untouched) Text(KEEP_TOO_MUCH, style = Type.caption, color = Ink.dim)
     Buttons(flow, "Restore", enabled = flow.ready(here)) { flow.apply() }
 }
 

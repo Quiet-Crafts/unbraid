@@ -251,6 +251,29 @@ class BackupTest {
         assertTrue(r.servers.any { it.id == "sp" })
     }
 
+    /** Keeping the setup in use keeps every own server here, its keys too, also one no route uses yet. */
+    @Test fun keepingASetupKeepsAnOwnServerNoRouteUses() {
+        val spare = OwnServer("sp", wg = wg.copy(name = "Spare"))
+        // Its id is taken in the backup by another server: it stays under a new one.
+        val clash = OwnServer("s1", ss = ss.copy(name = "Clash"))
+        val here = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands"))), defaultRoute = "nl", servers = listOf(spare, clash), version = VERSION)
+        val b = Backup.read(Backup.export(full(), "", 0)).setup
+        val r = here.restoredFrom(b, PREVIOUS, 0)!!
+        Backup.valid(r)
+        assertEquals(spare, r.servers.single { it.id == "sp" })
+        assertEquals(b.servers.single { it.id == "s1" }, r.servers.single { it.id == "s1" })
+        assertEquals(1, r.servers.count { it.copy(id = "s1") == clash })
+        // Without keeping, the backup's servers replace them, as the sheet says.
+        assertEquals(b.servers, here.restoredFrom(b, null, 0)!!.servers)
+        // Never more own servers than a setup may hold: then the setup here can't be kept, as with no room for its profile.
+        val many = b.copy(routes = b.routes.filter { !it.imported }, servers = (1..Backup.MAX_EACH).map { OwnServer("m$it", wg = wg.copy(name = "M$it")) })
+        assertNull(here.restoredFrom(many, PREVIOUS, 0))
+        assertEquals(Backup.MAX_EACH, here.restoredFrom(many.copy(servers = many.servers.drop(2)), PREVIOUS, 0)!!.servers.size)
+        // Counted as a backup without keys holds it: an imported route with no own server gets one there.
+        val loose = many.copy(servers = many.servers.drop(2), routes = many.routes + Route("loose", wg = wg.copy(name = "Loose")))
+        assertNull(here.restoredFrom(loose, PREVIOUS, 0))
+    }
+
     @Test fun aSetupTooLargeToRestoreIsNeverSaved() {
         assertEquals(Reason.TooBig, reason { Backup.seal(ByteArray(Backup.MAX), "p", logN = 10, r = 8, p = 1) })
     }
