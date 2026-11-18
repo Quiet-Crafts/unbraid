@@ -2,7 +2,6 @@
 package app.unbraid.ui
 
 import android.net.Uri
-import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -74,6 +73,20 @@ fun passProblem(pass: String, again: String, keys: Boolean): String? = when {
     again.isNotEmpty() && again != pass -> "The two passphrases are different."
     again.isEmpty() -> ""
     else -> null
+}
+
+/** Said when the save picker gave a file that already holds something ([saveInto]). */
+private const val SAVE_TAKEN = "unbraid saves a backup only to a new file, so that one was left as it is. Save again and choose a new name."
+
+/**
+ * Writes [sealed] through [open] to the document the save picker gave, only if it is [empty] before, as a new one the
+ * picker made is. One that holds something (a file the user chose to replace) or can't be read is never opened, as
+ * opening it for writing empties it: null. False when the write failed. Nothing is ever deleted: whether the picker
+ * made the document or the user chose an empty one can't be told.
+ */
+fun saveInto(sealed: ByteArray, empty: () -> Boolean, open: () -> java.io.OutputStream): Boolean? {
+    if (!runCatching { empty() }.getOrDefault(false)) return null
+    return runCatching { open().use { it.write(sealed) } }.isSuccess
 }
 
 /** The keys switch for a setup: whether it can be turned on (only with something to include), and its caption. */
@@ -150,6 +163,11 @@ class BackupFlow(private val ui: Ui) {
     var ok by mutableStateOf(false)
         private set
     private var file: ByteArray? = null
+    /** The backup sealed for the save picker, made before a file is chosen; [sealedLeft]: without own servers' keys and passwords. */
+    private var sealed by mutableStateOf<ByteArray?>(null)
+    private var sealedLeft = false
+    /** A backup is being made or waits for its file: the passphrases and the keys switch it was made with can't change. */
+    val sealing get() = busy || sealed != null
     var opened by mutableStateOf<Backup.Contents?>(null)
         private set
     private var judging: Job? = null
@@ -173,7 +191,7 @@ class BackupFlow(private val ui: Ui) {
     internal var pickOpen: () -> Unit = {}
     private val app get() = ui.getApplication<android.app.Application>()
 
-    fun close() { if (!busy) { step = null; pass = ""; pass2 = ""; file = null; opened(null); message = null; keep = true; keys = false } }
+    fun close() { if (!busy) { step = null; pass = ""; pass2 = ""; file = null; sealed = null; opened(null); message = null; keep = true; keys = false } }
 
     /** A new backup shown (or none): nothing worked out or accepted for another one carries over. */
     private fun opened(c: Backup.Contents?) { opened = c; judging?.cancel(); judging = null; gate.open(c); seen++ }
@@ -206,25 +224,12 @@ class BackupFlow(private val ui: Ui) {
 
     fun startSave() { close(); step = "save" }
 
-    /** The passphrases match: choose where the file goes. */
+    /** The passphrases match: the backup is made and sealed first, then the file it goes to is chosen. */
     fun chooseFile() {
         message = null
-        pickSave("unbraid-backup-${java.time.LocalDate.now()}.unbraid")
-    }
-
-    /** The picker's answer for saving: sealed and written, or nothing left behind. */
-    fun saveTo(uri: Uri?) {
-        if (uri == null) return
-        if (step != "save" || pass.isEmpty()) {
-            // The app was closed while the picker was open: the passphrase is gone (it is never saved), so the empty file goes.
-            ui.viewModelScope.launch(Dispatchers.IO) { runCatching { DocumentsContract.deleteDocument(app.contentResolver, uri) } }
-            finish(false, "The backup wasn't saved because unbraid was closed meanwhile. Start it again.")
-            return
-        }
         val p = pass
         val setup = Unbraid.store.setup.value
         val withKeys = keys
-        val left = !withKeys && Backup.hasSecrets(setup)
         busy = true
         ui.viewModelScope.launch {
             val r = withContext(Dispatchers.Default) {
@@ -234,11 +239,32 @@ class BackupFlow(private val ui: Ui) {
                     try { Backup.readBack(plain); Backup.seal(plain, p) } finally { plain.fill(0) }
                 }
             }
-            val wrote = r.getOrNull()?.let { b -> withContext(Dispatchers.IO) { runCatching { app.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(b) } }.isSuccess } } == true
-            if (!wrote) withContext(Dispatchers.IO) { runCatching { DocumentsContract.deleteDocument(app.contentResolver, uri) } }
             busy = false
-            finish(wrote, if (wrote) "Backup saved${if (left) " without server keys and passwords" else ""}. Keep the file and your passphrase: without the passphrase nobody can open it, not even you."
-                else (r.exceptionOrNull() as? Backup.Failed)?.message ?: "Couldn't save the backup there. Try another place.")
+            r.onSuccess { sealed = it; sealedLeft = !withKeys && Backup.hasSecrets(setup); pickSave("unbraid-backup-${java.time.LocalDate.now()}.unbraid") }
+                .onFailure { e -> finish(false, (e as? Backup.Failed)?.message ?: "Couldn't make the backup. Try again.") }
+        }
+    }
+
+    /** The picker's answer for saving (null: none chosen, the form can change again): the backup sealed before is written there, or the file is left as it was ([saveInto]). */
+    fun saveTo(uri: Uri?) {
+        val b = sealed.takeIf { step == "save" }
+        val left = sealedLeft
+        sealed = null
+        if (uri == null) return
+        // The app was closed while the picker was open: the backup was in memory only. A new file the picker made stays,
+        // empty, as it can't be told from an empty one the user chose.
+        if (b == null) return finish(false, "The backup wasn't saved because unbraid was closed meanwhile. A new file made for it is left empty: save over it or delete it.")
+        busy = true
+        val cr = app.contentResolver
+        ui.viewModelScope.launch {
+            val wrote = withContext(Dispatchers.IO) { saveInto(b, { cr.openInputStream(uri)!!.use { it.read() == -1 } }, { cr.openOutputStream(uri, "wt")!! }) }
+            busy = false
+            when (wrote) {
+                true -> finish(true, "Backup saved${if (left) " without server keys and passwords" else ""}. Keep the file and your passphrase: without the passphrase nobody can open it, not even you.")
+                // The form stays, passphrases and all, for another try.
+                null -> message = SAVE_TAKEN
+                false -> finish(false, "Couldn't save the backup there. The file may be left empty or cut: delete it, and try another place.")
+            }
         }
     }
 
@@ -305,7 +331,7 @@ class BackupFlow(private val ui: Ui) {
     fun signIns(s: Setup) = s.routes.filter { !it.imported }.map { it.loc.provider }.distinct().filter { it !in Unbraid.store.accounts.value }
         .map { Providers.get(it)?.name ?: it }.takeIf { it.isNotEmpty() }?.joinToString(", ")
 
-    private fun finish(success: Boolean, text: String) { pass = ""; pass2 = ""; file = null; opened(null); ok = success; message = text; step = "done" }
+    private fun finish(success: Boolean, text: String) { pass = ""; pass2 = ""; file = null; sealed = null; opened(null); ok = success; message = text; step = "done" }
 }
 
 /** The pickers and the sheet, wherever the app is: a backup can also be picked from the import of a config file. */
@@ -314,7 +340,7 @@ fun BackupHost(ui: Ui) {
     val flow = ui.backup
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { flow.saveTo(it) }
     val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { flow.restoreFrom(it) }
-    flow.pickSave = { name -> runCatching { save.launch(name) } }
+    flow.pickSave = { name -> runCatching { save.launch(name) }.onFailure { flow.saveTo(null) } }
     flow.pickOpen = { runCatching { open.launch(arrayOf("*/*")) } }
     if (flow.step != null) BackupSheet(ui, flow)
 }
@@ -337,10 +363,11 @@ private fun BackupSheet(ui: Ui, flow: BackupFlow) {
                     val here by ui.setup.collectAsStateWithLifecycle()
                     val secrets = Backup.hasSecrets(here)
                     val (canInclude, keysText) = keysSwitch(secrets, flow.keys)
-                    Switch("Include server keys and passwords", keysText, flow.keys && canInclude, canInclude) { flow.keys = it }
+                    Switch("Include server keys and passwords", keysText, flow.keys && canInclude, canInclude && !flow.sealing) { flow.keys = it }
                     Text(BACKUP_LEAVES, style = Type.caption, color = Ink.dim)
-                    DialogField(flow.pass, { flow.pass = it }, "Passphrase", secret = true)
-                    DialogField(flow.pass2, { flow.pass2 = it }, "Passphrase again", secret = true)
+                    // Locked while the backup made with them waits for its file.
+                    DialogField(flow.pass, { if (!flow.sealing) flow.pass = it }, "Passphrase", secret = true)
+                    DialogField(flow.pass2, { if (!flow.sealing) flow.pass2 = it }, "Passphrase again", secret = true)
                     val problem = passProblem(flow.pass, flow.pass2, flow.keys && secrets)
                     if (flow.pass.isNotEmpty()) Backup.strength(flow.pass).let { (n, text) -> Text(text, style = Type.caption, color = if (n == 0) Ink.bad else Ink.dim) }
                     problem?.takeIf { it.isNotEmpty() }?.let { Text(it, style = Type.caption, color = Ink.bad) }
