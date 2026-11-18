@@ -521,8 +521,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // a new table that couldn't be noted down doesn't start, or the next process would hand it out again.
             // A new block starts from a deleted table: never an old file, which a missing or bad one would follow into it.
             if (input.fakeBlock != lastBlock) {
-                engine("$APP couldn't save its state. Try again.") { store.fakeBlock = input.fakeBlock }
-                LookupTable.forget(filesDir, anyway = true); blockSince = SystemClock.elapsedRealtime()
+                engine("$APP couldn't save its state. Try again.") { store.fakeBlock = input.fakeBlock; LookupTable.clear(filesDir) }
+                blockSince = SystemClock.elapsedRealtime()
             }
             lastBlock = input.fakeBlock
             // The point of no return: the old engine's way in goes now, as it may be closed by the time the start fails.
@@ -539,10 +539,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             restarting = false
             starts++
             probe = next
-            lastInput = input
             state.update { it.copy(tsSuffix = input.tsSuffix) }
         }
         lastGood = json
+        lastInput = input // also when nothing restarted: a move restarts what is applied now
         tunnelDns = runCatching { Compiler.probeDns(json) }.getOrDefault(emptyMap())
         tags = Compiler.shared(setup, LinkPicker.ported(setup, links, portStep), blocked) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG }
         val was = running
@@ -593,31 +593,31 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /**
      * What ran before, back on the engine as it was compiled ([FakePool.restoreInput]: a new probe pair, and what may
      * have changed since read again), on [block] (a move to the next fake-IP block) or else the newest block spent. Until
-     * it runs the app's own tests have no way in. [FakePool.Outcome.Kept]: nothing was given up.
+     * it runs the app's own tests have no way in. [gone]: the old engine was already given up ([FakePool.restart]).
      */
-    private fun restoreLastGood(srv: CommandServer, block: Int? = null): FakePool.Outcome {
-        val last = lastInput ?: return FakePool.Outcome.Kept
-        val input = FakePool.restoreInput(last, block, lastBlock, runCatching { newProbe() }.getOrElse { return FakePool.Outcome.Kept },
-            store.setup.value, store.accounts.value, store.tsSuffix, isLockdownEnabled, tsLoginPending, ::blockedKin)
-        val json = runCatching { Compiler.compile(input).also(Libbox::checkConfig) }.getOrElse { Log.e(TAG, "restore: ${logLine(it)}"); return FakePool.Outcome.Kept }
-        return FakePool.restart(input.fakeBlock, lastBlock, save = { store.fakeBlock = it }, commit = {
-            probe = null // the old engine's way in goes with it
-            lastGood = null
-            if (input.fakeBlock != lastBlock) { LookupTable.forget(filesDir, anyway = true); blockSince = SystemClock.elapsedRealtime() }
-            lastBlock = input.fakeBlock
-            lastInput = input
-            state.update { it.copy(tsSuffix = input.tsSuffix) }
-            openTable(true)
-        }) {
-            Compiler.tcpOnly(json).let { u -> Health.stun.udpless(u) { tcpOnly = tcpOnly + u } }
-            srv.startOrReloadService(json, OverrideOptions())
-            tcpOnly = Compiler.tcpOnly(json)
-            starts++
-            // Nothing checked through the old engine holds for this one.
-            state.update { it.copy(engine = starts, passed = null, notAnswering = emptySet()) }
-            probe = input.probe
-            lastGood = json
-        }
+    private fun restoreLastGood(srv: CommandServer, block: Int? = null, gone: Boolean = true): FakePool.Outcome = FakePool.restart(gone, lastBlock, prepare = {
+        runCatching {
+            val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, lastBlock, newProbe(), store.setup.value.home.tsSuffixAllowed,
+                store.tsSuffix, isLockdownEnabled, tsLoginPending, ::blockedKin)
+            input to Compiler.compile(input).also(Libbox::checkConfig)
+        }.onFailure { Log.e(TAG, "restore: ${logLine(it)}") }.getOrThrow()
+    }, save = { store.fakeBlock = it; LookupTable.clear(filesDir) }, commit = { input ->
+        probe = null // the old engine's way in goes with it
+        lastGood = null
+        if (input.fakeBlock != lastBlock) blockSince = SystemClock.elapsedRealtime()
+        lastBlock = input.fakeBlock
+        lastInput = input
+        state.update { it.copy(tsSuffix = input.tsSuffix) }
+        openTable(true)
+    }) { input, json ->
+        Compiler.tcpOnly(json).let { u -> Health.stun.udpless(u) { tcpOnly = tcpOnly + u } }
+        srv.startOrReloadService(json, OverrideOptions())
+        tcpOnly = Compiler.tcpOnly(json)
+        starts++
+        // Nothing checked through the old engine holds for this one.
+        state.update { it.copy(engine = starts, passed = null, notAnswering = emptySet()) }
+        probe = input.probe
+        lastGood = json
     }
 
     private var pool: Job? = null
@@ -641,7 +641,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 when (FakePool.step(Libbox.fakeIPRemaining(), blockSince?.let { SystemClock.elapsedRealtime() - it })) {
                     FakePool.Step.Nothing, FakePool.Step.Wait -> {}
                     FakePool.Step.Exhausted -> if (!exhaustedSaid) { exhaustedSaid = true; Log.w(TAG, "fake IPs: block used up before the next move is due, new lookups fail until then") }
-                    FakePool.Step.Rotate -> when (restoreLastGood(srv, Compiler.nextBlock(last, false)).let { if (it == FakePool.Outcome.Failed) restoreLastGood(srv) else it }) {
+                    FakePool.Step.Rotate -> when (FakePool.move { gone -> restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone) }) {
                         FakePool.Outcome.Ran -> { exhaustedSaid = false; Log.i(TAG, "fake IPs: moved to the next block"); retime() }
                         FakePool.Outcome.Kept -> Log.w(TAG, "fake IPs: move not started, tried again at the next check")
                         FakePool.Outcome.Failed -> teardown("Connection lost")
@@ -1287,11 +1287,13 @@ internal object LookupTable {
     /** Set before an engine starts with the table, cleared once it has stopped. */
     @Synchronized fun open(v: Boolean) { open = v }
     @Synchronized fun isOpen() = open
+    /** Deletes the table in [dir] unless an engine has it open; true if it was deleted. */
+    @Synchronized fun forget(dir: File) = !open && File(dir, "cache.db").delete()
     /**
-     * Deletes the table in [dir] unless an engine has it open ([anyway]: also then, just before that engine gives way to
-     * one on a new block, which opens a file of its own); true if it was deleted.
+     * Deletes the table in [dir] also while an engine has it open, just before that engine gives way to one on a new
+     * block, which must start from no file; fails unless the file is gone (already gone is fine).
      */
-    @Synchronized fun forget(dir: File, anyway: Boolean = false) = (anyway || !open) && File(dir, "cache.db").delete()
+    @Synchronized fun clear(dir: File) = File(dir, "cache.db").let { check(it.delete() || !it.exists()) { "old table not deleted" } }
 }
 
 /** One line for Routes: which routes' apps are blocked and why, and that apps on a route that is gone are blocked too. */

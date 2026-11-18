@@ -45,49 +45,43 @@ object FakePool {
     fun restoreBlock(ran: Int, spent: Int?) = spent ?: ran
 
     /**
-     * What ran ([last]) as it may come back while [now], the setup saved now, couldn't start: every app and website whose
-     * choice differs between the two (changed, added or removed) gets no connection, and so does every app that follows
-     * the default if the default differs, until a reload applies the change. Unchanged choices stay. Routes [now] lost
-     * (removed, or a provider signed out of in [accounts]) and a differing default are returned, to run with no tunnel.
-     * Of protections with a stricter side, the stricter of the two; settings with no such order (a filter's server)
-     * stay as they ran.
+     * What a restore or a move runs: what last ran ([last]) as it was compiled, on [block] (a move) or else
+     * [restoreBlock], with a new probe pair, and with what may have changed since read again as [Compiler.Input] reads it
+     * now: tailnet DNS authority as saved ([tsSuffixAllowed]) and the tailnet's DNS suffix, the sign-in way around the
+     * exit only ever narrowed, Android's Block setting, and the apps sharing a user id with a blocked one ([kin], asked of
+     * the setup that runs: one installed since must not be left outside).
      */
-    @OptIn(app.unbraid.data.SavedSites::class) // saved against saved: the compiler then decides which rules apply
-    fun narrowed(last: Setup, now: Setup, accounts: Map<String, String>): Pair<Setup, Set<String>> {
-        fun same(old: Map<String, String>, new: Map<String, String>) = (old.keys + new.keys).associateWith { k -> old[k].takeIf { it == new[k] } ?: app.unbraid.data.BLOCK }
-        val lost = last.routes.filter { r -> now.route(r.id) == null || !r.imported && accounts[r.loc.provider] == null }.mapTo(HashSet()) { it.id }
-        val p = last.prefs
-        val prefs = p.copy(lan = p.lan && now.prefs.lan, blockLan = p.blockLan || now.prefs.blockLan, filter = if (p.filter.id != null) p.filter else now.prefs.filter)
-        val home = last.home.copy(tsSuffixAllowed = last.home.tsSuffixAllowed.takeIf { it == now.home.tsSuffixAllowed }, subnets = last.home.subnets.filter { it in now.home.subnets })
-        return last.copy(apps = same(last.apps, now.apps), sites = same(last.sites, now.sites), prefs = prefs, home = home) to
-            lost + listOfNotNull(last.defaultRoute.takeIf { it != now.defaultRoute })
+    fun restoreInput(last: Compiler.Input, block: Int?, spent: Int?, probe: Pair<Int, String>, tsSuffixAllowed: String?, tsSuffix: String?,
+                     lockdown: Boolean, tsLoginPending: Boolean, kin: (Setup) -> Set<String>): Compiler.Input {
+        val setup = last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = tsSuffixAllowed))
+        return Compiler.Input(setup, last.links, last.selfPackage, lockdown, last.tsDir, last.cacheFile, tsSuffix, probe,
+            block ?: restoreBlock(last.fakeBlock, spent), last.blocked, last.tsLoginPending && tsLoginPending, kin(setup))
     }
 
     /**
-     * What a restore or a move runs: what last ran ([last]), on [block] (a move) or else [restoreBlock], with a new
-     * probe pair, made no more open than the setup and accounts saved now ([narrowed]), and with what may have changed
-     * since read again: the sign-in way around the exit only ever narrowed, Android's Block setting, and the apps sharing
-     * a user id with a blocked one ([kin], asked of the setup that runs: one installed since must not be left outside).
+     * How a [restart] ended: [Ran]; [Kept], nothing given up (the engine runs as before); [Failed], none runs. Once the
+     * old engine is gone (`gone`), every failure is [Failed].
      */
-    fun restoreInput(last: Compiler.Input, block: Int?, spent: Int?, probe: Pair<Int, String>, now: Setup, accounts: Map<String, String>, tsSuffix: String?,
-                     lockdown: Boolean, tsLoginPending: Boolean, kin: (Setup) -> Set<String>): Compiler.Input {
-        val (setup, lost) = narrowed(last.setup, now, accounts)
-        return Compiler.Input(setup, last.links, last.selfPackage, lockdown || last.lockdown, last.tsDir, last.cacheFile, tsSuffix, probe,
-            block ?: restoreBlock(last.fakeBlock, spent), last.blocked + lost, last.tsLoginPending && tsLoginPending, kin(setup))
-    }
-
-    /** How a [restart] ended: [Ran]; [Kept], nothing given up (the engine runs as before); [Failed], none runs. */
     enum class Outcome { Ran, Kept, Failed }
 
     /**
-     * One engine restart onto [block], in the only safe order. A new block is saved first ([save], only when it isn't
-     * [spent] already), before the engine can hand out any of it and before anything is given up: a failure there
-     * keeps the running engine, and the next check tries again. [commit] then gives the old engine up (from here
+     * One engine restart, in the only safe order. [prepare] builds what to run (input and its config); a new block is
+     * then saved ([save], only when it isn't [spent] already, and failing unless the old table is gone), before the
+     * engine can hand out any of it. A failure up to here gives nothing up: [Outcome.Kept], or [Outcome.Failed] when the
+     * old engine had already been given up before this call ([gone]). [commit] then gives the old engine up (from here
      * nothing goes back to the old block) and [start] runs the new one.
      */
-    inline fun restart(block: Int, spent: Int?, save: (Int) -> Unit, commit: () -> Unit, start: () -> Unit): Outcome {
-        try { if (block != spent) save(block) } catch (e: Exception) { return Outcome.Kept }
-        commit()
-        return try { start(); Outcome.Ran } catch (e: Exception) { Outcome.Failed }
+    inline fun restart(gone: Boolean, spent: Int?, prepare: () -> Pair<Compiler.Input, String>, save: (Int) -> Unit,
+                       commit: (Compiler.Input) -> Unit, start: (Compiler.Input, String) -> Unit): Outcome {
+        val (input, json) = try { prepare() } catch (e: Exception) { return if (gone) Outcome.Failed else Outcome.Kept }
+        try { if (input.fakeBlock != spent) save(input.fakeBlock) } catch (e: Exception) { return if (gone) Outcome.Failed else Outcome.Kept }
+        commit(input)
+        return try { start(input, json); Outcome.Ran } catch (e: Exception) { Outcome.Failed }
     }
+
+    /**
+     * A move to the next block: [attempt] (`gone` false) and, if its start failed after the old engine was given up,
+     * once more with what ran (`gone` true), whose every failure ends the connection.
+     */
+    inline fun move(attempt: (gone: Boolean) -> Outcome) = attempt(false).let { if (it == Outcome.Failed) attempt(true) else it }
 }
