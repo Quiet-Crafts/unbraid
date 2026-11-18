@@ -371,7 +371,8 @@ internal fun onNetSub(s: Setup, kind: String): String? = when {
 
 internal const val ON_NET_NOTE = "Switches while $APP is connected, a few seconds after the phone moves to another network, and not while $APP is open on screen. " +
     "$APP can't tell one Wi-Fi from another: each one gets the Wi-Fi profile. " +
-    "A profile you pick by hand stays while the phone stays on the network you picked it on. It ends when the phone joins another network or reconnects, or $APP restarts. " +
+    "A profile you pick by hand stays while the phone stays on the network you picked it on, also if you turn $APP off and on. " +
+    "It ends when the phone joins another network or rejoins this one, when you change the profile for that kind of network, or when $APP restarts. " +
     "Every app reconnects for a moment."
 
 /** Manage profiles: rename or delete behind the pencil, drag the handle (or TalkBack's Move up / down) to reorder. */
