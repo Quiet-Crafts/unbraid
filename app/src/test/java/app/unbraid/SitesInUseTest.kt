@@ -23,6 +23,7 @@ class SitesInUseTest {
         "ui/Ui.kt" to 4, // editing
         "ui/Websites.kt" to 7, // the list, its rows and the Add sheet: every saved website
         "vpn/Compiler.kt" to 2, // routes that websites name but no longer exist, and names a lookup rule answers first: refused either way
+        "vpn/FakePool.kt" to 2, // a restore keeps a saved website's choice only where the setup that ran and the saved one agree
         "vpn/LinkPicker.kt" to 2, // a change to the saved websites restarts the engine
         "vpn/Widgets.kt" to 2, // a widget row's own count field
     )

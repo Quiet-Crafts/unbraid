@@ -52,6 +52,7 @@ object FakePool {
      * Of protections with a stricter side, the stricter of the two; settings with no such order (a filter's server)
      * stay as they ran.
      */
+    @OptIn(app.unbraid.data.SavedSites::class) // saved against saved: the compiler then decides which rules apply
     fun narrowed(last: Setup, now: Setup, accounts: Map<String, String>): Pair<Setup, Set<String>> {
         fun same(old: Map<String, String>, new: Map<String, String>) = (old.keys + new.keys).associateWith { k -> old[k].takeIf { it == new[k] } ?: app.unbraid.data.BLOCK }
         val lost = last.routes.filter { r -> now.route(r.id) == null || !r.imported && accounts[r.loc.provider] == null }.mapTo(HashSet()) { it.id }
