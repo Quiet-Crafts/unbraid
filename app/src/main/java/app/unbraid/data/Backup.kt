@@ -324,15 +324,18 @@ object Backup {
 
     /**
      * [s] with every text from a file that is only shown cleaned ([safe], at most [SHOWN]), so the app, its widgets and
-     * its notification never show what an older version let through: the places and pinned servers of routes and
-     * favourites, and Tailscale nodes' names. A provider's own names hold nothing [safe] takes out, so a route or a
-     * favourite still matches its provider's list. Texts that pick something stay as they are: own servers' names (a
-     * server saved without keys gets its config back by its name), a pin's host, region, group and the Tailscale address.
+     * its notification never show what an older version let through: a pinned server's city and country, and Tailscale
+     * nodes' names. Texts that pick or match something stay exactly as the file has them, whatever a provider's list
+     * holds: a place's country, code and city and a pin's name (a location's identity, its favourite and its provider's
+     * lookup), own servers' names (a server saved without keys gets its config back by its name), a pin's host, region,
+     * group and the Tailscale address. The two that also go into a provider's or the speed test's request are kept only
+     * in the shape every provider uses, else left out: a country code of two or three letters, a group as an identifier.
      */
     fun shown(s: Setup) = s.copy(routes = s.routes.map(::shown), favorites = s.favorites.map(::shown))
     fun shown(r: Route) = r.copy(loc = shown(r.loc), tsName = r.tsName?.let { safe(it, SHOWN) })
-    fun shown(l: Location) = l.copy(countryCode = l.countryCode?.let { safe(it, SHOWN) }, country = l.country?.let { safe(it, SHOWN) }, city = l.city?.let { safe(it, SHOWN) },
-        pinned = l.pinned?.run { copy(name = safe(name, SHOWN), city = safe(city, SHOWN), country = safe(country, SHOWN)) })
+    fun shown(l: Location) = l.copy(countryCode = l.countryCode?.takeIf(CODE::matches), group = l.group?.takeIf(ID::matches),
+        pinned = l.pinned?.run { copy(city = safe(city, SHOWN), country = safe(country, SHOWN)) })
+    private val CODE = Regex("[A-Za-z]{2,3}")
 
     /** [plain] read back as a restore would read it, so a file that restoring would refuse is never written. Throws [Failed]. */
     fun readBack(plain: ByteArray) {
@@ -369,7 +372,11 @@ object Backup {
     fun safe(s: String, n: Int = 40) = s.filterNot { it.isISOControl() || format(it) }.takeGraphemes(n)
 
     /** A name from the file as the restore sheet prints it, every name it prints: [safe], trimmed, and [or] when nothing visible is left. */
-    fun label(name: String?, or: String, n: Int = 60) = name?.let { safe(it, n).trim() }?.takeIf { it.isNotEmpty() } ?: or
+    fun label(name: String?, or: String, n: Int = 60) = name?.let { safe(it, n).trim() }?.takeIf { it.codePoints().anyMatch { c -> !blank(c) } } ?: or
+
+    /** Characters that show nothing on their own: spaces, joiners and the other default-ignorable ones (fillers, variation selectors, tags). */
+    private fun blank(c: Int) = Character.isWhitespace(c) || Character.isSpaceChar(c) || Character.getType(c) == Character.FORMAT.toInt() || c == 0x34F ||
+        c in 0x115F..0x1160 || c in 0x17B4..0x17B5 || c in 0x180B..0x180F || c == 0x3164 || c in 0xFE00..0xFE0F || c == 0xFFA0 || c in 0xE0000..0xE0FFF
 
     /**
      * A name as the importers leave it, the rule every earlier version checked: no control or direction characters, not
@@ -405,7 +412,7 @@ object Backup {
             val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.tsExit).size
             need(n <= 1, "a route has more than one exit")
             if (n == 0) need(Providers.get(r.loc.provider) != null, "a route uses a provider this unbraid doesn't know")
-            // Its node's name and its place are cleaned when a file is read ([shown]), never refused: older versions kept them unchecked.
+            // Its node's name and its place are never refused, as older versions kept them unchecked; what is only shown is cleaned ([shown]).
             r.tsExit?.let { need(tsAddress(it), "a Tailscale route is damaged") }
             // A route saved without keys gets them back only through its own server, which must be saved without them too.
             val own = r.own?.let(serverById::get)
@@ -498,11 +505,12 @@ const val WAIT_MS = 30 * 86_400_000L
 fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true): Setup? {
     // Saved without keys: an own server this phone still has gets its config back here, and the home peer stays as it is.
     // A route that had no own server here got one made up in the file: this phone's route of that id gives it back, only
-    // where the file carries that server's identity; an OpenVPN one holds just a name, so its route waits for its config.
+    // only where everything the file keeps of that server is the same here (plugin and allowed addresses too); an OpenVPN
+    // one holds just a name, so its route waits for its config.
     val byOwn = backup.routes.groupBy { it.own }
     val full = backup.servers.filter { it.keyless }.mapNotNull { k ->
         (servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) } ?: byOwn[k.id].orEmpty().firstNotNullOfOrNull { x ->
-            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf { k.ovpn == null && k.sameAs(it) }
+            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf { k.ovpn == null && it.withoutSecrets() == k }
         })?.let { k.id to it }
     }.toMap()
     val b = if (full.isEmpty()) backup else backup.copy(

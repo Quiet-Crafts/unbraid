@@ -18,6 +18,8 @@ import app.unbraid.data.Server
 import app.unbraid.data.Setup
 import app.unbraid.data.VERSION
 import app.unbraid.data.WgConf
+import app.unbraid.data.favKey
+import app.unbraid.data.ident
 import app.unbraid.data.restoredFrom
 import app.unbraid.ui.WEAK_TITLE
 import app.unbraid.ui.homeNote
@@ -221,8 +223,9 @@ class BackupAdversarialTest {
     }
 
     /**
-     * Texts from a file that are only shown (places and pinned servers of routes and favourites, Tailscale names) open,
-     * restore and are stored cleaned and bounded, so no route name in the app, a widget or the notification carries them.
+     * Texts from a file that are only shown (pinned servers' cities and countries, Tailscale names) open, restore and
+     * are stored cleaned and bounded; those that also match a provider's list (a place, a pin's name) open and restore
+     * as the file has them ([placesFromAFileStillMatchTheirProvider]).
      */
     @Test fun displayOnlyTextsAreCleanedOnRead() {
         val clean = { t: String? -> t == null || (t.none { it.isISOControl() || Character.getType(it) == Character.FORMAT.toInt() && it != '‌' && it != '‍' ||
@@ -233,14 +236,15 @@ class BackupAdversarialTest {
             for (keys in listOf(true, false)) for (keep in listOf(null, PREVIOUS)) {
                 val c = Backup.read(Backup.export(b, "3.0.2", 0, keys))
                 val r = phone.restoredFrom(c.setup, keep, 0, c.keys)!!
-                val texts = (r.routes.map { it.loc } + r.favorites).flatMap { listOf(it.countryCode, it.country, it.city) + listOfNotNull(it.pinned).flatMap { p -> listOf(p.name, p.city, p.country) } } + r.routes.map { it.tsName }
+                val texts = (r.routes.map { it.loc } + r.favorites).flatMap { listOfNotNull(it.pinned).flatMap { p -> listOf(p.city, p.country) } } + r.routes.map { it.tsName }
                 assertTrue(texts.filterNot(clean).toString().take(200), texts.all(clean))
+                assertEquals(listOf("Sweden$n", n, n), r.route("p")!!.loc.let { listOf(it.country, it.city, it.pinned!!.name) })
                 assertEquals("se-got", r.route("p")!!.loc.region)
                 assertEquals(evil.host, r.route("p")!!.loc.pinned!!.host)
                 Backup.valid(r)
             }
         }
-        // A provider's own names are unchanged by the cleaning, so a cleaned route or favourite still matches its list.
+        // A provider's own names are unchanged by the cleaning, so a pinned server's place reads as its provider names it.
         val names = mutableListOf<String>()
         fun walk(e: kotlinx.serialization.json.JsonElement, k: String?) {
             when (e) {
@@ -256,6 +260,48 @@ class BackupAdversarialTest {
         assertEquals(emptyList<String>(), names.filter { Backup.safe(it, Backup.SHOWN) != it })
     }
 
+    /**
+     * A place or pinned server name from a file still matches its provider's list, its favourite and the same route here
+     * whatever it holds: a list that names a place with an invisible character, a decomposed accent, another script or
+     * more than [Backup.SHOWN] characters.
+     */
+    @Test fun placesFromAFileStillMatchTheirProvider() {
+        for (place in listOf("Bosnia­and Herzegovina‎", "Côte d'Ivoire", "東京", "Россия", "ایران‌زمین", "Ville ".repeat(20))) {
+            val e = app.unbraid.data.Catalog.Entry("wireguard", country = place, city = place, serverName = place, hostname = "a.example.net", wgpubkey = "k", ips = listOf("203.0.113.5"))
+            val l = Location("mullvad", countryCode = "SE", country = place, city = place, region = "se-got", pinned = evil.copy(name = place))
+            val here = phone.copy(routes = phone.routes + Route("p", l), favorites = listOf(l))
+            for (keys in listOf(true, false)) {
+                val c = Backup.read(Backup.export(here, "3.0.2", 0, keys))
+                val r = here.restoredFrom(c.setup, null, 0, c.keys)!!
+                val got = r.route("p")!!.loc
+                assertEquals(place, 1, app.unbraid.data.Catalog.pick(listOf(e), got.copy(region = null)).size)
+                assertEquals(place, l.ident(), got.ident())
+                assertEquals(place, l.favKey(), r.favorites.single().favKey())
+                assertEquals(place, Backup.bare(l), got)
+            }
+        }
+    }
+
+    /**
+     * A country code and a group go into provider and speed-test requests: from a file they are kept only in the shape
+     * every provider uses, so no line break or other text can reach a request; the route still restores.
+     */
+    @Test fun codesAndGroupsFromAFileNeverCarryARequest() {
+        for ((code, kept) in listOf("SE" to "SE", "se" to "se", "GBR" to "GBR", "S\r\nX-Injected: 1" to null, "SE\n" to null, "" to null, "S" to null, "SÉ" to null, "S1" to null)) {
+            for ((group, g) in listOf("legacy_p2p" to "legacy_p2p", "legacy_p2p\r\nX: y" to null, "a&limit=1" to null)) {
+                val l = Location("nord", 208, code, "Sweden", group = group)
+                val c = Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("p", l), favorites = listOf(l)), "3.0.2", 0))
+                assertEquals(code, l.copy(countryCode = kept, group = g), c.setup.route("p")!!.loc)
+                assertEquals(code, l.copy(countryCode = kept, group = g), c.setup.favorites.single())
+            }
+        }
+        // At the speed test's own request, whatever the source: only two letters, and no path with a line break.
+        assertEquals("SE", app.unbraid.stats.Ndt7.code("se"))
+        for (bad in listOf("SWE", "S\r\nX", "S", "", null)) assertNull(app.unbraid.stats.Ndt7.code(bad))
+        val e = try { app.unbraid.vpn.Probe.get("none", "example.net", "/a?country=S\r\nX: y"); null } catch (e: IllegalArgumentException) { e }
+        assertEquals("Bad request path", e?.message)
+    }
+
     /** A website an older version saved, that the stricter reader of today refuses, keeps the backup restorable: it stays as this phone keeps it. */
     @Test fun anOlderWebsiteNameKeepsTheBackupRestorable() {
         val old = phone.copy(sites = phone.sites + ("x.0xff" to "nl") + ("xn--lcka6bwa0bnl60b.jp" to DIRECT), profiles = listOf(Profile("Work", "nl", sites = mapOf("y.0x1f" to DIRECT))))
@@ -267,6 +313,22 @@ class BackupAdversarialTest {
         assertFalse(RestoreTraffic.notes(phone, restored).toString(), RestoreTraffic.UNKNOWN in RestoreTraffic.notes(phone, restored))
         assertEquals(DIRECT, c.setup.profiles.single().sites["y.0x1f"])
         for (bad in listOf("Example.com", "x..com", "-x.com", "x.123", "com", "a b.com")) assertEquals(bad, Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(sites = mapOf(bad to "nl")), "3.0.2", 0)) })
+    }
+
+    /** A name with nothing visible in it, joiners and other invisible characters only, is printed as the sheet's fallback; joiners inside a name stay. */
+    @Test fun aNameWithNothingVisibleGetsTheFallback() {
+        val invisible = listOf("‍", "‌", "⁠", "­", "﻿", "‍‌", " ‍ ", "⁠­﻿‍", "͏️", "ㅤ", "󠀁")
+        for (n in invisible) assertEquals(n.map { "%04x".format(it.code) }.toString(), "a VPN", Backup.label(n, "a VPN"))
+        for (n in listOf("👩‍💻", "می‌خواهم", "Lab‍VPN")) assertEquals(n, Backup.label(n, "a VPN"))
+        assertEquals("LabVPN", Backup.label("⁠Lab­VPN﻿", "a VPN"))
+        // The own-server sentences fall back to "An own server" on an empty label.
+        assertEquals("", Backup.label("‍‌", "", 256))
+        // The sentence the reviewer saw: an own server named only a joiner, the default route restored to Direct.
+        val joined = wg.copy(name = "‍")
+        val here = phone.copy(routes = phone.routes.map { if (it.id == "w") it.copy(wg = joined) else it }, servers = listOf(OwnServer("s", wg = joined)), defaultRoute = "w")
+        val c = Backup.read(Backup.export(here, "3.0.2", 0))
+        assertEquals("‍", c.setup.servers.single().name)
+        assertEquals("The default route goes from a VPN to Direct.", RestoreTraffic.notes(here, here.copy(defaultRoute = DIRECT)).first())
     }
 
     /** Counting in another script is a pattern too: one through eight in Chinese numerals is not a hard passphrase. */
@@ -337,6 +399,17 @@ class BackupAdversarialTest {
         val now = then.copy(routes = listOf(Route("r", ovpn = office("198.51.100.22"))))
         val restored = now.restoredFrom(o.setup, null, 0, o.keys)!!
         assertTrue(restored.route("r")!!.keyless && restored.servers.single().keyless)
+        // Everything the file keeps must match: a WireGuard route here with other allowed addresses is not taken for it.
+        assertTrue(here.copy(routes = listOf(Route("w", wg = wg.copy(allowedIps = listOf("10.0.0.0/8"))))).restoredFrom(c.setup, null, 0, c.keys)!!.servers.single().keyless)
+        // Nor a Shadowsocks route here without the plugin the file names: the route waits for its config, plugin intact.
+        val ss = app.unbraid.data.SsProfile("Box", "203.0.113.30", 8388, "aes-256-gcm", "secret", "obfs-local", "obfs=http")
+        val sThen = Setup(routes = listOf(Route("s", ss = ss)), defaultRoute = "s", version = VERSION)
+        val so = Backup.read(Backup.export(sThen, "3.0.2", 0, keys = false))
+        val bare = sThen.copy(routes = listOf(Route("s", ss = ss.copy(plugin = null, pluginOpts = null)))).restoredFrom(so.setup, null, 0, so.keys)!!.route("s")!!
+        assertTrue(bare.keyless)
+        assertEquals("obfs-local", bare.ss!!.plugin)
+        // The same route, plugin and all, still gives it back.
+        assertEquals(ss, sThen.restoredFrom(so.setup, null, 0, so.keys)!!.route("s")!!.ss)
     }
 
     @Test fun everySaveNeedsEightCharactersAndKeysNeedAHardOne() {

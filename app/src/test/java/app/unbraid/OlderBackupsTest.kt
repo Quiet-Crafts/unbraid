@@ -33,8 +33,8 @@ class OlderBackupsTest {
      * 1. A provider's pinned server keeps only its name and host, and IVPN's block list starts from the standard one
      *    (compared without either, [plain]).
      * 2. A route saved without keys that had no own server (one was made up in the file) gets its config back from this
-     *    phone's same route, when the file carries that server's identity: WireGuard's address and key, Shadowsocks'
-     *    address, port and method. An OpenVPN file carries only a name, so the route waits for its config, as in 3.0.2.
+     *    phone's same route, only when that route's config, stripped of its secrets here, equals the file's entry. An
+     *    OpenVPN file carries only a name, so the route waits for its config, as in 3.0.2.
      * 3. Then the kept current setup shares that route ([shared]).
      * 4. Display-only texts are cleaned on read ([Backup.shown]; compared cleaned, [plain]).
      */
@@ -43,9 +43,12 @@ class OlderBackupsTest {
     }.mapNotNull { k ->
         file.routes.filter { it.own == k.id }.firstNotNullOfOrNull { x ->
             phone.route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }
-                ?.takeIf { k.ovpn == null && k.sameAs(it) }
+                ?.takeIf { k.ovpn == null && stripped(it) == k }
         }?.let { k.id to it }
     }.fold(expected) { s, (id, sv) -> s.refilled(id, sv) ?: s }
+
+    /** [o] with its keys and passwords taken out by hand, as a file saved without keys holds it. */
+    private fun stripped(o: OwnServer) = o.copy(keyless = true, wg = o.wg?.copy(privateKey = "", presharedKey = null), ss = o.ss?.copy(password = "", pluginOpts = null))
 
     /**
      * 3. The current setup kept as a profile shares a route difference 2 filled in (in [s], not in [was]) instead of
