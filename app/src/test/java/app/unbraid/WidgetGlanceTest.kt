@@ -47,6 +47,21 @@ class WidgetGlanceTest {
         assertTrue(g.protects)
     }
 
+    /**
+     * A route used only by a saved website whose rule doesn't apply (printer.lan while the local network bypasses the
+     * VPN) still has its tunnel open, so the widget lists it and shows it failing; its website count stays 0.
+     */
+    @Test fun aRouteWithOnlyANotAppliedWebsiteIsListed() {
+        val s = Setup(routes = listOf(r("it", "IT", "Italy")), defaultRoute = DIRECT, sites = mapOf("printer.lan" to "it"))
+        assertTrue(s.prefs.lan)
+        assertEquals(emptyMap<String, String>(), app.unbraid.data.Sites.applied(s))
+        val g = glance(VpnState(Phase.On, servers = mapOf("it" to srv), stalled = setOf("it")), s, NET)
+        assertEquals(listOf("Italy"), g.others.map { it.name })
+        assertEquals(listOf(true), g.others.map { it.failing })
+        assertEquals(listOf(0), g.others.map { it.sites })
+        assertEquals(0 to 1, g.ok to g.total)
+    }
+
     @Test fun aRouteFailsWhenItStallsStopsAnsweringKeepsDroppingOrHasNoTunnel() {
         fun down(v: VpnState) = glance(v, setup).let { g -> (listOfNotNull(g.default) + g.others).filter { it.failing }.map { it.code } }
         assertEquals(listOf("IT"), down(VpnState(Phase.On, servers = servers, stalled = setOf("it"))))
@@ -168,12 +183,12 @@ class WidgetGlanceTest {
         glance(VpnState(Phase.On, servers = servers), setup, NET).let { assertNull(it.count(true)); assertEquals(", routes not checked", it.spoken) }
     }
 
-    /** Only websites whose rule applies put a route in use, as in the engine: a name on the own network doesn't. */
-    @Test fun aWebsiteTheEngineLeavesOutPutsNoRouteInUse() {
+    /** A saved website puts its route in use, as in the engine, whether its rule applies or not; only applied ones count as its websites. */
+    @Test fun aWebsiteTheEngineLeavesOutStillPutsItsRouteInUse() {
         val s = Setup(routes = listOf(r("nl", "NL", "Netherlands"), r("it", "IT", "Italy")), defaultRoute = "nl", sites = mapOf("printer.lan" to "it"))
         val g = glance(VpnState(Phase.On, servers = mapOf("nl" to srv, "it" to srv)), s, NET)
-        assertTrue(g.others.isEmpty())
-        assertEquals(1, g.all)
+        assertEquals(listOf("Italy" to 0), g.others.map { it.name to it.sites })
+        assertEquals(2, g.all)
     }
 
     /** A route only websites use is in use: listed, counted and checked like one with apps. */

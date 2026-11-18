@@ -126,8 +126,9 @@ fun glance(vpn: VpnState, setup: Setup, net: Long? = null, held: Boolean = false
         return WidgetRoute(r.code, if (r.imported) r.source else r.name, r.hue, apps, direct = false, live = on, failing = f, sites = sites, working = !f && working(r), missing = missing(id))
     }
     val default = row(setup.defaultRoute)
-    // A route is in use through its apps or through websites alone.
-    val others = (setup.apps.values.toSet() + applied.values - setup.defaultRoute).mapNotNull(::row).sortedWith(compareBy({ !it.failing }, { it.direct }, { it.name.lowercase() }))
+    // A route is in use through its apps or through saved websites alone, applied or not: its tunnel is open either way
+    // ([Setup.activeRoutes]). Only the per-row website count is of applied ones.
+    @OptIn(app.unbraid.data.SavedSites::class) val others = (setup.apps.values.toSet() + setup.sites.values - setup.defaultRoute).mapNotNull(::row).sortedWith(compareBy({ !it.failing }, { it.direct }, { it.name.lowercase() }))
     val tunnels = (listOfNotNull(default) + others).filter { !it.direct }
     val known = tunnels.filter { it.failing || it.working }
     return Glance(
