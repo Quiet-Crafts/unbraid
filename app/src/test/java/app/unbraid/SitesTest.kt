@@ -199,25 +199,20 @@ class SitesTest {
         assertEquals("Covers nas.lan and every address under it", app.unbraid.ui.siteHint(s, "nas.lan", app.unbraid.data.BLOCK))
     }
 
-    /** A name an older version saved that today's reader refuses is listed, marked, routed as before and removable. */
+    /**
+     * A name an older version saved that today's reader refuses is listed, routed as before and removable. Its row says
+     * only where it goes, whether a browser opens it or not ("xn--n3h.com" opens as a snowman name; "x.0xff" doesn't).
+     */
     @Test fun aNameSavedByAnOlderVersionStaysUsable() {
-        val old = listOf("x.0xff", "xn--ax-iuk.com") // a number as the last label; a Hangul filler browsers drop
+        val old = listOf("x.0xff", "xn--ax-iuk.com", "xn--n3h.com", "123.xn--mgbh0fb.com") // a number as the last label; a Hangul filler browsers drop; a symbol; a digit-leading label beside a right-to-left one
         val s = setup.copy(sites = old.associateWith { "it" })
         for (n in old) {
-            assertNull(n, Sites.clean(n)); assertEquals(n, Sites.shown(n)); assertTrue(n, n in Sites.readings(n))
-            assertEquals("Italy · not an address browsers open", siteState(s, n))
+            assertNull(n, Sites.clean(n)); assertTrue(n, Sites.stored(n)); assertTrue(n, n in Sites.readings(n))
+            assertEquals("Italy", siteState(s, n))
         }
-        assertEquals(old, shownSites(s, "", null)); assertEquals(old.toSet(), Sites.applied(s).keys)
+        assertEquals(old.sorted(), shownSites(s, "", null).sorted()); assertEquals(old.toSet(), Sites.applied(s).keys)
         assertTrue(compile(s).rules().any { it.strings("domain")?.containsAll(old) == true && it.text("outbound") == "r-it" })
-        assertEquals(listOf("xn--ax-iuk.com"), s.site(null, "x.0xff", null).sites.keys.toList())
-    }
-
-    /** A digit-leading label beside a right-to-left one: new input is refused, but a saved name browsers open is not called unopenable. */
-    @Test fun aSavedNameOnlyTheDirectionRuleRefusesIsNotCalledUnopenable() {
-        val n = "123.xn--mgbh0fb.com"
-        assertNull(Sites.clean(n)); assertTrue(Sites.stored(n)); assertTrue(Sites.opens(n))
-        assertEquals("Italy", siteState(setup.copy(sites = mapOf(n to "it")), n))
-        assertFalse(Sites.opens("xn--ax-iuk.com")); assertFalse(Sites.opens("x.0xff"))
+        assertEquals(old - "x.0xff", s.site(null, "x.0xff", null).sites.keys.toList())
     }
 
     /** A website that doesn't apply shows as protecting nothing and is in no count of what a route carries; its route keeps its tunnel, as in 3.0.2. */

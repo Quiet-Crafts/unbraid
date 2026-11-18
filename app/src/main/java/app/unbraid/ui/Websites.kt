@@ -66,10 +66,7 @@ import app.unbraid.data.Sites
 /** The website tile that takes a website's own route away. */
 internal const val NO_ROUTE = "none"
 
-/**
- * Where website [site] goes, for its row and for TalkBack, with the tailnet domain Tailscale [reported]. An address saved
- * by an older version that no browser opens says so.
- */
+/** Where website [site] goes, for its row and for TalkBack, with the tailnet domain Tailscale [reported]. */
 internal fun siteState(s: Setup, site: String, reported: String? = null): String {
     val id = s.sites[site]
     val off = Sites.off(site, id, s, reported = reported)
@@ -80,7 +77,7 @@ internal fun siteState(s: Setup, site: String, reported: String? = null): String
         off != null -> "Not applied: ${off.why}"
         id == DIRECT -> "Direct, skips the VPN"
         else -> s.route(id)?.name ?: "A route that no longer exists"
-    } + if (!Sites.opens(site)) " · not an address browsers open" else ""
+    }
 }
 
 /** The website rows of a Routes page: each route's websites whose rule applies, A to Z. */

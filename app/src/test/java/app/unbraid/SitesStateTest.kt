@@ -90,7 +90,7 @@ class SitesStateTest {
     @Test fun onARouteWithoutATunnel() = cell(base.copy(sites = mapOf("example.com" to "it")), "example.com", "Italy", true, "reject", "reject", blocked = setOf("it"))
 
     /** A name an older version saved that today's reader refuses applies as it did. */
-    @Test fun aNameNoLongerReadable() = cell(base.copy(sites = mapOf("x.0xff" to "it")), "x.0xff", "Italy · not an address browsers open", true, "r-it", "r-it")
+    @Test fun aNameNoLongerReadable() = cell(base.copy(sites = mapOf("x.0xff" to "it")), "x.0xff", "Italy", true, "r-it", "r-it")
 
     /** Turning the local network bypass off makes a website apply again: that counts as a change that moves traffic off Direct, so what refuses it until its route is ready is installed at once. */
     @Test fun aWebsiteThatStartsApplyingLeavesDirect() {
