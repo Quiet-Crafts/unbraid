@@ -222,6 +222,36 @@ class StoreTest {
     }
 
     /**
+     * A broken key (one the Keystore keeps but that no longer works, seen after some system updates) is deleted by Start
+     * fresh and replaced, and saving works again; a phone where no new key works either is told the reset failed.
+     */
+    @Test fun startFreshReplacesABrokenKey() {
+        val broken = javax.crypto.spec.SecretKeySpec(ByteArray(5), "AES") // a key no cipher accepts
+        val dir = tmp.newFolder().also(::saved)
+        File(dir, "setup.bin").writeText("garbage")
+        var dropped = 0
+        val s = Store(dir, dropKey = { dropped++ }) { if (dropped > 0) key else broken }
+        assertTrue(s.unreadable.value)
+        assertTrue(s.startFresh())
+        assertEquals(1, dropped)
+        assertTrue(s.update { it.copy(defaultRoute = "new") })
+        assertEquals("new", Store(dir) { key }.setup.value.defaultRoute)
+
+        val never = tmp.newFolder().also(::saved)
+        File(never, "setup.bin").writeText("garbage")
+        // The old key still opened the sign-ins at start; once deleted, no new key works.
+        var drops = 0
+        val t = Store(never, dropKey = { drops++ }) { if (drops == 0) key else broken }
+        assertEquals(mapOf("nord" to "blob"), t.accounts.value)
+        assertFalse(t.startFresh())
+        assertTrue(t.unreadable.value)
+        // Nothing read before the reset comes back: trying again opens a new install, never the old sign-ins.
+        assertTrue(t.reopen())
+        assertTrue(t.accounts.value.isEmpty())
+        assertTrue(t.setup.value.pristine)
+    }
+
+    /**
      * Start fresh is a new install: the setup is pristine, a release list kept aside and the sign-in times go too, and a
      * list kept aside later in the same run is tried again.
      */

@@ -56,7 +56,8 @@ class SignedOut(val blob: String, val kept: Boolean) {
  * Everything Unbraid persists. Plain JSON files in private storage; secrets AES-GCM sealed by the Keystore. [dir] and
  * [keyOf] can be swapped for tests.
  */
-class Store(private val dir: File, private val keyOf: (create: Boolean) -> SecretKey = ::keystoreKey) {
+// [keyOf] stays last, so `Store(dir) { key }` keeps naming the key.
+class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeystoreKey, private val keyOf: (create: Boolean) -> SecretKey = ::keystoreKey) {
     constructor(ctx: Context) : this(ctx.filesDir)
     private val json = NordApi.json
     /**
@@ -66,8 +67,14 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
     private val explicit = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     // Declared before anything that loads sealed files at construction. A new key only while no sealed file exists: a
-    // key missing beside them throws, and a failed lazy runs again on the next use, so those files are never orphaned.
-    private val key: SecretKey by lazy { keyOf(listOf(SETUP, ACCOUNTS, TS_STATE, RELEASES, RELEASES_BAD).none { File(dir, it).exists() }) }
+    // key missing beside them throws, and a failed lookup runs again on the next use, so those files are never orphaned.
+    // Cached once found; [startFresh] drops it.
+    private val keyLock = Any()
+    @Volatile private var cachedKey: SecretKey? = null
+    private val key: SecretKey
+        get() = cachedKey ?: synchronized(keyLock) {
+            cachedKey ?: keyOf(listOf(SETUP, ACCOUNTS, TS_STATE, RELEASES, RELEASES_BAD).none { File(dir, it).exists() }).also { cachedKey = it }
+        }
 
     /**
      * True while the saved settings or sign-ins exist but won't open. Nothing changes them then, in memory or on disk,
@@ -325,7 +332,14 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         // The domain table only when no engine has it open (one keeping apps offline meanwhile): that engine deletes it
         // once it has stopped, so a new table never starts in the same block.
         app.unbraid.vpn.LookupTable.forget(dir)
+        // The key too, with nothing sealed left that it would orphan: a broken one (seen on some phones after a system
+        // update) would keep every save failing after a reset that said it worked. The new one must seal and open once.
+        runCatching(dropKey).onFailure { Log.w("Unbraid", "store: old key not deleted") }
+        synchronized(keyLock) { cachedKey = null }
+        // Memory as a new install whatever comes next, so nothing read before the reset comes back with a later reopen.
         _setup.value = newSetup(); _accounts.value = emptyMap(); failed(false, false, false); asideTried = false; newer = false
+        // No key that works: the screen stays, and the next try asks the Keystore again.
+        if (!sealWorks()) { synchronized(keyLock) { cachedKey = null }; return false }
         bad.removeAll { !File(dir, it).exists() }
         _unreadable.value = bad.isNotEmpty()
         !_unreadable.value
@@ -480,6 +494,14 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         return durable(name, c.iv + c.doFinal(value.toByteArray()))
     }
 
+    /** True when the key seals a value and opens it again. */
+    private fun sealWorks() = runCatching {
+        val probe = "unbraid".toByteArray()
+        val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key) }
+        val sealed = c.doFinal(probe)
+        Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, c.iv)) }.doFinal(sealed).contentEquals(probe)
+    }.getOrDefault(false)
+
     /** Null when [name] doesn't exist; throws when it won't read or open. */
     private fun open(name: String): String? {
         val b = File(dir, name).takeIf { it.exists() }?.readBytes() ?: return null
@@ -503,6 +525,9 @@ class Store(private val dir: File, private val keyOf: (create: Boolean) -> Secre
         val accountsSer = MapSerializer(String.serializer(), String.serializer())
         val releasesSer = ListSerializer(PendingRelease.serializer())
         val datesSer = MapSerializer(String.serializer(), Long.serializer())
+
+        /** Deletes the app's key, for [startFresh]: the next use makes a new one. */
+        fun dropKeystoreKey() = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.deleteEntry(ALIAS)
 
         /** The app's key; a new one only when [create] (no sealed file it would orphan), else a missing one throws. */
         fun keystoreKey(create: Boolean): SecretKey {
