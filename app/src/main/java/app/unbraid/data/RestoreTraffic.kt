@@ -427,8 +427,8 @@ object RestoreTraffic {
     }
 
     /**
-     * What a restore makes weaker, by what it is said for; [later]: what gets weaker only once a route waiting for its
-     * config gets it; [leaving]: apps that go outside unbraid (left out by Android), where no website rule, filter or home
+     * What a restore makes weaker, by what it is said for; [later]: what gets weaker once the routes waiting for their
+     * config get it, both setups compared that way (the sheet says what it adds to now); [leaving]: apps that go outside unbraid (left out by Android), where no website rule, filter or home
      * tunnel reaches them, with the worst their own traffic loses; [cut] when the budget left part of it unchecked.
      */
     data class Found(val losses: Map<Who, Set<Loss>>, val leaving: Map<Who, Loss?> = emptyMap(), val cut: Boolean = false, val later: Map<Who, Set<Loss>> = emptyMap())
@@ -436,8 +436,13 @@ object RestoreTraffic {
     private class Program(val pkgs: Set<String>, val members: List<Set<String>>, val ping: Boolean = false)
     private class Name(val name: String?, val members: List<String>)
     private class Address(val ip: Long, val home: Boolean, val local: Boolean)
-    /** Two steps and what the second loses; [later]: the steps of routes waiting for their config, as once it is added. */
-    private class Duo(val was: Step, val now: Step, val losses: Set<Loss>, val later: Boolean = false)
+    /**
+     * Two steps and what the second loses; [later]: the steps of routes waiting for their config, as once it is added.
+     * [then]: those, compared on their own, beside the steps now.
+     */
+    private class Duo(val was: Step, val now: Step, val losses: Set<Loss>, val later: Boolean = false, val then: Duo? = null) {
+        val phases get() = listOfNotNull(this, then)
+    }
 
     /** The first of [base], then [base] numbered, that [taken] refuses: a probe no rule names. */
     private fun fresh(base: (Int) -> String, taken: (String) -> Boolean) = generateSequence(0) { it + 1 }.map(base).first { !taken(it) }
@@ -516,16 +521,21 @@ object RestoreTraffic {
             // UDP goes as TCP does but where an exit carries TCP only.
             val nets = if (all.any { it.tcpOnly.isNotEmpty() }) listOf("tcp", "udp") else listOf("tcp")
 
+            // Now, and once the routes waiting for their config get it: two comparisons, each on its own.
             fun duo(lookup: Boolean = false, f: (Config) -> Step?): Duo? {
                 val a = f(side.was) ?: return null
                 val b = f(side.now) ?: return null
-                if (side.wasGiven == null || side.nowGiven == null || a.out.exit != REJECT || b.out.exit != REJECT) return Duo(a, b, losses(a.out, b.out, lookup))
-                // Refused on both sides, but maybe by a route waiting for its config: compared again as once it is added.
-                val c = f(side.wasGiven) ?: return null
-                val e = f(side.nowGiven) ?: return null
-                return if (c.out.exit == REJECT && e.out.exit != REJECT) Duo(a, b, setOf(Loss.Unblocked)) else Duo(c, e, losses(c.out, e.out, lookup), later = true)
+                val then = if (side.wasGiven == null || side.nowGiven == null) null else {
+                    val c = f(side.wasGiven) ?: return null
+                    val e = f(side.nowGiven) ?: return null
+                    Duo(c, e, losses(c.out, e.out, lookup), later = true)
+                }
+                return Duo(a, b, losses(a.out, b.out, lookup), then = then)
             }
             val say = { w: Set<Who>, d: Duo, l: Loss -> w.forEach { (if (d.later) later else lost).getOrPut(it) { mutableSetOf() } += l } }
+            // Each phase of [d] said against the same phase of the program's own traffic [own], for [pe] of that phase.
+            fun told(d: Duo, own: Duo, pe: List<Set<Who>>, w: (Duo, Duo, Set<Who>, Loss) -> Set<Who>?) =
+                d.phases.zip(own.phases).forEachIndexed { i, (x, o) -> x.losses.forEach { l -> w(x, o, pe[i], l)?.let { say(it, x, l) } } }
             // The default program's own traffic and lookups: what traffic no app is named for is judged against.
             var dflt: Duo? = null
             val dfltLookups = HashMap<String, Duo>()
@@ -540,14 +550,15 @@ object RestoreTraffic {
                 val ownName = if (p.ping) null else top
                 val own = duo { walk(it, p.pkgs, ownName, public.ip, protos[0], null) } ?: return null
                 if (pi == 0) dflt = own
-                val pe = entity(p, own, keys, dflt)
-                own.losses.forEach { say(pe, own, it) }
+                // What its own traffic is said for, in each phase, and what it loses there.
+                val mine = { o: Duo, d: Duo? -> o.phases.mapIndexed { i, x -> entity(p, x, keys, d?.phases?.getOrNull(i)).also { e -> x.losses.forEach { say(e, x, it) } } } }
+                val pe = mine(own, dflt)
                 val left = { s: Step -> s.by == By.AppFirst && s.out.exit == DIRECT_TAG }
-                if (left(own.now) && !left(own.was)) pe.filterIsInstance<Who.App>().forEach { leaving[it] = own.losses.minOrNull() }
+                if (left(own.now) && !left(own.was)) pe[0].filterIsInstance<Who.App>().forEach { leaving[it] = own.losses.minOrNull() }
                 // Its own lookups of each question type, which its other lookups are judged against.
                 val ownLookups = if (p.ping) emptyMap() else types.associateWith { q -> duo(true) { lookup(it, p.pkgs, top, q) } ?: return null }
                 if (pi == 0) dfltLookups.putAll(ownLookups)
-                val lookupEntities = ownLookups.mapValues { (q, o) -> entity(p, o, keys, dfltLookups[q]).also { e -> o.losses.forEach { say(e, o, it) } } }
+                val lookupEntities = ownLookups.mapValues { (q, o) -> mine(o, dfltLookups[q]) }
                 for (n in names) {
                     if (p.ping && n.name != null) continue
                     // Beyond the budget an app meets only its own traffic; the sheet says so.
@@ -557,13 +568,13 @@ object RestoreTraffic {
                         val first = duo { walk(it, p.pkgs, n.name, addresses[0].ip, net, t) } ?: return null
                         for ((ai, a) in addresses.withIndex()) {
                             val d = if (ai == 0 || !t.hit) first else duo { walk(it, p.pkgs, n.name, a.ip, net, null) } ?: return null
-                            if (d.losses.isEmpty() || (net == protos[0] && n.name == ownName && a === public)) continue
-                            d.losses.forEach { l -> if (!opensNearby(d, l)) say(who(n, a, d, own, pe, place, l), d, l) }
+                            if (net == protos[0] && n.name == ownName && a === public) continue
+                            told(d, own, pe) { x, o, e, l -> if (opensNearby(x, l)) null else who(n, a, x, o, e, place, l) }
                         }
                     }
                     if (n.name != null && n.name != top && !p.ping) for (q in types) {
                         val d = duo(true) { lookup(it, p.pkgs, n.name, q) } ?: return null
-                        d.losses.forEach { l -> say(who(n, null, d, ownLookups.getValue(q), lookupEntities.getValue(q), place, l), d, l) }
+                        told(d, ownLookups.getValue(q), lookupEntities.getValue(q)) { x, o, e, l -> who(n, null, x, o, e, place, l) }
                     }
                 }
             }
@@ -844,9 +855,13 @@ object RestoreTraffic {
         val filter = with(Loss.Filter)
         if (filterOff) out += Note(FILTER_OFF, Loss.Filter, filter) else say(filter, Loss.Filter)
         for (l in listOf(Loss.ProviderBlocking, Loss.Blocking, Loss.Udp)) say(with(l), l)
-        // What a route waiting for its config does differently once it gets it: after the restore it would.
-        val then = found.later.filterValues { it.isNotEmpty() }.mapValues { (_, l) -> l.minBy { it.ordinal } }
-        for (l in VERB.keys) say(then.filterValues { it == l }.keys, l, "once a server's config is added again, ")
+        // What gets weaker once a route waiting for its config gets it, where it is worse than what is said for now.
+        val later = found.later.filterValues { it.isNotEmpty() }
+        val then = later.mapValues { (_, l) -> l.minBy { it.ordinal } }.filter { (w, l) -> found.losses[w].orEmpty().none { it <= l } }
+        val again = "once a server's config is added again, "
+        for (d in listOf(true, false)) say(then.filter { (w, l) -> l == Loss.Unblocked && (Loss.ToDirect in later.getValue(w)) == d }.keys, Loss.Unblocked, again) { many ->
+            (if (many) "are no longer blocked" else "is no longer blocked") + if (!d) "" else if (many) " and go Direct" else " and goes Direct" }
+        for (l in VERB.keys) say(then.filterValues { it == l }.keys, l, again)
         if (found.cut) out += Note(CUT)
         return out
     }

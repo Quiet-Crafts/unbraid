@@ -199,14 +199,15 @@ class RestoreOracleTest {
         return l
     }
 
-    private class Duo(val was: Step, val now: Step, val losses: Set<Loss>, val later: Boolean = false)
+    /** Now, and [then]: once every waiting route has its config, both setups so; each compared on its own. */
+    private class Duo(val was: Step, val now: Step, val losses: Set<Loss>, val later: Boolean = false, val then: Duo? = null) {
+        val phases get() = listOfNotNull(this, then)
+    }
 
     private fun duo(a: Setup, b: Setup, l: Boolean, lookup: Boolean = false, f: (Model) -> Step): Duo {
         val x = f(Model(a, l)); val y = f(Model(b, l))
-        if (x.out.exit != REJECT || y.out.exit != REJECT) return Duo(x, y, weaker(x.out, y.out, lookup))
         val gx = f(Model(a, l, true)); val gy = f(Model(b, l, true))
-        if (gx.out.exit == REJECT && gy.out.exit != REJECT) return Duo(x, y, setOf(Loss.Unblocked))
-        return Duo(gx, gy, weaker(gx.out, gy.out, lookup), later = true)
+        return Duo(x, y, weaker(x.out, y.out, lookup), then = Duo(gx, gy, weaker(gx.out, gy.out, lookup), later = true))
     }
 
     // The spec of what a loss is said for, as the restore sheet's model states it.
@@ -267,21 +268,21 @@ class RestoreOracleTest {
             for (p in listOf(OTHER, OWNERLESS, PING) + appKeys) {
                 val ownName = if (p == PING) null else "free.test"
                 val own = duo(a, b, l) { it.connect(p, ownName, "203.0.113.80") }
-                val pe = entity(p, own, dflt)
-                own.losses.forEach { add(pe, own, it) }
+                // Each phase on its own: what the program's own traffic is said for, and what each connection loses there.
+                val mine = { o: Duo, d: Duo -> o.phases.zip(d.phases).map { (x, y) -> entity(p, x, y).also { e -> x.losses.forEach { add(e, x, it) } } } }
+                val each = { d: Duo, o: Duo, e: List<Set<Who>>, w: (Duo, Duo, Set<Who>, Loss) -> Set<Who>? -> d.phases.forEachIndexed { i, x -> x.losses.forEach { l -> w(x, o.phases[i], e[i], l)?.let { add(it, x, l) } } } }
+                val pe = mine(own, dflt)
                 val left = { s: Step -> s.by == By.AppFirst && s.out.exit == "direct" }
-                if (left(own.now) && !left(own.was)) pe.filterIsInstance<Who.App>().forEach { leaving[it] = own.losses.minOrNull() }
+                if (left(own.now) && !left(own.was)) pe[0].filterIsInstance<Who.App>().forEach { leaving[it] = own.losses.minOrNull() }
                 for (net in if (p == PING) listOf("icmp") else listOf("tcp", "udp"))
                     for (n in listOf<String?>(null) + if (p == PING) emptyList() else names) for (ip in addresses) {
                         if (net != "udp" && n == ownName && ip == "203.0.113.80") continue
-                        val d = duo(a, b, l) { it.connect(p, n, ip, net) }
-                        d.losses.forEach { x -> if (!(x == Loss.ToDirect && Loss.Unblocked in d.losses && d.now.by == By.Address)) add(who(n, place(ip), d, own, pe, sites, x), d, x) }
+                        each(duo(a, b, l) { it.connect(p, n, ip, net) }, own, pe) { d, o, e, x -> if (x == Loss.ToDirect && Loss.Unblocked in d.losses && d.now.by == By.Address) null else who(n, place(ip), d, o, e, sites, x) }
                     }
                 if (p != PING) for (q in listOf("TXT", "HTTPS")) {
                     val ownL = duo(a, b, l, true) { it.lookup(p, "free.test", q) }
-                    val peL = entity(p, ownL, dfltLookup.getValue(q))
-                    ownL.losses.forEach { add(peL, ownL, it) }
-                    for (n in names - "free.test") duo(a, b, l, true) { it.lookup(p, n, q) }.let { d -> d.losses.forEach { x -> add(who(n, null, d, ownL, peL, sites, x), d, x) } }
+                    val peL = mine(ownL, dfltLookup.getValue(q))
+                    for (n in names - "free.test") each(duo(a, b, l, true) { it.lookup(p, n, q) }, ownL, peL) { d, o, e, x -> who(n, null, d, o, e, sites, x) }
                 }
             }
         }

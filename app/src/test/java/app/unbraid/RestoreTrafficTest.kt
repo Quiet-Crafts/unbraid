@@ -483,6 +483,20 @@ class RestoreTrafficTest {
         assertEquals(setOf(false, true), RestoreTraffic.situations(wgDefault, wgDefault.copy(defaultRoute = "t")).map { it.signIn }.toSet())
     }
 
+    /** Now and once a waiting route gets its config are compared apart, each said in its own sentences. */
+    @Test fun nowAndOnceAConfigIsAddedAreSaidApart() {
+        // Blocked now and moved to a route waiting for its config: refused both now, open once the config is added.
+        val blocked = base.copy(sites = mapOf("bank.example" to BLOCK))
+        assertEquals(listOf("Once a server's config is added again, 1 website is no longer blocked."), notes(blocked, blocked.copy(sites = mapOf("bank.example" to "k1"))))
+        // The filter on VPN routes now; a default route waiting for its config without it: refused now, unfiltered once added.
+        val filtered = base.copy(prefs = Prefs(filter = Filter("adguard", routes = true)))
+        assertEquals(listOf("Once a server's config is added again, the default route loses the DNS filter."),
+            notes(filtered, filtered.copy(defaultRoute = "k1", prefs = Prefs(filter = Filter("adguard")))))
+        // A loss now that holds once the config is added too is said once, for now.
+        val vpn = base.copy(apps = mapOf("org.a" to "nl"))
+        assertEquals(listOf("1 app goes from a VPN route to Direct."), notes(vpn, vpn.copy(apps = mapOf("org.a" to DIRECT))))
+    }
+
     /** The largest setups a backup may hold, built to cost the most: bounded before anything is walked, and stopped when cancelled. */
     @Test fun aHostileBackupIsBoundedBeforeItIsWalked() {
         val box = { n: Int -> WgConf.parse("[Interface]\nPrivateKey = ${"A".repeat(42)}E=\nAddress = 10.9.0.2/32\n[Peer]\nPublicKey = ${"B".repeat(42)}E=\nEndpoint = 203.0.113.7:51820\nAllowedIPs = " +
