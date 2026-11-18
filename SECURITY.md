@@ -27,9 +27,10 @@ you're not sure where a problem belongs, send it here.
 routes, profiles, favourites, settings and own servers. Own servers' keys and passwords (including configs imported
 from a VPN provider with the login inside them) and the home WireGuard peer go in only when the user turns on
 *Include server keys and passwords*, which is off by default and can't be turned on when there is nothing for it to
-include; a passphrase the app rates easy to guess is then refused. Without them, an own server keeps only its name
+include; the passphrase must then get the app's best rating. Without them, an own server keeps only its name
 and kind, plus the server address and public key for WireGuard and Shadowsocks. After such a restore its routes stay blocked until its config is imported again, unless
-the phone already has that server, which keeps its config. The file never holds accounts signed in through unbraid's
+the phone already has that server with exactly the same settings, which keeps its config. A file never sets the
+address or key of a provider's server: after a restore, each provider looks its servers up again. The file never holds accounts signed in through unbraid's
 provider sign-in screens (their logins, tokens and device keys), Tailscale state or statistics.
 
 - **Key:** scrypt ([RFC 7914](https://www.rfc-editor.org/rfc/rfc7914)) with N = 2^16, r = 8 and p = 2 and a random
@@ -50,7 +51,8 @@ provider sign-in screens (their logins, tokens and device keys), Tailscale state
 Without the passphrase, the setup inside is unreadable. The file's size and its header (format, scrypt settings, salt,
 nonce and check value) stay visible, and the suggested file name holds the date it was saved. The
 passphrase is its weak point: anyone with the file can try to guess it, so a short or common one gives little
-protection. The app rates the passphrase as it is typed, and refuses a weak one when keys are included. A lost
+protection. Every passphrase needs at least 8 characters. The app rates it as it is typed, spotting repeats, sequences, keyboard
+walks and common passwords, and accepts only its best rating when keys are included. A lost
 passphrase can't be recovered.
 
 ## Supported versions
