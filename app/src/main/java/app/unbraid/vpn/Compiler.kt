@@ -566,11 +566,13 @@ object Compiler {
 
     /**
      * Routes whose WireGuard identity (client key on one server) is already taken, with other settings, by an earlier
-     * route or the home tunnel: one identity can be one tunnel only, two would knock each other off.
+     * route or the home tunnel: one identity can be one tunnel only, two would knock each other off. Decided in the saved
+     * order among every route the setup names, also one whose only use is a website another resolver answers (give its
+     * link in [links] too): the first of two clashing routes wins whatever answers a website.
      */
     fun clashes(s: Setup, links: Map<String, Link>): Set<String> {
         val seen = HashMap<String, String>().apply { s.home.wg?.let { put(wgIdentity(it), "home") } }
-        return s.activeRoutes.filter { it.tsExit == null }.mapNotNullTo(HashSet()) { r ->
+        return s.namedRoutes.filter { it.tsExit == null }.mapNotNullTo(HashSet()) { r ->
             val p = (links[r.id] as? WgLink)?.peer ?: return@mapNotNullTo null
             r.id.takeIf { seen.getOrPut(wgIdentity(p)) { wgKey(p) }.let { it == "home" || it != wgKey(p) } }
         }

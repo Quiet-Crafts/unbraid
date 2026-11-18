@@ -7,6 +7,8 @@ import app.unbraid.data.Location
 import app.unbraid.data.Prefs
 import app.unbraid.data.Route
 import app.unbraid.data.Setup
+import app.unbraid.data.WgPeer
+import app.unbraid.vpn.LinkPicker
 
 /**
  * Setups as version 3.0.2 saved them, with websites on public names, on Tailscale names with Tailscale on and off, on
@@ -62,6 +64,21 @@ object UpgradeTable {
     )
     private val platforms get() = mapOf("googleapis.com" to "it", "githubusercontent.com" to DIRECT, "gob.mx" to "us")
 
+    /**
+     * Three WireGuard configs for one client key, peer key and server, in the order A, B, C: A and C ask for keepalive 25,
+     * B for 17, so B clashes with A. A's only use is a local name the local network answers. The tunnels are the ones the
+     * link picker keeps (it refuses the clashing route), as the service compiles them. A and C
+     * are one tunnel (same settings): 3.0.2 ran it as A's, now C runs it alone when A has none, so the tag reads as A's.
+     */
+    private fun shared(n: String, keepalive: Int) = Route(n, wg = WgPeer(n, "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=", listOf("10.5.0.2/32"), "aGVsbG8taGVsbG8taGVsbG8taGVsbG8taGVsbG8tMTI=", endpoint = "198.51.100.7:51820", allowedIps = listOf("0.0.0.0/0"), keepalive = keepalive))
+    private val clashNames = listOf("printer.lan", "other.example", "bank.example")
+
+    fun clashLines(): List<String> = listOf(true, false).flatMap { lan ->
+        val s = Setup(routes = listOf(shared("a", 25), shared("b", 17), shared("c", 25)), defaultRoute = DIRECT, sites = mapOf("printer.lan" to "a", "other.example" to "b", "bank.example" to "c"), prefs = Prefs(lan = lan), version = 3)
+        val p = LinkPicker.pick(s, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { null }
+        RoutingProbe.outcomes(s, null, clashNames, apps, p.blocked.keys, p.links).map { "wg-clash-lan-$lan ${it.replace(" go=r-c", " go=r-a")}" }
+    }
+
     /** Every case's outcomes, one line each, prefixed by the case name. */
-    fun lines() = cases.flatMap { (name, s, rest) -> RoutingProbe.outcomes(s, rest.first, names, apps, rest.second).map { "$name $it" } }
+    fun lines() = cases.flatMap { (name, s, rest) -> RoutingProbe.outcomes(s, rest.first, names, apps, rest.second).map { "$name $it" } } + clashLines()
 }

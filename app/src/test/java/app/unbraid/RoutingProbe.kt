@@ -22,14 +22,14 @@ object RoutingProbe {
     private const val KEY = "aGVsbG8taGVsbG8taGVsbG8taGVsbG8taGVsbG8tMTI="
 
     /** One line per app and name: "app name A=... TXT=... go=...". [blocked]: routes without a tunnel. */
-    fun outcomes(s: Setup, tsSuffix: String?, names: List<String>, apps: List<String>, blocked: Set<String> = emptySet()): List<String> {
-        val (dns, route) = compiled(s, tsSuffix, blocked)
+    fun outcomes(s: Setup, tsSuffix: String?, names: List<String>, apps: List<String>, blocked: Set<String> = emptySet(), links: Map<String, app.unbraid.data.Link>? = null): List<String> {
+        val (dns, route) = compiled(s, tsSuffix, blocked, links)
         return apps.flatMap { app -> names.map { name -> "$app $name A=${lookup(dns, app, name, "A")} TXT=${lookup(dns, app, name, "TXT")} go=${connect(route, dns, app, name)}" } }
     }
 
     /** The DNS and route sections of [s] compiled with the tailnet domain [tsSuffix], every exit a rule names checked to have its tunnel. */
-    fun compiled(s: Setup, tsSuffix: String?, blocked: Set<String> = emptySet()): Pair<JsonObject, JsonObject> {
-        val links = s.routes.filter { it.tsExit == null }.associate { r -> Server("${r.id} #1", "${r.id}.nordvpn.com", "10.9.0.${r.id.hashCode() and 0x7f}", "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=", 10).let { r.id to WgLink(it, Nord.peer(it, KEY)) } }
+    fun compiled(s: Setup, tsSuffix: String?, blocked: Set<String> = emptySet(), given: Map<String, app.unbraid.data.Link>? = null): Pair<JsonObject, JsonObject> {
+        val links = given ?: s.routes.filter { it.tsExit == null }.associate { r -> Server("${r.id} #1", "${r.id}.nordvpn.com", "10.9.0.${r.id.hashCode() and 0x7f}", "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=", 10).let { r.id to WgLink(it, Nord.peer(it, KEY)) } }
         val c = Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links, "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", tsSuffix, blocked = blocked))).jsonObject
         val dns = c["dns"]!!.jsonObject
         val route = c["route"]!!.jsonObject
