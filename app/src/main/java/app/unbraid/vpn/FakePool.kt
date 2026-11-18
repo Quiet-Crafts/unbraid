@@ -65,16 +65,22 @@ object FakePool {
     enum class Outcome { Ran, Kept, Failed }
 
     /**
-     * One engine restart, in the only safe order. [prepare] builds what to run (input and its config); a new block is
-     * then saved ([save], only when it isn't [spent] already, and failing unless the old table is gone), before the
-     * engine can hand out any of it. A failure up to here gives nothing up: [Outcome.Kept], or [Outcome.Failed] when the
-     * old engine had already been given up before this call ([gone]). [commit] then gives the old engine up (from here
-     * nothing goes back to the old block) and [start] runs the new one.
+     * Every start on [block], before the engine can hand out any of it: unless it is [spent] already, it is noted down
+     * as spent ([note]) and the old table in [dir] deleted, so a new block starts from no file (an old one would carry a
+     * missing or bad table into it). Throws if either fails; true if the block is new.
      */
-    inline fun restart(gone: Boolean, spent: Int?, prepare: () -> Pair<Compiler.Input, String>, save: (Int) -> Unit,
+    fun spend(block: Int, spent: Int?, dir: java.io.File, note: (Int) -> Unit) = (block != spent).also { if (it) { note(block); LookupTable.clear(dir) } }
+
+    /**
+     * One engine restart, in the only safe order. [prepare] builds what to run (input and its config) from the newest
+     * block [spent]; the block is then spent ([spend]). A failure up to here gives nothing up: [Outcome.Kept], or
+     * [Outcome.Failed] when the old engine had already been given up before this call ([gone]). [commit] then gives the
+     * old engine up (from here nothing goes back to the old block) and [start] runs the new one.
+     */
+    inline fun restart(gone: Boolean, spent: Int?, dir: java.io.File, prepare: (spent: Int?) -> Pair<Compiler.Input, String>, noinline note: (Int) -> Unit,
                        commit: (Compiler.Input) -> Unit, start: (Compiler.Input, String) -> Unit): Outcome {
-        val (input, json) = try { prepare() } catch (e: Exception) { return if (gone) Outcome.Failed else Outcome.Kept }
-        try { if (input.fakeBlock != spent) save(input.fakeBlock) } catch (e: Exception) { return if (gone) Outcome.Failed else Outcome.Kept }
+        val (input, json) = try { prepare(spent) } catch (e: Exception) { return if (gone) Outcome.Failed else Outcome.Kept }
+        try { spend(input.fakeBlock, spent, dir, note) } catch (e: Exception) { return if (gone) Outcome.Failed else Outcome.Kept }
         commit(input)
         return try { start(input, json); Outcome.Ran } catch (e: Exception) { Outcome.Failed }
     }
