@@ -313,10 +313,18 @@ class NetSequencesTest {
         val other = link(9, vpn = true)
         val wifi = link(21); val cell = link(22, mobile = true)
         assertEquals(wifi, app.unbraid.vpn.choose(wifi, listOf(wifi, cell))) // no VPN: the default itself
-        assertEquals(wifi, app.unbraid.vpn.choose(other, listOf(other, cell, wifi))) // under the VPN: Wi-Fi before mobile data
+        // Under the VPN with Wi-Fi and mobile data both there, Android may be using either: not guessed.
+        assertNull(app.unbraid.vpn.choose(other, listOf(other, cell, wifi)))
+        assertEquals(wifi, app.unbraid.vpn.choose(other, listOf(other, wifi, link(31, free = false, mobile = true))))
         assertEquals(cell, app.unbraid.vpn.choose(other, listOf(other, link(30, internet = false), link(31, free = false), cell)))
         assertNull(app.unbraid.vpn.choose(other, listOf(other, link(30, internet = false)))) // none to follow
         assertNull(app.unbraid.vpn.choose(null, listOf(wifi))) // no default network: offline
+        // Not chosen while a default network is there, also one whose capabilities can't be read: unknown, so the pick
+        // waits for the first network seen; with none at all, offline.
+        assertEquals(app.unbraid.vpn.Own(null, true), app.unbraid.vpn.own(true, other, listOf(other, cell, wifi)))
+        assertEquals(app.unbraid.vpn.Own(null, true), app.unbraid.vpn.own(true, null, emptyList()))
+        assertEquals(app.unbraid.vpn.Own(null, false), app.unbraid.vpn.own(false, null, emptyList()))
+        assertEquals(app.unbraid.vpn.Own(Net(MOBILE, 22), false), app.unbraid.vpn.own(true, other, listOf(other, cell)))
         // Found under the VPN: the pick is for that network, and holds when unbraid starts on it.
         val here = Net(WIFI, 21)
         val rules = mapOf(WIFI to "Home")

@@ -98,12 +98,12 @@ internal data class Link(val handle: Long, val vpn: Boolean, val internet: Boole
 
 /**
  * The network under the phone's default one, never a VPN: the default itself unless it is a VPN (another one, with unbraid
- * off), then the best of the [all] networks the monitor would follow (internet, unrestricted, not a VPN), Wi-Fi before
- * mobile data as Android prefers it. Null with no default, or when none qualifies.
+ * off), then the one of the [all] networks the monitor would follow (internet, unrestricted, not a VPN). Null with no
+ * default, when none qualifies, or when more than one does: Android may be using any of them under that VPN.
  */
 internal fun choose(default: Link?, all: List<Link>): Link? =
     if (default == null || !default.vpn) default
-    else all.filter { !it.vpn && it.internet && it.unrestricted }.minByOrNull { it.mobile }
+    else all.filter { !it.vpn && it.internet && it.unrestricted }.singleOrNull()
 
 /** The phone's own network now ([net], never a VPN; null with none), and [unknown]: a default network is there but the one under it can't be told. */
 data class Own(val net: AutoSwitch.Net?, val unknown: Boolean)
@@ -116,10 +116,15 @@ private fun link(cm: ConnectivityManager, n: Network) = cm.getNetworkCapabilitie
 /** The phone's own network now. unbraid itself is left outside its VPN, so this holds while connected too. */
 @Suppress("DEPRECATION")
 fun underlying(cm: ConnectivityManager): Own = runCatching {
-    val default = cm.activeNetwork?.let { link(cm, it) }
-    val own = choose(default, if (default?.vpn == true) cm.allNetworks.mapNotNull { link(cm, it) } else emptyList())
-    Own(own?.takeIf { it.handle != 0L }?.let { AutoSwitch.Net(if (it.mobile) app.unbraid.data.MOBILE else app.unbraid.data.WIFI, it.handle) }, default != null && own == null)
+    val active = cm.activeNetwork
+    val default = active?.let { link(cm, it) }
+    own(active != null, default, if (default?.vpn == true) cm.allNetworks.mapNotNull { link(cm, it) } else emptyList())
 }.getOrDefault(Own(null, false))
+
+/** [Own] from [choose]: unknown when a default network is there ([active], even one whose capabilities can't be read) but none is chosen. */
+internal fun own(active: Boolean, default: Link?, all: List<Link>) = choose(default, all).let { o ->
+    Own(o?.takeIf { it.handle != 0L }?.let { AutoSwitch.Net(if (it.mobile) app.unbraid.data.MOBILE else app.unbraid.data.WIFI, it.handle) }, active && o == null)
+}
 
 /**
  * Hands the engine the current default interface ([current]: name and index, "" and -1 for none): only a change, unless
