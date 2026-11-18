@@ -1006,18 +1006,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun refusedFor(setup: Setup, accounts: Map<String, String>): Map<String, Exception> {
         refusals = refusals.filter { (p, v) -> v.first == accounts[p] }
         return setup.activeRoutes.filter { !it.imported }.mapNotNull { r ->
-            (refusals[r.loc.provider]?.second ?: r.loc.pinned?.let { gone["${r.loc.provider}|${it.host}"] })?.let { r.id to it }
+            (refusals[r.loc.provider]?.second ?: r.loc.pinned?.let { gone[LinkPicker.pinKey(r.loc.provider, it)] })?.let { r.id to it }
         }.toMap()
     }
 
     private fun noteRefusals(setup: Setup, accounts: Map<String, String>, r: LinkPicker.Result) = r.blocked.forEach { (id, e) ->
         setup.route(id)?.takeIf { !it.imported }?.let {
             if (e is AuthException) refusals = refusals + (it.loc.provider to (accounts[it.loc.provider] to e))
-            if (e is app.unbraid.data.NoLongerOffered) it.loc.pinned?.let { p -> gone = gone + ("${it.loc.provider}|${p.host}" to e) }
+            if (e is app.unbraid.data.NoLongerOffered) it.loc.pinned?.let { p -> gone = gone + (LinkPicker.pinKey(it.loc.provider, p) to e) }
         }
     }
 
-    /** Pinned servers ("provider|host") their provider's list no longer has, while connected. */
+    /** Pinned servers ([LinkPicker.pinKey]) their provider's list no longer has, while connected. */
     private var gone: Map<String, Exception> = emptyMap()
 
     /** Tailscale gave a sign-in link and waits for the user ([Compiler.Input.tsLoginPending]). */

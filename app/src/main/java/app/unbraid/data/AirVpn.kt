@@ -77,6 +77,8 @@ object AirVpn : KeyProvider() {
     /** `currentload` of the status API is the server's load in percent. */
     override val hasLoad = true
 
+    override val sharedHosts = true
+
     override val defaultAddress: List<String>? = null
     override val defaultDns = listOf("10.128.0.1")
     override val defaultPort = 1637

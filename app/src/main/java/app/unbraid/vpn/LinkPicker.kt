@@ -29,9 +29,25 @@ object LinkPicker {
     /** Fallback-cache key: a pinned route is its own entry, so it can never inherit another server's tunnel. */
     fun serverKey(r: Route, l: Link) = "${r.loc.provider}|${serverId(l.server)}"
 
-    fun cacheKey(r: Route) = "${r.loc.provider}|${r.loc.copy(pinned = null)}|${r.loc.pinned?.let(::serverId).orEmpty()}"
+    fun cacheKey(r: Route) = "${r.loc.provider}|${r.loc.copy(pinned = null)}|${r.loc.pinned?.let(::pinId).orEmpty()}"
 
     private fun serverId(s: Server) = s.ip.ifEmpty { s.host }
+
+    /** A pin restored without its address is its name too: AirVPN gives every server of a country one host name. */
+    private fun pinId(s: Server) = if (s.ip.isEmpty()) "${s.host}|${s.name}" else s.ip
+
+    /** A pinned server as its provider finds it again: by host name, and on AirVPN, whose servers share one per country, by name too. */
+    fun pinKey(provider: String, s: Server) = "$provider|${s.host}" + if (provider == "airvpn") "|${s.name}" else ""
+
+    /**
+     * The route's saved tunnel. A pin's is its own server's only ([pinKey]), also under the key 3.1.1 saved a pin restored
+     * without its address with (its host name alone), until a pick saves it under its own.
+     */
+    private fun saved(r: Route, last: Map<String, Link>): Link? {
+        val pin = r.loc.pinned ?: return last[cacheKey(r)]
+        val older = "${r.loc.provider}|${r.loc.copy(pinned = null)}|${serverId(pin)}"
+        return listOf(cacheKey(r), older).firstNotNullOfOrNull { k -> last[k]?.takeIf { pinKey(r.loc.provider, it.server) == pinKey(r.loc.provider, pin) } }
+    }
 
     /**
      * Imported configs as they are; provider routes keep the current server if the route's location didn't change, else
@@ -77,8 +93,8 @@ object LinkPicker {
             out[r.id] = link
         }
         // A server no longer offered is gone for every route pinned to it, not only the one that asked.
-        val gone = blocked.entries.filter { it.value is app.unbraid.data.NoLongerOffered }.mapNotNull { (id, e) -> setup.route(id)?.loc?.let { l -> l.pinned?.let { "${l.provider}|${it.host}" to e } } }.toMap()
-        setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> r.loc.pinned?.let { gone["${r.loc.provider}|${it.host}"] }?.let { blocked[r.id] = it; out.remove(r.id) } }
+        val gone = blocked.entries.filter { it.value is app.unbraid.data.NoLongerOffered }.mapNotNull { (id, e) -> setup.route(id)?.loc?.let { l -> l.pinned?.let { pinKey(l.provider, it) to e } } }.toMap()
+        setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> r.loc.pinned?.let { gone[pinKey(r.loc.provider, it)] }?.let { blocked[r.id] = it; out.remove(r.id) } }
         // A provider that refused its account refuses it for every route: none of them keeps a tunnel on it.
         val refusedBy = blocked.entries.filter { it.value is AuthException }.mapNotNull { (id, e) -> setup.route(id)?.takeIf { !it.imported }?.let { it.loc.provider to e } }.toMap()
         setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> refusedBy[r.loc.provider]?.let { blocked[r.id] = it; out.remove(r.id) } }
@@ -134,12 +150,12 @@ object LinkPicker {
         val acc = accounts[p.id] ?: throw AuthException("Sign in to ${p.name} for ${r.name}")
         val pinned = r.loc.pinned
         // A pinned server starts from its last refreshed copy, so going offline never brings back older details.
-        val loc = pinned?.let { pin -> last[cacheKey(r)]?.server?.takeIf { it.host == pin.host }?.let { r.loc.copy(pinned = it) } } ?: r.loc
+        val loc = pinned?.let { saved(r, last)?.server?.let { r.loc.copy(pinned = it) } } ?: r.loc
         val l = try {
             again(p, r, acc, last, used) ?: p.connect(loc, acc)
         } catch (e: Exception) {
             if (e is AuthException || e is app.unbraid.data.NoLongerOffered || e is Addr.Refused) throw e
-            val cached = last[cacheKey(r)]?.takeIf { pinned == null || it.server.host == pinned.host }?.takeIf { trusted(it, r, accounts, providers) }
+            val cached = saved(r, last)?.takeIf { trusted(it, r, accounts, providers) }
             // A cached tunnel at an address that can't be used is no fallback: the user is told to pick the server again.
             if (cached != null && !Addr.usable(cached)) throw Addr.refused(cached.server.name)
             cached ?: throw if (pinned != null) Fail("${r.name}: ${pinned.name} is unreachable") else e

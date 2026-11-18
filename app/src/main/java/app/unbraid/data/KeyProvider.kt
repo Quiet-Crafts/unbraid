@@ -56,6 +56,9 @@ abstract class KeyProvider : Provider {
 
     protected abstract fun entries(a: Account): List<Catalog.Entry>
 
+    /** One host name serves many servers (AirVPN's, per country): a pin is found by host and name only, never by an address another may have now. */
+    protected open val sharedHosts = false
+
     /** Whether a server key from an earlier list (a pinned or saved server) may still be used. */
     protected open fun trustsKey(key: String, a: Account): Boolean = true
 
@@ -114,13 +117,13 @@ abstract class KeyProvider : Provider {
 
     /**
      * The current address and key of a pinned server, found by host name and name (AirVPN shares one host name per
-     * country), else by IP. The pinned values stand in only when the list can't be read; a server the list no longer
+     * country), else by IP ([sharedHosts]: never). The pinned values stand in only when the list can't be read; a server the list no longer
      * has is an error rather than a stale endpoint.
      */
     private fun refreshed(p: Server, loc: Location, a: Account, entries: () -> List<Catalog.Entry>): Pair<Server, Catalog.Entry?> {
         val all = try { entries() } catch (e: IOException) { if (trustsKey(peerKey(p, a), a)) return p to null else throw e }
         val found = all.filter { it.hostname == p.host && (it.serverName ?: it.hostname.substringBefore('.')) == p.name }
-            .ifEmpty { all.filter { p.ip in it.ips } }
+            .ifEmpty { if (sharedHosts) emptyList() else all.filter { p.ip in it.ips } }
         if (found.isEmpty()) throw NoLongerOffered(p)
         // No address for it now: keep the pinned one, but with the list's current key.
         val live = try { usable(found, Location(loc.provider)).firstOrNull { it.hostname == found.first().hostname } } catch (_: IOException) { null }

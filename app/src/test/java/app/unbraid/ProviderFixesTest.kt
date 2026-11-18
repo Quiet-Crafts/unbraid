@@ -112,6 +112,10 @@ class ProviderFixesTest {
         val list = AirVpn.parse(body, key1)
         val pinned = Server("B", "at.vpn.airdns.org", "9.9.9.9", key1, 0)
         assertEquals("1.2.3.5:1637", AirVpn.link(Location("airvpn", pinned = pinned), account.copy(port = 1637)) { list }.peer.endpoint)
+        // A server the list no longer has is gone, even when a namesake on its host now has its old address.
+        val onlyB = list.filter { it.serverName == "B" }
+        try { AirVpn.link(Location("airvpn", pinned = Server("A", "at.vpn.airdns.org", "1.2.3.5", key1, 0)), account.copy(port = 1637)) { onlyB }; fail() }
+        catch (e: app.unbraid.data.NoLongerOffered) {}
     }
 
     // ---- NordVPN
