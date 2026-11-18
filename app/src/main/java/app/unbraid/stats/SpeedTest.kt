@@ -374,9 +374,12 @@ object SpeedTest {
         return a.second + (b.second - a.second) * (t - a.first) / (b.first - a.first).coerceAtLeast(1)
     }
 
-    /** The exit a running test measures through tunnel [tag], so its traffic is counted there; null = none. */
-    fun exitOn(tag: String?): String? = if (!testing) null
-        else nodeExitOn(tag) // a node only on the engine it switched
+    /**
+     * The exit a running test measures through tunnel [tag], so its traffic is counted there; null = none. [engine]: the
+     * engine the event came from (the running one unless it was queued before a restart).
+     */
+    fun exitOn(tag: String?, engine: Int = UnbraidVpn.state.value.engine): String? = if (!testing) null
+        else nodeExitOn(tag, engine) // a node only on the engine it switched
             ?: _run.value?.exit?.takeIf { e -> !e.startsWith(NODE) && tag == UnbraidVpn.tags[e] }
             ?: _all.value?.legs?.firstOrNull { UnbraidVpn.tags[it.exit] == tag }?.exit
 
