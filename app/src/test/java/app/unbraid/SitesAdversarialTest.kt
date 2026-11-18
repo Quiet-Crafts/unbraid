@@ -125,6 +125,9 @@ class SitesAdversarialTest {
         "B\u00fccher.DE." to "xn--bcher-kva.de.",
         "ex ample" to null,
         "\u00a0example.com" to null,
+        // Leading and trailing C0 controls and spaces are stripped before parsing; inside the name they are not.
+        "https://example.com:443\u0000" to "example.com",
+        "\u0001 https://example.com/\u001f" to "example.com",
     )
 
     /** What a browser opens, as a rule keeps it: no trailing dot, no leading "www.". */
@@ -151,7 +154,7 @@ class SitesAdversarialTest {
             "https://evil.com@example.com" to "example.com", "https://evil.com:pw@example.com:8443/x" to "example.com", "http://:@example.com" to "example.com",
             "https://example.com?@evil.com" to "example.com", "https://example.com#@evil.com" to "example.com", "https://example.com/@evil.com" to "example.com",
             "example.com/a://b@evil.com" to "example.com", "http://a.com/b/@c.com" to "a.com", "@example.com" to "example.com",
-            "example.com:443" to "example.com", "Example.com:" to "example.com", "EXAMPLE.COM" to "example.com", "  example.com  " to "example.com", "example.com\n" to "example.com",
+            "example.com:443" to "example.com", "https://example.com:443\u0000" to "example.com", "\u0001 https://example.com/\u001f" to "example.com", "Example.com:" to "example.com", "EXAMPLE.COM" to "example.com", "  example.com  " to "example.com", "example.com\n" to "example.com",
             "exa\tmple.com" to "example.com", "exa\nmple.com" to "example.com", "example.com." to "example.com", "example.com.." to "example.com", ".example.com" to "example.com",
             "ftp://example.com" to "example.com", "https:/example.com:443/path" to "example.com", "http://example.com:0000000000443/" to "example.com", "https://www.www.example.com" to "example.com", "https://xn--bcher-kva.de." to "xn--bcher-kva.de",
             "bücher.de" to "xn--bcher-kva.de", "BÜCHER.de" to "xn--bcher-kva.de", "XN--BCHER-KVA.DE" to "xn--bcher-kva.de", "Bücher.DE." to "xn--bcher-kva.de",
