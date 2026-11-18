@@ -508,7 +508,7 @@ const val WAIT_MS = 30 * 86_400_000L
  * together hold more routes or own servers than a setup may ([Backup.MAX_EACH]).
  */
 fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true): Setup? {
-    // Saved without keys: an own server this phone still has gets its config back here, and the home peer stays as it is.
+    // Saved without keys: an own server this phone still has, the same in everything the file keeps, gets its config back here, and the home peer stays as it is.
     // A route that had no own server here got one made up in the file: this phone's route of that id gives it back, only
     // only where everything the file keeps of that server is the same here (plugin and allowed addresses too); an OpenVPN
     // one holds just a name, so its route waits for its config.

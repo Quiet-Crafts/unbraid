@@ -140,9 +140,8 @@ data class OwnServer(
     val name get() = wg?.name ?: ovpn?.name ?: ss?.name.orEmpty()
     val kind get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; else -> "Shadowsocks" }
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OVPN"; else -> "SS" }
-    /** The same server as [o] by what can be told without keys: kind, name and, where known, address and peer key. */
-    fun sameAs(o: OwnServer) = kind == o.kind && name == o.name && (wg == null || (wg.endpoint == o.wg?.endpoint && wg.publicKey == o.wg.publicKey)) &&
-        (ss == null || (ss.server == o.ss?.server && ss.port == o.ss.port && ss.method == o.ss.method))
+    /** The same server as [o] by everything a file saved without keys keeps of it ([withoutSecrets]): a Shadowsocks plugin and WireGuard's allowed addresses too. */
+    fun sameAs(o: OwnServer) = withoutSecrets() == o.withoutSecrets()
 }
 
 /** [wg]'s private and preshared keys left out. */

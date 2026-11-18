@@ -452,6 +452,28 @@ class BackupAdversarialTest {
         assertEquals(ss, sThen.restoredFrom(so.setup, null, 0, so.keys)!!.route("s")!!.ss)
     }
 
+    /** An own server saved without keys gets its config back only from this phone's server of that id with everything the file keeps the same. */
+    @Test fun anOwnServerWithoutKeysTakesItsConfigBackOnlyFromAnIdenticalOne() {
+        val ss = app.unbraid.data.SsProfile("Box", "203.0.113.30", 8388, "aes-256-gcm", "secret", "obfs-local", "obfs=http")
+        val then = Setup(routes = listOf(Route("s", ss = ss, own = "x")), defaultRoute = "s", servers = listOf(OwnServer("x", ss = ss)), version = VERSION)
+        val c = Backup.read(Backup.export(then, "3.0.2", 0, keys = false))
+        // Here the server of that id, name, address, port and method has no plugin: it is not taken for the file's.
+        val plain = ss.copy(plugin = null, pluginOpts = null)
+        val r = then.copy(routes = listOf(Route("s", ss = plain, own = "x")), servers = listOf(OwnServer("x", ss = plain))).restoredFrom(c.setup, null, 0, c.keys)!!
+        assertTrue(r.servers.single().keyless && r.route("s")!!.keyless)
+        assertEquals("obfs-local", r.servers.single().ss!!.plugin)
+        // Nor one with other allowed addresses, for WireGuard.
+        val wThen = Setup(routes = listOf(Route("w", wg = wg, own = "y")), defaultRoute = "w", servers = listOf(OwnServer("y", wg = wg)), version = VERSION)
+        val w = Backup.read(Backup.export(wThen, "3.0.2", 0, keys = false))
+        val narrow = wg.copy(allowedIps = listOf("10.0.0.0/8"))
+        assertTrue(wThen.copy(routes = listOf(Route("w", wg = narrow, own = "y")), servers = listOf(OwnServer("y", wg = narrow))).restoredFrom(w.setup, null, 0, w.keys)!!.servers.single().keyless)
+        // The same server, plugin and all, still gives it back.
+        val same = then.restoredFrom(c.setup, null, 0, c.keys)!!
+        assertEquals(OwnServer("x", ss = ss), same.servers.single())
+        assertEquals(ss, same.route("s")!!.ss)
+        assertEquals(wg, wThen.restoredFrom(w.setup, null, 0, w.keys)!!.servers.single().wg)
+    }
+
     @Test fun everySaveNeedsEightCharactersAndKeysNeedAHardOne() {
         assertEquals("", passProblem("", "", false))
         assertEquals("A passphrase needs at least 8 characters.", passProblem("a", "a", false))
