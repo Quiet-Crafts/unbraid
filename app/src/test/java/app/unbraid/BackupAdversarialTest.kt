@@ -64,7 +64,7 @@ class BackupAdversarialTest {
             listOf(leaves) to { it.copy(prefs = it.prefs.copy(filter = it.prefs.filter.copy(apps = emptyMap()))) },
             listOf("Apps can reach the local network again.") to { it.copy(prefs = it.prefs.copy(lan = true)) },
             listOf("1 app that is blocked now won't be.") to { it.copy(apps = it.apps - "org.example.game") },
-            listOf("1 website that is blocked now won't be.") to { it.copy(sites = it.sites - "tracker.example") },
+            listOf("1 website that is blocked now goes Direct.") to { it.copy(sites = it.sites - "tracker.example") },
             // Left outside unbraid: its blocked website and home tunnel go with it, said once as the app's.
             listOf("1 app goes from a VPN route to Direct.") to { it.copy(apps = it.apps + ("org.example.mail" to DIRECT)) },
             listOf("1 website goes from a VPN route to Direct.") to { it.copy(sites = it.sites + ("work.example" to DIRECT)) },
@@ -81,7 +81,7 @@ class BackupAdversarialTest {
             RestoreTraffic.notes(noFilter, noFilter.copy(opts = mapOf("nord" to mapOf("protect" to "off")))))
         assertEquals(listOf("The DNS filter is turned off.", "\"Box\" connects to 198.51.100.66 instead of 203.0.113.1.", "Your home WireGuard uses other DNS servers: 198.51.100.53.", leaves,
             "The default route goes from Netherlands to Direct.", "1 app and 1 website go from a VPN route to Direct.", "Part of the home network goes Direct instead of through the home tunnel.",
-            "Apps can reach the local network again.", "1 app that is blocked now won't be.", "1 website that is blocked now won't be."), sheet(kinds.fold(phone) { s, (_, change) -> change(s) }))
+            "Apps can reach the local network again.", "1 app that is blocked now goes Direct.", "1 website that is blocked now goes Direct."), sheet(kinds.fold(phone) { s, (_, change) -> change(s) }))
     }
 
     @Test fun weakOwnServersAreNamedUntilAccepted() {
@@ -166,7 +166,11 @@ class BackupAdversarialTest {
         assertEquals(Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(prefs = phone.prefs.copy(filter = phone.prefs.filter.copy(apps = mapOf("not a package" to true)))), "3.0.2", 0)) })
         val ts = { exit: String -> phone.copy(routes = phone.routes + Route("t", tsExit = exit)) }
         for (ok in listOf("100.101.102.103", "fd7a:115c:a1e0::1")) Backup.read(Backup.export(ts(ok), "3.0.2", 0))
-        for (bad in listOf("100.64.0.1‮", "‮100.64.0.1", "node.example", "100.64.0.0/10", "1.2.3")) assertEquals(bad, Reason.Invalid, reason { Backup.read(Backup.export(ts(bad), "3.0.2", 0)) })
+        for (bad in listOf("100.64.0.1‮", "‮100.64.0.1", "node.example", "100.64.0.0/10", "1.2.3", ":::", "::::", "1::2::3", "fd7a::115c::1", "12345::1", " 100.64.0.1", "fe80::1%wlan0"))
+            assertEquals(bad, Reason.Invalid, reason { Backup.read(Backup.export(ts(bad), "3.0.2", 0)) })
+        // As the exit in use too: the compiler would pass it to Tailscale, which finds no node by that text.
+        assertEquals(Reason.Invalid, reason { Backup.read(Backup.export(ts(":::").copy(defaultRoute = "t"), "3.0.2", 0)) })
+        Backup.read(Backup.export(ts("::ffff:100.64.0.1").copy(defaultRoute = "t"), "3.0.2", 0))
         // Zero-width and other formatting characters in a name are refused; the joiners emoji are made of are not.
         for (n in listOf("Box​", "Box⁠x", "Box﻿", "Box x")) assertEquals(n, Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", n))), "3.0.2", 0)) })
         Backup.read(Backup.export(phone.copy(routes = phone.routes + Route("x", Location("nord", 1, "NL", "Team 👩‍💻"))), "3.0.2", 0))
@@ -174,13 +178,21 @@ class BackupAdversarialTest {
         val damaged = Backup.export(phone.copy(servers = phone.servers + OwnServer("k", wg = wg.copy(name = "‮evil\nname", privateKey = ""), keyless = true)), "3.0.2", 0)
         val e = try { Backup.read(damaged); null } catch (x: Backup.Failed) { x }!!
         assertTrue(e.message!!, e.message!!.none { it == '‮' || it == '\n' })
+        // A profile's name may hold a word joiner; the error that names it never shows it.
+        val joined = phone.copy(profiles = listOf(Profile("Wo⁠rk", "gone")))
+        val p = try { Backup.valid(joined); null } catch (x: Backup.Failed) { x }!!
+        assertTrue(p.message!!, "Work" in p.message!! && '⁠' !in p.message!!)
     }
 
     /** A website an older version saved, that the stricter reader of today refuses, keeps the backup restorable: it stays as this phone keeps it. */
     @Test fun anOlderWebsiteNameKeepsTheBackupRestorable() {
-        val old = phone.copy(sites = phone.sites + ("x.0xff" to "nl"), profiles = listOf(Profile("Work", "nl", sites = mapOf("y.0x1f" to DIRECT))))
-        val c = Backup.read(Backup.export(old, "3.0.2", 0))
+        val old = phone.copy(sites = phone.sites + ("x.0xff" to "nl") + ("xn--lcka6bwa0bnl60b.jp" to DIRECT), profiles = listOf(Profile("Work", "nl", sites = mapOf("y.0x1f" to DIRECT))))
+        val c = Backup.read(Backup.open(Backup.seal(Backup.export(old, "3.0.2", 0), "pass phrase", logN = 10), "pass phrase"))
         assertEquals("nl", c.setup.sites["x.0xff"])
+        assertEquals(DIRECT, c.setup.sites["xn--lcka6bwa0bnl60b.jp"])
+        // The restore check builds and walks it as the phone runs it.
+        val restored = phone.restoredFrom(c.setup, null, 0)!!
+        assertFalse(RestoreTraffic.notes(phone, restored).toString(), RestoreTraffic.UNKNOWN in RestoreTraffic.notes(phone, restored))
         assertEquals(DIRECT, c.setup.profiles.single().sites["y.0x1f"])
         for (bad in listOf("Example.com", "x..com", "-x.com", "x.123", "com", "a b.com")) assertEquals(bad, Reason.Invalid, reason { Backup.read(Backup.export(phone.copy(sites = mapOf(bad to "nl")), "3.0.2", 0)) })
     }
@@ -188,6 +200,9 @@ class BackupAdversarialTest {
     /** Counting in another script is a pattern too: one through eight in Chinese numerals is not a hard passphrase. */
     @Test fun countingInAnyScriptIsAPattern() {
         for (p in listOf("一二三四五六七八", "八七六五四三二一", "壹贰叁肆伍陆柒捌", "甲乙丙丁戊己庚辛", "あいうえおかきく", "αβγδεζηθ", "абвгдежз", "ⅠⅡⅢⅣⅤⅥⅦⅧ", "가나다라마바사아", "一二三四五六七八九十"))
+            assertFalse("$p ${Backup.strength(p)}", forKeys(p))
+        // Decorated digits and letters count as the plain ones they stand for.
+        for (p in listOf("①②③④⑤⑥⑦⑧", "⑧⑦⑥⑤④③②①", "➀➁➂➃➄➅➆➇", "❶❷❸❹❺❻❼❽", "ⓐⓑⓒⓓⓔⓕⓖⓗ", "ａｂｃｄｅｆｇｈ", "¹²³⁴⁵⁶⁷⁸", "𝟏𝟐𝟑𝟒𝟓𝟔𝟕𝟖", "⑴⑵⑶⑷⑸⑹⑺⑻", "①②③④⑤⑥⑦⑧⑨⑩⑪⑫", "①2③4⑤6⑦8", "ａbｃdｅfｇh", "①2③4⑤6⑦8ａbｃdｅfｇh"))
             assertFalse("$p ${Backup.strength(p)}", forKeys(p))
         // Han characters that count nothing still count.
         assertEquals(2, Backup.strength("龍一象山水火風雷木金土日月星雲花").first)

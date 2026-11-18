@@ -49,6 +49,7 @@ import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -92,10 +93,9 @@ class RestoreGate {
     private var asked: Ask? = null
     var result: Result? = null
         private set
-    private var accepted: Backup.Contents? = null
 
     /** Backup [c] opened (or none): nothing checked or accepted for another one carries over. */
-    fun open(c: Backup.Contents?) { backup = c; asked = null; result = null; accepted = null }
+    fun open(c: Backup.Contents?) { backup = c; asked = null; result = null; acceptWeak = false }
 
     /** The check to start for [here] and [keep]; null when one for them is under way or in. */
     fun ask(here: Setup, keep: Boolean): Ask? {
@@ -107,10 +107,8 @@ class RestoreGate {
     /** [r] for check [a]; dropped unless [a] is still the one asked. */
     fun answer(a: Ask, r: Result) { if (asked === a) result = r }
 
-    /** Weak servers accepted, for the backup open now only. */
-    var acceptWeak: Boolean
-        get() = accepted != null && accepted === backup
-        set(v) { accepted = if (v) backup else null }
+    /** Weak servers accepted, for the backup open now only: [open] clears it. */
+    var acceptWeak = false
 
     fun ready(here: Setup, keep: Boolean): Boolean {
         val r = result ?: return false
@@ -118,13 +116,13 @@ class RestoreGate {
     }
 
     companion object {
-        /** Works [a] out: slow for a large setup, never on the main thread. [kin]: the apps sharing a user id with an app. */
-        fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }): Result {
+        /** Works [a] out: slow for a large setup, never on the main thread. [kin]: the apps sharing a user id with an app; [tick] may throw to stop it. */
+        fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }, tick: () -> Unit = {}): Result {
             val c = a.backup
             val plain = a.here.restoredFrom(c.setup, null, 0, c.keys)!!
             val keepable = !a.here.untouched && a.here.restoredFrom(c.setup, PREVIOUS, 0, c.keys) != null
             val next = if (a.keep && keepable) a.here.restoredFrom(c.setup, PREVIOUS, 0, c.keys)!! else plain
-            return Result(RestoreTraffic.notes(a.here, next, kin), Backup.weak(plain, a.here), keepable, plain.servers.count { it.keyless })
+            return Result(RestoreTraffic.notes(a.here, next, kin, tick), Backup.weak(plain, a.here), keepable, plain.servers.count { it.keyless })
         }
     }
 }
@@ -195,7 +193,8 @@ class BackupFlow(private val ui: Ui) {
                 val all = runCatching { pm.getInstalledApplications(0) }.getOrDefault(emptyList())
                 val uid = all.associate { it.packageName to it.uid }
                 val byUid = all.groupBy({ it.uid }, { it.packageName })
-                RestoreGate.check(ask) { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }
+                // Stopped as soon as the sheet is closed or the check asked again.
+                RestoreGate.check(ask, { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }) { ensureActive() }
             }
             gate.answer(ask, r); seen++
         }
