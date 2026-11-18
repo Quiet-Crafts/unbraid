@@ -1,0 +1,193 @@
+Changes to sing-box v1.14.4 (GNU GPL v3.0 or later), made by the unbraid authors, last on 2026-11-18:
+a route chosen by a rule's own destination ip_cidr (or ip_is_private) dials only the resolved addresses that rule
+covers. Before, the rule matched when any one address of a name's answer was covered, and its outbound got the whole
+list: one local address in an answer took the name's public addresses out on the local route ("Local network bypasses
+the VPN", the home tunnels) too. A rule that matched otherwise (a domain item, a rule set, an inverted rule, a DNS
+answer) keeps every address.
+Applied by tools/build-libbox.sh; git apply skips these lines.
+
+diff --git a/route/route.go b/route/route.go
+index bf25bae..292ab8f 100644
+--- a/route/route.go
++++ b/route/route.go
+@@ -414,6 +414,7 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
+ 			applyRouteOptionsOverride(&metadata, action)
+ 		case *R.RuleActionRoute:
+ 			applyRouteOptionsOverride(&metadata, &action.RuleActionRouteOptions)
++			narrowDestinationAddresses(currentRule, &metadata)
+ 			return r.preMatchFlow(ctx, &metadata, packetDestination, currentRule, action.Outbound)
+ 		case *R.RuleActionBypass:
+ 			applyRouteOptionsOverride(&metadata, &action.RuleActionRouteOptions)
+@@ -459,6 +460,15 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
+ 	return r.preMatchFlow(ctx, &metadata, packetDestination, nil, "")
+ }
+ 
++// unbraid: a route picked by an address rule dials only the resolved addresses that rule covers.
++func narrowDestinationAddresses(rule adapter.Rule, metadata *adapter.InboundContext) {
++	if narrowing, isNarrowing := rule.(interface {
++		NarrowDestinationAddresses(*adapter.InboundContext)
++	}); isNarrowing {
++		narrowing.NarrowDestinationAddresses(metadata)
++	}
++}
++
+ func applyRouteOptionsOverride(metadata *adapter.InboundContext, routeOptions *R.RuleActionRouteOptions) {
+ 	if routeOptions.OverrideAddress.IsValid() {
+ 		metadata.Destination = M.Socksaddr{
+@@ -645,6 +655,7 @@ match:
+ 		switch action := currentRule.Action().(type) {
+ 		case *R.RuleActionRoute:
+ 			routeOptions = &action.RuleActionRouteOptions
++			narrowDestinationAddresses(currentRule, metadata)
+ 		case *R.RuleActionRouteOptions:
+ 			routeOptions = action
+ 		case *R.RuleActionBypass:
+diff --git a/route/route_narrow_test.go b/route/route_narrow_test.go
+new file mode 100644
+index 0000000..5f19f40
+--- /dev/null
++++ b/route/route_narrow_test.go
+@@ -0,0 +1,36 @@
++package route
++
++import (
++	"context"
++	"net/netip"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	R "github.com/sagernet/sing-box/route/rule"
++	M "github.com/sagernet/sing/common/metadata"
++
++	"github.com/stretchr/testify/require"
++)
++
++// A rule as the app writes it ("Local network bypasses the VPN"): a mixed answer goes Direct with its local address only.
++func TestNarrowDestinationAddressesOnAConfiguredRule(t *testing.T) {
++	t.Parallel()
++	rule, err := R.NewRule(context.Background(), log.StdLogger(), option.Rule{
++		Type: C.RuleTypeDefault,
++		DefaultOptions: option.DefaultRule{
++			RawDefaultRule: option.RawDefaultRule{IPCIDR: []string{"192.168.0.0/16"}},
++			RuleAction:     option.RuleAction{Action: C.RuleActionTypeRoute, RouteOptions: option.RouteActionOptions{Outbound: "direct"}},
++		},
++	}, true)
++	require.NoError(t, err)
++	metadata := adapter.InboundContext{
++		Destination:          M.Socksaddr{Fqdn: "nas.example", Port: 443},
++		DestinationAddresses: []netip.Addr{netip.MustParseAddr("203.0.113.5"), netip.MustParseAddr("192.168.1.10")},
++	}
++	require.True(t, rule.Match(&metadata))
++	narrowDestinationAddresses(rule, &metadata)
++	require.Equal(t, []netip.Addr{netip.MustParseAddr("192.168.1.10")}, metadata.DestinationAddresses)
++}
+diff --git a/route/rule/rule_abstract.go b/route/rule/rule_abstract.go
+index cb7d506..abc0d90 100644
+--- a/route/rule/rule_abstract.go
++++ b/route/rule/rule_abstract.go
+@@ -2,6 +2,7 @@ package rule
+ 
+ import (
+ 	"io"
++	"net/netip"
+ 	"strings"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -147,6 +148,25 @@ func (r *abstractDefaultRule) evaluateGroups(metadata *adapter.InboundContext) r
+ 	return groups
+ }
+ 
++// NarrowDestinationAddresses keeps only the resolved addresses the rule's own destination ip_cidr (or ip_is_private)
++// covers, when that is what matched: one local address in a name's answer must not take its public ones along to a
++// route meant for local ones (unbraid). Called for a matched rule that picks an outbound.
++func (r *abstractDefaultRule) NarrowDestinationAddresses(metadata *adapter.InboundContext) {
++	// Inverted, with a rule set, matched on a DNS answer or by a domain item: what matched is not these items alone.
++	if r.invert || r.ruleSetItem != nil || !r.destinationIPCIDRMatchesDestination(metadata) || metadata.DestinationAddressMatchFromResponse ||
++		metadata.Destination.IsIP() || len(metadata.DestinationAddresses) < 2 || matchAnyItem(r.destinationAddressItems, metadata) {
++		return
++	}
++	covered := common.Filter(metadata.DestinationAddresses, func(address netip.Addr) bool {
++		single := *metadata
++		single.DestinationAddresses = []netip.Addr{address}
++		return matchAnyItem(r.destinationIPCIDRItems, &single)
++	})
++	if len(covered) > 0 {
++		metadata.DestinationAddresses = covered
++	}
++}
++
+ func (r *abstractDefaultRule) Action() adapter.RuleAction {
+ 	return r.action
+ }
+diff --git a/route/rule/rule_narrow_test.go b/route/rule/rule_narrow_test.go
+new file mode 100644
+index 0000000..5ab21bd
+--- /dev/null
++++ b/route/rule/rule_narrow_test.go
+@@ -0,0 +1,63 @@
++package rule
++
++import (
++	"net/netip"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++
++	"github.com/stretchr/testify/require"
++)
++
++var lanAndPublic = []netip.Addr{netip.MustParseAddr("192.168.1.10"), netip.MustParseAddr("203.0.113.5"), netip.MustParseAddr("fd00::10")}
++
++func resolvedForTest(addresses ...netip.Addr) adapter.InboundContext {
++	metadata := testMetadata("nas.example")
++	metadata.DestinationAddresses = addresses
++	return metadata
++}
++
++// A name whose answer holds a local address and a public one: the local route gets the local ones only.
++func TestNarrowDestinationAddressesKeepsWhatTheRuleCovers(t *testing.T) {
++	t.Parallel()
++	rule := routeRuleForTest(func(rule *abstractDefaultRule) {
++		addDestinationIPCIDRItem(t, rule, []string{"192.168.0.0/16", "fc00::/7"})
++	})
++	metadata := resolvedForTest(lanAndPublic...)
++	require.True(t, rule.Match(&metadata))
++	rule.NarrowDestinationAddresses(&metadata)
++	require.Equal(t, []netip.Addr{lanAndPublic[0], lanAndPublic[2]}, metadata.DestinationAddresses)
++
++	private := routeRuleForTest(func(rule *abstractDefaultRule) { addDestinationIPIsPrivateItem(rule) })
++	metadata = resolvedForTest(lanAndPublic...)
++	require.True(t, private.Match(&metadata))
++	private.NarrowDestinationAddresses(&metadata)
++	require.NotContains(t, metadata.DestinationAddresses, lanAndPublic[1])
++}
++
++// What else matched, not these items alone: every address stays.
++func TestNarrowDestinationAddressesLeavesOtherMatchesAlone(t *testing.T) {
++	t.Parallel()
++	byDomain := routeRuleForTest(func(rule *abstractDefaultRule) {
++		addDestinationAddressItem(t, rule, []string{"nas.example"}, nil)
++		addDestinationIPCIDRItem(t, rule, []string{"192.168.0.0/16"})
++	})
++	inverted := routeRuleForTest(func(rule *abstractDefaultRule) {
++		addDestinationIPCIDRItem(t, rule, []string{"10.0.0.0/8"})
++		rule.invert = true
++	})
++	noAddressRule := routeRuleForTest(func(rule *abstractDefaultRule) { addDestinationPortItem(rule, []uint16{443}) })
++	for _, rule := range []*DefaultRule{byDomain, inverted, noAddressRule} {
++		metadata := resolvedForTest(lanAndPublic...)
++		require.True(t, rule.Match(&metadata))
++		rule.NarrowDestinationAddresses(&metadata)
++		require.Equal(t, lanAndPublic, metadata.DestinationAddresses)
++	}
++
++	// Matched on a DNS answer, not on what the connection dials.
++	lan := routeRuleForTest(func(rule *abstractDefaultRule) { addDestinationIPCIDRItem(t, rule, []string{"192.168.0.0/16"}) })
++	metadata := resolvedForTest(lanAndPublic...)
++	metadata.DestinationAddressMatchFromResponse = true
++	lan.NarrowDestinationAddresses(&metadata)
++	require.Equal(t, lanAndPublic, metadata.DestinationAddresses)
++}

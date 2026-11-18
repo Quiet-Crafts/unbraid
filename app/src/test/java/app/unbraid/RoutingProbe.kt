@@ -72,6 +72,7 @@ object RoutingProbe {
 
     private fun ipv4(a: String) = a.split('.').fold(0L) { n, o -> n shl 8 or o.toLong() }
     private fun inCidr(ip: String, cidr: String): Boolean {
+        if (':' in cidr) return false // the probe's addresses are IPv4
         val (net, len) = cidr.split('/').let { it[0] to it[1].toInt() }
         return len == 0 || (ipv4(ip) xor ipv4(net)) shr (32 - len) == 0L
     }
@@ -87,12 +88,19 @@ object RoutingProbe {
      * refused. [kept]: the app kept an address from before instead of looking the name up: a stand-in address ("fake",
      * the domain table outlives a reload, so it still carries the name) or a plain one a resolver gave (its server's tag).
      */
-    fun connect(route: JsonObject, dns: JsonObject, app: String, name: String, kept: String? = null): String {
+    fun connect(route: JsonObject, dns: JsonObject, app: String, name: String, kept: String? = null): String = dial(route, dns, app, name, kept).first
+
+    /**
+     * [connect] and the addresses that connection dials. [answer]: what the engine's own lookup of [name] gives instead
+     * of one address, such as a local and a public one. A rule chosen by its own `ip_cidr` dials only the addresses it
+     * covers, as the engine is patched to (tools/sing-box-address-rule-dials-its-addresses.patch); other rules dial all.
+     */
+    fun dial(route: JsonObject, dns: JsonObject, app: String, name: String, kept: String? = null, answer: List<String>? = null): Pair<String, List<String>> {
         val a = kept ?: lookup(dns, app, name, "A")
-        if (a == "reject" || a == "empty") return "none"
+        if (a == "reject" || a == "empty") return "none" to emptyList()
         // A stand-in address carries the name; any other answer is a plain address.
         var domain: String? = if (a == "fake") name else null
-        var ip = if (a == "fake") "198.18.0.5" else address(a, name)
+        var ips = listOf(if (a == "fake") "198.18.0.5" else address(a, name))
         fun match(r: JsonObject): Boolean {
             if (r.text("type") == "logical") {
                 val all = r["rules"]!!.jsonArray.map { match(it.jsonObject) }
@@ -109,19 +117,23 @@ object RoutingProbe {
                 r["protocol"]?.let { false }, // TLS, not DNS
                 r["port"]?.jsonPrimitive?.content?.let { it == "443" },
                 r.text("network")?.let { it == "tcp" },
-                r.list("ip_cidr")?.any { inCidr(ip, it) },
+                r.list("ip_cidr")?.let { c -> ips.any { ip -> c.any { inCidr(ip, it) } } },
             )
             return checks.all { it } != (r.text("invert") == "true")
         }
         for (r in route["rules"]!!.jsonArray.map { it.jsonObject }) {
             if (!match(r)) continue
             when (r.text("action")) {
-                null, "route" -> return r.text("outbound")!!
-                "reject" -> return "reject"
-                "resolve" -> if (domain != null) ip = address(r.text("server")!!, domain)
+                null, "route" -> {
+                    val cidr = r.list("ip_cidr")
+                    val own = cidr != null && r.text("type") != "logical" && domain != null && named(r, domain) != true && r.text("invert") != "true"
+                    return r.text("outbound")!! to if (own) ips.filter { ip -> cidr!!.any { inCidr(ip, it) } } else ips
+                }
+                "reject" -> return "reject" to emptyList()
+                "resolve" -> if (domain != null) ips = answer ?: listOf(address(r.text("server")!!, domain))
                 else -> error("Route action the probe can't follow: ${r.text("action")}")
             }
         }
-        return route.text("final")!!
+        return route.text("final")!! to ips
     }
 }

@@ -130,6 +130,19 @@ class SitesStateTest {
         assertEquals("dns-r-it", RoutingProbe.lookup(RoutingProbe.compiled(tailnet, null).first, browser, "9.0.64.100.in-addr.arpa", "PTR"))
     }
 
+    /** A name that answers with a local and a public address: the local route gets the local one, never the public one. */
+    @Test fun aMixedAnswerTakesNoPublicAddressOutOfTheVpn() {
+        val onItaly = base.copy(apps = mapOf(browser to "it"), prefs = base.prefs.copy(lan = true))
+        val mixed = listOf("192.168.1.10", "203.0.113.5")
+        val (dns, route) = RoutingProbe.compiled(onItaly, null)
+        assertEquals("fake", RoutingProbe.lookup(dns, browser, "nas.example.com", "A"))
+        assertEquals("direct" to listOf("192.168.1.10"), RoutingProbe.dial(route, dns, browser, "nas.example.com", answer = mixed))
+        assertEquals("r-it" to listOf("203.0.113.5"), RoutingProbe.dial(route, dns, browser, "nas.example.com", answer = listOf("203.0.113.5")))
+        // The same for the home tunnel: the public address never enters the tailnet.
+        val (tsDns, tsRoute) = RoutingProbe.compiled(onItaly.copy(home = Home(tailscale = true)), null)
+        assertEquals(Compiler.TS_TAG to listOf("100.64.0.7"), RoutingProbe.dial(tsRoute, tsDns, browser, "nas.example.com", answer = listOf("100.64.0.7", "203.0.113.5")))
+    }
+
     /** Tailscale running only for an exit node (Reach your tailnet off): no rule answers a tailnet name, so a website rule for one applies. */
     @Test fun aTailnetNameAppliesWhileTailscaleOnlyCarriesAnExit() {
         val s = base.copy(routes = listOf(italy, Route("ts", tsExit = "100.64.0.9")), apps = mapOf("com.chat" to "ts"), sites = mapOf("nas.tail1.ts.net" to "it"))

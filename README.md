@@ -204,7 +204,8 @@ one with an app that uses a VPN route or Block goes as that app does, filtered o
 for this to follow). Apps that only follow a Direct default route always go through unbraid. Only the default route and the routes your apps and websites use are connected.
 
 A website rule matches the name unbraid itself answered with a fake address, never a name read from the connection,
-so an app can't claim another site's route. Blocked apps are refused before any other rule, DNS included.
+so an app can't claim another site's route. A name whose answer holds both local and public addresses goes to your local
+network or home with its local addresses only: the public ones never leave outside the app's route. Blocked apps are refused before any other rule, DNS included.
 
 For NordVPN, unbraid picks a server from the provider's low-load recommendations when it connects, unless you
 pinned one. Server lists
@@ -227,7 +228,8 @@ The build script keeps its work files in `~/.cache/unbraid-libbox`. Set `WORK` t
 in `tools/` stop libbox from writing the running configuration, which holds private keys, to disk, seal the
 Tailscale node state with an Android Keystore key, refuse files sent through Taildrop, give an OpenVPN tunnel a
 resolver inside it when its server pushes none, let the app's connection checks look up their servers through
-the tunnel being checked, release every network part a tunnel built when it stops or fails to start, and never
+the tunnel being checked, release every network part a tunnel built when it stops or fails to start, send a connection
+that the local network or home rules take to only the addresses those rules cover, and never
 hand a stand-in (fake) address to a second name while its table lives: a used-up block of them answers new names
 with a failure, and the app moves to the next of eight blocks, with a new table, when less than a quarter of the block
 is left, at most once every 10 minutes (a block that runs low sooner moves at the first check after those 10 minutes). That promise holds across crashes and across any error the engine's cache reports (a
