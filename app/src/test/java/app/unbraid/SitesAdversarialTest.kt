@@ -111,6 +111,11 @@ class SitesAdversarialTest {
         "example.com:abc" to null,
         "example.com:99999" to null,
         "http://example.com:80:80" to null,
+        "https:/example.com:99999/path" to null,
+        "https:/example.com:443/path" to "example.com",
+        "http://example.com:065535/" to "example.com",
+        "http://example.com:0000000000443/" to "example.com",
+        "http://example.com:1x" to null,
         "example.com\\evil.com" to "example.com",
         "@example.com" to "example.com",
         "https://@example.com" to "example.com",
@@ -131,8 +136,8 @@ class SitesAdversarialTest {
     @Test fun neverAnotherWebsiteThanTheBrowserOpens() {
         val wrong = browser.mapNotNull { (raw, host) ->
             val saved = Sites.clean(raw) ?: return@mapNotNull null
-            // Kept on purpose: an address bar trims spaces, and a wrong port only says the name was typed with a mistake.
-            if (host == null && (raw.trim() != raw || raw.contains(":abc") || raw.contains(":99999"))) return@mapNotNull null
+            // Kept on purpose: an address bar trims spaces.
+            if (host == null && raw.trim() != raw) return@mapNotNull null
             if (host == null || saved != kept(host)) "${raw.take(40)} saved as $saved, browser ${host ?: "refuses"}" else null
         }
         assertEquals(emptyList<String>(), wrong)
@@ -148,7 +153,7 @@ class SitesAdversarialTest {
             "example.com/a://b@evil.com" to "example.com", "http://a.com/b/@c.com" to "a.com", "@example.com" to "example.com",
             "example.com:443" to "example.com", "Example.com:" to "example.com", "EXAMPLE.COM" to "example.com", "  example.com  " to "example.com", "example.com\n" to "example.com",
             "exa\tmple.com" to "example.com", "exa\nmple.com" to "example.com", "example.com." to "example.com", "example.com.." to "example.com", ".example.com" to "example.com",
-            "ftp://example.com" to "example.com", "https://www.www.example.com" to "example.com", "https://xn--bcher-kva.de." to "xn--bcher-kva.de",
+            "ftp://example.com" to "example.com", "https:/example.com:443/path" to "example.com", "http://example.com:0000000000443/" to "example.com", "https://www.www.example.com" to "example.com", "https://xn--bcher-kva.de." to "xn--bcher-kva.de",
             "bücher.de" to "xn--bcher-kva.de", "BÜCHER.de" to "xn--bcher-kva.de", "XN--BCHER-KVA.DE" to "xn--bcher-kva.de", "Bücher.DE." to "xn--bcher-kva.de",
             "a\u200bb.com" to "ab.com", "example\u3002com" to "example.com", "example\uff0ecom" to "example.com", "example\uff61com" to "example.com",
             "ｅｘａｍｐｌｅ.ｃｏｍ" to "example.com", "ΣΑΣ.gr" to "xn--mxa9ab.gr", "İstanbul.tr" to "xn--istanbul-o0e.tr", "ﬁ.com" to "fi.com", "Ⅻ.com" to "xii.com",
@@ -271,21 +276,24 @@ class SitesAdversarialTest {
         assertTrue(siteError(s, "straße.de")!!.startsWith("unbraid can't spell"))
     }
 
-    /** Seeded random mixes of odd pieces: whatever is saved is stable, reads back, and agrees with the refusal; nothing throws. */
+    /** Seeded random mixes of odd pieces: whatever is saved is stable, reads back, and agrees with the refusal; a port browsers refuse is refused; nothing throws. */
     @Test fun generatedHostileAddresses() {
         val pieces = listOf("example", "WWW", "www", "Ab", "a", "z9", "0x7f", "0x", "0X1F", "0177", "2130706433", "1", "123", "a-b", "-ab", "ab-", "a--b", "a_b", "☃", "bücher", "BÜCHER",
             "xn--bcher-kva", "XN--BCHER-KVA", "münchen", "a\u200bb", "a\u200db", "a\u202eb", "\ufeffa", "a\u0000b", "a b", "a\tb", "%61", "ex%2Ecom", "😀", "ß", "İstanbul", "ǅ", "ｅｘａｍｐｌｅ",
             "１２３", "localhost", "local", "lan", "com", "co", "uk", "ﬁ", "a\\b", "\"", "*", "Ⅻ", "e\u0301", "a".repeat(63), "b".repeat(64), "ü".repeat(30), "xn--", "xn--a", "xn--zz-", "xn--9999999999")
         val dots = listOf(".", ".", ".", "\u3002", "\uff0e", "\uff61", "..", "")
-        val before = listOf("", "", "", "https://", "HTTP://", "ftp://", "http://user:pass@", "http://u@v@", "*.", ".", " ", "\u00a0", "\t", "//", "www.", "[", "mailto:", "a://b@", "https:\\\\")
-        val after = listOf("", "", "", ".", "..", ":443", ":443/path?q=x#y", "/path", "?x=@evil.com", "#x", "\\evil.com", ":", ":abc", " ", "\n", "\u3002", "/@evil.com", "@evil.com", "]:80", "%00")
+        val before = listOf("", "", "", "https://", "HTTP://", "ftp://", "http://user:pass@", "http://u@v@", "*.", ".", " ", "\u00a0", "\t", "//", "www.", "[", "mailto:", "a://b@", "https:\\\\", "https:/")
+        val after = listOf("", "", "", ".", "..", ":443", ":443/path?q=x#y", "/path", "?x=@evil.com", "#x", "\\evil.com", ":", ":abc", " ", "\n", "\u3002", "/@evil.com", "@evil.com", "]:80", "%00", ":99999/path", ":65536", ":0443", ":1x")
         val rng = Random(0x10CA)
         val bad = mutableListOf<String>()
         repeat(40_000) {
-            val raw = before.random(rng) + (0 until rng.nextInt(1, 6)).joinToString("") { (if (it > 0) dots.random(rng) else "") + pieces.random(rng) } + after.random(rng)
+            val end = after.random(rng)
+            val host = (0 until rng.nextInt(1, 6)).joinToString("") { (if (it > 0) dots.random(rng) else "") + pieces.random(rng) }
+            val raw = before.random(rng) + host + end
             val name = runCatching { Sites.clean(raw) }.getOrElse { bad += "clean threw for ${raw.debugText()}"; return@repeat }
             val why = runCatching { Sites.refusal(raw) }.getOrElse { bad += "refusal threw for ${raw.debugText()}"; return@repeat }
             if (name == null && why == null) bad += "no reason for ${raw.debugText()}"
+            if (name != null && end in setOf(":99999/path", ":65536", ":1x", ":abc") && '\\' !in host) bad += "${raw.debugText()} saved as $name with a port browsers refuse"
             if (name != null) {
                 if (Sites.clean(name) != name) bad += "${raw.debugText()} saved as unstable $name"
                 if (name.length > 253 || name.split('.').size < 2 || name.startsWith("www.") && name.drop(4).contains('.') && !isShared(name.drop(4))) bad += "${raw.debugText()} saved as odd $name"

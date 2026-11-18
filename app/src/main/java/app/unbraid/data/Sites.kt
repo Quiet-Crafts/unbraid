@@ -141,6 +141,9 @@ object Sites {
         host = host.substringBefore('/').substringBefore('?').substringBefore('#').substringAfterLast('@')
         // An IPv6 address, bracketed in a link or bare.
         if (host.startsWith("[") || host.count { it == ':' } > 1) return null to ADDRESS
+        // A port is read as a browser reads it before it is dropped: digits only, at most 65535, else no address at all.
+        val port = host.substringAfter(':', "").trimStart('0')
+        if (!port.all { it in '0'..'9' } || port.length > 5 || (port.toIntOrNull() ?: 0) > 65535) return null to NOT_A_NAME
         host = host.substringBefore(':').trim('.')
         // Only letters, marks and digits that the older rule for international names writes as browsers do: any other
         // character could save as another site.
