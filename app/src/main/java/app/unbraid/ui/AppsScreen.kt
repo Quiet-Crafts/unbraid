@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.runtime.LaunchedEffect
@@ -35,7 +36,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ButtonGroupDefaults
@@ -91,6 +91,13 @@ internal fun emptyApps(query: String, filter: String?, hiddenSystem: Int): Pair<
     filter != null -> (if (query.isEmpty()) "No apps use $filter." else "No apps on $filter match \"$query\".") to "Show all"
     query.isNotEmpty() -> "No apps match \"$query\"." to null
     else -> "No apps" to null
+}
+
+/** The line under the Apps filters: how many system apps the switch hides or shows, and its action; null with none. */
+internal fun systemLine(count: Int, shown: Boolean): Pair<String, String>? = when {
+    count == 0 -> null
+    shown -> "Showing ${if (count == 1) "1 system app" else "$count system apps"}" to "Hide"
+    else -> "${if (count == 1) "1 system app" else "$count system apps"} hidden" to "Show"
 }
 
 /** The "Follow default" tile in an app's menu. */
@@ -169,6 +176,13 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                 (query.isEmpty() || a.label.contains(query, true) || a.pkg.contains(query, true))
         }.sortedBy { rank[placeOf(it.pkg)] ?: Int.MAX_VALUE }
     }
+    // The system apps the System switch hides or shows in this view: an app given a route of its own always shows.
+    val system = remember(apps, setup, query, filter, open, openedAs) {
+        apps.count { a ->
+            a.system && a.pkg !in setup.apps && (filter == null || placeOf(a.pkg) == filter) &&
+                (query.isEmpty() || a.label.contains(query, true) || a.pkg.contains(query, true))
+        }
+    }
     val direct = apps.count { it.pkg in setup.apps && setup.apps[it.pkg] == DIRECT }
     val blocked = apps.count { setup.apps[it.pkg] == BLOCK }
     val routed = apps.count { it.pkg in setup.apps } - direct - blocked
@@ -218,7 +232,15 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
                 if (!sites && setup.defaultRoute.isEmpty()) FilterChip("Not set", null, filter == "") { filter = "" }
                 FilterChip("Direct", Ink.direct, chosen == DIRECT, direct = true) { choose(DIRECT) }
                 FilterChip("Block", Ink.bad, chosen == BLOCK) { choose(BLOCK) }
-                if (!sites) FilterChip("System", null, showSystem, independent = true) { showSystem = !showSystem }
+            }
+            // System apps: a sentence of its own, not a chip, so it never reads as a route or scrolls off screen.
+            if (!sites && disclosed) systemLine(system, showSystem)?.let { (text, action) ->
+                Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = Gutter), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(if (showSystem) Icons.eye else Icons.eyeOff, null, Modifier.size(18.dp), tint = Ink.dim)
+                    Text(text, style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f))
+                    // TalkBack hears "Show system apps", not a bare "Show".
+                    Secondary(action, { showSystem = !showSystem }, Modifier.semantics { contentDescription = "$action system apps" })
+                }
             }
         },
     ) {
@@ -233,10 +255,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
             }
         } else if (shown.isEmpty()) item("empty") {
             // Say what hides them (a filter whose chip may be off-screen, or the system-apps filter) and undo it in one tap.
-            val hidden = if (showSystem) 0 else apps.count { a ->
-                a.system && a.pkg !in setup.apps && (filter == null || placeOf(a.pkg) == filter) &&
-                    (query.isEmpty() || a.label.contains(query, true) || a.pkg.contains(query, true))
-            }
+            val hidden = if (showSystem) 0 else system
             val name = when (filter) { null -> null; DIRECT -> "Direct"; BLOCK -> "Block"; "" -> "no route yet"; else -> setup.route(filter)?.name ?: "this route" }
             val (text, action) = emptyApps(query, name, hidden)
             Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -261,13 +280,13 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
 }
 
 @Composable
-private fun FilterChip(label: String, dot: Color?, on: Boolean, direct: Boolean = false, independent: Boolean = false, onClick: () -> Unit) {
+private fun FilterChip(label: String, dot: Color?, on: Boolean, direct: Boolean = false, onClick: () -> Unit) {
     val seen = remember { BringIntoViewRequester() }
     // The chosen route filter's chip scrolls into view, also when chosen from elsewhere (a restored filter, an empty list's Show all).
-    if (!independent) LaunchedEffect(on) { if (on) seen.bringIntoView() }
+    LaunchedEffect(on) { if (on) seen.bringIntoView() }
     Box(
-        // Exit filters are one choice among many; "System" is an independent on/off filter.
-        Modifier.bringIntoViewRequester(seen).heightIn(min = 48.dp).then(if (independent) Modifier.toggleable(on, role = Role.Checkbox) { onClick() } else Modifier.selectable(on, role = Role.RadioButton, onClick = onClick)),
+        // Exit filters are one choice among many.
+        Modifier.bringIntoViewRequester(seen).heightIn(min = 48.dp).selectable(on, role = Role.RadioButton, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         val shape = RoundedCornerShape(12.dp)

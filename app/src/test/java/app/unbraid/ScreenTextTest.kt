@@ -14,6 +14,7 @@ import app.unbraid.ui.blockingFor
 import app.unbraid.ui.pendingNote
 import app.unbraid.ui.importTarget
 import app.unbraid.ui.emptyApps
+import app.unbraid.ui.systemLine
 import app.unbraid.ui.noLocations
 import app.unbraid.ui.routeWarning
 import app.unbraid.ui.missingAppsText
@@ -115,6 +116,14 @@ class ScreenTextTest {
     }
 
     /** An empty Apps list says why and offers the way back, instead of "No apps match". */
+    @Test fun systemLineSaysHowManyAndFlips() {
+        assertEquals("14 system apps hidden" to "Show", systemLine(14, shown = false))
+        assertEquals("Showing 14 system apps" to "Hide", systemLine(14, shown = true))
+        assertEquals("1 system app hidden" to "Show", systemLine(1, shown = false))
+        assertEquals(null, systemLine(0, shown = false))
+        assertEquals(null, systemLine(0, shown = true))
+    }
+
     @Test fun emptyAppsListSaysWhy() {
         assertEquals("2 system apps match. System apps are hidden." to "Show system apps", emptyApps("play", null, 2))
         assertEquals("1 system app matches. System apps are hidden." to "Show system apps", emptyApps("webview", "Direct", 1))
