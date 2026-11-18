@@ -100,15 +100,36 @@ private val NordProtocols = listOf<Triple<String?, String, String>>(
     Triple("openvpn_tcp", "OpenVPN TCP", "For networks that block VPNs"),
 )
 
+/**
+ * The Nord server type and protocol the picker opens on for [l]. A restored file may name the standard servers and
+ * NordLynx as Nord's API does, which these lists say as null.
+ */
+internal fun nordOpening(l: Location?) = l?.group?.takeIf { it != "legacy_standard" } to l?.protocol?.takeIf { it != "wireguard_udp" }
+
+/** The labels of Nord's [group] and [protocol]: one a restored file names that these lists lack is Other, kept until another is picked. */
+internal fun nordLabels(group: String?, protocol: String?) =
+    (NordGroups.firstOrNull { it.first == group }?.second ?: "Other") to (NordProtocols.firstOrNull { it.first == protocol }?.second ?: "Other")
+
 /** A city saved before regions were stored: Mullvad, IVPN and PIA can't tell which city it was, so it must be picked again. */
 // Also a pinned favourite saved without its server's address and key (before favourites kept them): star it again.
 private fun stale(l: Location) = l.provider != "nord" && l.city != null && l.region == null || l.pinned?.host?.isEmpty() == true
+
+/** Whether the picker ticks [l] for the route's [current] place: whatever protocol is pending, the standard servers however a file names them. */
+internal fun ticked(current: Location?, l: Location) = current != null && !stale(l) &&
+    current.ident().copy(protocol = null, group = nordOpening(current).first) == l.ident().copy(protocol = null, group = nordOpening(l).first)
+
+/**
+ * [picked] as it is saved. A Nord server found over OpenVPN may have no NordLynx key: under NordLynx it is picked again
+ * instead. A restored pin has no address or key yet and stays: Nord's list finds it, or refuses it for NordLynx.
+ */
+internal fun toSave(picked: Location) =
+    picked.copy(pinned = picked.pinned?.takeIf { picked.provider != "nord" || picked.protocol != null || it.publicKey.isNotEmpty() || it.ip.isEmpty() })
 
 private class Pick(
     val provider: String, val current: Location?, val group: String?, val protocol: String?, val tint: Color, val hasLoad: Boolean, val choose: (Location) -> Unit,
 ) {
     // The place ticks whatever protocol is pending: tapping it again applies a changed protocol or blocking.
-    fun on(l: Location) = current != null && !stale(l) && current.ident().copy(protocol = null) == l.ident().copy(protocol = null)
+    fun on(l: Location) = ticked(current, l)
 }
 
 /**
@@ -179,9 +200,10 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     val provider = chosen?.takeIf { c -> signed.any { it.id == c } } ?: current?.provider?.takeIf { c -> signed.any { it.id == c } } ?: signed.firstOrNull()?.id
     val catalog = provider?.let { catalogs[it] }.orEmpty()
     var q by rememberSaveable { mutableStateOf("") }
-    var groupChoice by rememberSaveable { mutableStateOf(current?.group) }
+    val opening = nordOpening(current)
+    var groupChoice by rememberSaveable { mutableStateOf(opening.first) }
     val group = groupChoice.takeIf { provider == "nord" }
-    var protocolChoice by rememberSaveable { mutableStateOf(current?.protocol) }
+    var protocolChoice by rememberSaveable { mutableStateOf(opening.second) }
     // The route's provider blocking as chosen here, applied with the location tap; null = unchanged.
     var blockChoice by rememberSaveable { mutableStateOf<Boolean?>(null) }
     // Double VPN and Onion only run over OpenVPN: UDP unless TCP was chosen.
@@ -202,8 +224,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     var closed by remember { mutableStateOf(false) } // a second tap while the picker closes must not run the action again
     fun once(f: () -> Unit) { if (!closed) { closed = true; f() } }
     val pick = Pick(provider.orEmpty(), current, group, protocol, tint, hasLoad) { picked -> once {
-        // A Nord server found over OpenVPN may have no NordLynx key: under NordLynx it is picked again instead.
-        val loc = picked.copy(pinned = picked.pinned?.takeIf { picked.provider != "nord" || picked.protocol != null || it.publicKey.isNotEmpty() })
+        val loc = toSave(picked)
         when {
             target.isEmpty() -> ui.addRoute(loc)
             target == "default" -> if (draft != null) ui.chooseDefault(loc) else ui.setDefault(ui.addRoute(loc))
@@ -242,11 +263,10 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     val filterOverrides = setup.prefs.filter.routes && setup.prefs.filter.server() != null
     val blockingNow = blockable?.let { blockChoice ?: setup.protects(it) }
     val pending = pendingNote(
-        NordProtocols.firstOrNull { it.first == protocol }?.second?.takeIf { current?.provider == "nord" && provider == "nord" && protocol != current.protocol },
+        NordProtocols.firstOrNull { it.first == protocol }?.second?.takeIf { current?.provider == "nord" && provider == "nord" && protocol != opening.second },
         blockable?.let { r -> blockingToApply(blockChoice, setup.protects(r))?.let { providerName to it } },
     )
-    val groupLabel = NordGroups.first { it.first == group }.second
-    val protocolLabel = NordProtocols.first { it.first == protocol }.second
+    val (groupLabel, protocolLabel) = nordLabels(group, protocol)
 
     fun LazyListScope.countryRow(c: Country) = item(key = "c:${c.id}") {
         val all = Location(pick.provider, c.id, c.code, c.name, group = group, protocol = protocol)

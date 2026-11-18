@@ -16,6 +16,10 @@ import app.unbraid.ui.importTarget
 import app.unbraid.ui.emptyApps
 import app.unbraid.ui.systemLine
 import app.unbraid.ui.noLocations
+import app.unbraid.ui.nordLabels
+import app.unbraid.ui.nordOpening
+import app.unbraid.ui.ticked
+import app.unbraid.ui.toSave
 import app.unbraid.ui.routeWarning
 import app.unbraid.ui.connectedLabel
 import app.unbraid.ui.missingAppsText
@@ -38,6 +42,8 @@ import app.unbraid.ui.lookupsSub
 import app.unbraid.ui.AppInfo
 import app.unbraid.data.Filter
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** What the main screens say and tick, from the setup alone. */
@@ -142,6 +148,23 @@ class ScreenTextTest {
         assertEquals("Loading locations…" to false, noLocations(false, Fetch.Loading, "Standard"))
         assertEquals("NordVPN didn't answer." to true, noLocations(false, Fetch.Failed("NordVPN didn't answer."), "Standard"))
         assertEquals("No country offers P2P right now. Choose another server type in Route options." to false, noLocations(true, null, "P2P"))
+    }
+
+    /** A restored Nord route naming NordLynx or the standard servers as Nord's API does opens on them; anything else shows as Other. */
+    @Test fun pickerOpensOnRestoredNordChoices() {
+        val restored = nordOpening(Location("nord", 153, "NL", "Netherlands", group = "legacy_standard", protocol = "wireguard_udp"))
+        assertEquals(null to null, restored)
+        assertEquals("Standard" to "NordLynx", nordLabels(restored.first, restored.second))
+        assertEquals("legacy_p2p" to "openvpn_tcp", nordOpening(Location("nord", group = "legacy_p2p", protocol = "openvpn_tcp")))
+        assertEquals("Other" to "Other", nordLabels("legacy_obfuscated_servers", "openvpn_xor_udp"))
+        assertEquals(null to null, nordOpening(null))
+        // The place stays ticked however the file names the standard servers.
+        assertTrue(ticked(Location("nord", 153, "NL", "Netherlands", group = "legacy_standard", protocol = "wireguard_udp"), Location("nord", 153, "NL", "Netherlands")))
+        assertFalse(ticked(Location("nord", 153, "NL", "Netherlands", group = "legacy_p2p"), Location("nord", 153, "NL", "Netherlands")))
+        // A restored favourite's pin (no address or key yet) is kept under NordLynx; a listed server without a NordLynx key is not.
+        val restoredPin = Server("Germany #1", "de1.nordvpn.com", "", "", -1)
+        assertEquals(restoredPin, toSave(Location("nord", 81, "DE", "Germany", pinned = restoredPin)).pinned)
+        assertEquals(null, toSave(Location("nord", 81, "DE", "Germany", pinned = restoredPin.copy(ip = "89.187.175.235", load = 3))).pinned)
     }
 
     @Test fun routeCardWarnings() {
