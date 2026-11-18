@@ -184,6 +184,8 @@ class RestoreOracleTest {
     private fun guard(r: Resolver?) = if (r == Resolver.Filter) 2 else if (r == Resolver.Provider) 1 else 0
 
     private fun weaker(a: Outcome, b: Outcome, lookup: Boolean): Set<Loss> {
+        // A hold keeps traffic off Direct: lifted to Direct, it is a refusal lifted, and Direct.
+        if (a.exit == RestoreTraffic.HELD && b.exit == "direct") return setOf(Loss.Unblocked, Loss.ToDirect)
         if (RestoreTraffic.HELD in listOf(a.exit, b.exit)) return emptySet()
         // A question answered on the phone loses only by being sent out Direct.
         if (RestoreTraffic.EMPTY in listOf(a.exit, b.exit)) return if (a.exit == RestoreTraffic.EMPTY && b.exit == "direct") setOf(Loss.Lookups) else emptySet()
@@ -225,7 +227,9 @@ class RestoreOracleTest {
         else -> if (setOf(own.was.by, own.now.by, own.was.rby, own.now.rby).any { it == By.App || it == By.AppFirst }) kin(p).map { Who.App(it, p) }.toSet() + Who.App(p) else setOf(Who.Default)
     }
 
-    private fun who(name: String?, place: Who?, d: Duo, own: Duo, pe: Set<Who>, sites: Set<String>, loss: Loss): Set<Who> {
+    private fun who(name: String?, place: Who?, d: Duo, own: Duo, pe: Set<Who>, sites: Set<String>, loss: Loss): Set<Who>? {
+        // A hold lifted is the unattributed traffic's own, but at the local and home networks, which every app reaches without one.
+        if (d.was.out.exit == RestoreTraffic.HELD) return if (place != null) null else pe
         val l = if (loss == Loss.ToDirect && Loss.Unblocked in d.losses) Loss.Unblocked else loss
         if (alike(d, own, l)) return pe
         if (d.now.by == By.AppFirst && d.now.out.exit == own.now.out.exit) return pe

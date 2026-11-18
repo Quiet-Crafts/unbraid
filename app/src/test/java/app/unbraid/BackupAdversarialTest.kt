@@ -81,7 +81,9 @@ class BackupAdversarialTest {
             RestoreTraffic.notes(noFilter, noFilter.copy(opts = mapOf("nord" to mapOf("protect" to "off")))))
         assertEquals(listOf("The DNS filter is turned off.", "\"Box\" connects to 198.51.100.66 instead of 203.0.113.1.", "Your home WireGuard uses other DNS servers: 198.51.100.53.", leaves,
             "The default route goes from Netherlands to Direct.", "1 app and 1 website go from a VPN route to Direct.", "Part of the home network goes Direct instead of through the home tunnel.",
-            "Apps can reach the local network again.", "1 app that is blocked now goes Direct.", "1 website that is blocked now goes Direct."), sheet(kinds.fold(phone) { s, (_, change) -> change(s) }))
+            "Apps can reach the local network again.", "1 app that is blocked now goes Direct.", "1 website that is blocked now goes Direct.",
+            // The game no longer blocked and the default on Direct: what Android ties to no app is no longer held off Direct.
+            "Traffic Android can't tie to an app is no longer refused and goes Direct."), sheet(kinds.fold(phone) { s, (_, change) -> change(s) }))
     }
 
     @Test fun weakOwnServersAreNamedUntilAccepted() {

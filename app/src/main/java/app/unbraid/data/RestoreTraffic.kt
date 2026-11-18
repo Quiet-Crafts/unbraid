@@ -35,7 +35,7 @@ import java.util.IdentityHashMap
  *    answered the name and the way that question went out, and what that resolver blocks. Each part is compared on its
  *    own ([losses]): refused above any tunnel above Direct; a question kept on the phone or sent through a tunnel above
  *    one sent Direct; the filter above the provider's blocking above any other resolver; and blocking that covers every
- *    kind of site it covered. Neither a hold ([HELD]) nor a question answered on the phone is ranked against an exit.
+ *    kind of site it covered. A hold ([HELD]) ranks against Direct only, as a refusal; a question answered on the phone against no exit.
  * 4. Setups compared: the one in use against the restored one, then every other pair the phone can run without this
  *    sheet ([pairs]): after any order of networks, the profiles the rules switch to (and on a network with no rule, the
  *    one it switched to before), and each profile both have by name, as picked by hand or from a tile.
@@ -397,6 +397,8 @@ object RestoreTraffic {
      * alone, whose exit is the way it goes out; one answered on the phone counts only against one sent Direct.
      */
     fun losses(was: Outcome, now: Outcome, lookup: Boolean = false): Set<Loss> {
+        // Held off Direct, then out Direct: a refusal lifted, and Direct.
+        if (was.exit == HELD && now.exit == DIRECT_TAG) return setOf(Loss.Unblocked, Loss.ToDirect)
         if (was.exit == HELD || now.exit == HELD) return emptySet()
         if (was.exit == EMPTY || now.exit == EMPTY) return if (was.exit == EMPTY && now.exit == DIRECT_TAG) setOf(Loss.Lookups) else emptySet()
         val out = HashSet<Loss>()
@@ -613,7 +615,10 @@ object RestoreTraffic {
     private fun opensNearby(d: Duo, l: Loss) = l == Loss.ToDirect && Loss.Unblocked in d.losses && d.now.by == By.Address
 
     /** What loss [l] of a class other than an app's own traffic is said for ([RestoreTraffic] point 5); [place]: whose name a name is. */
-    private fun who(n: Name, a: Address?, d: Duo, own: Duo, pe: Set<Who>, place: (String, Boolean) -> Who, loss: Loss): Set<Who> {
+    private fun who(n: Name, a: Address?, d: Duo, own: Duo, pe: Set<Who>, place: (String, Boolean) -> Who, loss: Loss): Set<Who>? {
+        // Held off Direct only for want of an app to tie it to: said for that traffic; the local and home networks are
+        // left as they are for every app without a hold.
+        if (d.was.out.exit == HELD) return if (a?.home == true || a?.local == true) null else pe
         // A refusal lifted to Direct is said for what refused it, both ways.
         val l = if (loss == Loss.ToDirect && Loss.Unblocked in d.losses) Loss.Unblocked else loss
         // Going as the app's own traffic goes, or as an app decided before anything else: the app's.
@@ -854,7 +859,9 @@ object RestoreTraffic {
         }
         for (d in listOf(true, false)) say(waiting.filterTo(HashSet()) { leavesDirect(it) == d }, Loss.Unblocked) { many ->
             "that can't connect now, because ${if (many) "their routes wait" else "its route waits"} for a server's config, ${if (many) "go" else "goes"} out${if (d) " Direct" else ""} without it" }
-        say(opened.filterTo(HashSet()) { it == Who.NoApp || it == Who.SignIn }, Loss.Unblocked) { if (it) "are no longer refused" else "is no longer refused" }
+        // Each in a sentence of its own, said Direct where it then leaves outside any VPN.
+        for (w in listOf(Who.NoApp, Who.SignIn)) if (w in opened) say(setOf(w), Loss.Unblocked) { many ->
+            (if (many) "are no longer refused" else "is no longer refused") + if (!leavesDirect(w)) "" else if (many) " and go Direct" else " and goes Direct" }
         if (Who.Local in opened) out += Note("Blocked apps can reach the local network.", Loss.Unblocked, setOf(Who.Local))
         if (Who.Home in opened) out += Note("Part of the home network that is refused now won't be.", Loss.Unblocked, setOf(Who.Home))
 
