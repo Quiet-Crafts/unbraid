@@ -41,12 +41,6 @@ open class ProtonVpn(private val free: Boolean) : KeyProvider() {
     override val defaultAddress = listOf("10.2.0.2/32")
     override val defaultDns = listOf("10.2.0.1")
     override val defaultPort = 51820
-    /** Proton's alternative WireGuard ports, as its own apps try them. */
-    override val ports = listOf(51820, 443, 88, 1224, 500, 4500)
-    override val defaults = mapOf(PORT_OPT to AUTO)
-    override fun options(account: String) = listOf(
-        Opt(PORT_OPT, "Port", "Automatic tries 51820 first, then other ports when a network blocks it", listOf(AUTO to "Automatic") + ports.map { "$it" to "UDP $it" }, advanced = true),
-    )
 
     private val SECURE_CORE = Regex("^(CH|IS|SE)-[A-Z]{2}#")
 

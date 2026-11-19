@@ -330,7 +330,7 @@ class KeySourcesTest {
         Endpoint = at.vpn.airdns.org:$port
     """.trimIndent()
 
-    /** Every port, the account's first (51820 only with entry 3 known); both entries from AirVPN's list, none from the catalogue's. */
+    /** Every port, the account's first, 51820 tied to entry 3; both entries from AirVPN's list, none from the catalogue's. */
     @Test fun airvpnTunnelsCarryPortsAndEntries() {
         val entries = AirVpn.parse(res("airvpn_status.json"), accountKey)
         val l = AirVpn.link(Location("airvpn", country = "Netherlands"), AirVpn.account(AirVpn.signed(conf("10.164.20.6/32")))) { entries }
@@ -342,7 +342,7 @@ class KeySourcesTest {
         AirVpn.catalogue = { Catalog.parse(res("catalog_airvpn.json"), "wireguard") }
         val offline = AirVpn.connect(Location("airvpn"), AirVpn.signed(conf("10.164.20.6/32"))) as app.unbraid.data.WgLink
         assertTrue(offline.entries.isEmpty())
-        assertTrue(51820 !in offline.ports && offline.portEntry.isEmpty())
+        assertEquals(mapOf(51820 to 2), offline.portEntry)
     }
 
     @Test fun surfsharkDropsMalformedKeysBeforeKeepingAList() {

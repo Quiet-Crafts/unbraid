@@ -51,7 +51,7 @@ abstract class KeyProvider : Provider {
     protected open val presharedRequired = false
     /** Every port its servers take, best first; the account's own port is always tried first. */
     protected open val ports: List<Int> = emptyList()
-    /** A port its servers take on one entry address only ([WgLink.portEntry]); left out where that entry isn't known. */
+    /** A port its servers take on one entry address only ([WgLink.portEntry]); where that entry isn't known, another port is used. */
     protected open val portEntry: Map<Int, Int> = emptyMap()
     /** A server's entry addresses for [WgLink.entries]; none unless the provider has an entry setting. */
     protected open fun addresses(e: Catalog.Entry): List<String> = emptyList()
@@ -135,16 +135,15 @@ abstract class KeyProvider : Provider {
             ?: throw IOException("No $name server for ${loc.label}")
         Addr.usable(sv)
         val entries = e?.let(::addresses).orEmpty()
-        val only = portEntry.filterValues { it <= entries.size }
         return WgLink(
             sv,
             WgPeer(
                 name = sv.name, privateKey = a.privateKey, address = a.address, publicKey = peerKey(sv, a), presharedKey = a.presharedKey,
                 endpoint = "${sv.ip}:${a.port}", allowedIps = listOf("0.0.0.0/0"), dns = a.dns, mtu = a.mtu,
             ),
-            if (ports.isEmpty()) emptyList() else (listOf(a.port) + ports).distinct().filter { it !in portEntry || it in only },
+            if (ports.isEmpty()) emptyList() else (listOf(a.port) + ports).distinct(),
             entries,
-            only,
+            portEntry,
         )
     }
 

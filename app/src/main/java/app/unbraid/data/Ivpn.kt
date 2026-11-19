@@ -15,8 +15,8 @@ import kotlin.math.roundToInt
  * with `{username, force, wg_public_key}`. The reply carries its own `status` (200, 401 bad ID, 602 session limit,
  * 702 inactive account, 70001 captcha, 70011 2FA), `token` and `wireguard.ip_address`. One session and one key serve every host.
  * Server list: `GET /v5/servers.json`. Port 2049 and DNS = the host's in-tunnel `local_ip` (172.16.0.1) as in IVPN's WireGuard FAQ
- * and the client's DefaultDNS. `ip_address` is taken as a bare IPv4 (a mask is stripped if present). Accounts with 2FA,
- * or ones IVPN answers with a captcha, cannot sign in here.
+ * and the client's DefaultDNS. `ip_address` is taken as a bare IPv4 (a mask is stripped if present). A 2FA code or a
+ * captcha IVPN asks for is answered in the sign-in screen.
  *
  * Sign-out frees the session: `POST /v4/session/delete {"session_token"}`. Limitation: IVPN has no API to list sessions,
  * so a `session/new` whose reply is lost in transit leaves an orphaned session (one of the account's device slots) that

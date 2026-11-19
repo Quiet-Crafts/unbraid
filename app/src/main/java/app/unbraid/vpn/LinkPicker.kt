@@ -96,9 +96,10 @@ object LinkPicker {
      */
     fun ported(setup: Setup, links: Map<String, Link>, step: Map<String, Int>): Map<String, Link> {
         val provider = { id: String -> setup.route(id)?.takeIf { !it.imported }?.loc?.provider }
-        // One list per provider, so a tunnel saved without one (offline) still takes the same port as its provider's others.
-        val lists = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.ports.orEmpty() }).mapValues { (_, l) -> l.firstOrNull { it.isNotEmpty() }.orEmpty() }
-        val only = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.portEntry.orEmpty() }).mapValues { (_, l) -> l.firstOrNull { it.isNotEmpty() }.orEmpty() }
+        // One list per provider, every tunnel's ports in route order, so a tunnel saved without one (offline) still takes the
+        // same port as its provider's others, and no route's order hides a port another tunnel knows.
+        val lists = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.ports.orEmpty() }).mapValues { (_, l) -> l.flatten().distinct() }
+        val only = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.portEntry.orEmpty() }).mapValues { (_, l) -> l.fold(emptyMap<Int, Int>()) { a, m -> m + a } }
         return links.mapValues { (id, l) -> portedOne(setup, provider(id), l, lists, only, step) }
     }
 
@@ -107,10 +108,11 @@ object LinkPicker {
         if (p == null) return l.copy(peer = l.peer.copy(mtu = minOf(l.peer.mtu, app.unbraid.data.MTU_MIN)))
         val picked = setup.opt(p, app.unbraid.data.PORT_OPT)?.toIntOrNull()?.takeIf { it in 1..65535 }
             ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[(step[p] ?: 0) % it.size] }
-        val needs = picked?.let { only[p]?.get(it) }
-        // A one-entry port on a tunnel that doesn't know that entry would go nowhere: it keeps its own port instead.
+        val one = only[p].orEmpty()
+        val needs = picked?.let { one[it] }
+        // A one-entry port on a tunnel that doesn't know that entry would go nowhere: it takes the first port that works at any entry.
         val fits = needs == null || l.entries.getOrNull(needs - 1) != null
-        val port = picked?.takeIf { fits } ?: l.peer.endpoint.substringAfterLast(':')
+        val port = picked?.takeIf { fits } ?: lists[p].orEmpty().firstOrNull { it !in one } ?: l.peer.endpoint.substringAfterLast(':')
         val entry = needs?.takeIf { fits }
         val host = (entry ?: setup.opt(p, app.unbraid.data.ENTRY_OPT)?.toIntOrNull())?.let { l.entries.getOrNull(it - 1) } ?: l.peer.endpoint.substringBeforeLast(':')
         return l.copy(peer = l.peer.copy(endpoint = "$host:$port", mtu = app.unbraid.data.mtu(setup.opt(p, app.unbraid.data.MTU_OPT))))

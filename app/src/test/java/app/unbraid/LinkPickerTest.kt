@@ -272,6 +272,29 @@ class LinkPickerTest {
         assertEquals("198.51.100.3:1637", at(alt)["1"])
     }
 
+    /** Without the entry it needs, a one-entry port gives way to the first port any entry takes: fixed, stepped or the tunnel's own. */
+    @Test fun oneEntryPortWithoutItsEntry() {
+        val peer = WgPeer("x", "k", listOf("10.0.0.2/32"), "p", endpoint = "198.51.100.1:51820", allowedIps = listOf("0.0.0.0/0"))
+        val s = setup(Route("1", Location("fake", countryCode = "NL")))
+        val links = mapOf("1" to WgLink(a, peer, listOf(51820, 1637, 47107), emptyList(), mapOf(51820 to 2)))
+        fun at(s: Setup, step: Map<String, Int> = emptyMap()) = (LinkPicker.ported(s, links, step)["1"] as WgLink).peer.endpoint
+        assertEquals("198.51.100.1:1637", at(s))
+        assertEquals("198.51.100.1:1637", at(s.copy(opts = mapOf("fake" to mapOf("port" to "51820")))))
+        assertEquals("198.51.100.1:47107", at(s, mapOf("fake" to 2)))
+    }
+
+    /** A provider's Automatic ports are every tunnel's, in route order: a first route without a port never hides it from the next. */
+    @Test fun providerPortsAreEveryTunnels() {
+        val peer = WgPeer("x", "k", listOf("10.0.0.2/32"), "p", endpoint = "198.51.100.1:1637", allowedIps = listOf("0.0.0.0/0"))
+        val s = setup(Route("1", Location("fake", countryCode = "NL")), Route("2", Location("fake", countryCode = "DE")))
+        val links = mapOf(
+            "1" to WgLink(a, peer, listOf(1637, 47107)),
+            "2" to WgLink(a, peer.copy(endpoint = "198.51.100.9:1637"), listOf(1637, 47107, 51820), listOf("198.51.100.9", "198.51.100.10"), mapOf(51820 to 2)),
+        )
+        val at = LinkPicker.ported(s, links, mapOf("fake" to 2)).mapValues { (it.value as WgLink).peer.endpoint }
+        assertEquals(mapOf("1" to "198.51.100.1:1637", "2" to "198.51.100.10:51820"), at)
+    }
+
     /** A fixed port wins; Automatic walks the server's ports one step at a time, per provider; imports keep theirs. */
     @Test fun portsFollowTheProviderPage() {
         val peer = WgPeer("x", "k", listOf("10.0.0.2/32"), "p", endpoint = "198.51.100.1:2049", allowedIps = listOf("0.0.0.0/0"))
