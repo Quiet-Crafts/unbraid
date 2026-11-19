@@ -143,12 +143,17 @@ object Ivpn : Provider {
         val acct = input["account"].orEmpty().filterNot(Char::isWhitespace)
         require(acct.matches(Regex("i-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}|ivpn[A-Za-z0-9]{7,8}"))) { "Account ID must look like i-XXXX-XXXX-XXXX or ivpnXXXXXXXX" }
         val keys = WgKeys.generate()
-        val body = buildJsonObject {
-            put("username", acct); put("force", false); put("wg_public_key", keys.public)
-            // The answers to an earlier reply's two-factor or captcha question.
-            for (k in listOf(CODE, CAPTCHA, CAPTCHA_ID)) input[k]?.filterNot(Char::isWhitespace)?.takeIf { it.isNotEmpty() }?.let { put(k, it) }
-        }
-        return session(postJsonRaw("$API/v4/session/new", body.toString()), acct, keys.private)
+        return session(postJsonRaw("$API/v4/session/new", sessionBody(acct, keys.public, input).toString()), acct, keys.private, forced(acct, input))
+    }
+
+    /** Forced only for the very account the user agreed for: the agreement carries its ID, so a changed field never inherits it. */
+    private fun forced(acct: String, input: Map<String, String>) = input[FORCE]?.let { it.isNotEmpty() && it == acct } == true
+
+    /** The sign-in request. `force` only after the user agreed: IVPN then signs out every other device on the account ([SlotsFull]). */
+    internal fun sessionBody(acct: String, publicKey: String, input: Map<String, String>) = buildJsonObject {
+        put("username", acct); put("force", forced(acct, input)); put("wg_public_key", publicKey)
+        // The answers to an earlier reply's two-factor or captcha question.
+        for (k in listOf(CODE, CAPTCHA, CAPTCHA_ID)) input[k]?.filterNot(Char::isWhitespace)?.takeIf { it.isNotEmpty() }?.let { put(k, it) }
     }
 
     override fun signOut(account: String): Boolean = try {
@@ -168,29 +173,38 @@ object Ivpn : Provider {
     internal fun sessionGone(reply: Pair<Int, String>) =
         (runCatching { NordApi.json.decodeFromString(SessionReply.serializer(), reply.second).status }.getOrNull() ?: reply.first).let { it == 601 || it == 401 }
 
+    private const val FORCE = "force"
     private const val CODE = "confirmation"
     private const val CAPTCHA = "captcha"
     private const val CAPTCHA_ID = "captcha_id"
     private val codeField = Field(CODE, "Two-factor code", secret = false, hint = "6 digits")
     private val captchaField = Field(CAPTCHA, "Characters in the picture", secret = false)
 
-    internal fun session(reply: Pair<Int, String>, account: String, privateKey: String): String {
+    internal fun session(reply: Pair<Int, String>, account: String, privateKey: String, force: Boolean = false): String {
         val (code, body) = reply
         val o = Http.parsed("IVPN") { NordApi.json.decodeFromString(SessionReply.serializer(), body) }
+        // A forced sign-in that IVPN still asks a question (two-factor, captcha) stays forced when it is answered.
+        val kept = if (force) mapOf(FORCE to account) else emptyMap()
         when (val status = o.status ?: code) {
             200 -> Unit
             401 -> throw AuthException("IVPN doesn't recognise that account ID")
             602 -> o.data?.deviceLimit?.takeIf { it > 0 }.let { n ->
-                throw AuthException(Limits.full(name, n, "device"), CLIENT_AREA)
+                // IVPN's own apps offer the same: "force login to logout of all other devices".
+                if (force) throw AuthException(Limits.full(name, n, "device"), CLIENT_AREA)
+                throw app.unbraid.data.SlotsFull(
+                    "All ${n?.let { "$it " }.orEmpty()}IVPN devices are in use.", CLIENT_AREA,
+                    "IVPN signs out every other device on this account, including the IVPN app on your computer or other phones. They stay off until someone signs in on them again. Then this phone signs in and takes a free slot.",
+                    mapOf(FORCE to account),
+                )
             }
             702 -> throw AuthException("This IVPN account isn't active. Renew it first.")
             70001, 70002 -> {
                 val id = o.captchaId?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,128}")) } ?: throw AuthException("IVPN is asking for a captcha. Log in once on ivpn.net or in the IVPN app, then try again.")
                 val png = runCatching { java.util.Base64.getMimeDecoder().decode(o.captchaImage.orEmpty().substringAfter("base64,")) }.getOrNull()
-                throw Challenge(if (status == 70001) "IVPN wants to check you're a person. Type the characters in the picture." else "That didn't match. Try this picture.", captchaField, png, mapOf(CAPTCHA_ID to id))
+                throw Challenge(if (status == 70001) "IVPN wants to check you're a person. Type the characters in the picture." else "That didn't match. Try this picture.", captchaField, png, mapOf(CAPTCHA_ID to id) + kept)
             }
-            70011 -> throw Challenge("Two-factor authentication is on for this account. Enter the code from your authenticator app.", codeField)
-            70012 -> throw Challenge("That code didn't work. Enter the current one.", codeField)
+            70011 -> throw Challenge("Two-factor authentication is on for this account. Enter the code from your authenticator app.", codeField, keep = kept)
+            70012 -> throw Challenge("That code didn't work. Enter the current one.", codeField, keep = kept)
             else -> throw Http.Status(status, "IVPN error $status")
         }
         val ip = o.wireguard?.ipAddress ?: throw app.unbraid.vpn.Fail("IVPN didn't assign a WireGuard address. Try again later")

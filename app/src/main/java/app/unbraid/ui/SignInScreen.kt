@@ -4,6 +4,7 @@ import app.unbraid.BuildConfig
 import app.unbraid.WORDMARK
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.ui.draw.clip
@@ -122,6 +123,10 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
     val link = ui.formLink[provider.id]
     // A question the provider asked (a two-factor code, a captcha) is one more field, answered and sent with the rest.
     val asked = ui.challenge[provider.id]
+    // Every device slot is taken and the provider can free one by signing out the others: offered, and asked again before it happens.
+    val full = ui.slotsFull[provider.id]
+    // Tied to this offer: a new attempt never opens with the confirm already up.
+    var confirmFull by remember(full) { mutableStateOf(false) }
     val fields = provider.fields + listOfNotNull(asked?.field)
     fun key(f: Field) = "${provider.id}:${f.key}"
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -163,7 +168,7 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
                         }
                         Text(f.label, style = Type.sub.copy(fontWeight = FontWeight.Medium), color = Ink.text, modifier = Modifier.padding(horizontal = 8.dp))
                         PillField(
-                            ui.form[key(f)].orEmpty(), { ui.form[key(f)] = it; if (f != asked?.field) { ui.formError.remove(provider.id); ui.formLink.remove(provider.id); ui.challenge.remove(provider.id) } },
+                            ui.form[key(f)].orEmpty(), { ui.form[key(f)] = it; if (f != asked?.field) { ui.formError.remove(provider.id); ui.formLink.remove(provider.id); ui.challenge.remove(provider.id); ui.slotsFull.remove(provider.id) } },
                             f.label, placeholder = f.hint.ifBlank { f.label }, secret = f.secret,
                             imeAction = if (i == fields.lastIndex) ImeAction.Done else ImeAction.Next, onDone = ::submit,
                         )
@@ -180,6 +185,20 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
                     // A question isn't a failure: it reads as an instruction, not in red.
                     error?.let { Text(it, style = Type.caption, color = if (asked != null) Ink.text else Ink.bad, modifier = Modifier.padding(horizontal = 8.dp)) }
                     link?.let { u -> Secondary("Open the ${provider.name} client area", { context.openUrl(u) }) }
+                    if (full != null && !busy) {
+                        Row(
+                            Modifier.padding(top = 8.dp).heightIn(min = 48.dp).clip(RoundedCornerShape(24.dp)).background(Ink.accentContainer)
+                                .clickable(role = Role.Button) { confirmFull = true }.padding(horizontal = 20.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.logout, null, Modifier.size(20.dp), tint = Ink.accent)
+                            Text("Sign out your other devices", style = Type.body, color = Ink.text)
+                        }
+                        Text(
+                            "${provider.name} signs out every other device on this account, then this phone signs in. You are asked first.",
+                            style = Type.caption, color = Ink.dim, modifier = Modifier.padding(horizontal = 8.dp),
+                        )
+                    }
                     Text(
                         "${provider.help} Stored encrypted on this phone.",
                         style = Type.caption, color = Ink.dim, modifier = Modifier.padding(horizontal = 8.dp),
@@ -191,6 +210,12 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Ink.ground).imePadding().navigationBarsPadding()
                 .padding(start = Gutter, end = Gutter, top = 8.dp, bottom = 16.dp),
         ) { Primary("Continue", ::submit, enabled = ready, busy = busy) }
+    }
+    if (confirmFull && full != null) Prompt("Sign out your other ${provider.name} devices?", "Sign out the others", {
+        confirmFull = false
+        ui.signIn(provider, fields.associate { it.key to ui.form[key(it)].orEmpty() }, full.retry)
+    }, { confirmFull = false }, danger = true) {
+        Text(full.confirm, style = Type.sub)
     }
     if (scanning) Prompt("Scan QR code", "Take a photo", { scanning = false; scan.photo() }, { scanning = false }) {
         Text("Photograph the QR code with your camera app, or pick a screenshot of it.", style = Type.sub)

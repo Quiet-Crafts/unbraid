@@ -31,7 +31,8 @@ class DebugHooks : BroadcastReceiver() {
                     "account" -> {
                         val o = NordApi.json.parseToJsonElement(i.getStringExtra("arg")!!).jsonObject
                         val p = app.unbraid.data.Providers.get(o["provider"]!!.jsonPrimitive.content)!!
-                        s.account(p.id, p.signIn(o["input"]!!.jsonObject.mapValues { it.value.jsonPrimitive.content }))
+                        // Never forced from here: signing out other devices needs the user's own confirm in the app.
+                        s.account(p.id, p.signIn(o["input"]!!.jsonObject.mapValues { it.value.jsonPrimitive.content } - "force"))
                         "account ${p.id} ok, ${p.countries(s.accounts.value.getValue(p.id)).size} countries"
                     }
                     "health" -> kotlinx.coroutines.runBlocking { val out = mutableListOf<String>(); for (t in UnbraidVpn.tags.values.distinct().filter { it.startsWith("r-") }) out += "$t=${app.unbraid.vpn.Health.reachable(t)}"; out.joinToString() }
