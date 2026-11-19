@@ -18,6 +18,11 @@ import kotlin.math.roundToInt
  * and the client's DefaultDNS. `ip_address` is taken as a bare IPv4 (a mask is stripped if present). Accounts with 2FA,
  * or ones IVPN answers with a captcha, cannot sign in here.
  *
+ * Quantum-safe: every sign-in also sends a Round-3 Kyber-1024 public key (`kem_public_key1`, with IVPN's own
+ * `kem_library_version`); the reply's `wireguard.kem_cipher1` decapsulates to a secret whose SHA-256 is the WireGuard
+ * preshared key, as in IVPN's own apps. A reply without it ends the sign-in (the new session is signed out again):
+ * the server then refuses the key without the preshared key anyway, and unbraid never falls back to a plain tunnel.
+ *
  * Sign-out frees the session: `POST /v4/session/delete {"session_token"}`. Limitation: IVPN has no API to list sessions,
  * so a `session/new` whose reply is lost in transit leaves an orphaned session (one of the account's device slots) that
  * only the user can remove in the IVPN client area; it cannot be reconciled here.
@@ -28,10 +33,29 @@ object Ivpn : Provider {
         val accountId: String, val sessionToken: String, val privateKey: String, val ipAddress: String,
         /** The name IVPN gave this session, as its client area lists it, and the plan's device limit (0 = unknown). */
         val device: String = "", val limit: Int = 0,
+        /** The quantum-safe preshared key; null for accounts signed in before it existed. */
+        val psk: String? = null,
     )
 
     @Serializable
-    private class WgReply(@SerialName("ip_address") val ipAddress: String? = null)
+    private class WgReply(@SerialName("ip_address") val ipAddress: String? = null, @SerialName("kem_cipher1") val kemCipher: String? = null)
+
+    /** Round-3 Kyber-1024 (not ML-KEM, which IVPN's servers don't accept), from the engine. */
+    internal interface Kyber {
+        /** A new key pair: public and private key, base64. */
+        fun keyPair(): Pair<String, String>
+        /** base64(SHA-256(secret)) of [cipher] for [private]; throws on a malformed key or ciphertext. */
+        fun psk(private: String, cipher: String): String
+    }
+
+    internal var kyber: Kyber = object : Kyber {
+        override fun keyPair() = io.nekohasekai.libbox.Libbox.kyber1024KeyPair().split('|').let { it[0] to it[1] }
+        override fun psk(private: String, cipher: String): String = io.nekohasekai.libbox.Libbox.kyber1024PSK(private, cipher)
+    }
+    private const val KEM_VERSION = "0.10.0" // what IVPN's Android app sends
+    /** A session IVPN opened without a usable quantum-safe key; [token] lets the sign-in close it again. */
+    internal class NoPq(val token: String) : app.unbraid.vpn.Fail(NO_PQ)
+    internal const val NO_PQ = "IVPN didn't send a quantum-safe key, so $APP didn't finish signing in. Try again later"
 
     @Serializable
     internal class Plan(val name: String = "", @SerialName("device_limit") val deviceLimit: Int = 0)
@@ -119,6 +143,12 @@ object Ivpn : Provider {
         return Device("${if (name.isNotBlank()) "Named $name. " else ""}See all your devices in the IVPN client area", CLIENT_AREA)
     }
     /** The plan's device limit as read at sign-in; unbraid always holds one session. */
+    /** A cached tunnel stands in only if it was made for this sign-in: its key and quantum-safe key both match. */
+    override fun trusts(link: Link, account: String): Boolean =
+        link !is WgLink || runCatching { account(account).let { link.peer.privateKey == it.privateKey && link.peer.presharedKey == it.psk } }.getOrDefault(false)
+
+    override fun quantumSafe(account: String) = runCatching { account(account).psk != null }.getOrDefault(false)
+
     override fun limit(account: String) = Limit("device", perTunnel = false, runCatching { account(account).limit }.getOrDefault(0).takeIf { it > 0 })
     /** A block list is saved as its two resolvers, "normal|hardcore", so a route needs no server list to use it. */
     override fun blockingDns(opts: (String) -> String?) =
@@ -143,12 +173,20 @@ object Ivpn : Provider {
         val acct = input["account"].orEmpty().filterNot(Char::isWhitespace)
         require(acct.matches(Regex("i-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}|ivpn[A-Za-z0-9]{7,8}"))) { "Account ID must look like i-XXXX-XXXX-XXXX or ivpnXXXXXXXX" }
         val keys = WgKeys.generate()
+        val (kemPublic, kemPrivate) = kyber.keyPair()
         val body = buildJsonObject {
             put("username", acct); put("force", false); put("wg_public_key", keys.public)
+            put("kem_public_key1", kemPublic); put("kem_library_version", KEM_VERSION)
             // The answers to an earlier reply's two-factor or captcha question.
             for (k in listOf(CODE, CAPTCHA, CAPTCHA_ID)) input[k]?.filterNot(Char::isWhitespace)?.takeIf { it.isNotEmpty() }?.let { put(k, it) }
         }
-        return session(postJsonRaw("$API/v4/session/new", body.toString()), acct, keys.private)
+        return try {
+            session(postJsonRaw("$API/v4/session/new", body.toString()), acct, keys.private, kemPrivate)
+        } catch (e: NoPq) {
+            // Free the slot this sign-in just took: without the key this session is of no use.
+            runCatching { postJsonRaw("$API/v4/session/delete", buildJsonObject { put("session_token", e.token) }.toString()) }
+            throw e
+        }
     }
 
     override fun signOut(account: String): Boolean = try {
@@ -174,7 +212,7 @@ object Ivpn : Provider {
     private val codeField = Field(CODE, "Two-factor code", secret = false, hint = "6 digits")
     private val captchaField = Field(CAPTCHA, "Characters in the picture", secret = false)
 
-    internal fun session(reply: Pair<Int, String>, account: String, privateKey: String): String {
+    internal fun session(reply: Pair<Int, String>, account: String, privateKey: String, kemPrivate: String): String {
         val (code, body) = reply
         val o = Http.parsed("IVPN") { NordApi.json.decodeFromString(SessionReply.serializer(), body) }
         when (val status = o.status ?: code) {
@@ -196,7 +234,9 @@ object Ivpn : Provider {
         val ip = o.wireguard?.ipAddress ?: throw app.unbraid.vpn.Fail("IVPN didn't assign a WireGuard address. Try again later")
         Addr.assigned(ip) ?: throw Addr.unexpected("IVPN")
         val token = o.token ?: throw app.unbraid.vpn.Fail("IVPN didn't return a session. Try again later")
-        return NordApi.json.encodeToString(Account.serializer(), Account(account, token, privateKey, ip.substringBefore('/'), o.device.orEmpty().take(64), o.service?.deviceLimit ?: 0))
+        val psk = o.wireguard?.kemCipher?.let { c -> runCatching { kyber.psk(kemPrivate, c) }.getOrNull()?.takeIf { runCatching { java.util.Base64.getDecoder().decode(it).size == 32 }.getOrDefault(false) } }
+            ?: throw NoPq(token)
+        return NordApi.json.encodeToString(Account.serializer(), Account(account, token, privateKey, ip.substringBefore('/'), o.device.orEmpty().take(64), o.service?.deviceLimit ?: 0, psk))
     }
 
     fun account(blob: String) = Http.parsed("IVPN") { NordApi.json.decodeFromString(Account.serializer(), blob) }
@@ -244,7 +284,7 @@ object Ivpn : Provider {
             sv,
             WgPeer(
                 name = sv.name, privateKey = a.privateKey, address = listOf("${a.ipAddress.substringBefore('/')}/32"),
-                publicKey = sv.publicKey, endpoint = "${sv.ip}:$PORT", allowedIps = listOf("0.0.0.0/0"), dns = listOf(dns),
+                publicKey = sv.publicKey, presharedKey = a.psk, endpoint = "${sv.ip}:$PORT", allowedIps = listOf("0.0.0.0/0"), dns = listOf(dns),
             ),
             ports,
         )

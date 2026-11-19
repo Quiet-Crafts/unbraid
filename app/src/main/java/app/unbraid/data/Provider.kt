@@ -131,6 +131,8 @@ interface Provider {
     val protection: Opt? get() = null
     /** How the account's key was made, as its config says (Proton's options), for its page; null = nothing to show, "" = not known. */
     fun facts(account: String): String? = null
+    /** Whether the account's key has a quantum-safe preshared key; null = the provider has no quantum-safe exchange. */
+    fun quantumSafe(account: String): Boolean? = null
     /** Help about what is managed in the provider's own account (config expiry, forwarded ports) and where, for its page. */
     val configHelp: Pair<String, String>? get() = null
     /** The gluetun catalogue that is its only server list, if any: its page and status show how old it is. */
