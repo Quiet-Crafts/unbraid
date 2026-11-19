@@ -57,7 +57,7 @@ internal const val REACH_ONLY = "Only devices you choose"
 internal const val REACH_ONLY_SUB = "Your Tailscale access rules still apply. Other devices get a connection refused response."
 internal const val REACH_RECENT_NOTE = "The last 50 decisions stay in memory until the VPN stops. They're never saved, logged or included in reports."
 internal const val KDE_CONNECT = "org.kde.kdeconnect_tp"
-internal const val KDE_TIP = "Use KDE Connect 1.36 or newer on this phone and give it the Nearby devices permission. " +
+internal const val KDE_TIP = "Give KDE Connect (or the version of it you use) the Nearby devices permission on this phone. " +
     "Then, in KDE Connect, add your PC with Add devices by IP and its tailnet address. If it doesn't reconnect after the VPN " +
     "restarts, use Refresh in KDE Connect's menu."
 
