@@ -181,8 +181,8 @@
 +
 +// Handler takes packets the system writes into the TUN before they reach the stack.
 +type Handler interface {
-+	// Intercept is called once per packet; packet returns the whole IP packet. True means it was taken.
-+	Intercept(source netip.Addr, packet func() ([]byte, bool)) bool
++	// Intercept is called once per packet; packet(n) returns its first n bytes (all for n <= 0). True: taken.
++	Intercept(source netip.Addr, packet func(n int) ([]byte, bool)) bool
 +}
 +
 +type handlerBox struct{ Handler }
@@ -261,13 +261,13 @@
 +}
 +
 +// InterceptPacket is the TUN stack's interceptor: the handler is loaded once per packet.
-+func (b *Binding) InterceptPacket(source netip.Addr, packet func() ([]byte, bool)) bool {
++func (b *Binding) InterceptPacket(source netip.Addr, packet func(n int) ([]byte, bool)) bool {
 +	h := b.handler.Load()
 +	return h != nil && h.Intercept(source, packet)
 +}
 --- /dev/null
 +++ b/protocol/tailscale/handoff.go
-@@ -0,0 +1,750 @@
+@@ -0,0 +1,819 @@
 +//go:build with_gvisor
 +
 +package tailscale
@@ -303,7 +303,8 @@
 +	handoffCheckWait    = 3 * time.Second  // final ACK to the decision
 +	handoffIdle         = 2 * time.Hour    // an allowed connection silent this long is closed
 +	handoffTombstone    = 30 * time.Second // a refused or closed tuple stays dead this long
-+	handoffChecks       = 4                // owner lookups at once
++	handoffCalls        = 8                // owner lookups in flight at once, stuck ones included
++	handoffPeek         = 136              // enough for any IPv4 header, TCP flags, or an ICMP error's quote
 +
 +	tcpFIN = 0x01
 +	tcpSYN = 0x02
@@ -379,7 +380,7 @@
 +	block     map[string]bool
 +	deps      handoffDeps
 +	heldTotal atomic.Int64
-+	checks    chan struct{}
++	calls     chan struct{}
 +	done      chan struct{}
 +	closeOnce sync.Once
 +	local     atomic.Pointer[netip.Addr] // lock-free first test for packets from the system
@@ -392,7 +393,7 @@
 +func newHandoff(logger log.ContextLogger, options *option.TailscaleTUNHandoffOptions, deps handoffDeps) *handoff {
 +	h := &handoff{
 +		logger: logger, deps: deps, allow: map[string]bool{}, block: map[string]bool{},
-+		checks: make(chan struct{}, handoffChecks), done: make(chan struct{}), tab: newHandoffTable(1, netip.Addr{}),
++		calls: make(chan struct{}, handoffCalls), done: make(chan struct{}), tab: newHandoffTable(1, netip.Addr{}),
 +	}
 +	for _, p := range options.TCPPorts {
 +		from, to, _ := strings.Cut(p, ":")
@@ -628,29 +629,48 @@
 +	return true
 +}
 +
-+// Intercept sees a packet the system writes into the TUN; true means it was taken (tunhandoff.Handler).
-+func (h *handoff) Intercept(source netip.Addr, packet func() ([]byte, bool)) bool {
-+	if local := h.local.Load(); local == nil || *local != source {
++// Intercept sees a packet the system writes into the TUN; true means it was taken (tunhandoff.Handler). Only the
++// headers are read until the packet turns out to belong to a handed-off connection.
++func (h *handoff) Intercept(source netip.Addr, packet func(n int) ([]byte, bool)) bool {
++	local := h.local.Load()
++	if local == nil || *local != source {
 +		return false
 +	}
-+	b, ok := packet()
++	head, ok := packet(handoffPeek)
 +	if !ok {
 +		return false
 +	}
-+	p, ok := parseTCP4(b)
-+	if !ok || p.flags&(tcpSYN|tcpACK) == tcpSYN {
-+		return false // not TCP, or the system opening a connection of its own: normal routing and policy
++	key, icmp, ok := systemKey(head, *local)
++	if !ok {
++		return false // not ours, or the system opening a connection of its own: normal routing and policy
 +	}
 +	h.access.Lock()
 +	tab := h.tab
-+	if tab.closed || p.src.Addr() != tab.local {
++	if tab.closed || tab.local != *local {
 +		h.access.Unlock()
 +		return false
 +	}
-+	f := tab.flows[flowKey{p.dst, p.src.Port()}]
++	f := tab.flows[key]
 +	h.access.Unlock()
 +	if f == nil {
 +		return false
++	}
++	b, ok := packet(0)
++	if !ok {
++		return false
++	}
++	if icmp {
++		// An error the system sends about an allowed connection goes to the peer; any other is dropped.
++		f.mu.Lock()
++		if !f.revoked && f.state == flowAllowed {
++			h.deps.toPeer(append([]byte(nil), b...))
++		}
++		f.mu.Unlock()
++		return true
++	}
++	p, ok := parseTCP4(b)
++	if !ok {
++		return true // headers said ours, the whole packet doesn't parse: dropped
 +	}
 +	pkt := append([]byte(nil), b...)
 +	f.mu.Lock()
@@ -754,37 +774,53 @@
 +	}
 +}
 +
-+// check asks the system which app holds the connection, then lets it through or refuses it.
++// check asks the system which app holds the connection, then lets it through or refuses it. The platform call can't
++// be cancelled, so it runs on its own: at most handoffCalls at once, and the decision never waits past the deadline.
++// With every slot taken (the platform is slow or stuck) the connection is refused at once.
 +func (h *handoff) check(f *handoffFlow) {
 +	f.mu.Lock()
 +	deadline := f.deadline
 +	f.mu.Unlock()
-+	select {
-+	case h.checks <- struct{}{}:
-+		defer func() { <-h.checks }()
-+	case <-time.After(time.Until(deadline)):
-+		h.decide(f, nil)
-+		return
-+	case <-h.done:
-+		return
-+	}
-+	var packages []string
-+	var err error
++	timer := time.NewTimer(time.Until(deadline))
++	defer timer.Stop()
++	local := netip.AddrPortFrom(f.local, f.key.port)
 +	for {
-+		packages, err = h.deps.owner(netip.AddrPortFrom(f.local, f.key.port), f.key.peer)
-+		if err == nil || !time.Now().Add(50*time.Millisecond).Before(deadline) {
-+			break
-+		}
 +		select {
++		case h.calls <- struct{}{}:
++		default:
++			h.decide(f, nil)
++			return
++		}
++		result := make(chan []string, 1)
++		go func() {
++			defer func() { <-h.calls }()
++			packages, err := h.deps.owner(local, f.key.peer)
++			if err != nil {
++				packages = nil
++			}
++			result <- packages
++		}()
++		select {
++		case packages := <-result:
++			if len(packages) > 0 {
++				h.decide(f, packages)
++				return
++			}
++		case <-timer.C:
++			h.decide(f, nil)
++			return
++		case <-h.done:
++			return
++		}
++		select { // not found yet: the socket may still be appearing
 +		case <-time.After(50 * time.Millisecond):
++		case <-timer.C:
++			h.decide(f, nil)
++			return
 +		case <-h.done:
 +			return
 +		}
 +	}
-+	if err != nil {
-+		packages = nil
-+	}
-+	h.decide(f, packages)
 +}
 +
 +// allowed: every package of the user id is chosen and none is blocked.
@@ -929,6 +965,39 @@
 +		n++
 +	}
 +	return n
++}
++
++// systemKey finds the hand-off tuple of a packet from the system by its headers alone: a TCP segment from local that
++// is not the system opening a connection, or an ICMPv4 error from local about a segment a peer sent to local.
++func systemKey(b []byte, local netip.Addr) (key flowKey, icmp bool, ok bool) {
++	if len(b) < 20 || b[0]>>4 != 4 || binary.BigEndian.Uint16(b[6:8])&0x3fff != 0 || netip.AddrFrom4([4]byte(b[12:16])) != local {
++		return flowKey{}, false, false
++	}
++	ihl := int(b[0]&0x0f) * 4
++	if ihl < 20 {
++		return flowKey{}, false, false
++	}
++	switch b[9] {
++	case 6:
++		if len(b) < ihl+14 || b[ihl+13]&(tcpSYN|tcpACK) == tcpSYN {
++			return flowKey{}, false, false
++		}
++		t := b[ihl:]
++		peer := netip.AddrPortFrom(netip.AddrFrom4([4]byte(b[16:20])), binary.BigEndian.Uint16(t[2:4]))
++		return flowKey{peer, binary.BigEndian.Uint16(t[0:2])}, false, true
++	case 1:
++		if len(b) < ihl+8+20+4 || (b[ihl] != 3 && b[ihl] != 11) {
++			return flowKey{}, false, false
++		}
++		in := b[ihl+8:]
++		inIHL := int(in[0]&0x0f) * 4
++		if in[0]>>4 != 4 || in[9] != 6 || inIHL < 20 || len(in) < inIHL+4 || netip.AddrFrom4([4]byte(in[16:20])) != local {
++			return flowKey{}, false, false
++		}
++		peer := netip.AddrPortFrom(netip.AddrFrom4([4]byte(in[12:16])), binary.BigEndian.Uint16(in[inIHL:inIHL+2]))
++		return flowKey{peer, binary.BigEndian.Uint16(in[inIHL+2 : inIHL+4])}, true, true
++	}
++	return flowKey{}, false, false
 +}
 +
 +// icmpQuote finds the hand-off tuple an ICMPv4 error to local is about (destination unreachable, time exceeded).
@@ -1115,7 +1184,7 @@
 +}
 --- /dev/null
 +++ b/protocol/tailscale/handoff_test.go
-@@ -0,0 +1,324 @@
+@@ -0,0 +1,428 @@
 +//go:build with_gvisor
 +
 +package tailscale
@@ -1207,7 +1276,111 @@
 +}
 +
 +func fromSystem(h *handoff, b []byte) bool {
-+	return h.Intercept(hoLocal, func() ([]byte, bool) { return b, true })
++	return h.Intercept(hoLocal, pullOf(b, nil))
++}
++
++// pullOf hands out b as the TUN does; full counts the calls for the whole packet.
++func pullOf(b []byte, full *int) func(int) ([]byte, bool) {
++	return func(n int) ([]byte, bool) {
++		if n <= 0 || n > len(b) {
++			if full != nil {
++				*full++
++			}
++			return b, true
++		}
++		return b[:n], true
++	}
++}
++
++func TestHandoffStuckLookupRefusesAtTheDeadline(t *testing.T) {
++	stuck := make(chan struct{})
++	defer close(stuck)
++	w := &hoWorld{owner: func() ([]string, error) { <-stuck; return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	start := time.Now()
++	handshake(t, h, []byte("x"))
++	waitState(t, h, flowDenied)
++	if d := time.Since(start); d > handoffCheckWait+time.Second {
++		t.Fatalf("refused after %s, past the deadline", d)
++	}
++	// Every slot taken by stuck lookups: the next connection is refused at once.
++	for filled := false; !filled; { // the stuck lookup already holds one slot: take the rest
++		select {
++		case h.calls <- struct{}{}:
++		default:
++			filled = true
++		}
++	}
++	other := netip.AddrPortFrom(hoPeer, 40001)
++	h.Inbound(tcpPacket(other, hoLocalEnd, 1, 0, tcpSYN, nil))
++	fromSystem(h, tcpPacket(hoLocalEnd, other, 9, 2, tcpSYN|tcpACK, nil))
++	h.Inbound(tcpPacket(other, hoLocalEnd, 2, 10, tcpACK, nil))
++	deadline := time.Now().Add(500 * time.Millisecond)
++	for time.Now().Before(deadline) {
++		h.access.Lock()
++		f := h.tab.flows[flowKey{other, 1716}]
++		h.access.Unlock()
++		f.mu.Lock()
++		s := f.state
++		f.mu.Unlock()
++		if s == flowDenied {
++			return
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	t.Fatal("not refused at once with every lookup slot taken")
++}
++
++func TestHandoffSystemICMPOnlyForAllowed(t *testing.T) {
++	icmpFromSystem := func() []byte {
++		quote := tcpPacket(hoPeerEnd, hoLocalEnd, 1001, 5001, tcpACK, nil)
++		b := make([]byte, 28+len(quote))
++		b[0], b[8], b[9] = 0x45, 64, 1
++		binary.BigEndian.PutUint16(b[2:4], uint16(len(b)))
++		l4, p4 := hoLocal.As4(), hoPeer.As4()
++		copy(b[12:16], l4[:])
++		copy(b[16:20], p4[:])
++		b[20] = 3
++		copy(b[28:], quote)
++		return b
++	}
++	for _, allowedApp := range []bool{true, false} {
++		owner := "com.other"
++		if allowedApp {
++			owner = "a"
++		}
++		w := &hoWorld{owner: func() ([]string, error) { return []string{owner}, nil }}
++		h := newTestHandoff(t, w, []string{"a"}, nil)
++		handshake(t, h, nil)
++		if allowedApp {
++			waitState(t, h, flowAllowed)
++		} else {
++			waitState(t, h, flowDenied)
++		}
++		w.mu.Lock()
++		before := len(w.peer)
++		w.mu.Unlock()
++		if !fromSystem(h, icmpFromSystem()) {
++			t.Fatal("an ICMP error about a handed-off flow was left to the stack")
++		}
++		w.mu.Lock()
++		got := len(w.peer) - before
++		w.mu.Unlock()
++		if allowedApp && got != 1 || !allowedApp && got != 0 {
++			t.Fatalf("allowed=%v: %d ICMP packets reached the peer", allowedApp, got)
++		}
++	}
++}
++
++func TestHandoffReadsOnlyHeadersOfOthersPackets(t *testing.T) {
++	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	full := 0
++	// A big segment from this node's address that belongs to no handed-off flow (an outgoing connection, say).
++	big := tcpPacket(hoLocalEnd, netip.AddrPortFrom(hoPeer, 443), 1, 1, tcpACK, make([]byte, 1200))
++	if h.Intercept(hoLocal, pullOf(big, &full)) || full != 0 {
++		t.Fatalf("taken or fully read: full reads %d", full)
++	}
 +}
 +
 +var (
@@ -1231,7 +1404,7 @@
 +
 +func waitState(t *testing.T, h *handoff, want handoffState) {
 +	t.Helper()
-+	deadline := time.Now().Add(3 * time.Second)
++	deadline := time.Now().Add(handoffCheckWait + 2*time.Second) // a refusal may come at the check's own deadline
 +	for time.Now().Before(deadline) {
 +		h.access.Lock()
 +		f := h.tab.flows[flowKey{hoPeerEnd, 1716}]

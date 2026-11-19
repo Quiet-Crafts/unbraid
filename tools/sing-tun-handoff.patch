@@ -1,6 +1,6 @@
 --- a/stack.go
 +++ b/stack.go
-@@ -32,8 +32,18 @@
+@@ -32,8 +32,19 @@
  	ForwarderBindInterface bool
  	IncludeAllNetworks     bool
  	InterfaceFinder        control.InterfaceFinder
@@ -11,9 +11,10 @@
  
 +// PacketInterceptor takes packets the system writes into the TUN before they reach the stack.
 +type PacketInterceptor interface {
-+	// InterceptPacket is called once per packet with its source address; packet returns the whole IP packet and is
-+	// only to be called for packets that may be taken. True means the packet was taken and must not reach the stack.
-+	InterceptPacket(source netip.Addr, packet func() ([]byte, bool)) bool
++	// InterceptPacket is called once per packet with its source address; packet(n) returns the packet's first n bytes
++	// (all of it for n <= 0 or more than its size), to be called only for packets that may be taken. True means the
++	// packet was taken and must not reach the stack.
++	InterceptPacket(source netip.Addr, packet func(n int) ([]byte, bool)) bool
 +}
 +
  func NewStack(
@@ -71,12 +72,15 @@
  }
  
  func (w *networkDispatcherFilter) DeliverNetworkPacket(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
-@@ -68,6 +71,11 @@
+@@ -68,6 +71,14 @@
  		w.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
  		return
  	}
-+	if w.interceptor != nil && w.interceptor.InterceptPacket(AddrFromAddress(network.SourceAddress()), func() ([]byte, bool) {
-+		return pkt.Data().PullUp(pkt.Data().Size())
++	if w.interceptor != nil && w.interceptor.InterceptPacket(AddrFromAddress(network.SourceAddress()), func(n int) ([]byte, bool) {
++		if size := pkt.Data().Size(); n <= 0 || n > size {
++			n = size
++		}
++		return pkt.Data().PullUp(n)
 +	}) {
 +		return
 +	}
