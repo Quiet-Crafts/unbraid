@@ -138,7 +138,7 @@ object LinkPicker {
         val l = try {
             again(p, r, acc, last, used) ?: p.connect(loc, acc)
         } catch (e: Exception) {
-            if (e is AuthException || e is app.unbraid.data.NoLongerOffered || e is Addr.Refused) throw e
+            if (e is AuthException || e is app.unbraid.data.NoLongerOffered || e is app.unbraid.data.Unsupported || e is Addr.Refused) throw e
             val cached = last[cacheKey(r)]?.takeIf { pinned == null || it.server.host == pinned.host }?.takeIf { trusted(it, r, accounts, providers) }
             // A cached tunnel at an address that can't be used is no fallback: the user is told to pick the server again.
             if (cached != null && !Addr.usable(cached)) throw Addr.refused(cached.server.name)

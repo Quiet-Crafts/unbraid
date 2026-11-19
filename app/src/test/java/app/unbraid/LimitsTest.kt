@@ -71,6 +71,11 @@ class LimitsTest {
         val nordPin = Server("nl1302", "nl1302.nordvpn.com", "1.1.1.1", "k", 4)
         val protocols = Setup(routes = listOf(Route("x", Location("nord", pinned = nordPin)), Route("y", Location("nord", pinned = nordPin, protocol = "openvpn_udp"))), defaultRoute = "x", apps = mapOf("a" to "y"))
         assertEquals(2, Limits.tunnels(protocols, "nord")) // one server, two protocols: two tunnels
+        // AirVPN gives every server in a country one host name: two pinned servers there are two tunnels.
+        val alchiba = Server("Alchiba", "nl.vpn.airdns.org", "1.1.1.2", "k", 4)
+        val alhena = Server("Alhena", "nl.vpn.airdns.org", "1.1.1.3", "k", 4)
+        val air = Setup(routes = listOf(Route("x", Location("airvpn", pinned = alchiba)), Route("y", Location("airvpn", pinned = alhena)), Route("z", Location("airvpn", pinned = alchiba))), defaultRoute = "x", apps = mapOf("a" to "y", "b" to "z"))
+        assertEquals(2, Limits.tunnels(air, "airvpn"))
     }
 
     /** Only a change that adds a tunnel over the limit asks; changes that keep or lower the count, or other providers, don't. */

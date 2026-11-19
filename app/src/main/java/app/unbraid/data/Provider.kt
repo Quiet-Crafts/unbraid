@@ -13,6 +13,9 @@ open class AuthException(message: String, val url: String? = null) : IOException
  */
 class Challenge(message: String, val field: Field, val image: ByteArray? = null, val keep: Map<String, String> = emptyMap()) : IOException(message)
 
+/** A route asks for something this account can't do (a protocol it has no sign-in for): final, so no cached tunnel stands in. */
+class Unsupported(message: String) : app.unbraid.vpn.Fail(message)
+
 /** The provider's list was read and no longer has a pinned server: final, so no older copy of it is used instead. */
 class NoLongerOffered(server: Server) : app.unbraid.vpn.Fail("${server.name} is no longer offered. Pick another server")
 
@@ -103,8 +106,10 @@ interface Provider {
     val hasLoad: Boolean get() = false
     /** One WireGuard key per account: moving it to another server can stall the tunnel, so reconnects keep the last server. */
     val oneKey: Boolean get() = false
-    /** The tunnel protocol its servers are reached with, shown in the picker (NordVPN lets the user choose). */
+    /** The tunnel protocol its servers are reached with, shown in the picker when it offers no [protocols]. */
     val protocol: String get() = "WireGuard"
+    /** Protocols a route can choose in the picker ([Location.protocol] key, null = the default; label; note); empty = no choice. */
+    val protocols: List<Triple<String?, String, String>> get() = emptyList()
 
     /** Releases what [signIn] registered (device slot, session). False if that failed; the account is forgotten regardless. */
     fun signOut(account: String): Boolean = true

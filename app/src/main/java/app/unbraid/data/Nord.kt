@@ -8,6 +8,11 @@ object Nord : Provider {
     @Serializable
     data class Account(val token: String, val key: String, val user: String = "", val pass: String = "")
 
+    override val protocols = listOf<Triple<String?, String, String>>(
+        Triple(null, "NordLynx", "Fastest. Built on WireGuard"),
+        Triple("openvpn_udp", "OpenVPN UDP", "Wider compatibility"),
+        Triple("openvpn_tcp", "OpenVPN TCP", "For networks that block VPNs"),
+    )
     /** Groups only served over OpenVPN. */
     val openVpnOnly = setOf("legacy_double_vpn", "legacy_onion_over_vpn")
 

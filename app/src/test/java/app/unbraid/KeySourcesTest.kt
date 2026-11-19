@@ -193,6 +193,124 @@ class KeySourcesTest {
         }
     }
 
+    /** An AirVPN generator OpenVPN profile (shape from the live test's sample), reaching [remote] on port 443. */
+    private fun airOvpn(remote: String, tcp: Boolean) = """
+        client
+        dev tun
+        remote $remote 443
+        proto ${if (tcp) "tcp" else "udp"}
+        resolv-retry infinite
+        nobind
+        persist-key
+        persist-tun
+        auth-nocache
+        verb 3
+        ${if (tcp) "" else "explicit-exit-notify 5"}
+        keepalive 10 60
+        reneg-sec 3600
+        push-peer-info
+        setenv UV_IPV6 yes
+        remote-cert-tls server
+        tls-version-min 1.2
+        data-ciphers AES-256-GCM:AES-256-CBC:AES-192-GCM:AES-192-CBC:AES-128-GCM:AES-128-CBC:CHACHA20-POLY1305
+        data-ciphers-fallback AES-256-CBC
+        auth SHA512
+        <ca>
+        -----BEGIN CERTIFICATE-----
+        MIIBhTCCASugAwIBAgIUQ1Q7fFb2Y9bqMUZkO9X0m2lC1c0wCgYIKoZIzj0EAwIw
+        -----END CERTIFICATE-----
+        </ca>
+        <cert>
+        -----BEGIN CERTIFICATE-----
+        MIIBhTCCASugAwIBAgIUQ1Q7fFb2Y9bqMUZkO9X0m2lC1c0wCgYIKoZIzj0EAwIw
+        -----END CERTIFICATE-----
+        </cert>
+        <key>
+        -----BEGIN PRIVATE KEY-----
+        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgAAAAAAAAAAAAAAAA
+        -----END PRIVATE KEY-----
+        </key>
+        ${if (tcp) "<tls-crypt>" else "key-direction 1\n<tls-auth>"}
+        -----BEGIN OpenVPN Static key V1-----
+        00000000000000000000000000000000
+        -----END OpenVPN Static key V1-----
+        ${if (tcp) "</tls-crypt>" else "</tls-auth>"}
+    """.trimIndent()
+
+    /** An OpenVPN route takes the server WireGuard would, with a profile the generator makes for this device; checked to reach that server. */
+    @Test fun airvpnOpenVpnRoutesUseAProfileMadeForTheDevice() {
+        val air = FakeAir("Default")
+        val blob = airSignIn()
+        val status = AirVpn.parse(res("airvpn_status.json"), "")
+        val fake = AirVpn.api
+        var asked = emptyMap<String, String>()
+        var remote: (Catalog.Entry, Boolean) -> String = { e, tcp -> if (tcp) e.ips[1] else e.ips[0] }
+        AirVpn.api = { service, key, query ->
+            val q = query.toMap()
+            if (service == "generator" && q.getValue("protocols").startsWith("openvpn")) {
+                asked = q
+                val tcp = "tcp" in q.getValue("protocols")
+                airOvpn(remote(status.first { it.serverName == q["servers"] }, tcp), tcp)
+            } else fake(service, key, query)
+        }
+        val nl = Location("airvpn", country = "Netherlands")
+        val tcp = AirVpn.connect(nl.copy(protocol = "openvpn_tcp"), blob) as app.unbraid.data.OvpnLink
+        assertEquals(listOf("openvpn_3_tcp_443", tcp.server.name, AirVpn.account(blob).device), listOf(asked["protocols"], asked["servers"], asked["device"]))
+        assertTrue("<tls-crypt>" in tcp.profile.config)
+        assertEquals("Netherlands", status.first { it.serverName == tcp.server.name }.place)
+        val udp = AirVpn.connect(nl.copy(protocol = "openvpn_udp"), blob) as app.unbraid.data.OvpnLink
+        assertEquals("openvpn_1_udp_443", asked["protocols"])
+        assertTrue("<tls-auth>" in udp.profile.config)
+        // A device renamed on the website: the profile is asked for under its new name, found by its id.
+        air.devices.first { it.name == AirVpn.account(blob).device }.name = "Renamed"
+        AirVpn.connect(nl.copy(protocol = "openvpn_udp"), blob)
+        assertEquals("Renamed", asked["device"])
+        // WireGuard stays as it was: no OpenVPN profile asked for.
+        asked = emptyMap()
+        assertTrue(AirVpn.connect(nl, blob) is app.unbraid.data.WgLink)
+        assertTrue(asked.isEmpty())
+        // A profile that would dial anything else is refused: another address, the other entry, another port or transport, a second remote.
+        fun refused(r: (Catalog.Entry, Boolean) -> String, proto: String = "openvpn_tcp") { remote = r; assertFailsWith("doesn't match") { AirVpn.connect(nl.copy(protocol = proto), blob) } }
+        refused({ _, _ -> "203.0.113.99" })
+        refused({ e, _ -> e.ips[0] })
+        refused({ e, _ -> e.ips[1] }, "openvpn_udp")
+        refused({ e, _ -> "${e.ips[1]} 443\nremote 203.0.113.99" })
+        refused({ e, _ -> "${e.ips[1]} 443\n--remote 203.0.113.99 443" })
+        refused({ e, _ -> "${e.ips[1]} 1194" })
+        refused({ e, _ -> "${e.ips[1]}\n#" }) // no port given (the template's 443 becomes a comment): OpenVPN would use 1194
+        refused({ e, _ -> "${e.ips[1]} 443 udp" })
+        refused({ e, _ -> "${e.ips[1]}\n<connection>\nremote 203.0.113.99 443\n</connection>" })
+        remote = { e, tcp -> if (tcp) e.ips[1] else e.ips[0] }
+        AirVpn.api = { service, key, query -> if (service == "generator" && query.toMap().getValue("protocols").startsWith("openvpn")) """{"error":"Server unknown"}""" else fake(service, key, query) }
+        assertFailsWith("couldn't answer") { AirVpn.connect(nl.copy(protocol = "openvpn_tcp"), blob) }
+        assertFailsWith("doesn't offer") { AirVpn.connect(nl.copy(protocol = "openvpn_xyz"), blob) }
+        // The device is gone: sign in again, no profile asked for.
+        AirVpn.api = fake
+        air.devices.clear()
+        assertFailsWith("Sign in to AirVPN again") { AirVpn.connect(nl.copy(protocol = "openvpn_udp"), blob) }
+        // A pasted config has no API key: it says so, final (no cached tunnel stands in), and asks AirVPN nothing.
+        var calls = 0
+        AirVpn.api = { _, _, _ -> calls++; "" }
+        val pasted = AirVpn.signed(conf("10.164.20.6/32"))
+        val e = runCatching { AirVpn.connect(nl.copy(protocol = "openvpn_udp"), pasted) }.exceptionOrNull()
+        assertTrue(e is app.unbraid.data.Unsupported && "API key" in e.message.orEmpty())
+        assertEquals(0, calls)
+    }
+
+    /** OpenVPN TCP checks the server's alternative entry: with only the catalogue (no entries), it says so instead of guessing. */
+    @Test fun airvpnOpenVpnTcpNeedsTheStatusList() {
+        FakeAir("Default")
+        val blob = airSignIn()
+        AirVpn.status = { throw IOException("offline") }
+        AirVpn.catalogue = { Catalog.parse(res("catalog_airvpn.json"), "wireguard") }
+        assertFailsWith("can't be read right now") { AirVpn.connect(Location("airvpn", country = "Netherlands", protocol = "openvpn_tcp"), blob) }
+    }
+
+    private fun assertFailsWith(text: String, f: () -> Unit) {
+        val e = runCatching(f).exceptionOrNull() ?: return fail("expected a failure with: $text")
+        assertTrue("${e.message}", e.message.orEmpty().contains(text))
+    }
+
     private fun airSignIn(device: String? = null) = AirVpn.signIn(mapOf("key" to " $apiKey\n") + listOfNotNull(device?.let { "device" to it }))
 
     /** Like other providers' device slots: added, named, used, removed again on sign-out; the user's devices untouched. */

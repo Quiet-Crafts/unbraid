@@ -201,7 +201,7 @@ private fun place(r: Route, live: Map<String, Server>) = when {
         r.source,
         NordGroups.firstOrNull { it.first != null && it.first == r.loc.group }?.second.takeIf { r.loc.provider == "nord" },
         r.loc.pinned?.name ?: r.loc.city ?: live[r.id]?.city?.ifBlank { null } ?: "Fastest",
-        when (Nord.tech(r.loc).takeIf { r.loc.provider == "nord" }) {
+        when (Nord.tech(r.loc).takeIf { r.loc.provider == "nord" } ?: r.loc.protocol) {
             "openvpn_udp" -> "OpenVPN"
             "openvpn_tcp" -> "OpenVPN TCP"
             else -> null
