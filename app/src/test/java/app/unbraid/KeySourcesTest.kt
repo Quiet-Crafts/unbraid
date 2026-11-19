@@ -142,6 +142,7 @@ class KeySourcesTest {
         var readyAfter = 2
         var generated: String? = null
         var lists = 0
+        var sessions = 0
 
         init {
             AirVpn.status = { res("airvpn_status.json") }
@@ -187,7 +188,7 @@ class KeySourcesTest {
                     AllowedIPs = 0.0.0.0/0
                     PersistentKeepalive = 15
                 """.trimIndent()
-                "userinfo" -> """{"user":{"login":"x","premium":true,"expiration_unix":1795348998},"result":"ok"}"""
+                "userinfo" -> """{"user":{"login":"x","premium":true,"expiration_unix":1795348998},"sessions":[${List(sessions) { i -> """{"device_name":"d$i","server_name":"S$i"}""" }.joinToString(",")}],"result":"ok"}"""
                 else -> fail(service).let { "" }
             }
         }
@@ -308,6 +309,29 @@ class KeySourcesTest {
         assertTrue(!AirVpn.revoked(pasted))
         assertTrue(AirVpn.signOut(pasted))
         assertEquals(null, AirVpn.plan(pasted))
+    }
+
+    /** The page counts every app's open AirVPN connections, from the account's sessions; unknown when AirVPN can't be asked. */
+    @Test fun airvpnCountsEveryAppsConnections() {
+        val air = FakeAir("Default")
+        val blob = airSignIn()
+        assertEquals(0, AirVpn.inUse(blob))
+        air.sessions = 3
+        assertEquals(3, AirVpn.inUse(blob))
+        // AirVPN answers a refused key as HTTP 200 with an error: not known, never 0 in use; no plan line either.
+        AirVpn.api = { _, _, _ -> """{"error":"Not authorized","user":{"login":"x","premium":true,"expiration_unix":1795348998},"sessions":[]}""" }
+        assertEquals(null, AirVpn.inUse(blob))
+        assertEquals(null, AirVpn.plan(blob))
+        AirVpn.api = { _, _, _ -> """{"user":{"login":"x"},"result":"ok"}""" }
+        assertEquals(null, AirVpn.inUse(blob))
+        AirVpn.api = { _, _, _ -> throw IOException("offline") }
+        assertEquals(null, AirVpn.inUse(blob))
+        // The device's own line needs no request, nor does a pasted config (it has no API key).
+        var asked = 0
+        AirVpn.api = { _, _, _ -> asked++; "" }
+        assertEquals("Its own device, unbraid, removed when you sign out. See all your devices in the AirVPN Client Area", AirVpn.device(blob)?.line)
+        assertEquals(null, AirVpn.inUse(AirVpn.signed(AirVpn.account(blob).let { conf(it.address.single()) })))
+        assertEquals(0, asked)
     }
 
     @Test fun airvpnPlanComesFromTheAccount() {

@@ -147,6 +147,8 @@ interface Provider {
     fun blockingDns(opts: (String) -> String?): String? = null
     /** This phone's device slot, if the provider reports one; may block on the network. */
     fun device(account: String): Device? = null
+    /** How many connections or devices the account has in use now, every app's, when the provider says apart from [device]; null = not known. May block on the network. */
+    fun inUse(account: String): Int? = null
     /** The account's plan as the provider reports it ([Plans.line]); null = not known. May block on the network. */
     fun plan(account: String): String? = null
     /** What the account may use at once ([Limits]); unknown unless the provider says or documents it. */

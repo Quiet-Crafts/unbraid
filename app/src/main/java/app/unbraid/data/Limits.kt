@@ -15,11 +15,15 @@ const val LIMIT_OPT = "limit"
 object Limits {
     fun units(n: Int, unit: String) = "$n $unit${if (n == 1) "" else "s"}"
 
-    /** The account's line on a provider page: [n] is what unbraid uses now, [limit] null when unknown, [all] what the provider counts in use. */
-    fun line(name: String, limit: Int?, unit: String, n: Int, all: Int? = null) =
+    /**
+     * The account's line on a provider page: [n] is what unbraid uses now, [limit] null when unknown, [all] what the provider
+     * counts in use, never fewer than unbraid's own (a provider's count can lag a moment behind a new connection).
+     */
+    fun line(name: String, limit: Int?, unit: String, n: Int, all: Int? = null) = all?.coerceAtLeast(n).let { all ->
         if (limit != null && all != null) "$name allows ${units(limit, unit)}. ${if (all == 1) "1 is" else "$all are"} in use, ${if (all == n) "" else "$n of them "}by $APP."
         else if (limit != null) "$name allows ${units(limit, unit)}. $APP is using $n. Your other devices aren't counted."
         else "$APP is using ${units(n, unit).replaceFirst(" ", " $name ")}. Check how many your plan allows: over the limit, routes can stop working without an error."
+    }
 
     /** Before a change that would take [n] over [limit]. */
     fun warning(name: String, limit: Int, unit: String, n: Int) =
