@@ -326,7 +326,7 @@ object Compiler {
                         putJsonObject("tun_handoff") {
                             put("tcp_ports", JsonArray(ib.tcpPorts.map(::JsonPrimitive)))
                             // An app outside the VPN never sends its replies through unbraid and can't be named by it: not allowed.
-                            put("allow_packages", JsonArray(ib.allow.filter { i.lockdown || !s.outside(it) }.sorted().map(::JsonPrimitive)))
+                            put("allow_packages", JsonArray(ib.allow.filter { it != i.selfPackage && (i.lockdown || !s.outside(it)) }.sorted().map(::JsonPrimitive)))
                             put("block_packages", JsonArray((s.apps.filterValues { it == BLOCK }.keys + i.blockedKin).sorted().map(::JsonPrimitive)))
                         }
                     }

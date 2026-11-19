@@ -9,6 +9,8 @@ import app.unbraid.data.Server
 import app.unbraid.data.Setup
 import app.unbraid.data.VERSION
 import app.unbraid.data.WgLink
+import app.unbraid.ui.reachRefusal
+import app.unbraid.ui.reachSub
 import app.unbraid.vpn.Compiler
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -49,6 +51,25 @@ class InboundTest {
         // as allowed here, and the engine refuses it because Block wins.
         assertEquals(listOf("com.blocked", "org.kde.kdeconnect_tp"), gate.strings("allow_packages"))
         assertEquals(listOf("com.blocked"), gate.strings("block_packages"))
+    }
+
+    @Test fun unbraidItselfIsNeverAllowed() {
+        val gate = compile(base, Compiler.Inbound("100.64.0.5", listOf("1024:65535"), listOf("app.unbraid", "org.kde.kdeconnect_tp")), lockdown = true).ts()["tun_handoff"]!!.jsonObject
+        assertEquals(listOf("org.kde.kdeconnect_tp"), gate.strings("allow_packages"))
+    }
+
+    @Test fun theSettingSaysWhatHolds() {
+        val on = base.copy(home = base.home.copy(reachable = true, reachableApps = listOf("org.kde.kdeconnect_tp", "com.blocked", "com.outside")))
+        assertEquals("1 app allowed", reachSub(on, lockdown = false, tsWaiting = false))
+        assertEquals("2 apps allowed", reachSub(on, lockdown = true, tsWaiting = false)) // nothing is outside under lockdown
+        assertEquals("Paused · Tailscale isn't connected", reachSub(on, lockdown = false, tsWaiting = true))
+        assertEquals("Off", reachSub(on.copy(home = on.home.copy(reachable = false)), lockdown = false, tsWaiting = false))
+        assertEquals("No apps selected", reachSub(on.copy(home = on.home.copy(reachableApps = listOf("com.blocked"))), lockdown = false, tsWaiting = false))
+        assertEquals("Needs Reach your tailnet", reachSub(on.copy(home = on.home.copy(tailscale = false)), lockdown = false, tsWaiting = false))
+        assertEquals("Blocked · incoming connections refused", reachRefusal(on, "com.blocked", lockdown = false))
+        assertEquals("Outside unbraid · tailnet devices can't reach it", reachRefusal(on, "com.outside", lockdown = false))
+        assertNull(reachRefusal(on, "com.outside", lockdown = true))
+        assertNull(reachRefusal(on, "org.kde.kdeconnect_tp", lockdown = false))
     }
 
     @Test fun underLockdownNoAppIsOutsideSoAllStayAllowed() {

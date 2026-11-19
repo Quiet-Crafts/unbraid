@@ -970,26 +970,28 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** This node's tailnet IPv4 address, once Tailscale reported it. */
     @Volatile private var tsSelf4: String? = null
-    /** The address a reload was last asked for, so inbound gets it installed. */
-    @Volatile private var inboundAsked: String? = null
+    /** The last reload asked for so inbound gets this node's address installed: which address, when, and the reload. */
+    @Volatile private var inboundAsked: Triple<String, Long, Job>? = null
 
-    /** TEST ONLY (debug builds): apps tailnet devices may reach, set with the debug hook "inbound"; null = off. */
-    private fun inboundApps(): List<String>? = if (!app.unbraid.BuildConfig.DEBUG) null else
-        getSharedPreferences("debug", MODE_PRIVATE).getString("inbound", null)?.split(',')?.map(String::trim)?.filter(String::isNotEmpty)?.ifEmpty { null }
+    /** Apps tailnet devices may reach ([app.unbraid.data.Home.reachable]); null = off. */
+    private fun inboundApps(): List<String>? = store.setup.value.home.takeIf { it.reachable }?.reachableApps?.ifEmpty { null }
 
+    /** Any port from 1024 up: the engine's check of the receiving app is what decides, not the port. */
     private fun inbound(): Compiler.Inbound? {
         val apps = inboundApps() ?: return null
         val self4 = tsSelf4 ?: return null
-        return Compiler.Inbound(self4, listOf("1714:1764"), apps)
+        return Compiler.Inbound(self4, listOf("1024:65535"), apps)
     }
 
     private fun watchTailscale() {
+        val mine = session // a status still arriving after a stop belongs to the old engine
         ts = runCatching {
             Libbox.newStandaloneCommandClient().subscribeTailscaleStatus(object : TailscaleStatusHandler {
                 override fun onError(message: String?) { Log.w(TAG, "tailscale: ${logText(message)}") }
                 override fun onStatusUpdate(u: TailscaleStatusUpdate) {
+                    if (mine != session) return
                     val it = u.endpoints()
-                    if (!it.hasNext()) return
+                    if (!it.hasNext()) { tsSelf4 = null; return }
                     val ep = it.next()
                     val nodes = buildList {
                         val groups = ep.userGroups()
@@ -1007,11 +1009,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     if (ep.backendState == "Running" && self4 != null) {
                         tsSelf4 = self4
                         // Compared with what the engine runs, so a restore that kept an older address is put right too.
-                        if (inboundApps() != null && lastInput?.inbound?.address4 != self4 && inboundAsked != self4) {
-                            inboundAsked = self4 // once per address: status comes often, a reload takes a while
-                            scope.launch { reload() }
+                        // Status comes often and a reload takes a while: one at a time, and one that didn't take is
+                        // asked again after half a minute.
+                        val asked = inboundAsked
+                        if (inboundApps() != null && lastInput?.inbound?.address4 != self4 && asked?.third?.isActive != true &&
+                            (asked == null || asked.first != self4 || System.currentTimeMillis() - asked.second > 30_000)) {
+                            inboundAsked = Triple(self4, System.currentTimeMillis(), scope.launch { reload() })
                         }
-                    } else if (ep.backendState != "Running") tsSelf4 = null
+                    } else tsSelf4 = null
                     val suffix = Compiler.tsSuffix(ep.magicDNSSuffix)
                     val reported = if (ep.backendState == "Running") suffix else store.tsSuffix
                     state.update { s -> s.copy(tsLoginUrl = ep.authURL.ifEmpty { null }, tsState = ep.backendState, tsExitNodes = nodes, tsAnnounced = reported) }
@@ -1042,7 +1047,6 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** Stops the engine and the tunnel; the service itself stays. Caller holds [lock]. */
     private fun stopEngine() {
-        tsSelf4 = null; inboundAsked = null // the next engine learns its tailnet address afresh: never installs a stale one
         watch?.cancel(); watch = null
         health?.cancel(); health = null
         pool?.cancel(); pool = null; exhaustedSaid = false
@@ -1051,6 +1055,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         session++
         retry?.cancel(); retry = null; retries = 0; retrying = emptyMap(); net.onChange = null; refusals = emptyMap(); gone = emptyMap(); failing = emptySet()
         runCatching { ts?.close() }; ts = null
+        tsSelf4 = null; inboundAsked = null // the next engine learns its tailnet address afresh: never installs a stale one
         tsLoginPending = false
         holding = false
         runCatching { server?.closeService() }

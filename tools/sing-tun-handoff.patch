@@ -72,10 +72,12 @@
  }
  
  func (w *networkDispatcherFilter) DeliverNetworkPacket(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
-@@ -68,6 +71,14 @@
+@@ -68,7 +71,16 @@
  		w.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
  		return
  	}
++	// The destination is copied out first: the interceptor's own reads may release the view network points into.
+ 	destination := AddrFromAddress(network.DestinationAddress())
 +	if w.interceptor != nil && w.interceptor.InterceptPacket(AddrFromAddress(network.SourceAddress()), func(n int) ([]byte, bool) {
 +		if size := pkt.Data().Size(); n <= 0 || n > size {
 +			n = size
@@ -84,6 +86,6 @@
 +	}) {
 +		return
 +	}
- 	destination := AddrFromAddress(network.DestinationAddress())
  	if destination == w.broadcastAddress || !destination.IsGlobalUnicast() {
  		w.writer.WritePacket(pkt)
+ 		return

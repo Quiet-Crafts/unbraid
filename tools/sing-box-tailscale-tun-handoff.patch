@@ -69,16 +69,18 @@
  	C "github.com/sagernet/sing-box/constant"
  	"github.com/sagernet/sing-box/dns"
  	"github.com/sagernet/sing-box/log"
-@@ -128,6 +129,8 @@
+@@ -128,6 +129,10 @@
  	keyAuth             bool
  	started             atomic.Bool
  	systemDialer        *dialer.DefaultDialer
 +	handoff             *handoff
 +	handoffBinding      *tunhandoff.Binding
++	handoffRefresh      chan struct{}
++	handoffCloseOnce    sync.Once
  }
  
  func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TailscaleEndpointOptions) (adapter.Endpoint, error) {
-@@ -192,7 +195,7 @@
+@@ -192,7 +197,7 @@
  	if err != nil {
  		return nil, err
  	}
@@ -87,7 +89,7 @@
  		Adapter:           endpoint.NewAdapter(C.TypeTailscale, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, nil),
  		ctx:               ctx,
  		router:            router,
-@@ -251,7 +254,9 @@
+@@ -251,7 +256,9 @@
  		systemInterfaceName:        options.SystemInterfaceName,
  		systemInterfaceMTU:         options.SystemInterfaceMTU,
  		keyAuth:                    options.AuthKey != "",
@@ -98,7 +100,7 @@
  }
  
  func (t *Endpoint) References() []string {
-@@ -474,6 +479,7 @@
+@@ -474,6 +481,7 @@
  	wgEngine := localBackend.ExportEngine().(wgengine.ExportedUserspaceEngine)
  	wgEngine.SetOnReconfigListener(t.onReconfig)
  	t.wgEngine = wgEngine
@@ -106,16 +108,16 @@
  
  	ipStack := t.server.ExportNetstack().ExportIPStack()
  	gErr := ipStack.SetSpoofing(tun.DefaultNIC, true)
-@@ -1011,6 +1017,9 @@
- 
- 	domains := newTailnetDomains(dnsCfg)
- 	t.domains.Store(&domains)
+@@ -1000,6 +1008,9 @@
+ 	if t.sshReconfigHook != nil {
+ 		t.sshReconfigHook(cfg, routerCfg, dnsCfg)
+ 	}
 +	if t.handoff != nil {
-+		go t.refreshHandoff() // reads the backend's state: not from inside the engine's reconfiguration
++		t.requestHandoffRefresh() // peers can change in the netmap alone, so before the change check too
 +	}
- 
- 	if t.onReconfigHook != nil {
- 		t.onReconfigHook(cfg, routerCfg, dnsCfg)
+ 	if t.cfg != nil && reflect.DeepEqual(t.cfg, cfg) &&
+ 		t.routerCfg != nil && reflect.DeepEqual(t.routerCfg, routerCfg) &&
+ 		t.dnsCfg != nil && reflect.DeepEqual(t.dnsCfg, dnsCfg) {
 --- a/protocol/tun/inbound.go
 +++ b/protocol/tun/inbound.go
 @@ -13,6 +13,7 @@
@@ -267,19 +269,23 @@
 +}
 --- /dev/null
 +++ b/protocol/tailscale/handoff.go
-@@ -0,0 +1,819 @@
+@@ -0,0 +1,979 @@
 +//go:build with_gvisor
 +
 +package tailscale
 +
 +// Hand-off of inbound tailnet TCP to the system through the TUN (unbraid patch). A connection a peer opens to this
-+// node's own tailnet address, on an allowed port, is written into the TUN, so the system delivers it to the listening
-+// app with the peer's real address; the app's packets for it are taken back from the TUN before the stack and sent to
-+// Tailscale. No byte of payload passes in either direction until the system has named the app holding the
-+// connection; unless that app is allowed and none of its user id is blocked, both ends are reset.
++// node's own tailnet address is written into the TUN, so the system delivers it to the listening app with the peer's
++// real address; the app's packets for it are taken back from the TUN before the stack and sent to Tailscale.
++//
++// Two checks guard it. Before the system sees the SYN, it names the app listening on the port: an app that isn't
++// allowed is refused with a reset, and a port no app of the VPN listens on is left to the Tailscale stack as before
++// (its own services live there). After the handshake, it names the app holding the connection, and no byte of payload
++// passes either way until that app is allowed and none of its user id is blocked; otherwise both ends are reset.
 +//
 +// Locking: handoff.access guards the table; each flow's mu orders its state and delivery. access is always taken
-+// before a flow's mu, and never while holding one. No I/O happens under access.
++// before a flow's mu, and never while holding one. No I/O happens under access. Every write goes through write, which
++// refuses for a retired flow or a closed hand-off; close waits for the writes under way.
 +
 +import (
 +	"encoding/binary"
@@ -299,27 +305,33 @@
 +	handoffMaxPerPeer   = 64
 +	handoffMaxHeldFlow  = 64 << 10
 +	handoffMaxHeldTotal = 4 << 20
-+	handoffOpenWait     = 10 * time.Second // SYN to the final ACK
-+	handoffCheckWait    = 3 * time.Second  // final ACK to the decision
-+	handoffIdle         = 2 * time.Hour    // an allowed connection silent this long is closed
-+	handoffTombstone    = 30 * time.Second // a refused or closed tuple stays dead this long
-+	handoffCalls        = 8                // owner lookups in flight at once, stuck ones included
-+	handoffPeek         = 136              // enough for any IPv4 header, TCP flags, or an ICMP error's quote
++	handoffHeldCost     = 64                     // charged per held packet besides its bytes
++	handoffVetWait      = 300 * time.Millisecond // the listener lookup, made before the system sees the SYN
++	handoffOpenWait     = 10 * time.Second       // SYN to the final ACK
++	handoffCheckWait    = 3 * time.Second        // final ACK to the decision
++	handoffIdle         = 2 * time.Hour          // an allowed connection silent this long is closed
++	handoffTombstone    = 30 * time.Second       // a refused or closed tuple stays dead this long
++	handoffPeek         = 136                    // enough for any IPv4 header, TCP flags, or an ICMP error's quote
 +
 +	tcpFIN = 0x01
 +	tcpSYN = 0x02
 +	tcpRST = 0x04
 +	tcpPSH = 0x08
 +	tcpACK = 0x10
++	tcpURG = 0x20
 +)
++
++// handoffCalls bounds the owner lookups in flight in the whole process, stuck ones included: the platform call can't
++// be cancelled, so a reload must not bring fresh slots.
++var handoffCalls = make(chan struct{}, 8)
 +
 +type handoffState uint8
 +
 +const (
-+	flowOpening  handoffState = iota // SYN seen, handshake under way
++	flowOpening  handoffState = iota // SYN delivered, handshake under way
 +	flowChecking                     // handshake done, owner check running
 +	flowAllowed
-+	flowClosing // reset or closed both ways: dropped until removed
++	flowClosing // reset: dropped until removed
 +	flowDenied  // refused: dropped until removed
 +)
 +
@@ -328,46 +340,84 @@
 +	port uint16
 +}
 +
-+type handoffFlow struct {
-+	key   flowKey
-+	gen   uint64     // the table it belongs to
-+	local netip.Addr // this node's address when it opened
++// stream is what one direction delivered, and what its receiver acknowledged.
++type stream struct {
++	started, acked, fin bool
++	next                uint32 // after the highest segment delivered
++	ack                 uint32 // the highest acknowledgment the receiver sent back
++	finEnd              uint32
++}
 +
-+	mu           sync.Mutex
-+	state        handoffState
-+	revoked      bool // the table it belonged to is gone: never deliver again
-+	peerISN      uint32
-+	localISN     uint32
-+	haveLocalISN bool
-+	peerNext     uint32 // next sequence number after what was delivered to the system
-+	localNext    uint32 // next sequence number after what was delivered to the peer
-+	peerSent     bool
-+	localSent    bool
-+	finIn        bool
-+	finOut       bool
-+	in, out      [][]byte // held: towards the system, towards the peer
-+	held         int
-+	deadline     time.Time // opening and checking
-+	expires      time.Time // closing and denied
-+	lastActive   time.Time
++func (s *stream) sent(p tcp4) {
++	if p.flags&tcpRST != 0 {
++		return // takes no sequence space, and the receiver may well reject it
++	}
++	if n := p.next(); !s.started || seqAfter(n, s.next) {
++		s.next, s.started = n, true
++	}
++	if p.flags&tcpFIN != 0 {
++		s.fin, s.finEnd = true, p.next()
++	}
++}
++
++func (s *stream) acknowledged(ack uint32) {
++	if !s.started || seqAfter(ack, s.next) {
++		return // nothing can be acknowledged beyond what was delivered
++	}
++	if !s.acked || seqAfter(ack, s.ack) {
++		s.ack, s.acked = ack, true
++	}
++}
++
++func (s *stream) done() bool { return s.fin && s.acked && !seqAfter(s.finEnd, s.ack) }
++
++// resetAt: the sequence numbers a reset must carry for this stream's receiver to take it. Its next expected byte is
++// the last it acknowledged, or the end of what was delivered when it hasn't acknowledged that yet.
++func (s *stream) resetAt() []uint32 {
++	switch {
++	case !s.started:
++		return nil
++	case s.acked && s.ack != s.next:
++		return []uint32{s.ack, s.next}
++	default:
++		return []uint32{s.next}
++	}
++}
++
++type handoffFlow struct {
++	key     flowKey
++	node    string     // the peer node that opened it
++	local   netip.Addr // this node's address when it opened
++	retired atomic.Bool
++
++	mu                sync.Mutex
++	state             handoffState
++	peerISN, localISN uint32
++	haveLocalISN      bool
++	rx, tx            stream   // peer to system, system to peer
++	in, out           [][]byte // held: towards the system, towards the peer
++	held              int
++	ending            bool      // both ends closed: forwarded until expires, then removed
++	deadline          time.Time // opening and checking
++	expires           time.Time // closing, denied and ending
++	lastActive        time.Time
 +}
 +
 +type handoffTable struct {
-+	gen     uint64
 +	local   netip.Addr // invalid: nothing is handed off
 +	closed  bool
 +	flows   map[flowKey]*handoffFlow
 +	perPeer map[netip.Addr]int
 +}
 +
-+func newHandoffTable(gen uint64, local netip.Addr) *handoffTable {
-+	return &handoffTable{gen: gen, local: local, flows: map[flowKey]*handoffFlow{}, perPeer: map[netip.Addr]int{}}
++func newHandoffTable(local netip.Addr) *handoffTable {
++	return &handoffTable{local: local, flows: map[flowKey]*handoffFlow{}, perPeer: map[netip.Addr]int{}}
 +}
 +
 +// handoffDeps is the outside world, replaced in tests.
 +type handoffDeps struct {
-+	owner    func(local, peer netip.AddrPort) ([]string, error) // packages of the user id holding the connection
-+	toPeer   func(packet []byte)                                // into Tailscale, towards the peer
++	owner    func(local, peer netip.AddrPort) ([]string, error) // packages of the user id holding the socket
++	toPeer   func(packet []byte) bool                           // into Tailscale, towards the peer
 +	toSystem func(packet []byte) bool                           // into the TUN, towards the system
 +}
 +
@@ -380,20 +430,21 @@
 +	block     map[string]bool
 +	deps      handoffDeps
 +	heldTotal atomic.Int64
-+	calls     chan struct{}
 +	done      chan struct{}
 +	closeOnce sync.Once
 +	local     atomic.Pointer[netip.Addr] // lock-free first test for packets from the system
-+	peers     atomic.Pointer[map[netip.Addr]struct{}]
++	closed    atomic.Bool
++	gate      sync.RWMutex // writes hold it shared; close takes it to wait for them
 +
 +	access sync.Mutex
 +	tab    *handoffTable
++	peers  map[netip.Addr]string // peer node address -> node
 +}
 +
 +func newHandoff(logger log.ContextLogger, options *option.TailscaleTUNHandoffOptions, deps handoffDeps) *handoff {
 +	h := &handoff{
 +		logger: logger, deps: deps, allow: map[string]bool{}, block: map[string]bool{},
-+		calls: make(chan struct{}, handoffCalls), done: make(chan struct{}), tab: newHandoffTable(1, netip.Addr{}),
++		done: make(chan struct{}), tab: newHandoffTable(netip.Addr{}),
 +	}
 +	for _, p := range options.TCPPorts {
 +		from, to, _ := strings.Cut(p, ":")
@@ -403,7 +454,7 @@
 +		if to != "" {
 +			b, err2 = strconv.ParseUint(to, 10, 16)
 +		}
-+		// Ports below 1024 are never handed off: system services and Tailscale's own peer API live there.
++		// Ports below 1024 are never handed off: they belong to the system and to Tailscale's own services.
 +		if err1 == nil && err2 == nil && a >= 1024 && b >= a {
 +			h.ports = append(h.ports, portRange{uint16(a), uint16(b)})
 +		}
@@ -426,72 +477,96 @@
 +	return false
 +}
 +
-+// setLocal installs this node's IPv4 tailnet address (invalid: off) and the peers' own node addresses. A new address
-+// starts an empty table; flows of peers that left are revoked.
-+func (h *handoff) setLocal(local netip.Addr, peers map[netip.Addr]struct{}) {
-+	h.peers.Store(&peers)
++// setLocal installs this node's IPv4 tailnet address (invalid: off) and the peers' own node addresses with their node,
++// read together from one snapshot. A new address starts an empty table; flows whose address left or now belongs to
++// another node are retired.
++func (h *handoff) setLocal(local netip.Addr, peers map[netip.Addr]string) {
 +	h.access.Lock()
 +	old := h.tab
 +	if old.closed {
 +		h.access.Unlock()
 +		return
 +	}
-+	var revoked []*handoffFlow
++	h.peers = peers
++	var retired []*handoffFlow
 +	if old.local != local {
-+		h.tab = newHandoffTable(old.gen+1, local)
++		h.tab = newHandoffTable(local)
 +		if local.IsValid() {
 +			h.local.Store(&local)
 +		} else {
 +			h.local.Store(nil)
 +		}
 +		for _, f := range old.flows {
-+			revoked = append(revoked, f)
++			f.retired.Store(true)
++			retired = append(retired, f)
 +		}
 +	} else {
 +		for _, f := range old.flows {
-+			if _, ok := peers[f.key.peer.Addr()]; !ok {
++			if node, ok := peers[f.key.peer.Addr()]; !ok || node != f.node {
 +				h.retireLocked(old, f)
-+				revoked = append(revoked, f)
++				retired = append(retired, f)
 +			}
 +		}
 +	}
 +	h.access.Unlock()
-+	for _, f := range revoked {
-+		h.revoke(f)
++	for _, f := range retired {
++		h.release(f)
 +	}
 +}
 +
-+// close stops the hand-off: nothing is delivered any more once it returns.
++// close stops the hand-off: nothing is written any more once it returns.
 +func (h *handoff) close() {
 +	h.access.Lock()
 +	old := h.tab
-+	h.tab = &handoffTable{gen: old.gen + 1, closed: true, flows: map[flowKey]*handoffFlow{}, perPeer: map[netip.Addr]int{}}
++	h.closed.Store(true)
++	h.tab = &handoffTable{closed: true, flows: map[flowKey]*handoffFlow{}, perPeer: map[netip.Addr]int{}}
 +	h.local.Store(nil)
-+	h.access.Unlock()
 +	for _, f := range old.flows {
-+		h.revoke(f) // waits for a delivery in progress on that flow
++		f.retired.Store(true)
++	}
++	h.access.Unlock()
++	h.gate.Lock() // the writes under way end; every later one sees closed
++	h.gate.Unlock()
++	for _, f := range old.flows {
++		h.release(f)
 +	}
 +	h.closeOnce.Do(func() { close(h.done) })
 +}
 +
++// retireLocked detaches a flow from its table; from then on nothing of it is written.
 +func (h *handoff) retireLocked(tab *handoffTable, f *handoffFlow) {
 +	if tab.flows[f.key] != f {
 +		return
 +	}
++	f.retired.Store(true)
 +	delete(tab.flows, f.key)
 +	if tab.perPeer[f.key.peer.Addr()]--; tab.perPeer[f.key.peer.Addr()] <= 0 {
 +		delete(tab.perPeer, f.key.peer.Addr())
 +	}
 +}
 +
-+func (h *handoff) revoke(f *handoffFlow) {
++// release frees what a retired flow holds, after a delivery in progress on it.
++func (h *handoff) release(f *handoffFlow) {
 +	f.mu.Lock()
-+	f.revoked = true
 +	h.dropHeldLocked(f)
 +	f.mu.Unlock()
 +}
 +
-+// Inbound sees a packet from a peer after Tailscale's access rules; true means it was taken.
++// write sends one packet, unless the flow (nil: none) is retired or the hand-off closed.
++func (h *handoff) write(f *handoffFlow, toSystem bool, pkt []byte) bool {
++	h.gate.RLock()
++	defer h.gate.RUnlock()
++	if h.closed.Load() || f != nil && f.retired.Load() {
++		return false
++	}
++	if toSystem {
++		return h.deps.toSystem(pkt)
++	}
++	return h.deps.toPeer(pkt)
++}
++
++// Inbound sees a packet from a peer after Tailscale's access rules; true means it was taken. It runs on the
++// receiving path of that one peer, so the listener lookup only ever holds up that peer.
 +func (h *handoff) Inbound(b []byte) bool {
 +	h.access.Lock()
 +	tab := h.tab
@@ -503,83 +578,105 @@
 +	if !ok {
 +		return h.inboundICMPLocked(tab, b) // unlocks
 +	}
-+	if p.dst.Addr() != tab.local || !h.portAllowed(p.dst.Port()) {
++	if p.dst.Addr() != tab.local {
 +		h.access.Unlock()
 +		return false
 +	}
-+	// From here the packet is ours: taken or dropped, never left to the stack.
-+	peers := h.peers.Load()
-+	if peers == nil || p.src.Addr() == tab.local {
-+		h.access.Unlock()
-+		return true
-+	}
-+	if _, ok := (*peers)[p.src.Addr()]; !ok {
-+		h.access.Unlock() // not a peer's own node address (a routed one, say)
-+		return true
-+	}
 +	key := flowKey{p.src, p.dst.Port()}
-+	opening := p.flags&(tcpSYN|tcpACK|tcpRST|tcpFIN) == tcpSYN
 +	f := tab.flows[key]
-+	var replaced *handoffFlow
-+	if f != nil && opening && p.seq != f.peerISN {
-+		h.retireLocked(tab, f) // a new connection on the same tuple: nothing carries over
-+		replaced, f = f, nil
-+	}
-+	if f == nil {
-+		if !opening || p.payload != 0 || len(tab.flows) >= handoffMaxFlows || tab.perPeer[p.src.Addr()] >= handoffMaxPerPeer {
-+			h.access.Unlock()
-+			if replaced != nil {
-+				h.revoke(replaced)
-+			}
-+			return true
++	opening := p.flags&(tcpSYN|tcpACK|tcpRST|tcpFIN) == tcpSYN
++	if f != nil && !(opening && p.seq != f.peerISN) {
++		h.access.Unlock()
++		pkt := append([]byte(nil), b...)
++		f.mu.Lock()
++		defer f.mu.Unlock()
++		if !f.retired.Load() {
++			h.fromPeerLocked(f, p, pkt)
 +		}
-+		now := time.Now()
-+		f = &handoffFlow{key: key, gen: tab.gen, local: tab.local, state: flowOpening, peerISN: p.seq, deadline: now.Add(handoffOpenWait), lastActive: now}
-+		tab.flows[key] = f
-+		tab.perPeer[p.src.Addr()]++
++		return true
 +	}
++	if f != nil {
++		h.retireLocked(tab, f) // a new connection on the same tuple: nothing carries over
++	}
++	node, isPeer := h.peers[p.src.Addr()]
++	room := len(tab.flows) < handoffMaxFlows && tab.perPeer[p.src.Addr()] < handoffMaxPerPeer
 +	h.access.Unlock()
-+	if replaced != nil {
-+		h.revoke(replaced)
++	if f != nil {
++		h.release(f)
 +	}
-+	pkt := append([]byte(nil), b...)
++	// Anything else is the stack's, as without the hand-off: its own connections, and SYNs this can't take.
++	if !opening || p.payload != 0 || !isPeer || !room || !h.portAllowed(p.dst.Port()) {
++		return false
++	}
++	return h.open(tab, key, node, p, b)
++}
++
++// open vets a peer's SYN by the app listening on its port, then delivers it to the system under a new flow.
++func (h *handoff) open(tab *handoffTable, key flowKey, node string, p tcp4, b []byte) bool {
++	packages, found := h.lookup(p.dst, p.src, handoffVetWait)
++	if !found {
++		return false // no app of the VPN listens there: the stack's
++	}
++	if !h.allowed(packages) {
++		h.write(nil, false, rst4(p.dst, p.src, 0, p.seq+1, true))
++		h.logger.Info("tun hand-off: refused ", p.src, " -> port ", p.dst.Port(), " (", strings.Join(packages, ","), ")")
++		return true
++	}
++	now := time.Now()
++	f := &handoffFlow{key: key, node: node, local: tab.local, state: flowOpening, peerISN: p.seq, deadline: now.Add(handoffOpenWait), lastActive: now}
++	h.access.Lock()
++	if h.tab != tab || tab.flows[key] != nil || h.peers[p.src.Addr()] != node || len(tab.flows) >= handoffMaxFlows || tab.perPeer[p.src.Addr()] >= handoffMaxPerPeer {
++		h.access.Unlock()
++		return true // things changed during the lookup: dropped, the peer sends the SYN again
++	}
++	tab.flows[key] = f
++	tab.perPeer[p.src.Addr()]++
++	h.access.Unlock()
 +	f.mu.Lock()
 +	defer f.mu.Unlock()
-+	if !f.revoked {
-+		h.fromPeerLocked(f, p, pkt)
++	if !h.deliverSystemLocked(f, append([]byte(nil), b...)) {
++		h.closeLocked(f)
 +	}
 +	return true
 +}
 +
 +func (h *handoff) fromPeerLocked(f *handoffFlow, p tcp4, pkt []byte) {
++	if p.flags&tcpSYN != 0 && f.state != flowOpening {
++		return // the handshake is over: a SYN now is stale or forged
++	}
 +	switch f.state {
 +	case flowAllowed:
 +		f.lastActive = time.Now()
-+		if !h.deliverSystemLocked(f, pkt) {
-+			h.denyLocked(f)
-+			return
-+		}
 +		if p.flags&tcpRST != 0 {
-+			h.closeLocked(f)
-+		} else if p.flags&tcpFIN != 0 {
-+			if f.finIn = true; f.finOut {
++			// The system decides whether a reset is in its window; only one it surely takes closes the flow.
++			valid := p.seq == f.rx.next || f.rx.acked && p.seq == f.rx.ack
++			if h.deliverSystemLocked(f, rstOnly(pkt)) && valid {
 +				h.closeLocked(f)
 +			}
++			return
++		}
++		if !h.deliverSystemLocked(f, pkt) {
++			h.denyLocked(f)
 +		}
 +	case flowOpening:
 +		switch {
 +		case p.flags&tcpRST != 0:
-+			if p.payload == 0 {
-+				h.deliverSystemLocked(f, pkt)
-+			}
++			h.deliverSystemLocked(f, rstOnly(pkt))
 +			h.closeLocked(f)
 +		case p.flags&tcpSYN != 0:
-+			if p.flags&tcpACK == 0 && p.seq == f.peerISN && p.payload == 0 {
-+				h.deliverSystemLocked(f, pkt) // retransmitted SYN
++			if p.flags&tcpACK == 0 && p.payload == 0 {
++				h.deliverSystemLocked(f, pkt) // retransmitted SYN, same ISN
 +			}
 +		case p.flags&tcpACK != 0 && f.haveLocalISN && p.seq == f.peerISN+1 && p.ack == f.localISN+1:
 +			// The final ACK. Data on it is held; the system gets a bare ACK so its socket can be established.
-+			if p.payload > 0 || p.flags&tcpFIN != 0 {
++			if time.Now().After(f.deadline) {
++				h.denyLocked(f)
++				return
++			}
++			if p.payload > 0 || p.flags&(tcpFIN|tcpURG) != 0 {
++				if !checksumsValid(pkt) {
++					return // damaged: the peer sends it again
++				}
 +				if !h.deliverSystemLocked(f, bareACK(pkt)) || !h.holdLocked(f, &f.in, pkt) {
 +					h.denyLocked(f)
 +					return
@@ -595,11 +692,9 @@
 +	case flowChecking:
 +		switch {
 +		case p.flags&tcpRST != 0:
-+			if p.payload == 0 {
-+				h.deliverSystemLocked(f, pkt)
-+			}
++			h.deliverSystemLocked(f, rstOnly(pkt))
 +			h.closeLocked(f)
-+		case p.payload > 0 || p.flags&tcpFIN != 0:
++		case p.payload > 0 || p.flags&(tcpFIN|tcpURG) != 0:
 +			h.holdLocked(f, &f.in, pkt)
 +		default:
 +			h.deliverSystemLocked(f, pkt)
@@ -610,8 +705,8 @@
 +// inboundICMPLocked hands an ICMP error about an allowed connection to the system, which owns that connection.
 +// Called with access held; unlocks it.
 +func (h *handoff) inboundICMPLocked(tab *handoffTable, b []byte) bool {
-+	key, ok := icmpQuote(b, tab.local)
-+	if !ok || !h.portAllowed(key.port) {
++	key, ok := icmpError(b, tab.local, false, true)
++	if !ok {
 +		h.access.Unlock()
 +		return false
 +	}
@@ -622,10 +717,9 @@
 +	}
 +	f.mu.Lock()
 +	defer f.mu.Unlock()
-+	if f.revoked || f.state != flowAllowed {
-+		return true
++	if f.state == flowAllowed {
++		h.write(f, true, append([]byte(nil), b...))
 +	}
-+	h.deps.toSystem(append([]byte(nil), b...))
 +	return true
 +}
 +
@@ -640,9 +734,9 @@
 +	if !ok {
 +		return false
 +	}
-+	key, icmp, ok := systemKey(head, *local)
++	key, kind, ok := systemKey(head, *local)
 +	if !ok {
-+		return false // not ours, or the system opening a connection of its own: normal routing and policy
++		return false
 +	}
 +	h.access.Lock()
 +	tab := h.tab
@@ -651,39 +745,43 @@
 +		return false
 +	}
 +	f := tab.flows[key]
++	if f != nil && kind == keyOpening {
++		h.retireLocked(tab, f) // the system opens a connection of its own on that tuple: the old entry has no say in it
++	}
 +	h.access.Unlock()
 +	if f == nil {
 +		return false
 +	}
++	if kind == keyOpening {
++		h.release(f)
++		return false // normal routing and policy
++	}
 +	b, ok := packet(0)
 +	if !ok {
-+		return false
++		return true
 +	}
-+	if icmp {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	if kind == keyICMP {
 +		// An error the system sends about an allowed connection goes to the peer; any other is dropped.
-+		f.mu.Lock()
-+		if !f.revoked && f.state == flowAllowed {
-+			h.deps.toPeer(append([]byte(nil), b...))
++		if k, ok := icmpError(b, *local, true, true); ok && k == key && f.state == flowAllowed {
++			h.write(f, false, append([]byte(nil), b...))
 +		}
-+		f.mu.Unlock()
 +		return true
 +	}
 +	p, ok := parseTCP4(b)
-+	if !ok {
-+		return true // headers said ours, the whole packet doesn't parse: dropped
-+	}
-+	pkt := append([]byte(nil), b...)
-+	f.mu.Lock()
-+	defer f.mu.Unlock()
-+	if f.revoked {
++	if !ok || f.retired.Load() {
 +		return true
 +	}
++	pkt := append([]byte(nil), b...)
 +	switch f.state {
 +	case flowOpening:
 +		switch {
-+		case p.flags&(tcpSYN|tcpACK) == tcpSYN|tcpACK && p.ack == f.peerISN+1 && p.payload == 0:
++		case p.flags&(tcpSYN|tcpACK|tcpRST|tcpFIN) == tcpSYN|tcpACK && p.ack == f.peerISN+1 && p.payload == 0 && (!f.haveLocalISN || p.seq == f.localISN):
 +			f.localISN, f.haveLocalISN = p.seq, true
-+			h.deliverPeerLocked(f, pkt)
++			if !h.deliverPeerLocked(f, pkt) {
++				h.denyLocked(f)
++			}
 +		case p.flags&tcpRST != 0:
 +			h.deliverPeerLocked(f, rstOnly(pkt))
 +			h.closeLocked(f)
@@ -693,55 +791,80 @@
 +		case p.flags&tcpRST != 0:
 +			h.deliverPeerLocked(f, rstOnly(pkt))
 +			h.closeLocked(f)
-+		case p.payload > 0 || p.flags&tcpFIN != 0:
++		case p.flags&tcpSYN != 0:
++		case p.payload > 0 || p.flags&(tcpFIN|tcpURG) != 0:
 +			h.holdLocked(f, &f.out, pkt)
 +		default:
-+			h.deliverPeerLocked(f, pkt)
++			if !h.deliverPeerLocked(f, pkt) {
++				h.denyLocked(f)
++			}
 +		}
 +	case flowAllowed:
-+		f.lastActive = time.Now()
-+		h.deliverPeerLocked(f, pkt)
-+		if p.flags&tcpRST != 0 {
++		switch {
++		case p.flags&tcpRST != 0:
++			h.deliverPeerLocked(f, rstOnly(pkt))
 +			h.closeLocked(f)
-+		} else if p.flags&tcpFIN != 0 {
-+			if f.finOut = true; f.finIn {
-+				h.closeLocked(f)
++		case p.flags&tcpSYN != 0:
++		default:
++			f.lastActive = time.Now()
++			if !h.deliverPeerLocked(f, pkt) {
++				h.denyLocked(f)
 +			}
 +		}
 +	}
 +	return true
 +}
 +
++// deliverSystemLocked writes a peer's segment into the TUN and tracks both streams.
 +func (h *handoff) deliverSystemLocked(f *handoffFlow, pkt []byte) bool {
 +	p, ok := parseTCP4(pkt)
-+	if !ok || !h.deps.toSystem(pkt) {
++	if !ok || !h.write(f, true, pkt) {
 +		return false
 +	}
-+	if next := p.next(); !f.peerSent || seqAfter(next, f.peerNext) {
-+		f.peerNext, f.peerSent = next, true
++	f.rx.sent(p)
++	if p.flags&tcpACK != 0 {
++		f.tx.acknowledged(p.ack)
 +	}
++	h.endLocked(f)
 +	return true
 +}
 +
-+func (h *handoff) deliverPeerLocked(f *handoffFlow, pkt []byte) {
++// deliverPeerLocked sends a system's segment to the peer and tracks both streams.
++func (h *handoff) deliverPeerLocked(f *handoffFlow, pkt []byte) bool {
 +	p, ok := parseTCP4(pkt)
-+	if !ok {
-+		return
++	if !ok || !h.write(f, false, pkt) {
++		return false
 +	}
-+	h.deps.toPeer(pkt)
-+	if next := p.next(); !f.localSent || seqAfter(next, f.localNext) {
-+		f.localNext, f.localSent = next, true
++	f.tx.sent(p)
++	if p.flags&tcpACK != 0 {
++		f.rx.acknowledged(p.ack)
++	}
++	h.endLocked(f)
++	return true
++}
++
++// endLocked: once both ends sent a FIN and both FINs are acknowledged, the flow is forwarded a while longer, for
++// the retransmissions of a closing connection, then removed.
++func (h *handoff) endLocked(f *handoffFlow) {
++	if f.state == flowAllowed && !f.ending && f.rx.done() && f.tx.done() {
++		f.ending = true
++		f.expires = time.Now().Add(handoffTombstone)
 +	}
 +}
 +
 +// holdLocked queues a packet while the check runs; past the limits the flow is refused.
 +func (h *handoff) holdLocked(f *handoffFlow, q *[][]byte, pkt []byte) bool {
-+	if f.held+len(pkt) > handoffMaxHeldFlow || h.heldTotal.Load()+int64(len(pkt)) > handoffMaxHeldTotal {
++	cost := len(pkt) + handoffHeldCost
++	if f.held+cost > handoffMaxHeldFlow {
 +		h.denyLocked(f)
 +		return false
 +	}
-+	f.held += len(pkt)
-+	h.heldTotal.Add(int64(len(pkt)))
++	if h.heldTotal.Add(int64(cost)) > handoffMaxHeldTotal {
++		h.heldTotal.Add(-int64(cost))
++		h.denyLocked(f)
++		return false
++	}
++	f.held += cost
 +	*q = append(*q, pkt)
 +	return true
 +}
@@ -757,7 +880,7 @@
 +	f.expires = time.Now().Add(handoffTombstone)
 +}
 +
-+// denyLocked drops what is held, resets both ends at the position each actually received, and keeps a tombstone.
++// denyLocked drops what is held, resets both ends where each will take it, and keeps a tombstone.
 +func (h *handoff) denyLocked(f *handoffFlow) {
 +	if f.state == flowDenied || f.state == flowClosing {
 +		return
@@ -766,57 +889,61 @@
 +	f.state = flowDenied
 +	f.expires = time.Now().Add(handoffTombstone)
 +	me := netip.AddrPortFrom(f.local, f.key.port)
-+	if f.peerSent {
-+		h.deps.toSystem(rst4(f.key.peer, me, f.peerNext))
++	for _, seq := range f.rx.resetAt() {
++		h.write(f, true, rst4(f.key.peer, me, seq, 0, false))
 +	}
-+	if f.localSent {
-+		h.deps.toPeer(rst4(me, f.key.peer, f.localNext))
++	for _, seq := range f.tx.resetAt() {
++		h.write(f, false, rst4(me, f.key.peer, seq, f.rx.next, f.rx.started))
 +	}
 +}
 +
-+// check asks the system which app holds the connection, then lets it through or refuses it. The platform call can't
-+// be cancelled, so it runs on its own: at most handoffCalls at once, and the decision never waits past the deadline.
-+// With every slot taken (the platform is slow or stuck) the connection is refused at once.
++// lookup asks the platform which packages hold local's socket for peer: its listener before the handshake, the
++// connection after it. The call can't be cancelled, so it runs on its own, under the process-wide limit, and its
++// answer is awaited at most wait; found is false without an answer naming a package.
++func (h *handoff) lookup(local, peer netip.AddrPort, wait time.Duration) (packages []string, found bool) {
++	select {
++	case handoffCalls <- struct{}{}:
++	default:
++		return nil, false
++	}
++	result := make(chan []string, 1)
++	go func() {
++		defer func() { <-handoffCalls }()
++		packages, err := h.deps.owner(local, peer)
++		if err != nil {
++			packages = nil
++		}
++		result <- packages
++	}()
++	timer := time.NewTimer(wait)
++	defer timer.Stop()
++	select {
++	case packages = <-result:
++		return packages, len(packages) > 0
++	case <-timer.C:
++	case <-h.done:
++	}
++	return nil, false
++}
++
++// check names the app holding an established connection, then lets it through or refuses it, by its deadline.
 +func (h *handoff) check(f *handoffFlow) {
 +	f.mu.Lock()
 +	deadline := f.deadline
 +	f.mu.Unlock()
-+	timer := time.NewTimer(time.Until(deadline))
-+	defer timer.Stop()
 +	local := netip.AddrPortFrom(f.local, f.key.port)
-+	for {
-+		select {
-+		case h.calls <- struct{}{}:
-+		default:
++	for !f.retired.Load() {
++		wait := time.Until(deadline)
++		if wait <= 0 {
 +			h.decide(f, nil)
 +			return
 +		}
-+		result := make(chan []string, 1)
-+		go func() {
-+			defer func() { <-h.calls }()
-+			packages, err := h.deps.owner(local, f.key.peer)
-+			if err != nil {
-+				packages = nil
-+			}
-+			result <- packages
-+		}()
-+		select {
-+		case packages := <-result:
-+			if len(packages) > 0 {
-+				h.decide(f, packages)
-+				return
-+			}
-+		case <-timer.C:
-+			h.decide(f, nil)
-+			return
-+		case <-h.done:
++		if packages, found := h.lookup(local, f.key.peer, wait); found {
++			h.decide(f, packages)
 +			return
 +		}
-+		select { // not found yet: the socket may still be appearing
++		select { // not found yet: the socket may still be appearing, or every slot is taken
 +		case <-time.After(50 * time.Millisecond):
-+		case <-timer.C:
-+			h.decide(f, nil)
-+			return
 +		case <-h.done:
 +			return
 +		}
@@ -837,35 +964,31 @@
 +}
 +
 +func (h *handoff) decide(f *handoffFlow, packages []string) {
-+	h.access.Lock()
-+	current := h.tab.gen == f.gen && h.tab.flows[f.key] == f
-+	h.access.Unlock()
-+	if !current {
-+		return // a result for a flow that is gone never applies to its successor
-+	}
 +	f.mu.Lock()
 +	defer f.mu.Unlock()
-+	if f.revoked || f.state != flowChecking {
-+		return
++	if f.retired.Load() || f.state != flowChecking {
++		return // a result for a flow that is gone never applies to its successor
 +	}
 +	if !h.allowed(packages) || time.Now().After(f.deadline) {
 +		h.denyLocked(f)
 +		h.logger.Info("tun hand-off: refused ", f.key.peer, " -> port ", f.key.port)
 +		return
 +	}
-+	in, out := f.in, f.out
-+	h.dropHeldLocked(f)
 +	f.state = flowAllowed
 +	f.lastActive = time.Now()
-+	for _, pkt := range in {
++	for _, pkt := range f.in {
 +		if !h.deliverSystemLocked(f, pkt) {
 +			h.denyLocked(f)
 +			return
 +		}
 +	}
-+	for _, pkt := range out {
-+		h.deliverPeerLocked(f, pkt)
++	for _, pkt := range f.out {
++		if !h.deliverPeerLocked(f, pkt) {
++			h.denyLocked(f)
++			return
++		}
 +	}
++	h.dropHeldLocked(f)
 +	h.logger.Info("tun hand-off: allowed ", f.key.peer, " -> port ", f.key.port, " (", strings.Join(packages, ","), ")")
 +}
 +
@@ -893,29 +1016,33 @@
 +	h.access.Unlock()
 +	var dead []*handoffFlow
 +	for _, f := range flows {
-+		f.mu.Lock()
-+		switch f.state {
-+		case flowOpening, flowChecking:
-+			if now.After(f.deadline) {
-+				h.denyLocked(f)
-+			}
-+		case flowAllowed:
-+			if now.Sub(f.lastActive) > handoffIdle {
-+				h.denyLocked(f) // closed on purpose rather than left half-known
-+			}
-+		case flowClosing, flowDenied:
-+			if now.After(f.expires) {
-+				dead = append(dead, f)
++		if !f.mu.TryLock() {
++			continue // busy delivering: next round, so one slow flow holds up no other
++		}
++		if !f.retired.Load() {
++			switch f.state {
++			case flowOpening, flowChecking:
++				if now.After(f.deadline) {
++					h.denyLocked(f)
++				}
++			case flowAllowed:
++				if f.ending && now.After(f.expires) {
++					dead = append(dead, f)
++				} else if now.Sub(f.lastActive) > handoffIdle {
++					h.denyLocked(f) // closed on purpose rather than left half-known
++				}
++			case flowClosing, flowDenied:
++				if now.After(f.expires) {
++					dead = append(dead, f)
++				}
 +			}
 +		}
 +		f.mu.Unlock()
 +	}
 +	if len(dead) > 0 {
 +		h.access.Lock()
-+		if h.tab == tab {
-+			for _, f := range dead {
-+				h.retireLocked(tab, f)
-+			}
++		for _, f := range dead {
++			h.retireLocked(tab, f)
 +		}
 +		h.access.Unlock()
 +	}
@@ -967,68 +1094,87 @@
 +	return n
 +}
 +
-+// systemKey finds the hand-off tuple of a packet from the system by its headers alone: a TCP segment from local that
-+// is not the system opening a connection, or an ICMPv4 error from local about a segment a peer sent to local.
-+func systemKey(b []byte, local netip.Addr) (key flowKey, icmp bool, ok bool) {
++const (
++	keyTCP     = iota // a segment of a connection
++	keyOpening        // the system opening a connection of its own
++	keyICMP           // an ICMP error about a connection
++)
++
++// systemKey finds the hand-off tuple of a packet from the system by its headers alone: a TCP segment from local, or
++// an ICMPv4 error from local about a segment a peer sent to local.
++func systemKey(b []byte, local netip.Addr) (key flowKey, kind int, ok bool) {
 +	if len(b) < 20 || b[0]>>4 != 4 || binary.BigEndian.Uint16(b[6:8])&0x3fff != 0 || netip.AddrFrom4([4]byte(b[12:16])) != local {
-+		return flowKey{}, false, false
++		return flowKey{}, 0, false
 +	}
 +	ihl := int(b[0]&0x0f) * 4
 +	if ihl < 20 {
-+		return flowKey{}, false, false
++		return flowKey{}, 0, false
 +	}
 +	switch b[9] {
 +	case 6:
-+		if len(b) < ihl+14 || b[ihl+13]&(tcpSYN|tcpACK) == tcpSYN {
-+			return flowKey{}, false, false
++		if len(b) < ihl+14 {
++			return flowKey{}, 0, false
++		}
++		kind = keyTCP
++		if b[ihl+13]&(tcpSYN|tcpACK) == tcpSYN {
++			kind = keyOpening
 +		}
 +		t := b[ihl:]
 +		peer := netip.AddrPortFrom(netip.AddrFrom4([4]byte(b[16:20])), binary.BigEndian.Uint16(t[2:4]))
-+		return flowKey{peer, binary.BigEndian.Uint16(t[0:2])}, false, true
++		return flowKey{peer, binary.BigEndian.Uint16(t[0:2])}, kind, true
 +	case 1:
-+		if len(b) < ihl+8+20+4 || (b[ihl] != 3 && b[ihl] != 11) {
-+			return flowKey{}, false, false
-+		}
-+		in := b[ihl+8:]
-+		inIHL := int(in[0]&0x0f) * 4
-+		if in[0]>>4 != 4 || in[9] != 6 || inIHL < 20 || len(in) < inIHL+4 || netip.AddrFrom4([4]byte(in[16:20])) != local {
-+			return flowKey{}, false, false
-+		}
-+		peer := netip.AddrPortFrom(netip.AddrFrom4([4]byte(in[12:16])), binary.BigEndian.Uint16(in[inIHL:inIHL+2]))
-+		return flowKey{peer, binary.BigEndian.Uint16(in[inIHL+2 : inIHL+4])}, true, true
++		key, ok := icmpError(b, local, true, false)
++		return key, keyICMP, ok
 +	}
-+	return flowKey{}, false, false
++	return flowKey{}, 0, false
 +}
 +
-+// icmpQuote finds the hand-off tuple an ICMPv4 error to local is about (destination unreachable, time exceeded).
-+func icmpQuote(b []byte, local netip.Addr) (flowKey, bool) {
-+	if len(b) < 20 || b[0]>>4 != 4 || b[9] != 1 {
++// icmpError finds the hand-off tuple an ICMPv4 error (destination unreachable, time exceeded) is about: one local
++// sends to the peer whose segment it quotes (fromLocal), or one arriving for local about a segment local sent. whole:
++// b is the complete packet, checked against its length; otherwise only its headers.
++func icmpError(b []byte, local netip.Addr, fromLocal, whole bool) (flowKey, bool) {
++	if len(b) < 20 || b[0]>>4 != 4 || b[9] != 1 || binary.BigEndian.Uint16(b[6:8])&0x3fff != 0 {
 +		return flowKey{}, false
 +	}
 +	ihl := int(b[0]&0x0f) * 4
-+	total := int(binary.BigEndian.Uint16(b[2:4]))
-+	if ihl < 20 || total > len(b) || total < ihl+8+20+8 || binary.BigEndian.Uint16(b[6:8])&0x3fff != 0 {
++	if whole {
++		total := int(binary.BigEndian.Uint16(b[2:4]))
++		if total > len(b) {
++			return flowKey{}, false
++		}
++		b = b[:total]
++	}
++	if ihl < 20 || len(b) < ihl+8+20+8 || (b[ihl] != 3 && b[ihl] != 11) {
 +		return flowKey{}, false
 +	}
-+	if netip.AddrFrom4([4]byte(b[16:20])) != local || (b[ihl] != 3 && b[ihl] != 11) {
-+		return flowKey{}, false
-+	}
-+	in := b[ihl+8 : total]
++	in := b[ihl+8:]
 +	inIHL := int(in[0]&0x0f) * 4
-+	if in[0]>>4 != 4 || in[9] != 6 || inIHL < 20 || len(in) < inIHL+8 || netip.AddrFrom4([4]byte(in[12:16])) != local {
++	if in[0]>>4 != 4 || in[9] != 6 || inIHL < 20 || len(in) < inIHL+8 || binary.BigEndian.Uint16(in[6:8])&0x1fff != 0 {
++		return flowKey{}, false // the quote must hold the start of a TCP segment
++	}
++	outerSrc, outerDst := netip.AddrFrom4([4]byte(b[12:16])), netip.AddrFrom4([4]byte(b[16:20]))
++	inSrc, inDst := netip.AddrFrom4([4]byte(in[12:16])), netip.AddrFrom4([4]byte(in[16:20]))
++	inSport, inDport := binary.BigEndian.Uint16(in[inIHL:inIHL+2]), binary.BigEndian.Uint16(in[inIHL+2:inIHL+4])
++	if fromLocal {
++		if outerSrc != local || inDst != local || outerDst != inSrc {
++			return flowKey{}, false
++		}
++		return flowKey{netip.AddrPortFrom(inSrc, inSport), inDport}, true
++	}
++	if outerDst != local || inSrc != local {
 +		return flowKey{}, false
 +	}
-+	peer := netip.AddrPortFrom(netip.AddrFrom4([4]byte(in[16:20])), binary.BigEndian.Uint16(in[inIHL+2:inIHL+4]))
-+	return flowKey{peer, binary.BigEndian.Uint16(in[inIHL : inIHL+2])}, true
++	return flowKey{netip.AddrPortFrom(inDst, inDport), inSport}, true
 +}
 +
-+// bareACK is the packet's headers alone, without data or FIN, checksums recomputed.
++// bareACK is the packet's headers alone, without data, FIN or urgent data, checksums recomputed.
 +func bareACK(pkt []byte) []byte {
 +	ihl := int(pkt[0]&0x0f) * 4
 +	off := int(pkt[ihl+12]>>4) * 4
 +	b := append([]byte(nil), pkt[:ihl+off]...)
 +	binary.BigEndian.PutUint16(b[2:4], uint16(ihl+off))
-+	b[ihl+13] &^= tcpFIN | tcpPSH
++	b[ihl+13] &^= tcpFIN | tcpPSH | tcpURG
++	b[ihl+18], b[ihl+19] = 0, 0
 +	fixChecksums(b, ihl)
 +	return b
 +}
@@ -1046,8 +1192,8 @@
 +	return b
 +}
 +
-+// rst4 builds an IPv4 TCP RST from src to dst with the given sequence number.
-+func rst4(src, dst netip.AddrPort, seq uint32) []byte {
++// rst4 builds an IPv4 TCP RST from src to dst; withACK also acknowledges ack.
++func rst4(src, dst netip.AddrPort, seq, ack uint32, withACK bool) []byte {
 +	b := make([]byte, 40)
 +	b[0], b[8], b[9] = 0x45, 64, 6
 +	binary.BigEndian.PutUint16(b[2:4], 40)
@@ -1059,8 +1205,21 @@
 +	binary.BigEndian.PutUint16(t[2:4], dst.Port())
 +	binary.BigEndian.PutUint32(t[4:8], seq)
 +	t[12], t[13] = 5<<4, tcpRST
++	if withACK {
++		binary.BigEndian.PutUint32(t[8:12], ack)
++		t[13] |= tcpACK
++	}
 +	fixChecksums(b, 20)
 +	return b
++}
++
++// pseudoSum is the TCP pseudo-header's sum for the IPv4 packet b.
++func pseudoSum(b []byte, ihl int) uint32 {
++	sum := uint32(6) + uint32(len(b)-ihl)
++	for i := 12; i < 20; i += 2 {
++		sum += uint32(binary.BigEndian.Uint16(b[i:]))
++	}
++	return sum
 +}
 +
 +func fixChecksums(b []byte, ihl int) {
@@ -1068,11 +1227,14 @@
 +	binary.BigEndian.PutUint16(b[10:12], checksum(b[:ihl], 0))
 +	t := b[ihl:]
 +	t[16], t[17] = 0, 0
-+	pseudo := uint32(6) + uint32(len(t))
-+	for i := 12; i < 20; i += 2 {
-+		pseudo += uint32(binary.BigEndian.Uint16(b[i:]))
-+	}
-+	binary.BigEndian.PutUint16(t[16:18], checksum(t, pseudo))
++	binary.BigEndian.PutUint16(t[16:18], checksum(t, pseudoSum(b, ihl)))
++}
++
++// checksumsValid: the IPv4 header and TCP checksums of a packet parseTCP4 took are right.
++func checksumsValid(b []byte) bool {
++	ihl := int(b[0]&0x0f) * 4
++	b = b[:binary.BigEndian.Uint16(b[2:4])]
++	return checksum(b[:ihl], 0) == 0 && checksum(b[ihl:], pseudoSum(b, ihl)) == 0
 +}
 +
 +func checksum(b []byte, sum uint32) uint16 {
@@ -1089,7 +1251,7 @@
 +}
 --- /dev/null
 +++ b/protocol/tailscale/handoff_endpoint.go
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,133 @@
 +//go:build with_gvisor
 +
 +package tailscale
@@ -1106,13 +1268,15 @@
 +	"github.com/sagernet/tailscale/net/packet"
 +)
 +
-+// setupHandoff runs in NewEndpoint: it tells this engine instance's TUN to install the interceptor.
++// setupHandoff runs in NewEndpoint: it tells this engine instance's TUN to install the interceptor. CloseConstructed
++// gives the binding back, also when the endpoint never starts (a configuration check).
 +func (t *Endpoint) setupHandoff(options *option.TailscaleTUNHandoffOptions) {
 +	if options == nil {
 +		return
 +	}
 +	t.handoffBinding = tunhandoff.Acquire(t.router)
 +	t.handoffBinding.Want()
++	t.handoffRefresh = make(chan struct{}, 1)
 +	t.handoff = newHandoff(t.logger, options, handoffDeps{
 +		owner:    t.handoffOwner,
 +		toPeer:   t.handoffToPeer,
@@ -1129,35 +1293,71 @@
 +	take := func(p *packet.Parsed) bool { return t.handoff.Inbound(p.Buffer()) }
 +	ns.InboundHandoff.Store(&take)
 +	token := t.handoffBinding.SetHandler(t.handoff)
-+	t.refreshHandoff()
++	t.requestHandoffRefresh()
++	go t.handoffRefresher()
 +	go t.handoff.sweep()
 +	scope.Add(func() error {
 +		ns.InboundHandoff.Store(nil)
 +		t.handoffBinding.ClearHandler(token)
-+		t.handoff.close()
-+		tunhandoff.Release(t.router, t.handoffBinding)
-+		return nil
++		return t.CloseConstructed()
 +	})
 +}
 +
-+// refreshHandoff takes this node's IPv4 address and every peer's own node addresses from the current netmap.
-+func (t *Endpoint) refreshHandoff() {
-+	if t.handoff == nil {
-+		return
++// CloseConstructed stops the hand-off and gives the binding back, once.
++func (t *Endpoint) CloseConstructed() error {
++	if t.handoff != nil {
++		t.handoffCloseOnce.Do(func() {
++			t.handoff.close()
++			tunhandoff.Release(t.router, t.handoffBinding)
++		})
 +	}
-+	addr4, _ := t.server.TailscaleIPs()
-+	peers := map[netip.Addr]struct{}{}
-+	if nm := t.server.ExportLocalBackend().NetMap(); nm != nil {
++	return nil
++}
++
++func (t *Endpoint) requestHandoffRefresh() {
++	select {
++	case t.handoffRefresh <- struct{}{}:
++	default: // one is pending already, and it reads the state when it runs
++	}
++}
++
++// handoffRefresher applies refreshes one at a time, each from the state current when it runs, so an older one never
++// overwrites a newer.
++func (t *Endpoint) handoffRefresher() {
++	for {
++		select {
++		case <-t.handoff.done:
++			return
++		case <-t.handoffRefresh:
++			t.refreshHandoff()
++		}
++	}
++}
++
++// refreshHandoff takes this node's IPv4 address and every peer's own node addresses, with the node holding each,
++// from one live netmap.
++func (t *Endpoint) refreshHandoff() {
++	var local netip.Addr
++	peers := map[netip.Addr]string{}
++	if nm := t.server.ExportLocalBackend().NetMapWithPeers(); nm != nil {
++		if nm.SelfNode.Valid() {
++			addresses := nm.SelfNode.Addresses()
++			for i := 0; i < addresses.Len() && !local.IsValid(); i++ {
++				if prefix := addresses.At(i); prefix.IsSingleIP() && prefix.Addr().Is4() {
++					local = prefix.Addr()
++				}
++			}
++		}
 +		for _, node := range nm.Peers {
 +			addresses := node.Addresses()
 +			for i := 0; i < addresses.Len(); i++ {
 +				if prefix := addresses.At(i); prefix.IsSingleIP() && prefix.Addr().Is4() {
-+					peers[prefix.Addr()] = struct{}{}
++					peers[prefix.Addr()] = string(node.StableID())
 +				}
 +			}
 +		}
 +	}
-+	t.handoff.setLocal(addr4, peers)
++	t.handoff.setLocal(local, peers)
 +}
 +
 +func (t *Endpoint) handoffOwner(local, peer netip.AddrPort) ([]string, error) {
@@ -1177,14 +1377,17 @@
 +	return owner.AndroidPackageNames, nil
 +}
 +
-+func (t *Endpoint) handoffToPeer(pkt []byte) {
-+	if engine := t.wgEngine; engine != nil {
-+		_, _ = engine.InputPackets([][]byte{pkt})
++func (t *Endpoint) handoffToPeer(pkt []byte) bool {
++	engine := t.wgEngine
++	if engine == nil {
++		return false
 +	}
++	unmatched, err := engine.InputPackets([][]byte{pkt})
++	return err == nil && len(unmatched) == 0
 +}
 --- /dev/null
 +++ b/protocol/tailscale/handoff_test.go
-@@ -0,0 +1,428 @@
+@@ -0,0 +1,632 @@
 +//go:build with_gvisor
 +
 +package tailscale
@@ -1206,21 +1409,38 @@
 +	hoPeer  = netip.MustParseAddr("100.64.0.6")
 +)
 +
++// hoWorld stands in for the TUN, Tailscale and the platform. A lookup made before the flow exists is the listener
++// check, answered by listener; one made after it is the connection check, answered by owner.
 +type hoWorld struct {
-+	mu       sync.Mutex
-+	system   [][]byte
-+	peer     [][]byte
-+	owner    func() ([]string, error)
-+	writeErr bool
++	mu         sync.Mutex
++	h          *handoff
++	system     [][]byte
++	peer       [][]byte
++	listener   []string
++	noListener bool
++	owner      func() ([]string, error)
++	writeErr   bool
 +}
 +
 +func (w *hoWorld) deps() handoffDeps {
 +	return handoffDeps{
-+		owner: func(local, peer netip.AddrPort) ([]string, error) { return w.owner() },
-+		toPeer: func(p []byte) {
++		owner: func(local, peer netip.AddrPort) ([]string, error) {
++			w.h.access.Lock()
++			f := w.h.tab.flows[flowKey{peer, local.Port()}]
++			w.h.access.Unlock()
++			if f == nil {
++				if w.noListener {
++					return nil, errors.New("no socket")
++				}
++				return w.listener, nil
++			}
++			return w.owner()
++		},
++		toPeer: func(p []byte) bool {
 +			w.mu.Lock()
 +			w.peer = append(w.peer, p)
 +			w.mu.Unlock()
++			return true
 +		},
 +		toSystem: func(p []byte) bool {
 +			w.mu.Lock()
@@ -1248,11 +1468,21 @@
 +	return
 +}
 +
++func (w *hoWorld) counts() (system, peer int) {
++	w.mu.Lock()
++	defer w.mu.Unlock()
++	return len(w.system), len(w.peer)
++}
++
 +func newTestHandoff(t *testing.T, w *hoWorld, allow, block []string) *handoff {
 +	h := newHandoff(log.NewNOPFactory().NewLogger(""), &option.TailscaleTUNHandoffOptions{
 +		TCPPorts: []string{"1714:1764", "22"}, AllowPackages: allow, BlockPackages: block,
 +	}, w.deps())
-+	h.setLocal(hoLocal, map[netip.Addr]struct{}{hoPeer: {}})
++	w.h = h
++	if w.listener == nil {
++		w.listener = allow
++	}
++	h.setLocal(hoLocal, map[netip.Addr]string{hoPeer: "n1"})
 +	t.Cleanup(h.close)
 +	return h
 +}
@@ -1292,97 +1522,6 @@
 +	}
 +}
 +
-+func TestHandoffStuckLookupRefusesAtTheDeadline(t *testing.T) {
-+	stuck := make(chan struct{})
-+	defer close(stuck)
-+	w := &hoWorld{owner: func() ([]string, error) { <-stuck; return []string{"a"}, nil }}
-+	h := newTestHandoff(t, w, []string{"a"}, nil)
-+	start := time.Now()
-+	handshake(t, h, []byte("x"))
-+	waitState(t, h, flowDenied)
-+	if d := time.Since(start); d > handoffCheckWait+time.Second {
-+		t.Fatalf("refused after %s, past the deadline", d)
-+	}
-+	// Every slot taken by stuck lookups: the next connection is refused at once.
-+	for filled := false; !filled; { // the stuck lookup already holds one slot: take the rest
-+		select {
-+		case h.calls <- struct{}{}:
-+		default:
-+			filled = true
-+		}
-+	}
-+	other := netip.AddrPortFrom(hoPeer, 40001)
-+	h.Inbound(tcpPacket(other, hoLocalEnd, 1, 0, tcpSYN, nil))
-+	fromSystem(h, tcpPacket(hoLocalEnd, other, 9, 2, tcpSYN|tcpACK, nil))
-+	h.Inbound(tcpPacket(other, hoLocalEnd, 2, 10, tcpACK, nil))
-+	deadline := time.Now().Add(500 * time.Millisecond)
-+	for time.Now().Before(deadline) {
-+		h.access.Lock()
-+		f := h.tab.flows[flowKey{other, 1716}]
-+		h.access.Unlock()
-+		f.mu.Lock()
-+		s := f.state
-+		f.mu.Unlock()
-+		if s == flowDenied {
-+			return
-+		}
-+		time.Sleep(10 * time.Millisecond)
-+	}
-+	t.Fatal("not refused at once with every lookup slot taken")
-+}
-+
-+func TestHandoffSystemICMPOnlyForAllowed(t *testing.T) {
-+	icmpFromSystem := func() []byte {
-+		quote := tcpPacket(hoPeerEnd, hoLocalEnd, 1001, 5001, tcpACK, nil)
-+		b := make([]byte, 28+len(quote))
-+		b[0], b[8], b[9] = 0x45, 64, 1
-+		binary.BigEndian.PutUint16(b[2:4], uint16(len(b)))
-+		l4, p4 := hoLocal.As4(), hoPeer.As4()
-+		copy(b[12:16], l4[:])
-+		copy(b[16:20], p4[:])
-+		b[20] = 3
-+		copy(b[28:], quote)
-+		return b
-+	}
-+	for _, allowedApp := range []bool{true, false} {
-+		owner := "com.other"
-+		if allowedApp {
-+			owner = "a"
-+		}
-+		w := &hoWorld{owner: func() ([]string, error) { return []string{owner}, nil }}
-+		h := newTestHandoff(t, w, []string{"a"}, nil)
-+		handshake(t, h, nil)
-+		if allowedApp {
-+			waitState(t, h, flowAllowed)
-+		} else {
-+			waitState(t, h, flowDenied)
-+		}
-+		w.mu.Lock()
-+		before := len(w.peer)
-+		w.mu.Unlock()
-+		if !fromSystem(h, icmpFromSystem()) {
-+			t.Fatal("an ICMP error about a handed-off flow was left to the stack")
-+		}
-+		w.mu.Lock()
-+		got := len(w.peer) - before
-+		w.mu.Unlock()
-+		if allowedApp && got != 1 || !allowedApp && got != 0 {
-+			t.Fatalf("allowed=%v: %d ICMP packets reached the peer", allowedApp, got)
-+		}
-+	}
-+}
-+
-+func TestHandoffReadsOnlyHeadersOfOthersPackets(t *testing.T) {
-+	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
-+	h := newTestHandoff(t, w, []string{"a"}, nil)
-+	full := 0
-+	// A big segment from this node's address that belongs to no handed-off flow (an outgoing connection, say).
-+	big := tcpPacket(hoLocalEnd, netip.AddrPortFrom(hoPeer, 443), 1, 1, tcpACK, make([]byte, 1200))
-+	if h.Intercept(hoLocal, pullOf(big, &full)) || full != 0 {
-+		t.Fatalf("taken or fully read: full reads %d", full)
-+	}
-+}
-+
 +var (
 +	hoPeerEnd  = netip.AddrPortFrom(hoPeer, 40000)
 +	hoLocalEnd = netip.AddrPortFrom(hoLocal, 1716)
@@ -1402,20 +1541,24 @@
 +	}
 +}
 +
++func flowOf(h *handoff, peer netip.AddrPort) *handoffFlow {
++	h.access.Lock()
++	defer h.access.Unlock()
++	return h.tab.flows[flowKey{peer, 1716}]
++}
++
++func stateOf(f *handoffFlow) handoffState {
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	return f.state
++}
++
 +func waitState(t *testing.T, h *handoff, want handoffState) {
 +	t.Helper()
 +	deadline := time.Now().Add(handoffCheckWait + 2*time.Second) // a refusal may come at the check's own deadline
 +	for time.Now().Before(deadline) {
-+		h.access.Lock()
-+		f := h.tab.flows[flowKey{hoPeerEnd, 1716}]
-+		h.access.Unlock()
-+		if f != nil {
-+			f.mu.Lock()
-+			s := f.state
-+			f.mu.Unlock()
-+			if s == want {
-+				return
-+			}
++		if f := flowOf(h, hoPeerEnd); f != nil && stateOf(f) == want {
++			return
 +		}
 +		time.Sleep(10 * time.Millisecond)
 +	}
@@ -1436,21 +1579,48 @@
 +	handshake(t, h, []byte("hello"))
 +	waitState(t, h, flowAllowed)
 +	system, peer := w.seen()
-+	if len(system) != 3 || system[2].payload != 0 && system[1].payload != 0 {
-+		t.Fatalf("system got %d packets", len(system))
++	if len(system) != 3 || payloadTo(system) != 5 || len(peer) != 1 || peer[0].flags != tcpSYN|tcpACK {
++		t.Fatalf("system %d packets, payload %d, peer %d", len(system), payloadTo(system), len(peer))
 +	}
-+	if payloadTo(system) != 5 || len(peer) != 1 || peer[0].flags != tcpSYN|tcpACK {
-+		t.Fatalf("payload %d, peer %d", payloadTo(system), len(peer))
-+	}
-+	// The bare ACK came before the data.
 +	if system[1].payload != 0 || system[2].payload != 5 {
 +		t.Fatal("data was not held behind a bare ACK")
 +	}
-+	// Both directions now pass.
 +	fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5001, 1006, tcpACK|tcpPSH, []byte("hi")))
 +	if _, peer = w.seen(); payloadTo(peer) != 2 {
 +		t.Fatal("reply not sent to the peer")
 +	}
++}
++
++func TestHandoffListenerCheck(t *testing.T) {
++	t.Run("unchosen app never sees the SYN", func(t *testing.T) {
++		w := &hoWorld{listener: []string{"com.other"}, owner: func() ([]string, error) { return []string{"a"}, nil }}
++		h := newTestHandoff(t, w, []string{"a"}, nil)
++		if !h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1000, 0, tcpSYN, nil)) {
++			t.Fatal("refused SYN left to the stack")
++		}
++		system, peer := w.seen()
++		if len(system) != 0 || len(peer) != 1 || peer[0].flags != tcpRST|tcpACK || peer[0].ack != 1001 {
++			t.Fatalf("system %d, peer %+v", len(system), peer)
++		}
++		if flowOf(h, hoPeerEnd) != nil {
++			t.Fatal("a refused SYN left a flow")
++		}
++	})
++	t.Run("blocked app never sees the SYN", func(t *testing.T) {
++		w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++		h := newTestHandoff(t, w, []string{"a"}, []string{"a"})
++		h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1000, 0, tcpSYN, nil))
++		if s, _ := w.counts(); s != 0 {
++			t.Fatal("SYN reached the system")
++		}
++	})
++	t.Run("no app listening: the stack's", func(t *testing.T) {
++		w := &hoWorld{noListener: true, owner: func() ([]string, error) { return []string{"a"}, nil }}
++		h := newTestHandoff(t, w, []string{"a"}, nil)
++		if h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1000, 0, tcpSYN, nil)) {
++			t.Fatal("took a port no app listens on")
++		}
++	})
 +}
 +
 +func TestHandoffRefusesOthersAndBlock(t *testing.T) {
@@ -1466,22 +1636,25 @@
 +	} {
 +		t.Run(name, func(t *testing.T) {
 +			w := &hoWorld{owner: func() ([]string, error) { return tc.owner, tc.err }}
-+			h := newTestHandoff(t, w, []string{"org.kde.kdeconnect_tp"}, tc.block)
-+			handshake(t, h, []byte("secret"))
++			h := newTestHandoff(t, w, []string{"org.kde.kdeconnect_tp"}, nil)
++			h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1000, 0, tcpSYN, nil))
++			for _, b := range tc.block { // blocked after the listener check: the connection check meets it
++				h.block[b] = true
++			}
++			fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5000, 1001, tcpSYN|tcpACK, nil))
++			h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1001, 5001, tcpACK|tcpPSH, []byte("secret")))
 +			fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5001, 1001, tcpACK|tcpPSH, []byte("banner")))
 +			waitState(t, h, flowDenied)
 +			system, peer := w.seen()
 +			if payloadTo(system) != 0 || payloadTo(peer) != 0 {
 +				t.Fatal("payload passed a refused connection")
 +			}
-+			last := system[len(system)-1]
-+			if last.flags != tcpRST || last.seq != 1001 {
++			if last := system[len(system)-1]; last.flags != tcpRST || last.seq != 1001 {
 +				t.Fatalf("system reset %x seq %d, want RST at 1001", last.flags, last.seq)
 +			}
-+			if p := peer[len(peer)-1]; p.flags != tcpRST || p.seq != 5001 {
++			if p := peer[len(peer)-1]; p.flags != tcpRST|tcpACK || p.seq != 5001 {
 +				t.Fatalf("peer reset %x seq %d, want RST at 5001", p.flags, p.seq)
 +			}
-+			// Later packets of the tuple go nowhere.
 +			h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1007, 5001, tcpACK|tcpPSH, []byte("more")))
 +			if system, _ = w.seen(); payloadTo(system) != 0 {
 +				t.Fatal("payload after refusal")
@@ -1490,12 +1663,152 @@
 +	}
 +}
 +
++func TestHandoffStuckLookupRefusesAtTheDeadline(t *testing.T) {
++	stuck := make(chan struct{})
++	defer close(stuck)
++	w := &hoWorld{owner: func() ([]string, error) { <-stuck; return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	start := time.Now()
++	handshake(t, h, []byte("x"))
++	waitState(t, h, flowDenied)
++	if d := time.Since(start); d > handoffCheckWait+time.Second {
++		t.Fatalf("refused after %s, past the deadline", d)
++	}
++	// Every slot of the process taken: a new connection is not handed off at all.
++	filled := 0
++	for full := false; !full; {
++		select {
++		case handoffCalls <- struct{}{}:
++			filled++
++		default:
++			full = true
++		}
++	}
++	defer func() {
++		for ; filled > 0; filled-- {
++			<-handoffCalls
++		}
++	}()
++	if h.Inbound(tcpPacket(netip.AddrPortFrom(hoPeer, 40001), hoLocalEnd, 1, 0, tcpSYN, nil)) {
++		t.Fatal("handed off without a listener check")
++	}
++}
++
++func TestHandoffCleanCloseLingers(t *testing.T) {
++	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	handshake(t, h, []byte("bye")) // 1001..1004
++	waitState(t, h, flowAllowed)
++	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1004, 5001, tcpACK|tcpFIN, nil))     // peer FIN: 1004..1005
++	fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5001, 1005, tcpACK|tcpFIN, nil)) // system ACK + FIN: 5001..5002
++	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1005, 5002, tcpACK, nil))            // last ACK
++	f := flowOf(h, hoPeerEnd)
++	f.mu.Lock()
++	ending, state := f.ending, f.state
++	f.mu.Unlock()
++	if !ending || state != flowAllowed {
++		t.Fatalf("ending %v state %d", ending, state)
++	}
++	// A retransmitted FIN still reaches the system, so it can answer it.
++	before, _ := w.counts()
++	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1004, 5002, tcpACK|tcpFIN, nil))
++	if after, _ := w.counts(); after != before+1 {
++		t.Fatal("teardown retransmission dropped")
++	}
++	h.sweepOnce(time.Now().Add(handoffTombstone + time.Second))
++	if flowOf(h, hoPeerEnd) != nil {
++		t.Fatal("closed flow not removed")
++	}
++}
++
++func TestHandoffHeldFINIsTracked(t *testing.T) {
++	release := make(chan struct{})
++	w := &hoWorld{owner: func() ([]string, error) { <-release; return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	handshake(t, h, []byte("ab"))
++	waitState(t, h, flowChecking)
++	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1003, 5001, tcpACK|tcpFIN, nil))
++	close(release)
++	waitState(t, h, flowAllowed)
++	f := flowOf(h, hoPeerEnd)
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	if !f.rx.fin || f.rx.finEnd != 1004 {
++		t.Fatalf("held FIN not tracked: %+v", f.rx)
++	}
++}
++
++func TestHandoffResetOutsideWindowKeepsFlow(t *testing.T) {
++	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	handshake(t, h, nil)
++	waitState(t, h, flowAllowed)
++	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 99999, 0, tcpRST, nil))
++	if s := stateOf(flowOf(h, hoPeerEnd)); s != flowAllowed {
++		t.Fatalf("an out-of-window reset closed the flow: %d", s)
++	}
++	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1001, 0, tcpRST, nil))
++	if s := stateOf(flowOf(h, hoPeerEnd)); s != flowClosing {
++		t.Fatalf("an exact reset did not close the flow: %d", s)
++	}
++}
++
++func TestHandoffHandshakeChecks(t *testing.T) {
++	open := func(t *testing.T) (*hoWorld, *handoff) {
++		w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++		h := newTestHandoff(t, w, []string{"a"}, nil)
++		h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1000, 0, tcpSYN, nil))
++		return w, h
++	}
++	t.Run("late final ACK", func(t *testing.T) {
++		_, h := open(t)
++		fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5000, 1001, tcpSYN|tcpACK, nil))
++		f := flowOf(h, hoPeerEnd)
++		f.mu.Lock()
++		f.deadline = time.Now().Add(-time.Second)
++		f.mu.Unlock()
++		h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1001, 5001, tcpACK, nil))
++		if s := stateOf(f); s != flowDenied {
++			t.Fatalf("late handshake state %d", s)
++		}
++	})
++	t.Run("damaged data on the final ACK", func(t *testing.T) {
++		_, h := open(t)
++		fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5000, 1001, tcpSYN|tcpACK, nil))
++		bad := tcpPacket(hoPeerEnd, hoLocalEnd, 1001, 5001, tcpACK|tcpURG, []byte("x"))
++		bad[len(bad)-1] ^= 0xff
++		h.Inbound(bad)
++		if s := stateOf(flowOf(h, hoPeerEnd)); s != flowOpening {
++			t.Fatalf("damaged segment moved the flow to %d", s)
++		}
++	})
++	t.Run("SYN-ACK with FIN or another ISN", func(t *testing.T) {
++		w, h := open(t)
++		fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5000, 1001, tcpSYN|tcpACK|tcpFIN, nil))
++		fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5000, 1001, tcpSYN|tcpACK, nil))
++		fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 6000, 1001, tcpSYN|tcpACK, nil))
++		if _, p := w.counts(); p != 1 {
++			t.Fatalf("%d SYN-ACKs reached the peer, want 1", p)
++		}
++	})
++	t.Run("SYN after the handshake", func(t *testing.T) {
++		w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++		h := newTestHandoff(t, w, []string{"a"}, nil)
++		handshake(t, h, nil)
++		waitState(t, h, flowAllowed)
++		before, _ := w.counts()
++		h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1000, 0, tcpSYN, []byte("data")))
++		if after, _ := w.counts(); after != before {
++			t.Fatal("a SYN reached an established connection")
++		}
++	})
++}
++
 +func TestHandoffNewConnectionOnSameTupleStartsOver(t *testing.T) {
 +	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
 +	h := newTestHandoff(t, w, []string{"a"}, nil)
 +	handshake(t, h, nil)
 +	waitState(t, h, flowAllowed)
-+	// A new SYN (new ISN) on the same tuple must not inherit the approval.
 +	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 90000, 0, tcpSYN, nil))
 +	waitState(t, h, flowOpening)
 +	before := payloadTo(func() []tcp4 { s, _ := w.seen(); return s }())
@@ -1511,43 +1824,47 @@
 +	h := newTestHandoff(t, w, []string{"a"}, nil)
 +	handshake(t, h, []byte("x"))
 +	waitState(t, h, flowChecking)
-+	// The peer resets and opens again before the first lookup returns.
 +	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1002, 5001, tcpRST, nil))
 +	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 7000, 0, tcpSYN, nil))
 +	close(release)
 +	time.Sleep(200 * time.Millisecond)
-+	h.access.Lock()
-+	f := h.tab.flows[flowKey{hoPeerEnd, 1716}]
-+	h.access.Unlock()
-+	f.mu.Lock()
-+	defer f.mu.Unlock()
-+	if f.state != flowOpening {
-+		t.Fatalf("successor state %d, want opening", f.state)
++	if s := stateOf(flowOf(h, hoPeerEnd)); s != flowOpening {
++		t.Fatalf("successor state %d, want opening", s)
 +	}
 +}
 +
 +func TestHandoffIgnoresWhatIsNotItsOwn(t *testing.T) {
 +	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
 +	h := newTestHandoff(t, w, []string{"a"}, nil)
-+	// Another port: left to the stack.
 +	if h.Inbound(tcpPacket(hoPeerEnd, netip.AddrPortFrom(hoLocal, 5555), 1, 0, tcpSYN, nil)) {
 +		t.Fatal("took a port outside the list")
 +	}
-+	// Below 1024 is never handed off, even if listed.
 +	if h.Inbound(tcpPacket(hoPeerEnd, netip.AddrPortFrom(hoLocal, 22), 1, 0, tcpSYN, nil)) {
 +		t.Fatal("took a port below 1024")
 +	}
-+	// A source that is not a peer's own address: taken and dropped.
 +	stranger := netip.AddrPortFrom(netip.MustParseAddr("100.70.0.9"), 1)
-+	if !h.Inbound(tcpPacket(stranger, hoLocalEnd, 1, 0, tcpSYN, nil)) {
-+		t.Fatal("left a non-peer packet for the stack")
++	if h.Inbound(tcpPacket(stranger, hoLocalEnd, 1, 0, tcpSYN, nil)) {
++		t.Fatal("took a SYN from an address that is no peer's own")
 +	}
-+	if s, _ := w.seen(); len(s) != 0 {
-+		t.Fatal("a non-peer packet reached the system")
++	// Segments of a connection the stack holds (an outgoing one of Tailscale's, say).
++	if h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1, 1, tcpACK|tcpSYN, nil)) || h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1, 1, tcpACK, []byte("x"))) {
++		t.Fatal("took a segment of no handed-off flow")
 +	}
-+	// The system opening a connection of its own: normal routing.
++	if s, _ := w.counts(); s != 0 {
++		t.Fatal("something reached the system")
++	}
 +	if fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 1, 0, tcpSYN, nil)) {
 +		t.Fatal("took the system's own SYN")
++	}
++}
++
++func TestHandoffSystemOwnSYNRetiresEntry(t *testing.T) {
++	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	handshake(t, h, nil)
++	waitState(t, h, flowAllowed)
++	if fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 1, 0, tcpSYN, nil)) || flowOf(h, hoPeerEnd) != nil {
++		t.Fatal("the old entry kept a say over the system's own connection")
 +	}
 +}
 +
@@ -1568,37 +1885,112 @@
 +	}
 +}
 +
-+func TestHandoffAddressChangeRevokes(t *testing.T) {
++func TestHandoffRetiresOnPeerChanges(t *testing.T) {
++	for name, peers := range map[string]map[netip.Addr]string{
++		"address change": nil,
++		"peer left":      {},
++		"other node":     {hoPeer: "n2"},
++	} {
++		t.Run(name, func(t *testing.T) {
++			w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++			h := newTestHandoff(t, w, []string{"a"}, nil)
++			handshake(t, h, nil)
++			waitState(t, h, flowAllowed)
++			f := flowOf(h, hoPeerEnd)
++			if peers == nil {
++				h.setLocal(netip.MustParseAddr("100.64.0.9"), map[netip.Addr]string{hoPeer: "n1"})
++			} else {
++				h.setLocal(hoLocal, peers)
++			}
++			before, beforePeer := w.counts()
++			h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1001, 5001, tcpACK|tcpPSH, []byte("late")))
++			fromSystem(h, tcpPacket(hoLocalEnd, hoPeerEnd, 5001, 1001, tcpACK|tcpPSH, []byte("late")))
++			// Even a timeout on the retired flow writes nothing: a successor may own the tuple.
++			f.mu.Lock()
++			h.denyLocked(f)
++			f.mu.Unlock()
++			if after, afterPeer := w.counts(); after != before || afterPeer != beforePeer {
++				t.Fatal("a retired flow still wrote")
++			}
++		})
++	}
++}
++
++func TestHandoffCloseStopsWrites(t *testing.T) {
 +	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
 +	h := newTestHandoff(t, w, []string{"a"}, nil)
 +	handshake(t, h, nil)
 +	waitState(t, h, flowAllowed)
-+	h.setLocal(netip.MustParseAddr("100.64.0.9"), map[netip.Addr]struct{}{hoPeer: {}})
-+	before, _ := w.seen()
-+	h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1001, 5001, tcpACK|tcpPSH, []byte("late")))
-+	if after, _ := w.seen(); len(after) != len(before) {
-+		t.Fatal("a flow of the old address still delivered")
++	f := flowOf(h, hoPeerEnd)
++	h.close()
++	if h.write(f, true, []byte{0x45}) || h.write(nil, false, []byte{0x45}) {
++		t.Fatal("wrote after close")
++	}
++}
++
++func TestHandoffSystemICMPOnlyForAllowed(t *testing.T) {
++	icmpFromSystem := func(to netip.Addr) []byte {
++		quote := tcpPacket(hoPeerEnd, hoLocalEnd, 1001, 5001, tcpACK, nil)
++		b := make([]byte, 28+len(quote))
++		b[0], b[8], b[9] = 0x45, 64, 1
++		binary.BigEndian.PutUint16(b[2:4], uint16(len(b)))
++		l4, p4 := hoLocal.As4(), to.As4()
++		copy(b[12:16], l4[:])
++		copy(b[16:20], p4[:])
++		b[20] = 3
++		copy(b[28:], quote)
++		return b
++	}
++	for _, allowedApp := range []bool{true, false} {
++		owner := "com.other"
++		if allowedApp {
++			owner = "a"
++		}
++		w := &hoWorld{owner: func() ([]string, error) { return []string{owner}, nil }}
++		h := newTestHandoff(t, w, []string{"a"}, nil)
++		handshake(t, h, nil)
++		if allowedApp {
++			waitState(t, h, flowAllowed)
++		} else {
++			waitState(t, h, flowDenied)
++		}
++		_, before := w.counts()
++		if !fromSystem(h, icmpFromSystem(hoPeer)) {
++			t.Fatal("an ICMP error about a handed-off flow was left to the stack")
++		}
++		fromSystem(h, icmpFromSystem(netip.MustParseAddr("100.64.0.7"))) // sent elsewhere than the peer it quotes
++		_, after := w.counts()
++		if got := after - before; allowedApp && got != 1 || !allowedApp && got != 0 {
++			t.Fatalf("allowed=%v: %d ICMP packets reached the peer", allowedApp, got)
++		}
++	}
++}
++
++func TestHandoffReadsOnlyHeadersOfOthersPackets(t *testing.T) {
++	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	full := 0
++	big := tcpPacket(hoLocalEnd, netip.AddrPortFrom(hoPeer, 443), 1, 1, tcpACK, make([]byte, 1200))
++	if h.Intercept(hoLocal, pullOf(big, &full)) || full != 0 {
++		t.Fatalf("taken or fully read: full reads %d", full)
 +	}
 +}
 +
 +func TestChecksumsAndHelpers(t *testing.T) {
-+	r := rst4(hoPeerEnd, hoLocalEnd, 42)
-+	if checksum(r[:20], 0) != 0 {
-+		t.Fatal("bad IP checksum")
++	r := rst4(hoPeerEnd, hoLocalEnd, 42, 7, true)
++	if !checksumsValid(r) {
++		t.Fatal("bad reset checksums")
 +	}
-+	pkt := tcpPacket(hoPeerEnd, hoLocalEnd, 1, 2, tcpACK|tcpPSH|tcpFIN, []byte("data"))
++	if p, _ := parseTCP4(r); p.flags != tcpRST|tcpACK || p.seq != 42 || p.ack != 7 {
++		t.Fatalf("reset %+v", p)
++	}
++	pkt := tcpPacket(hoPeerEnd, hoLocalEnd, 1, 2, tcpACK|tcpPSH|tcpFIN|tcpURG, []byte("data"))
++	binary.BigEndian.PutUint16(pkt[38:40], 3)
++	fixChecksums(pkt, 20)
 +	bare := bareACK(pkt)
 +	p, ok := parseTCP4(bare)
-+	if !ok || p.payload != 0 || p.flags != tcpACK || p.seq != 1 || p.ack != 2 {
++	if !ok || p.payload != 0 || p.flags != tcpACK || p.seq != 1 || p.ack != 2 || bare[38] != 0 || bare[39] != 0 || !checksumsValid(bare) {
 +		t.Fatalf("bare ACK %+v", p)
-+	}
-+	// The TCP checksum of a valid segment, with the pseudo header, sums to zero.
-+	sum := uint32(6) + uint32(len(bare)-20)
-+	for i := 12; i < 20; i += 2 {
-+		sum += uint32(binary.BigEndian.Uint16(bare[i:]))
-+	}
-+	if checksum(bare[20:], sum) != 0 {
-+		t.Fatal("bad TCP checksum on the bare ACK")
 +	}
 +	icmp := make([]byte, 28+40)
 +	icmp[0], icmp[9] = 0x45, 1
@@ -1608,8 +2000,23 @@
 +	copy(icmp[16:20], l4[:])
 +	icmp[20] = 3
 +	copy(icmp[28:], tcpPacket(hoLocalEnd, hoPeerEnd, 1, 1, tcpACK, nil))
-+	key, ok := icmpQuote(icmp, hoLocal)
-+	if !ok || key != (flowKey{hoPeerEnd, 1716}) {
++	if key, ok := icmpError(icmp, hoLocal, false, true); !ok || key != (flowKey{hoPeerEnd, 1716}) {
 +		t.Fatalf("icmp quote %v %v", key, ok)
++	}
++	binary.BigEndian.PutUint16(icmp[28+6:28+8], 10) // the quote is a later fragment: no ports in it
++	if _, ok := icmpError(icmp, hoLocal, false, true); ok {
++		t.Fatal("took a quoted later fragment")
++	}
++	binary.BigEndian.PutUint16(icmp[28+6:28+8], 0)
++	binary.BigEndian.PutUint16(icmp[2:4], uint16(len(icmp)+1))
++	if _, ok := icmpError(icmp, hoLocal, false, true); ok {
++		t.Fatal("took a packet shorter than its length")
++	}
++	st := stream{}
++	st.sent(tcp4{seq: 10, payload: 5})
++	st.acknowledged(100) // beyond what was delivered
++	st.sent(tcp4{seq: 900, flags: tcpRST})
++	if st.acked || st.next != 15 {
++		t.Fatalf("stream %+v", st)
 +	}
 +}

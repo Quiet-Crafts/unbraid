@@ -54,10 +54,14 @@ class DebugHooks : BroadcastReceiver() {
                         UnbraidVpn.state.value = app.unbraid.vpn.VpnState(ph, servers = s.setup.value.routes.associate { it.id to app.unbraid.data.Server("s", "h", "0.0.0.0", "k", 0) },
                             tsState = a.getOrNull(1)?.ifEmpty { null }, stalled = a.drop(2).toSet(), pausedUntil = if (ph == app.unbraid.vpn.VpnState.Phase.Paused) System.currentTimeMillis() + 900_000 else 0)
                         "fake ${a[0]}" }
-                    // Inbound from the tailnet (test): "pkg1,pkg2" allows those apps on 1714-1764, "off" ends it. Applies at the next start.
+                    // Reachable on your tailnet (tests): "pkg1,pkg2" switches it on for those apps, "off" switches it off.
                     "inbound" -> { val a = i.getStringExtra("arg").orEmpty()
-                        ctx.getSharedPreferences("debug", Context.MODE_PRIVATE).edit().apply { if (a == "off") remove("inbound") else putString("inbound", a) }.commit()
+                        s.update { it.copy(home = it.home.copy(reachable = a != "off", reachableApps = if (a == "off") it.home.reachableApps else a.split(',').map(String::trim).filter(String::isNotEmpty))) }
                         "inbound ${if (a == "off") "off" else a}" }
+                    // Which app Android names for a TCP tuple: "local:port,remote:port".
+                    "owner" -> { val (l, r) = i.getStringExtra("arg")!!.split(',').map { val (h, p) = it.split(':'); java.net.InetSocketAddress(h, p.toInt()) }
+                        val cm = ctx.getSystemService(android.net.ConnectivityManager::class.java); val uid = cm.getConnectionOwnerUid(6, l, r)
+                        "owner uid=$uid ${ctx.packageManager.getPackagesForUid(uid)?.toList()}" }
                     "keys" -> app.unbraid.data.WgKeys.generate().let { "keys ok sdk=${android.os.Build.VERSION.SDK_INT} priv=${it.private.length} pub=${it.public.length}" }
                     else -> UnbraidVpn.state.value.toString() + UnbraidVpn.asked.value.let { a -> if (a == null) " asked=none" else " asked=${a.n}:${a.on}" }
                 }

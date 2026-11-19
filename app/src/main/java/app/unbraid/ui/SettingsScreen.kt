@@ -227,7 +227,7 @@ fun settingsHub() { path = emptyList() }
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefault: () -> Unit) {
+fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, disclose: () -> Unit, chooseDefault: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val setup by ui.setup.collectAsStateWithLifecycle()
@@ -318,6 +318,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
     val running = vpn.phase == Phase.On || vpn.phase == Phase.Paused
     val onOff = { b: Boolean -> if (b) "on" else "off" }
     val tsStatus = tailscaleSub(home.tailscale, vpn.phase == Phase.On, vpn.tsState)
+    val reachWaiting = vpn.phase == Phase.On && vpn.tsState != "Running"
+    val installed by ui.apps.collectAsStateWithLifecycle()
     val homeVia = listOfNotNull("Tailscale".takeIf { home.tailscale }, "WireGuard".takeIf { home.wg != null }).joinToString(" and ").ifEmpty { null }
 
     // A key's setup minute ends while Providers & servers may stay open.
@@ -460,6 +462,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 group(null, listOfNotNull(
                     Item("Reach your tailnet", if (home.tailscale) tsStatus else if (setup.tsExit != null) "Off · Tailscale still runs for your exit-node route" else "From apps routed through unbraid", { setTailscale(!home.tailscale) }, checked = home.tailscale, icon = Icons.hub) { Toggle(home.tailscale) },
                     vpn.tsLoginUrl?.takeIf { setup.tailscale }?.let { url -> Item("Sign in to Tailscale", "Opens your browser", cta = true, onClick = { tsLogin(url) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } },
+                    // The other direction, right under it: tailnet devices reaching apps on this phone.
+                    Item(REACH_TITLE, "Experimental · " + reachSub(setup, vpn.lockdown, reachWaiting), { go("reach") }, icon = Icons.lan) { Chevron() },
                 ))
                 if (setup.tailscale && vpn.tsExitNodes.isNotEmpty()) group("Exit nodes", vpn.tsExitNodes.sortedByDescending { it.online }.map { n ->
                     val used = setup.routes.count { it.tsExit == n.ip }
@@ -478,6 +482,36 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 ))
                 // Whatever the sign-in's state, and also with Tailscale off while its node is still kept on the phone.
                 if (setup.tailscale || tsStored) group(null, listOf(ui.signOutTailscaleRefused().let { no -> Item("Sign out of Tailscale", no?.text ?: "Its exit routes are removed; their apps follow the default route", { dialog = "tsout" }.takeIf { no == null }, danger = true) }))
+            }
+
+            p == "reach" -> Page(REACH_TITLE, back, over = "Tailscale") {
+                notice(ui, notice)
+                val on = home.reachable && home.tailscale
+                item { Box(Modifier.padding(start = 24.dp, top = 8.dp)) { ExperimentalTag() } }
+                group(null, listOf(Item(REACH_SWITCH, reachSub(setup, vpn.lockdown, reachWaiting), { ui.setHome { it.copy(reachable = !it.reachable) }; Unit }.takeIf { home.tailscale },
+                    checked = on, icon = Icons.lan) { Toggle(on, enabled = home.tailscale) }))
+                if (!home.tailscale) {
+                    caption(REACH_NEEDS)
+                    item { Box(Modifier.padding(horizontal = Gutter, vertical = 8.dp)) { Tonal("Turn on Reach your tailnet", Icons.hub) { setTailscale(true) } } }
+                }
+                caption(REACH_PROMISE)
+                // The choice stays while the switch is off, so turning it on again needs no new picking.
+                val labels = installed.associate { it.pkg to it.label }
+                val chosen = home.reachableApps
+                item { SectionLabel("Reachable apps") }
+                if (chosen.isEmpty()) item { GroupRow(0, 1, "No apps yet", "Add the apps your tailnet devices may open") }
+                chosen.forEachIndexed { i, pkg ->
+                    item(key = "reach:$pkg") {
+                        val label = labels[pkg] ?: pkg
+                        val refusal = reachRefusal(setup, pkg, vpn.lockdown)
+                        GroupRow(i, chosen.size, label, refusal ?: if (on) "Allowed" else "Allowed when switched on", leading = { AppIcon(ui, pkg, label) }, trailing = {
+                            Secondary("Remove", { ui.setHome { it.copy(reachableApps = it.reachableApps - pkg) } }, color = Ink.dim)
+                        })
+                    }
+                }
+                item { Box(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Tonal("Add apps", Icons.add) { dialog = "reach:add" } } }
+                if (KDE_CONNECT in chosen) group("How to connect", listOf(Item("KDE Connect", KDE_TIP)))
+                caption("Turning it off ends incoming connections; the apps you chose stay listed.")
             }
 
             p == "local" -> Page("Local & home access", back) {
@@ -675,6 +709,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
         "wgremove" -> Prompt("Remove the home tunnel?", "Remove", { dialog = null; wgError = null; ui.setHome { it.copy(wg = null) } }, { dialog = null }, danger = true) {
             Text("$APP forgets this tunnel's config and key. To use it again you need your router's .conf file.", style = Type.sub)
         }
+        "reach:add" -> ReachSheet(ui, setup, vpn.lockdown, disclose, { added -> dialog = null; ui.setHome { it.copy(reachableApps = (it.reachableApps + added).distinct()) } }) { dialog = null }
         "tsout" -> Prompt("Sign out of Tailscale?", "Sign out", { dialog = null; ui.signOutTailscale()?.let { ui.notice.value = it.text } }, { dialog = null }, danger = true) {
             Text("Tailscale exit routes are removed. Their apps follow the default route.", style = Type.sub)
         }

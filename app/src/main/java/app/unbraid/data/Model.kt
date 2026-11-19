@@ -113,6 +113,13 @@ data class Home(
     val wg: WgPeer? = null,
     /** A Headscale server's DNS suffix the user allowed to answer every app's lookups under it; Tailscale's own needs none. */
     val tsSuffixAllowed: String? = null,
+    /**
+     * Experimental, off by default: tailnet devices that the tailnet's access rules allow may open connections to
+     * [reachableApps] on this phone, which see the device's real address. Needs [tailscale]; an app on Block, or one
+     * left outside the VPN, is never reached.
+     */
+    val reachable: Boolean = false,
+    val reachableApps: List<String> = emptyList(),
 )
 
 @Serializable

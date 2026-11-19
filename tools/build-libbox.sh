@@ -36,6 +36,16 @@ else
   mkdir -m 700 "$DEPS"
 fi
 chmod 700 "$DEPS"
+# One build at a time uses the copies, from preparing them to the end of the bind; a lock left by a build that died
+# is taken over.
+LOCK="$DEPS.lock"
+until mkdir -m 700 "$LOCK" 2>/dev/null; do
+  OWNER=$(cat "$LOCK/pid" 2>/dev/null || true)
+  if [ -n "$OWNER" ] && [ -O "$LOCK" ] && ! kill -0 "$OWNER" 2>/dev/null; then rm -rf "$LOCK"; continue; fi
+  echo "waiting for another libbox build ($LOCK)"; sleep 5
+done
+echo $$ > "$LOCK/pid"
+trap 'rm -rf "$LOCK"' EXIT
 for MOD in sing-tun tailscale; do
   ls "$ROOT"/tools/"$MOD"-*.patch >/dev/null 2>&1 || continue
   SRC=$(go mod download -json "github.com/sagernet/$MOD" | python3 -c 'import json, sys; print(json.load(sys.stdin)["Dir"])')
