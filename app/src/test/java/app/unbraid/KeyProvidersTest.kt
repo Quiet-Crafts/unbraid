@@ -374,6 +374,25 @@ class KeyProvidersTest {
         assertEquals(city.region, AirVpn.link(city, a) { entries }.server.city)
     }
 
+    /** 51820 joins AirVPN's ports only with entry 3 known; Proton tries its alternative ports after the config's own. */
+    @Test fun providerPortLists() {
+        val a = AirVpn.signed(airConf)
+        val status = AirVpn.parse(res("airvpn_status.json"), a.publicKey!!)
+        val l = AirVpn.link(Location("airvpn", country = "Netherlands"), a) { status }
+        assertEquals(2, l.entries.size)
+        assertEquals(listOf(1637, 47107, 51820), l.ports)
+        assertEquals(mapOf(51820 to 2), l.portEntry)
+        val bare = AirVpn.link(Location("airvpn", country = "Germany"), a) { catalog("airvpn") }
+        assertTrue(bare.entries.isEmpty())
+        assertEquals(listOf(1637, 47107), bare.ports)
+        assertTrue(bare.portEntry.isEmpty())
+
+        val entries = Proton.filtered(catalog("protonvpn"))
+        val p = Proton.link(Location("proton", countryCode = "DE"), Proton.signed(conf("10.2.0.2/32", "10.2.0.1", "79.135.105.1:51820"))) { entries }
+        assertEquals(listOf(51820, 443, 88, 1224, 500, 4500), p.ports)
+        assertEquals("auto", Proton.defaults["port"])
+    }
+
     @Test fun airvpnCatalogueFallbackUsesTheAccountKey() {
         val entries = catalog("airvpn")
         assertTrue(entries.isNotEmpty() && entries.all { '.' in it.ipv4!! })

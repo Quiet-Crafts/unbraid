@@ -91,21 +91,28 @@ object LinkPicker {
     /**
      * [links] with each provider WireGuard tunnel on the entry address, port and MTU its provider page asks for: a fixed port,
      * or with Automatic the [step]-th of the server's ports (a step per provider moves on when its tunnels stop answering).
+     * A port the server takes on one entry only ([WgLink.portEntry]) goes to that entry; a tunnel without it skips the port.
      * Imported configs keep their own MTU, at most [app.unbraid.data.MTU_MIN].
      */
     fun ported(setup: Setup, links: Map<String, Link>, step: Map<String, Int>): Map<String, Link> {
         val provider = { id: String -> setup.route(id)?.takeIf { !it.imported }?.loc?.provider }
         // One list per provider, so a tunnel saved without one (offline) still takes the same port as its provider's others.
         val lists = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.ports.orEmpty() }).mapValues { (_, l) -> l.firstOrNull { it.isNotEmpty() }.orEmpty() }
-        return links.mapValues { (id, l) -> portedOne(setup, provider(id), l, lists, step) }
+        val only = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.portEntry.orEmpty() }).mapValues { (_, l) -> l.firstOrNull { it.isNotEmpty() }.orEmpty() }
+        return links.mapValues { (id, l) -> portedOne(setup, provider(id), l, lists, only, step) }
     }
 
-    private fun portedOne(setup: Setup, p: String?, l: Link, lists: Map<String?, List<Int>>, step: Map<String, Int>): Link {
+    private fun portedOne(setup: Setup, p: String?, l: Link, lists: Map<String?, List<Int>>, only: Map<String?, Map<Int, Int>>, step: Map<String, Int>): Link {
         if (l !is WgLink) return l
         if (p == null) return l.copy(peer = l.peer.copy(mtu = minOf(l.peer.mtu, app.unbraid.data.MTU_MIN)))
-        val host = setup.opt(p, app.unbraid.data.ENTRY_OPT)?.toIntOrNull()?.let { l.entries.getOrNull(it - 1) } ?: l.peer.endpoint.substringBeforeLast(':')
-        val port = setup.opt(p, app.unbraid.data.PORT_OPT)?.toIntOrNull()?.takeIf { it in 1..65535 }
-            ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[(step[p] ?: 0) % it.size] } ?: l.peer.endpoint.substringAfterLast(':')
+        val picked = setup.opt(p, app.unbraid.data.PORT_OPT)?.toIntOrNull()?.takeIf { it in 1..65535 }
+            ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[(step[p] ?: 0) % it.size] }
+        val needs = picked?.let { only[p]?.get(it) }
+        // A one-entry port on a tunnel that doesn't know that entry would go nowhere: it keeps its own port instead.
+        val fits = needs == null || l.entries.getOrNull(needs - 1) != null
+        val port = picked?.takeIf { fits } ?: l.peer.endpoint.substringAfterLast(':')
+        val entry = needs?.takeIf { fits }
+        val host = (entry ?: setup.opt(p, app.unbraid.data.ENTRY_OPT)?.toIntOrNull())?.let { l.entries.getOrNull(it - 1) } ?: l.peer.endpoint.substringBeforeLast(':')
         return l.copy(peer = l.peer.copy(endpoint = "$host:$port", mtu = app.unbraid.data.mtu(setup.opt(p, app.unbraid.data.MTU_OPT))))
     }
 

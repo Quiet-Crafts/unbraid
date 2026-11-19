@@ -20,8 +20,8 @@ import kotlinx.serialization.Serializable
  * Servers: AirVPN's own status API `GET airvpn.org/api/status/` (no login; the gluetun updater reads it): healthy
  * servers' `ip_v4_in1` is the WireGuard entry and `ip_v4_in3` the alternative one, hostname `<cc>.vpn.airdns.org`.
  * Fallback: gluetun's catalogue, for addresses only: the key is always the account's own, never the catalogue's.
- * WireGuard answers at entries 1 and 3 on ports 1637 and 47107; entry 3 also takes 51820, left out so every port works
- * at either entry (entries 2 and 4 have no WireGuard). DNS 10.128.0.1 (the in-tunnel DNS in AirVPN's configs; a pasted
+ * WireGuard answers at entries 1 and 3 on ports 1637 and 47107; entry 3 also takes 51820, which always goes there
+ * ([portEntry]); entries 2 and 4 have no WireGuard. DNS 10.128.0.1 (the in-tunnel DNS in AirVPN's configs; a pasted
  * .conf overrides it and the port). Every plan allows 5 connections at once, each to a different server: two tunnels to
  * the *same* server need two devices' keys.
  */
@@ -81,14 +81,17 @@ object AirVpn : KeyProvider() {
     override val defaultDns = listOf("10.128.0.1")
     override val defaultPort = 1637
     override val presharedRequired = true
-    override val ports = listOf(1637, 47107)
+    override val ports = listOf(1637, 47107, 51820)
+    /** AirVPN takes WireGuard on 51820 at entry 3 only (the page's Alternative entry). */
+    override val portEntry = mapOf(51820 to 2)
 
     /** Entry 1, then entry 3 ([parse] keeps both only when the status API lists both). */
     override fun addresses(e: Catalog.Entry) = e.ips.takeIf { it.size == 2 }.orEmpty()
 
     override val defaults = mapOf(PORT_OPT to AUTO, ENTRY_OPT to "1")
     override fun options(account: String) = listOf(
-        Opt(PORT_OPT, "Port", "Automatic tries one, then the other when a network blocks it", listOf(AUTO to "Automatic") + ports.map { "$it" to "UDP $it" }, advanced = true),
+        Opt(PORT_OPT, "Port", "Automatic tries each in turn when a network blocks one", listOf(AUTO to "Automatic") +
+            ports.map { "$it" to "UDP $it" + if (it in portEntry) " (Alternative entry)" else "" }, advanced = true),
         Opt(ENTRY_OPT, "Entry address", "Alternative reaches each server on another address, for networks that block the standard one", listOf("1" to "Standard", "2" to "Alternative"), advanced = true),
     )
 
