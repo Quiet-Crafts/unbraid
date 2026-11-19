@@ -1,6 +1,6 @@
 --- a/option/tailscale.go
 +++ b/option/tailscale.go
-@@ -14,28 +14,38 @@
+@@ -14,28 +14,40 @@
  
  type TailscaleEndpointOptions struct {
  	DialerOptions
@@ -54,6 +54,8 @@
 +	TCPPorts      badoption.Listable[string] `json:"tcp_ports,omitempty"`
 +	AllowPackages badoption.Listable[string] `json:"allow_packages,omitempty"`
 +	BlockPackages badoption.Listable[string] `json:"block_packages,omitempty"`
++	// AllowNodes, when set, limits the peers that may connect to these nodes (stable node IDs).
++	AllowNodes badoption.Listable[string] `json:"allow_nodes,omitempty"`
 +}
 +
  type _TailscaleSSHServerOptions struct {
@@ -169,7 +171,7 @@
  			return err
 --- /dev/null
 +++ b/common/tunhandoff/tunhandoff.go
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,138 @@
 +// Package tunhandoff links the TUN inbound and an endpoint that hands inbound packets to the system through the TUN
 +// (unbraid patch). One Binding per engine instance, keyed by its router, so an engine that is shutting down never
 +// reaches the TUN of the engine that replaced it.
@@ -267,9 +269,76 @@
 +	h := b.handler.Load()
 +	return h != nil && h.Intercept(source, packet)
 +}
++
++// Event is one decision on a connection a peer opened: kept in memory for the app to show, never logged or saved.
++type Event struct {
++	Time     int64    `json:"time"` // Unix milliseconds
++	Peer     string   `json:"peer"` // the peer's tailnet address
++	Node     string   `json:"node"` // its stable node ID
++	Port     uint16   `json:"port"`
++	Packages []string `json:"packages,omitempty"`
++	Allowed  bool     `json:"allowed"`
++	Reason   string   `json:"reason,omitempty"` // refused: "device", "app", "blocked" or "unknown"
++}
++
++const maxEvents = 50
++
++var (
++	eventsAccess sync.Mutex
++	events       []Event
++)
++
++// Record keeps an event, the newest maxEvents only.
++func Record(e Event) {
++	eventsAccess.Lock()
++	defer eventsAccess.Unlock()
++	if events = append(events, e); len(events) > maxEvents {
++		events = append([]Event(nil), events[len(events)-maxEvents:]...)
++	}
++}
++
++// Events returns the kept events, oldest first.
++func Events() []Event {
++	eventsAccess.Lock()
++	defer eventsAccess.Unlock()
++	return append([]Event(nil), events...)
++}
++
++// ClearEvents forgets every event.
++func ClearEvents() {
++	eventsAccess.Lock()
++	defer eventsAccess.Unlock()
++	events = nil
++}
+--- /dev/null
++++ b/experimental/libbox/handoff_events.go
+@@ -0,0 +1,23 @@
++package libbox
++
++// Inbound tailnet connections' decisions for the app to show (unbraid patch): in memory only.
++
++import (
++	"encoding/json"
++
++	"github.com/sagernet/sing-box/common/tunhandoff"
++)
++
++// HandoffEvents returns the latest decisions as a JSON array, oldest first.
++func HandoffEvents() string {
++	b, err := json.Marshal(tunhandoff.Events())
++	if err != nil {
++		return "[]"
++	}
++	return string(b)
++}
++
++// ClearHandoffEvents forgets them.
++func ClearHandoffEvents() {
++	tunhandoff.ClearEvents()
++}
 --- /dev/null
 +++ b/protocol/tailscale/handoff.go
-@@ -0,0 +1,979 @@
+@@ -0,0 +1,1017 @@
 +//go:build with_gvisor
 +
 +package tailscale
@@ -279,8 +348,8 @@
 +// real address; the app's packets for it are taken back from the TUN before the stack and sent to Tailscale.
 +//
 +// Two checks guard it. Before the system sees the SYN, it names the app listening on the port: an app that isn't
-+// allowed is refused with a reset, and a port no app of the VPN listens on is left to the Tailscale stack as before
-+// (its own services live there). After the handshake, it names the app holding the connection, and no byte of payload
++// allowed, or a peer that isn't among the allowed devices when only some are, is refused with a reset, and a port no
++// app of the VPN listens on is left to the Tailscale stack as before (its own services live there). After the handshake, it names the app holding the connection, and no byte of payload
 +// passes either way until that app is allowed and none of its user id is blocked; otherwise both ends are reset.
 +//
 +// Locking: handoff.access guards the table; each flow's mu orders its state and delivery. access is always taken
@@ -296,6 +365,7 @@
 +	"sync/atomic"
 +	"time"
 +
++	"github.com/sagernet/sing-box/common/tunhandoff"
 +	"github.com/sagernet/sing-box/log"
 +	"github.com/sagernet/sing-box/option"
 +)
@@ -424,17 +494,20 @@
 +type portRange struct{ from, to uint16 }
 +
 +type handoff struct {
-+	logger    log.ContextLogger
-+	ports     []portRange
-+	allow     map[string]bool
-+	block     map[string]bool
-+	deps      handoffDeps
-+	heldTotal atomic.Int64
-+	done      chan struct{}
-+	closeOnce sync.Once
-+	local     atomic.Pointer[netip.Addr] // lock-free first test for packets from the system
-+	closed    atomic.Bool
-+	gate      sync.RWMutex // writes hold it shared; close takes it to wait for them
++	logger log.ContextLogger
++	ports  []portRange
++	allow  map[string]bool
++	block  map[string]bool
++	// allowNodes, when not empty, are the only peer nodes that may connect; the others are refused like an app that
++	// isn't allowed, once the listener check found an app of the VPN on the port.
++	allowNodes map[string]bool
++	deps       handoffDeps
++	heldTotal  atomic.Int64
++	done       chan struct{}
++	closeOnce  sync.Once
++	local      atomic.Pointer[netip.Addr] // lock-free first test for packets from the system
++	closed     atomic.Bool
++	gate       sync.RWMutex // writes hold it shared; close takes it to wait for them
 +
 +	access sync.Mutex
 +	tab    *handoffTable
@@ -443,7 +516,7 @@
 +
 +func newHandoff(logger log.ContextLogger, options *option.TailscaleTUNHandoffOptions, deps handoffDeps) *handoff {
 +	h := &handoff{
-+		logger: logger, deps: deps, allow: map[string]bool{}, block: map[string]bool{},
++		logger: logger, deps: deps, allow: map[string]bool{}, block: map[string]bool{}, allowNodes: map[string]bool{},
 +		done: make(chan struct{}), tab: newHandoffTable(netip.Addr{}),
 +	}
 +	for _, p := range options.TCPPorts {
@@ -464,6 +537,9 @@
 +	}
 +	for _, p := range options.BlockPackages {
 +		h.block[p] = true
++	}
++	for _, n := range options.AllowNodes {
++		h.allowNodes[n] = true
 +	}
 +	return h
 +}
@@ -617,9 +693,16 @@
 +	if !found {
 +		return false // no app of the VPN listens there: the stack's
 +	}
-+	if !h.allowed(packages) {
++	reason := ""
++	if len(h.allowNodes) > 0 && !h.allowNodes[node] {
++		reason = "device"
++	} else if !h.allowed(packages) {
++		reason = h.refusal(packages)
++	}
++	if reason != "" {
 +		h.write(nil, false, rst4(p.dst, p.src, 0, p.seq+1, true))
-+		h.logger.Info("tun hand-off: refused ", p.src, " -> port ", p.dst.Port(), " (", strings.Join(packages, ","), ")")
++		h.logger.Info("tun hand-off: refused ", p.src, " -> port ", p.dst.Port(), " (", reason, ": ", strings.Join(packages, ","), ")")
++		h.record(p.src, node, p.dst.Port(), packages, false, reason)
 +		return true
 +	}
 +	now := time.Now()
@@ -971,7 +1054,12 @@
 +	}
 +	if !h.allowed(packages) || time.Now().After(f.deadline) {
 +		h.denyLocked(f)
-+		h.logger.Info("tun hand-off: refused ", f.key.peer, " -> port ", f.key.port)
++		h.logger.Info("tun hand-off: refused ", f.key.peer, " -> port ", f.key.port, " (", strings.Join(packages, ","), ")")
++		reason := h.refusal(packages)
++		if len(packages) == 0 {
++			reason = "unknown"
++		}
++		h.record(f.key.peer, f.node, f.key.port, packages, false, reason)
 +		return
 +	}
 +	f.state = flowAllowed
@@ -990,6 +1078,25 @@
 +	}
 +	h.dropHeldLocked(f)
 +	h.logger.Info("tun hand-off: allowed ", f.key.peer, " -> port ", f.key.port, " (", strings.Join(packages, ","), ")")
++	h.record(f.key.peer, f.node, f.key.port, packages, true, "")
++}
++
++// refusal says why packages that aren't allowed are refused: "blocked" when one of them is on Block, else "app".
++func (h *handoff) refusal(packages []string) string {
++	for _, name := range packages {
++		if h.block[name] {
++			return "blocked"
++		}
++	}
++	return "app"
++}
++
++// record keeps a decision for the app to show (tunhandoff.Event): in memory only.
++func (h *handoff) record(peer netip.AddrPort, node string, port uint16, packages []string, allowed bool, reason string) {
++	tunhandoff.Record(tunhandoff.Event{
++		Time: time.Now().UnixMilli(), Peer: peer.Addr().String(), Node: node, Port: port,
++		Packages: append([]string(nil), packages...), Allowed: allowed, Reason: reason,
++	})
 +}
 +
 +// sweep enforces deadlines and removes dead flows.
@@ -1387,7 +1494,7 @@
 +}
 --- /dev/null
 +++ b/protocol/tailscale/handoff_test.go
-@@ -0,0 +1,632 @@
+@@ -0,0 +1,671 @@
 +//go:build with_gvisor
 +
 +package tailscale
@@ -1400,6 +1507,7 @@
 +	"testing"
 +	"time"
 +
++	"github.com/sagernet/sing-box/common/tunhandoff"
 +	"github.com/sagernet/sing-box/log"
 +	"github.com/sagernet/sing-box/option"
 +)
@@ -2019,4 +2127,42 @@
 +	if st.acked || st.next != 15 {
 +		t.Fatalf("stream %+v", st)
 +	}
++}
++
++func TestHandoffAllowedDevicesAndEvents(t *testing.T) {
++	tunhandoff.ClearEvents()
++	w := &hoWorld{owner: func() ([]string, error) { return []string{"a"}, nil }}
++	h := newTestHandoff(t, w, []string{"a"}, nil)
++	h.allowNodes = map[string]bool{"n2": true} // the peer is node n1
++	if !h.Inbound(tcpPacket(hoPeerEnd, hoLocalEnd, 1000, 0, tcpSYN, nil)) {
++		t.Fatal("a device that isn't allowed was left to the stack")
++	}
++	system, peer := w.seen()
++	if len(system) != 0 || len(peer) != 1 || peer[0].flags != tcpRST|tcpACK || flowOf(h, hoPeerEnd) != nil {
++		t.Fatalf("device not refused: system %d, peer %+v", len(system), peer)
++	}
++	h.allowNodes["n1"] = true
++	handshake(t, h, nil)
++	waitState(t, h, flowAllowed)
++	h.block["b"] = true
++	other := netip.AddrPortFrom(hoPeer, 40002)
++	w.listener = []string{"b"}
++	h.Inbound(tcpPacket(other, hoLocalEnd, 1, 0, tcpSYN, nil))
++	w.listener = []string{"a"}
++	ev := tunhandoff.Events()
++	if len(ev) != 3 || ev[2].Reason != "blocked" {
++		t.Fatalf("blocked refusal %+v", ev)
++	}
++	ev = ev[:2]
++	if len(ev) != 2 || ev[0].Allowed || ev[0].Reason != "device" || ev[0].Node != "n1" || ev[0].Peer != "100.64.0.6" || ev[0].Port != 1716 ||
++		!ev[1].Allowed || len(ev[1].Packages) != 1 || ev[1].Packages[0] != "a" {
++		t.Fatalf("events %+v", ev)
++	}
++	for i := 0; i < 60; i++ {
++		tunhandoff.Record(tunhandoff.Event{Port: uint16(i)})
++	}
++	if ev = tunhandoff.Events(); len(ev) != 50 || ev[49].Port != 59 {
++		t.Fatalf("kept %d events, newest %d", len(ev), ev[len(ev)-1].Port)
++	}
++	tunhandoff.ClearEvents()
 +}

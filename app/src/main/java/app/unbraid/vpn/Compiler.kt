@@ -89,7 +89,7 @@ object Compiler {
      * into the TUN, which then carries that address too, and holds their data until Android names the receiving app:
      * only one of [allow], and none on Block, gets any.
      */
-    class Inbound(val address4: String, val tcpPorts: List<String>, val allow: List<String>)
+    class Inbound(val address4: String, val tcpPorts: List<String>, val allow: List<String>, val nodes: List<String> = emptyList())
 
     /**
      * Inbound tag of the app's own way into a chosen exit, for speed and health tests: a proxy on 127.0.0.1 whose
@@ -328,6 +328,7 @@ object Compiler {
                             // An app outside the VPN never sends its replies through unbraid and can't be named by it: not allowed.
                             put("allow_packages", JsonArray(ib.allow.filter { it != i.selfPackage && (i.lockdown || !s.outside(it)) }.sorted().map(::JsonPrimitive)))
                             put("block_packages", JsonArray((s.apps.filterValues { it == BLOCK }.keys + i.blockedKin).sorted().map(::JsonPrimitive)))
+                            if (ib.nodes.isNotEmpty()) put("allow_nodes", JsonArray(ib.nodes.sorted().map(::JsonPrimitive)))
                         }
                     }
                 })

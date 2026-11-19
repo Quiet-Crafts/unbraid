@@ -120,7 +120,14 @@ data class Home(
      */
     val reachable: Boolean = false,
     val reachableApps: List<String> = emptyList(),
+    /** Only [reachableDevices] may connect, not every device the access rules allow; none chosen: nobody. */
+    val reachableOnly: Boolean = false,
+    val reachableDevices: List<TailnetDevice> = emptyList(),
 )
+
+/** A tailnet device by its stable node ID, with the name it had when chosen (shown while it isn't connected). */
+@Serializable
+data class TailnetDevice(val id: String, val name: String)
 
 @Serializable
 data class Prefs(

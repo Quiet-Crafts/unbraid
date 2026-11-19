@@ -11,6 +11,7 @@ import androidx.compose.foundation.verticalScroll
 import app.unbraid.vpn.UnbraidVpn
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -320,6 +321,12 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, disclose: 
     val tsStatus = tailscaleSub(home.tailscale, vpn.phase == Phase.On, vpn.tsState)
     val reachWaiting = vpn.phase == Phase.On && vpn.tsState != "Running"
     val installed by ui.apps.collectAsStateWithLifecycle()
+    // Recent incoming tailnet connections, read every 2 seconds while their page is open and the VPN runs.
+    val reachEvents by androidx.compose.runtime.produceState(emptyList<ReachEvent>(), page, running) {
+        value = emptyList()
+        while (page == "reach" && running) { value = withContext(Dispatchers.IO) { reachEvents(app.unbraid.vpn.UnbraidVpn.inboundEvents()) }; delay(2_000) }
+    }
+    var reachAll by rememberSaveable { mutableStateOf(false) }
     val homeVia = listOfNotNull("Tailscale".takeIf { home.tailscale }, "WireGuard".takeIf { home.wg != null }).joinToString(" and ").ifEmpty { null }
 
     // A key's setup minute ends while Providers & servers may stay open.
@@ -511,7 +518,48 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, disclose: 
                 }
                 item { Box(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Tonal("Add apps", Icons.add) { dialog = "reach:add" } } }
                 if (KDE_CONNECT in chosen) group("How to connect", listOf(Item("KDE Connect", KDE_TIP)))
-                caption("Turning it off ends incoming connections; the apps you chose stay listed.")
+
+                // Who can connect: every device the access rules allow, or only the chosen ones.
+                val only = home.reachableOnly
+                group("Who can connect", listOf(
+                    Item(REACH_ALL, null, { ui.setHome { it.copy(reachableOnly = false) }; Unit }, selected = !only) { Radio(!only) },
+                    Item(REACH_ONLY, REACH_ONLY_SUB, { ui.setHome { it.copy(reachableOnly = true) }; Unit }, selected = only) { Radio(only) },
+                ))
+                if (only) {
+                    val devices = home.reachableDevices
+                    item { Gap(8.dp) }
+                    if (devices.isEmpty()) item { GroupRow(0, 1, "No devices yet", "No device can connect until you add one") }
+                    devices.forEachIndexed { i, d ->
+                        item(key = "reachdev:${d.id}") {
+                            val peer = vpn.tsPeers.firstOrNull { it.id == d.id }
+                            GroupRow(i, devices.size, peer?.name ?: d.name, peer?.let { if (it.online) "Online" else "Offline" }.takeIf { running }, trailing = {
+                                Secondary("Remove", { ui.setHome { it.copy(reachableDevices = it.reachableDevices.filter { x -> x.id != d.id }) } }, color = Ink.dim,
+                                    modifier = Modifier.semantics { contentDescription = "Remove ${peer?.name ?: d.name}" })
+                            })
+                        }
+                    }
+                    item { Box(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Tonal("Add devices", Icons.add) { dialog = "reach:devices" } } }
+                }
+
+                // Recent connections: read from the engine while this page is open; kept in memory only.
+                item { SectionLabel("Recent connections") }
+                when {
+                    !running -> item { GroupRow(0, 1, "VPN is off") }
+                    reachEvents.isEmpty() -> item { GroupRow(0, 1, "No incoming connection attempts yet") }
+                    else -> {
+                        val shown = if (reachAll) reachEvents else reachEvents.take(3)
+                        shown.forEachIndexed { i, e ->
+                            item(key = "reachev:$i:${e.time}") {
+                                val device = eventDevice(e, vpn.tsPeers, home.reachableDevices)
+                                GroupRow(i, shown.size, eventTitle(device, e) { labels[it] ?: it }, eventOutcome(e) + " · " + ago(System.currentTimeMillis() - e.time),
+                                    titleColor = if (e.allowed) Ink.text else Ink.bad)
+                            }
+                        }
+                        if (reachEvents.size > 3) item { Box(Modifier.padding(start = 24.dp, top = 8.dp)) { Secondary(if (reachAll) "Show fewer" else "Show all", { reachAll = !reachAll }) } }
+                    }
+                }
+                caption(REACH_RECENT_NOTE)
+                caption("Turning it off ends incoming connections; the apps and devices you chose stay listed.")
             }
 
             p == "local" -> Page("Local & home access", back) {
@@ -709,7 +757,8 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, disclose: 
         "wgremove" -> Prompt("Remove the home tunnel?", "Remove", { dialog = null; wgError = null; ui.setHome { it.copy(wg = null) } }, { dialog = null }, danger = true) {
             Text("$APP forgets this tunnel's config and key. To use it again you need your router's .conf file.", style = Type.sub)
         }
-        "reach:add" -> ReachSheet(ui, setup, vpn.lockdown, disclose, { added -> dialog = null; ui.setHome { it.copy(reachableApps = (it.reachableApps + added).distinct()) } }) { dialog = null }
+        "reach:devices" -> DeviceSheet(vpn.tsPeers, home.reachableDevices, { added -> dialog = null; ui.setHome { it.copy(reachableDevices = (it.reachableDevices + added).distinctBy { d -> d.id }) } }) { dialog = null }
+        "reach:add" ->ReachSheet(ui, setup, vpn.lockdown, disclose, { added -> dialog = null; ui.setHome { it.copy(reachableApps = (it.reachableApps + added).distinct()) } }) { dialog = null }
         "tsout" -> Prompt("Sign out of Tailscale?", "Sign out", { dialog = null; ui.signOutTailscale()?.let { ui.notice.value = it.text } }, { dialog = null }, danger = true) {
             Text("Tailscale exit routes are removed. Their apps follow the default route.", style = Type.sub)
         }

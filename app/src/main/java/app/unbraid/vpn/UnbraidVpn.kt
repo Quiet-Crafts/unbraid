@@ -84,6 +84,8 @@ data class VpnState(
     val tsAnnounced: String? = null,
     /** Tailnet peers that offer themselves as exit nodes. */
     val tsExitNodes: List<TsNode> = emptyList(),
+    /** Every tailnet peer, for choosing which devices may reach this phone. */
+    val tsPeers: List<TsNode> = emptyList(),
     /** While paused: when the connection comes back (epoch ms), 0 = only when resumed by hand. */
     val pausedUntil: Long = 0,
     /** While paused: when the pause began (epoch ms), for the countdown ring. */
@@ -120,6 +122,8 @@ data class VpnState(
 class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     companion object {
         val state = MutableStateFlow(VpnState())
+        /** The engine's latest decisions on incoming tailnet connections, as JSON (in memory only); null if unreadable. */
+        fun inboundEvents(): String? = runCatching { Libbox.handoffEvents() }.getOrNull()
         /**
          * Restores so far: each replaces the whole setup, and is counted before the store changes. An engine still running
          * a setup read before the latest one ([ranRestores]) runs one that exists nowhere else, so a refused reload stops
@@ -973,14 +977,16 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** The last reload asked for so inbound gets this node's address installed: which address, when, and the reload. */
     @Volatile private var inboundAsked: Triple<String, Long, Job>? = null
 
-    /** Apps tailnet devices may reach ([app.unbraid.data.Home.reachable]); null = off. */
-    private fun inboundApps(): List<String>? = store.setup.value.home.takeIf { it.reachable }?.reachableApps?.ifEmpty { null }
+    /** Apps tailnet devices may reach ([app.unbraid.data.Home.reachable]); null = off, also when no device may connect. */
+    private fun inboundApps(): List<String>? = store.setup.value.home.takeIf { it.reachable && !(it.reachableOnly && it.reachableDevices.isEmpty()) }
+        ?.reachableApps?.ifEmpty { null }
 
     /** Any port from 1024 up: the engine's check of the receiving app is what decides, not the port. */
     private fun inbound(): Compiler.Inbound? {
         val apps = inboundApps() ?: return null
         val self4 = tsSelf4 ?: return null
-        return Compiler.Inbound(self4, listOf("1024:65535"), apps)
+        val home = store.setup.value.home
+        return Compiler.Inbound(self4, listOf("1024:65535"), apps, if (home.reachableOnly) home.reachableDevices.map { it.id } else emptyList())
     }
 
     private fun watchTailscale() {
@@ -993,17 +999,22 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     val it = u.endpoints()
                     if (!it.hasNext()) { tsSelf4 = null; return }
                     val ep = it.next()
-                    val nodes = buildList {
+                    val exits = mutableListOf<TsNode>()
+                    val all = buildList {
                         val groups = ep.userGroups()
                         while (groups.hasNext()) {
                             val peers = groups.next().peers()
                             while (peers.hasNext()) {
                                 val p = peers.next()
-                                val ips = p.tailscaleIPs()
-                                if (p.exitNodeOption && ips.hasNext()) add(TsNode(p.hostName.ifEmpty { p.dnsName.substringBefore('.') }, ips.next(), p.online, p.stableID, p.exitNode))
+                                val ips = generateSequence(p.tailscaleIPs().let { i -> { if (i.hasNext()) i.next() else null } }).toList()
+                                val ip = ips.firstOrNull { '.' in it } ?: ips.firstOrNull() ?: continue
+                                val n = TsNode(p.hostName.ifEmpty { p.dnsName.substringBefore('.') }, ip, p.online, p.stableID, p.exitNode)
+                                add(n)
+                                if (p.exitNodeOption) exits += n
                             }
                         }
                     }.sortedBy { it.name.lowercase() }
+                    val nodes = exits.sortedBy { it.name.lowercase() }
                     // This node's tailnet IPv4: inbound carries it on the TUN, so a new one needs a reload.
                     val self4 = ep.self?.tailscaleIPs()?.let { ips -> generateSequence { if (ips.hasNext()) ips.next() else null }.firstOrNull { '.' in it } }
                     if (ep.backendState == "Running" && self4 != null) {
@@ -1019,7 +1030,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     } else tsSelf4 = null
                     val suffix = Compiler.tsSuffix(ep.magicDNSSuffix)
                     val reported = if (ep.backendState == "Running") suffix else store.tsSuffix
-                    state.update { s -> s.copy(tsLoginUrl = ep.authURL.ifEmpty { null }, tsState = ep.backendState, tsExitNodes = nodes, tsAnnounced = reported) }
+                    state.update { s -> s.copy(tsLoginUrl = ep.authURL.ifEmpty { null }, tsState = ep.backendState, tsExitNodes = nodes, tsPeers = all, tsAnnounced = reported) }
                     // The sign-in pages' way around the exit opens with a sign-in link and closes only once signed in: a
                     // restarted engine reports no link at first, which must not close it (each reload restarts Tailscale).
                     // Compared with what the engine runs, so a reload that failed is tried again on the next status.
@@ -1056,6 +1067,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         retry?.cancel(); retry = null; retries = 0; retrying = emptyMap(); net.onChange = null; refusals = emptyMap(); gone = emptyMap(); failing = emptySet()
         runCatching { ts?.close() }; ts = null
         tsSelf4 = null; inboundAsked = null // the next engine learns its tailnet address afresh: never installs a stale one
+        runCatching { Libbox.clearHandoffEvents() } // recent incoming connections are kept only while connected
         tsLoginPending = false
         holding = false
         runCatching { server?.closeService() }
