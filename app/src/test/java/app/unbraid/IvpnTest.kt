@@ -36,6 +36,21 @@ class IvpnTest {
         assertTrue(hosts.all { it.publicKey.length == 44 && Base64.getDecoder().decode(it.publicKey).size == 32 })
     }
 
+    /** Hosts IVPN's status list marks inactive or in maintenance are picked last, and only when nothing else is left. */
+    @Test fun downHostsArePickedLast() {
+        val down = Ivpn.down("""{"servers":[
+            {"gateway":"a","is_active":false,"in_maintenance":false,"hosts":{"wireguard":{"hostname":"x1.wg.ivpn.net"}}},
+            {"gateway":"b","is_active":true,"in_maintenance":true,"hosts":{"wireguard":{"hostname":"x2.wg.ivpn.net"}}},
+            {"gateway":"c","is_active":true,"in_maintenance":false,"hosts":{"wireguard":{"hostname":"x3.wg.ivpn.net"}}},
+            {"gateway":"d","is_active":false,"hosts":{}}],"config":{}}""")
+        assertEquals(setOf("x1.wg.ivpn.net", "x2.wg.ivpn.net"), down)
+        val nl = list.wireguard.filter { it.countryCode == "NL" }.flatMap { it.hosts }.sortedBy { it.load }
+        assertTrue(nl.size > 1)
+        val loc = Location("ivpn", countryCode = "NL")
+        assertEquals(nl[1].hostname, Ivpn.link(list.copy(down = setOf(nl[0].hostname)), loc, acct).server.host)
+        assertEquals(nl[0].hostname, Ivpn.link(list.copy(down = nl.map { it.hostname }.toSet()), loc, acct).server.host)
+    }
+
     @Test fun countryLinkPicksTheLeastLoadedHost() {
         val l = Ivpn.link(list, Location("ivpn", countryCode = "NL"), acct)
         val best = list.wireguard.filter { it.countryCode == "NL" }.flatMap { it.hosts }.minBy { it.load }

@@ -27,6 +27,8 @@ object Catalog {
         val free: Boolean = false,
         /** Live load in percent from a provider's own list; -1 = none (the gluetun catalogue has no load figures). */
         val load: Int = -1,
+        /** The provider says this server works but has a problem, and names it ("Low packet loss"); null = none. */
+        val warning: String? = null,
     ) {
         /** Some providers (Windscribe) only fill `region` with the country. */
         val place get() = country ?: region.orEmpty()
@@ -66,7 +68,7 @@ object Catalog {
         .filter { e -> loc.country?.let { it == e.place } ?: loc.countryCode?.let { it == code(e.place) } ?: true }
         .filter { loc.region == null || it.city == loc.region }
         .shuffled()
-        .sortedBy { if (it.load < 0) Int.MAX_VALUE else it.load }
+        .sortedWith(compareBy({ it.warning != null }, { if (it.load < 0) Int.MAX_VALUE else it.load }))
 
     /** Java's English names, normalised ("Hong Kong SAR China" → "hong kong", "Myanmar (Burma)" → "myanmar"). */
     private fun norm(name: String) = name.lowercase().replace(" & ", " and ").replace("ô", "o").substringBefore(" (").substringBefore(", ")

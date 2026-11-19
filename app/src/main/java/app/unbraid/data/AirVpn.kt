@@ -17,8 +17,8 @@ import kotlinx.serialization.Serializable
  * `GET /api/generator/?protocols=wireguard_1_udp_1637&servers=<name>&device=<name>` returns that device's .conf. The
  * generator falls back to the Default device for an unknown name, so the name is always one from the list and the
  * config's address must be the device's own. API errors come back as HTTP 200 with `{"error": …}`.
- * Servers: AirVPN's own status API `GET airvpn.org/api/status/` (no login; the gluetun updater reads it): healthy
- * servers' `ip_v4_in1` is the WireGuard entry and `ip_v4_in3` the alternative one, hostname `<cc>.vpn.airdns.org`.
+ * Servers: AirVPN's own status API `GET airvpn.org/api/status/` (no login; the gluetun updater reads it): servers that
+ * take connections (`ok`, or `warning` with a named problem; not `error`); `ip_v4_in1` is the WireGuard entry and `ip_v4_in3` the alternative one, hostname `<cc>.vpn.airdns.org`.
  * Fallback: gluetun's catalogue, for addresses only: the key is always the account's own, never the catalogue's.
  * WireGuard answers at entries 1 and 3 on ports 1637 and 47107; entry 3 also takes 51820, left out so every port works
  * at either entry (entries 2 and 4 have no WireGuard). DNS 10.128.0.1 (the in-tunnel DNS in AirVPN's configs; a pasted
@@ -36,6 +36,8 @@ object AirVpn : KeyProvider() {
         @SerialName("ip_v4_in1") val ip: String = "",
         @SerialName("ip_v4_in3") val ip3: String = "",
         val health: String = "",
+        /** Why a server isn't `ok`, such as "Low packet loss". */
+        val warning: String = "",
         @SerialName("currentload") val load: Int? = null,
     )
 
@@ -255,10 +257,11 @@ object AirVpn : KeyProvider() {
 
     internal fun parse(body: String, serverKey: String): List<Catalog.Entry> =
         Http.parsed("AirVPN") { NordApi.json.decodeFromString(Status.serializer(), body) }.servers
-            .filter { it.health == "ok" && Addr.server(it.ip) && it.country.isNotBlank() && it.code.isNotBlank() }
+            // `error` refuses connections; `warning` works, with a problem it names: kept, picked after the healthy ones.
+            .filter { (it.health == "ok" || it.health == "warning") && Addr.server(it.ip) && it.country.isNotBlank() && it.code.isNotBlank() }
             .map {
                 val city = it.location.replace(", ", " ").replace(",", "").takeIf(String::isNotBlank)
                 Catalog.Entry("wireguard", it.country, it.continent, city, it.name, "${it.code}.vpn.airdns.org", serverKey, listOfNotNull(it.ip, it.ip3.takeIf(Addr::server)),
-                    load = it.load?.coerceIn(0, 100) ?: -1)
+                    load = it.load?.coerceIn(0, 100) ?: -1, warning = it.warning.trim().ifEmpty { "Warning" }.takeIf { _ -> it.health == "warning" })
             }
 }
