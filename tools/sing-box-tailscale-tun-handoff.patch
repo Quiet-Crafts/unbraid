@@ -342,7 +342,7 @@
 +}
 --- /dev/null
 +++ b/protocol/tailscale/handoff.go
-@@ -0,0 +1,1201 @@
+@@ -0,0 +1,1251 @@
 +//go:build with_gvisor
 +
 +package tailscale
@@ -392,7 +392,9 @@
 +	handoffTombstone    = 30 * time.Second       // a refused or closed tuple stays dead this long
 +	handoffPeek         = 136                    // enough for any IPv4 header, TCP flags, or an ICMP error's quote
 +	handoffUDPIdle      = 2 * time.Minute        // a UDP exchange silent this long ends
-+	handoffUDPRecheck   = 10 * time.Second       // how often the app holding a UDP exchange's port is named again
++	handoffUDPRecheck   = 3 * time.Second        // how often the app holding a UDP exchange's port is named again
++	handoffUDPGrace     = 2 * time.Second        // past its check this long without a new answer, an exchange is held
++	handoffMaxUDP       = 256                    // UDP exchanges at once, apart from the TCP flows
 +	handoffUDPTombstone = 10 * time.Second       // a refused UDP exchange stays dropped this long, without new lookups
 +
 +	tcpFIN = 0x01
@@ -482,6 +484,7 @@
 +	held              int
 +	ending            bool      // both ends closed: forwarded until expires, then removed
 +	recheckAt         time.Time // UDP: when to name the app holding the port again
++	validUntil        time.Time // UDP: delivery stops past this unless a check names an allowed app again
 +	rechecking        bool      // UDP: a lookup for that is running
 +	deadline          time.Time // opening and checking
 +	expires           time.Time // closing, denied and ending
@@ -492,11 +495,40 @@
 +	local   netip.Addr // invalid: nothing is handed off
 +	closed  bool
 +	flows   map[flowKey]*handoffFlow
-+	perPeer map[netip.Addr]int
++	perPeer map[peerProto]int
++	total   [2]int // TCP flows, UDP exchanges
++}
++
++// peerProto counts one peer's flows of one protocol: UDP exchanges never use up TCP's room, nor the other way.
++type peerProto struct {
++	addr netip.Addr
++	udp  bool
++}
++
++func protoIndex(udp bool) int {
++	if udp {
++		return 1
++	}
++	return 0
++}
++
++// room: another flow of that protocol from peer fits.
++func (t *handoffTable) room(peer netip.Addr, udp bool) bool {
++	max := handoffMaxFlows
++	if udp {
++		max = handoffMaxUDP
++	}
++	return t.total[protoIndex(udp)] < max && t.perPeer[peerProto{peer, udp}] < handoffMaxPerPeer
++}
++
++func (t *handoffTable) add(f *handoffFlow) {
++	t.flows[f.key] = f
++	t.perPeer[peerProto{f.key.peer.Addr(), f.key.udp}]++
++	t.total[protoIndex(f.key.udp)]++
 +}
 +
 +func newHandoffTable(local netip.Addr) *handoffTable {
-+	return &handoffTable{local: local, flows: map[flowKey]*handoffFlow{}, perPeer: map[netip.Addr]int{}}
++	return &handoffTable{local: local, flows: map[flowKey]*handoffFlow{}, perPeer: map[peerProto]int{}}
 +}
 +
 +// handoffDeps is the outside world, replaced in tests.
@@ -631,7 +663,7 @@
 +	h.access.Lock()
 +	old := h.tab
 +	h.closed.Store(true)
-+	h.tab = &handoffTable{closed: true, flows: map[flowKey]*handoffFlow{}, perPeer: map[netip.Addr]int{}}
++	h.tab = &handoffTable{closed: true, flows: map[flowKey]*handoffFlow{}, perPeer: map[peerProto]int{}}
 +	h.local.Store(nil)
 +	for _, f := range old.flows {
 +		f.retired.Store(true)
@@ -652,8 +684,10 @@
 +	}
 +	f.retired.Store(true)
 +	delete(tab.flows, f.key)
-+	if tab.perPeer[f.key.peer.Addr()]--; tab.perPeer[f.key.peer.Addr()] <= 0 {
-+		delete(tab.perPeer, f.key.peer.Addr())
++	tab.total[protoIndex(f.key.udp)]--
++	pp := peerProto{f.key.peer.Addr(), f.key.udp}
++	if tab.perPeer[pp]--; tab.perPeer[pp] <= 0 {
++		delete(tab.perPeer, pp)
 +	}
 +}
 +
@@ -714,7 +748,7 @@
 +		h.retireLocked(tab, f) // a new connection on the same tuple: nothing carries over
 +	}
 +	node, isPeer := h.peers[p.src.Addr()]
-+	room := len(tab.flows) < handoffMaxFlows && tab.perPeer[p.src.Addr()] < handoffMaxPerPeer
++	room := tab.room(p.src.Addr(), key.udp)
 +	h.access.Unlock()
 +	if f != nil {
 +		h.release(f)
@@ -747,12 +781,11 @@
 +	now := time.Now()
 +	f := &handoffFlow{key: key, node: node, local: tab.local, state: flowOpening, peerISN: p.seq, deadline: now.Add(handoffOpenWait), lastActive: now}
 +	h.access.Lock()
-+	if h.tab != tab || tab.flows[key] != nil || h.peers[p.src.Addr()] != node || len(tab.flows) >= handoffMaxFlows || tab.perPeer[p.src.Addr()] >= handoffMaxPerPeer {
++	if h.tab != tab || tab.flows[key] != nil || h.peers[p.src.Addr()] != node || !tab.room(p.src.Addr(), key.udp) {
 +		h.access.Unlock()
 +		return true // things changed during the lookup: dropped, the peer sends the SYN again
 +	}
-+	tab.flows[key] = f
-+	tab.perPeer[p.src.Addr()]++
++	tab.add(f)
 +	h.access.Unlock()
 +	f.mu.Lock()
 +	defer f.mu.Unlock()
@@ -839,14 +872,14 @@
 +		pkt := append([]byte(nil), b...)
 +		f.mu.Lock()
 +		defer f.mu.Unlock()
-+		if f.state == flowAllowed && !f.retired.Load() {
-+			f.lastActive = time.Now()
++		if now := time.Now(); f.state == flowAllowed && !f.retired.Load() && now.Before(f.validUntil) {
++			f.lastActive = now
 +			h.write(f, true, pkt)
 +		}
-+		return true // a refused exchange's datagrams are dropped until its tombstone ends
++		return true // a refused exchange's datagrams, or one whose check is overdue, are dropped
 +	}
 +	node, isPeer := h.peers[p.src.Addr()]
-+	room := len(tab.flows) < handoffMaxFlows && tab.perPeer[p.src.Addr()] < handoffMaxPerPeer
++	room := tab.room(p.src.Addr(), key.udp)
 +	h.access.Unlock()
 +	if !isPeer || !room {
 +		return false
@@ -867,17 +900,17 @@
 +		reason = h.refusal(packages)
 +	}
 +	now := time.Now()
-+	f := &handoffFlow{key: key, node: node, local: tab.local, state: flowAllowed, lastActive: now, recheckAt: now.Add(handoffUDPRecheck)}
++	f := &handoffFlow{key: key, node: node, local: tab.local, state: flowAllowed, lastActive: now, recheckAt: now.Add(handoffUDPRecheck),
++		validUntil: now.Add(handoffUDPRecheck + handoffUDPGrace)}
 +	if reason != "" {
 +		f.state, f.expires = flowDenied, now.Add(handoffUDPTombstone)
 +	}
 +	h.access.Lock()
-+	if h.tab != tab || tab.flows[key] != nil || h.peers[p.src.Addr()] != node || len(tab.flows) >= handoffMaxFlows || tab.perPeer[p.src.Addr()] >= handoffMaxPerPeer {
++	if h.tab != tab || tab.flows[key] != nil || h.peers[p.src.Addr()] != node || !tab.room(p.src.Addr(), key.udp) {
 +		h.access.Unlock()
 +		return true // things changed during the lookup: dropped
 +	}
-+	tab.flows[key] = f
-+	tab.perPeer[p.src.Addr()]++
++	tab.add(f)
 +	h.access.Unlock()
 +	h.record(true, p.src, node, p.dst.Port(), packages, reason == "", reason)
 +	if reason != "" {
@@ -902,11 +935,13 @@
 +	}
 +	now := time.Now()
 +	if !found {
-+		f.recheckAt = now.Add(time.Second) // no answer yet (every lookup slot busy, or the socket closing): soon again
++		// No answer (every lookup slot busy, or the socket closing): asked again soon, and nothing passes once the
++		// last answer is too old.
++		f.recheckAt = now.Add(time.Second)
 +		return
 +	}
 +	if h.allowedIn(h.udpAllow, packages) {
-+		f.recheckAt = now.Add(handoffUDPRecheck)
++		f.recheckAt, f.validUntil = now.Add(handoffUDPRecheck), now.Add(handoffUDPRecheck+handoffUDPGrace)
 +		return
 +	}
 +	reason := h.refusal(packages)
@@ -975,11 +1010,15 @@
 +		if f.state != flowAllowed || f.retired.Load() {
 +			return false // not an allowed exchange: the app's own traffic, normal routing and policy
 +		}
++		now := time.Now()
++		if !now.Before(f.validUntil) {
++			return true // the check is overdue: held, like the peer's side
++		}
 +		b, ok := packet(0)
 +		if !ok {
 +			return true
 +		}
-+		f.lastActive = time.Now()
++		f.lastActive = now
 +		h.write(f, false, append([]byte(nil), b...))
 +		return true
 +	}
@@ -987,15 +1026,26 @@
 +	if !ok {
 +		return true
 +	}
-+	f.mu.Lock()
-+	defer f.mu.Unlock()
 +	if kind == keyICMP {
-+		// An error the system sends about an allowed connection goes to the peer; any other is dropped.
-+		if k, ok := icmpError(b, *local, true, true); ok && k == key && f.state == flowAllowed {
++		// An error the system sends about an allowed connection goes to the peer; any other is dropped. For UDP,
++		// "port unreachable" means the app's socket is gone: the exchange ends, and the next datagram asks again.
++		f.mu.Lock()
++		k, ok := icmpError(b, *local, true, true)
++		match := ok && k == key && f.state == flowAllowed
++		if match {
 +			h.write(f, false, append([]byte(nil), b...))
++		}
++		f.mu.Unlock()
++		if match && key.udp && b[int(b[0]&0x0f)*4] == 3 && b[int(b[0]&0x0f)*4+1] == 3 {
++			h.access.Lock()
++			h.retireLocked(tab, f)
++			h.access.Unlock()
++			h.release(f)
 +		}
 +		return true
 +	}
++	f.mu.Lock()
++	defer f.mu.Unlock()
 +	p, ok := parseTCP4(b)
 +	if !ok || f.retired.Load() {
 +		return true
@@ -1444,7 +1494,7 @@
 +	}
 +	in := b[ihl+8:]
 +	inIHL := int(in[0]&0x0f) * 4
-+	if in[0]>>4 != 4 || in[9] != 6 || inIHL < 20 || len(in) < inIHL+8 || binary.BigEndian.Uint16(in[6:8])&0x1fff != 0 {
++	if in[0]>>4 != 4 || (in[9] != 6 && in[9] != 17) || inIHL < 20 || len(in) < inIHL+8 || binary.BigEndian.Uint16(in[6:8])&0x1fff != 0 {
 +		return flowKey{}, false // the quote must hold the start of a TCP segment
 +	}
 +	outerSrc, outerDst := netip.AddrFrom4([4]byte(b[12:16])), netip.AddrFrom4([4]byte(b[16:20]))
@@ -1454,12 +1504,12 @@
 +		if outerSrc != local || inDst != local || outerDst != inSrc {
 +			return flowKey{}, false
 +		}
-+		return flowKey{netip.AddrPortFrom(inSrc, inSport), inDport, false}, true
++		return flowKey{netip.AddrPortFrom(inSrc, inSport), inDport, in[9] == 17}, true
 +	}
 +	if outerDst != local || inSrc != local {
 +		return flowKey{}, false
 +	}
-+	return flowKey{netip.AddrPortFrom(inDst, inDport), inSport, false}, true
++	return flowKey{netip.AddrPortFrom(inDst, inDport), inSport, in[9] == 17}, true
 +}
 +
 +// bareACK is the packet's headers alone, without data, FIN or urgent data, checksums recomputed.
@@ -1689,7 +1739,7 @@
 +}
 --- /dev/null
 +++ b/protocol/tailscale/handoff_test.go
-@@ -0,0 +1,843 @@
+@@ -0,0 +1,902 @@
 +//go:build with_gvisor
 +
 +package tailscale
@@ -2532,4 +2582,63 @@
 +	if _, ok := parseUDP4(b[:20]); ok {
 +		t.Fatal("took a truncated packet")
 +	}
++}
++
++func TestHandoffUDPHeldWhenCheckOverdue(t *testing.T) {
++	w := &hoWorld{listener: []string{"st"}, owner: func() ([]string, error) { return []string{"st"}, nil }}
++	h := newUDPHandoff(t, w, []string{"st"})
++	h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("x")))
++	h.access.Lock()
++	f := h.tab.flows[flowKey{hoPeerEnd, 21027, true}]
++	h.access.Unlock()
++	f.mu.Lock()
++	f.validUntil = time.Now().Add(-time.Millisecond) // no fresh answer: e.g. every lookup slot busy
++	f.mu.Unlock()
++	sys, peer := w.counts()
++	h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("held")))
++	if !fromSystem(h, udpPacket(hoUDPLocal, hoPeerEnd, []byte("held"))) {
++		t.Fatal("an overdue exchange's reply took normal routing")
++	}
++	if s2, p2 := w.counts(); s2 != sys || p2 != peer {
++		t.Fatal("datagrams passed while the check was overdue")
++	}
++}
++
++func TestHandoffUDPPortClosedEndsExchange(t *testing.T) {
++	w := &hoWorld{listener: []string{"st"}, owner: func() ([]string, error) { return []string{"st"}, nil }}
++	h := newUDPHandoff(t, w, []string{"st"})
++	h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("x")))
++	quote := udpPacket(hoPeerEnd, hoUDPLocal, []byte("x"))
++	icmp := make([]byte, 28+len(quote))
++	icmp[0], icmp[8], icmp[9] = 0x45, 64, 1
++	binary.BigEndian.PutUint16(icmp[2:4], uint16(len(icmp)))
++	l4, p4 := hoLocal.As4(), hoPeer.As4()
++	copy(icmp[12:16], l4[:])
++	copy(icmp[16:20], p4[:])
++	icmp[20], icmp[21] = 3, 3 // port unreachable: the app's socket is gone
++	copy(icmp[28:], quote)
++	if !fromSystem(h, icmp) {
++		t.Fatal("port unreachable about an exchange left to the stack")
++	}
++	h.access.Lock()
++	gone := h.tab.flows[flowKey{hoPeerEnd, 21027, true}] == nil
++	h.access.Unlock()
++	if !gone {
++		t.Fatal("exchange kept after its socket closed")
++	}
++	before := w.lookupCount()
++	h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("y")))
++	if w.lookupCount() != before+1 {
++		t.Fatal("the next datagram didn't ask which app holds the port")
++	}
++}
++
++func TestHandoffUDPDoesNotUseTCPRoom(t *testing.T) {
++	w := &hoWorld{listener: []string{"a"}, owner: func() ([]string, error) { return []string{"a"}, nil }}
++	h := newUDPHandoff(t, w, []string{"a"})
++	for i := 0; i < handoffMaxPerPeer+5; i++ {
++		h.Inbound(udpPacket(netip.AddrPortFrom(hoPeer, uint16(30000+i)), hoUDPLocal, []byte("x")))
++	}
++	handshake(t, h, nil) // TCP from the same peer still gets room
++	waitState(t, h, flowAllowed)
 +}
