@@ -517,7 +517,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, disclose: 
                     }
                 }
                 item { Box(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Tonal("Add apps", Icons.add) { dialog = "reach:add" } } }
-                if (KDE_CONNECT in chosen) group("How to connect", listOf(Item("KDE Connect", KDE_TIP)))
+                if (chosen.any { it == KDE_CONNECT || it.startsWith("$KDE_CONNECT.") }) group("How to connect", listOf(Item("KDE Connect", KDE_TIP))) // forks too (…_tp.shizuku)
 
                 // Who can connect: every device the access rules allow, or only the chosen ones.
                 val only = home.reachableOnly
