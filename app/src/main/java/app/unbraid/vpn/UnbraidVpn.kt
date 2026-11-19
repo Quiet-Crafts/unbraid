@@ -950,7 +950,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var portNet: android.net.Network? = null
 
     private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
-        Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(setup), inbound())
+        Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(setup), inbound(setup.home))
 
     /**
      * The apps that share their Android user id with an app on Block ([Compiler.Input.blockedKin]). A blocked app that
@@ -978,15 +978,19 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     @Volatile private var inboundAsked: Triple<String, Long, Job>? = null
 
     /** Apps tailnet devices may reach ([app.unbraid.data.Home.reachable]); null = off, also when no device may connect. */
-    private fun inboundApps(): List<String>? = store.setup.value.home.takeIf { it.reachable && !(it.reachableOnly && it.reachableDevices.isEmpty()) }
-        ?.reachableApps?.ifEmpty { null }
+    private fun inboundApps(home: app.unbraid.data.Home = store.setup.value.home): List<String>? =
+        home.takeIf { it.reachable && !(it.reachableOnly && it.reachableDevices.isEmpty()) }?.reachableApps?.ifEmpty { null }
 
-    /** Any port from 1024 up: the engine's check of the receiving app is what decides, not the port. */
-    private fun inbound(): Compiler.Inbound? {
-        val apps = inboundApps() ?: return null
+    /**
+     * Any port from 1024 up: the engine's check of the receiving app is what decides, not the port. Everything comes from
+     * one [home], the setup being compiled: read twice, a change in between could leave "only chosen devices" with no
+     * list, which the engine reads as every device.
+     */
+    private fun inbound(home: app.unbraid.data.Home): Compiler.Inbound? {
+        val apps = inboundApps(home) ?: return null
         val self4 = tsSelf4 ?: return null
-        val home = store.setup.value.home
-        return Compiler.Inbound(self4, listOf("1024:65535"), apps, if (home.reachableOnly) home.reachableDevices.map { it.id } else emptyList())
+        val nodes = if (home.reachableOnly) home.reachableDevices.map { it.id }.ifEmpty { return null } else emptyList()
+        return Compiler.Inbound(self4, listOf("1024:65535"), apps, nodes)
     }
 
     private fun watchTailscale() {
@@ -1067,10 +1071,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         retry?.cancel(); retry = null; retries = 0; retrying = emptyMap(); net.onChange = null; refusals = emptyMap(); gone = emptyMap(); failing = emptySet()
         runCatching { ts?.close() }; ts = null
         tsSelf4 = null; inboundAsked = null // the next engine learns its tailnet address afresh: never installs a stale one
-        runCatching { Libbox.clearHandoffEvents() } // recent incoming connections are kept only while connected
         tsLoginPending = false
         holding = false
         runCatching { server?.closeService() }
+        // Recent incoming connections are kept only while connected; cleared once the engine that records them is closed.
+        runCatching { Libbox.clearHandoffEvents() }
         runCatching { tun?.close() }; tun = null
         openTable(false)
         forgetLookups(this)

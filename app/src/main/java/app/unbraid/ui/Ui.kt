@@ -459,7 +459,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         if (!whileStopped("switch servers") {
             File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
             store.tsSuffix = null
-            saved = store.update { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl }, tsSuffixAllowed = null)) }
+            // Device IDs are only unique within one tailnet: another server can give the same ID to another device.
+            saved = store.update { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl }, tsSuffixAllowed = null, reachableDevices = emptyList())) }
         }) return@launch
         if (saved) authKey?.let(::clearClipboardIf)
         checkTailscale()
@@ -483,7 +484,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         viewModelScope.launch(Dispatchers.IO) {
             val loggedOut = stopVpn(had)
             if (!whileStopped("turn Tailscale off") {
-                store.update { s -> s.without(s.tsRoutes).copy(home = s.home.copy(tailscale = false, tsAuthKey = null)) }
+                store.update { s -> s.without(s.tsRoutes).copy(home = s.home.copy(tailscale = false, tsAuthKey = null, reachableDevices = emptyList())) } // the next sign-in may be another tailnet
                 File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
                 store.tsSuffix = null
             }) return@launch
