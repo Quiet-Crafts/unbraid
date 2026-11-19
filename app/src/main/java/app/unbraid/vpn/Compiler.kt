@@ -89,7 +89,7 @@ object Compiler {
      * into the TUN, which then carries that address too, and holds their data until Android names the receiving app:
      * only one of [allow], and none on Block, gets any.
      */
-    class Inbound(val address4: String, val tcpPorts: List<String>, val allow: List<String>, val nodes: List<String> = emptyList())
+    class Inbound(val address4: String, val tcpPorts: List<String>, val allow: List<String>, val nodes: List<String> = emptyList(), val udp: List<String> = emptyList())
 
     /**
      * Inbound tag of the app's own way into a chosen exit, for speed and health tests: a proxy on 127.0.0.1 whose
@@ -324,9 +324,16 @@ object Compiler {
                     s.tsExit?.let { put("exit_node", it); put("exit_node_allow_lan_access", s.prefs.lan) }
                     inbound?.let { ib ->
                         putJsonObject("tun_handoff") {
-                            put("tcp_ports", JsonArray(ib.tcpPorts.map(::JsonPrimitive)))
                             // An app outside the VPN never sends its replies through unbraid and can't be named by it: not allowed.
-                            put("allow_packages", JsonArray(ib.allow.filter { it != i.selfPackage && (i.lockdown || !s.outside(it)) }.sorted().map(::JsonPrimitive)))
+                            val eligible = { pkg: String -> pkg != i.selfPackage && (i.lockdown || !s.outside(pkg)) }
+                            val tcp = ib.allow.filter(eligible).sorted()
+                            val udp = ib.udp.filter(eligible).sorted()
+                            if (tcp.isNotEmpty()) put("tcp_ports", JsonArray(ib.tcpPorts.map(::JsonPrimitive)))
+                            put("allow_packages", JsonArray(tcp.map(::JsonPrimitive)))
+                            if (udp.isNotEmpty()) {
+                                put("udp_ports", JsonArray(ib.tcpPorts.map(::JsonPrimitive)))
+                                put("udp_allow_packages", JsonArray(udp.map(::JsonPrimitive)))
+                            }
                             put("block_packages", JsonArray((s.apps.filterValues { it == BLOCK }.keys + i.blockedKin).sorted().map(::JsonPrimitive)))
                             if (ib.nodes.isNotEmpty()) put("allow_nodes", JsonArray(ib.nodes.sorted().map(::JsonPrimitive)))
                         }

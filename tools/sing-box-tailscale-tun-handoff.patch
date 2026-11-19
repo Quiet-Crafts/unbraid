@@ -1,6 +1,6 @@
 --- a/option/tailscale.go
 +++ b/option/tailscale.go
-@@ -14,28 +14,40 @@
+@@ -14,28 +14,43 @@
  
  type TailscaleEndpointOptions struct {
  	DialerOptions
@@ -54,6 +54,9 @@
 +	TCPPorts      badoption.Listable[string] `json:"tcp_ports,omitempty"`
 +	AllowPackages badoption.Listable[string] `json:"allow_packages,omitempty"`
 +	BlockPackages badoption.Listable[string] `json:"block_packages,omitempty"`
++	// UDPPorts and UDPAllowPackages hand inbound UDP to these apps on these ports; none: UDP is never handed off.
++	UDPPorts         badoption.Listable[string] `json:"udp_ports,omitempty"`
++	UDPAllowPackages badoption.Listable[string] `json:"udp_allow_packages,omitempty"`
 +	// AllowNodes, when set, limits the peers that may connect to these nodes (stable node IDs).
 +	AllowNodes badoption.Listable[string] `json:"allow_nodes,omitempty"`
 +}
@@ -171,7 +174,7 @@
  			return err
 --- /dev/null
 +++ b/common/tunhandoff/tunhandoff.go
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,139 @@
 +// Package tunhandoff links the TUN inbound and an endpoint that hands inbound packets to the system through the TUN
 +// (unbraid patch). One Binding per engine instance, keyed by its router, so an engine that is shutting down never
 +// reaches the TUN of the engine that replaced it.
@@ -276,6 +279,7 @@
 +	Peer     string   `json:"peer"` // the peer's tailnet address
 +	Node     string   `json:"node"` // its stable node ID
 +	Port     uint16   `json:"port"`
++	Proto    string   `json:"proto"` // "tcp" or "udp"
 +	Packages []string `json:"packages,omitempty"`
 +	Allowed  bool     `json:"allowed"`
 +	Reason   string   `json:"reason,omitempty"` // refused: "device", "app", "blocked" or "unknown"
@@ -338,7 +342,7 @@
 +}
 --- /dev/null
 +++ b/protocol/tailscale/handoff.go
-@@ -0,0 +1,1017 @@
+@@ -0,0 +1,1201 @@
 +//go:build with_gvisor
 +
 +package tailscale
@@ -351,6 +355,11 @@
 +// allowed, or a peer that isn't among the allowed devices when only some are, is refused with a reset, and a port no
 +// app of the VPN listens on is left to the Tailscale stack as before (its own services live there). After the handshake, it names the app holding the connection, and no byte of payload
 +// passes either way until that app is allowed and none of its user id is blocked; otherwise both ends are reset.
++//
++// UDP, when allowed for an app: the first datagram of an exchange (peer address and port, local port) waits for the
++// platform to name the app holding the port; an allowed exchange then passes both ways, the app is named again every
++// few seconds while it lasts, and it ends when idle. A refused exchange is dropped for a while without new lookups.
++// There is no handshake, so no second check: the listener check alone decides.
 +//
 +// Locking: handoff.access guards the table; each flow's mu orders its state and delivery. access is always taken
 +// before a flow's mu, and never while holding one. No I/O happens under access. Every write goes through write, which
@@ -382,6 +391,9 @@
 +	handoffIdle         = 2 * time.Hour          // an allowed connection silent this long is closed
 +	handoffTombstone    = 30 * time.Second       // a refused or closed tuple stays dead this long
 +	handoffPeek         = 136                    // enough for any IPv4 header, TCP flags, or an ICMP error's quote
++	handoffUDPIdle      = 2 * time.Minute        // a UDP exchange silent this long ends
++	handoffUDPRecheck   = 10 * time.Second       // how often the app holding a UDP exchange's port is named again
++	handoffUDPTombstone = 10 * time.Second       // a refused UDP exchange stays dropped this long, without new lookups
 +
 +	tcpFIN = 0x01
 +	tcpSYN = 0x02
@@ -408,6 +420,7 @@
 +type flowKey struct {
 +	peer netip.AddrPort
 +	port uint16
++	udp  bool // a UDP exchange; otherwise a TCP connection
 +}
 +
 +// stream is what one direction delivered, and what its receiver acknowledged.
@@ -468,6 +481,8 @@
 +	in, out           [][]byte // held: towards the system, towards the peer
 +	held              int
 +	ending            bool      // both ends closed: forwarded until expires, then removed
++	recheckAt         time.Time // UDP: when to name the app holding the port again
++	rechecking        bool      // UDP: a lookup for that is running
 +	deadline          time.Time // opening and checking
 +	expires           time.Time // closing, denied and ending
 +	lastActive        time.Time
@@ -486,18 +501,20 @@
 +
 +// handoffDeps is the outside world, replaced in tests.
 +type handoffDeps struct {
-+	owner    func(local, peer netip.AddrPort) ([]string, error) // packages of the user id holding the socket
-+	toPeer   func(packet []byte) bool                           // into Tailscale, towards the peer
-+	toSystem func(packet []byte) bool                           // into the TUN, towards the system
++	owner    func(udp bool, local, peer netip.AddrPort) ([]string, error) // packages of the user id holding the socket
++	toPeer   func(packet []byte) bool                                     // into Tailscale, towards the peer
++	toSystem func(packet []byte) bool                                     // into the TUN, towards the system
 +}
 +
 +type portRange struct{ from, to uint16 }
 +
 +type handoff struct {
-+	logger log.ContextLogger
-+	ports  []portRange
-+	allow  map[string]bool
-+	block  map[string]bool
++	logger   log.ContextLogger
++	ports    []portRange
++	allow    map[string]bool
++	udpPorts []portRange
++	udpAllow map[string]bool // apps that may take UDP; none: UDP is never handed off
++	block    map[string]bool
 +	// allowNodes, when not empty, are the only peer nodes that may connect; the others are refused like an app that
 +	// isn't allowed, once the listener check found an app of the VPN on the port.
 +	allowNodes map[string]bool
@@ -516,21 +533,13 @@
 +
 +func newHandoff(logger log.ContextLogger, options *option.TailscaleTUNHandoffOptions, deps handoffDeps) *handoff {
 +	h := &handoff{
-+		logger: logger, deps: deps, allow: map[string]bool{}, block: map[string]bool{}, allowNodes: map[string]bool{},
++		logger: logger, deps: deps, allow: map[string]bool{}, block: map[string]bool{}, allowNodes: map[string]bool{}, udpAllow: map[string]bool{},
 +		done: make(chan struct{}), tab: newHandoffTable(netip.Addr{}),
 +	}
-+	for _, p := range options.TCPPorts {
-+		from, to, _ := strings.Cut(p, ":")
-+		a, err1 := strconv.ParseUint(from, 10, 16)
-+		b := a
-+		var err2 error
-+		if to != "" {
-+			b, err2 = strconv.ParseUint(to, 10, 16)
-+		}
-+		// Ports below 1024 are never handed off: they belong to the system and to Tailscale's own services.
-+		if err1 == nil && err2 == nil && a >= 1024 && b >= a {
-+			h.ports = append(h.ports, portRange{uint16(a), uint16(b)})
-+		}
++	h.ports = parsePorts(options.TCPPorts)
++	h.udpPorts = parsePorts(options.UDPPorts)
++	for _, p := range options.UDPAllowPackages {
++		h.udpAllow[p] = true
 +	}
 +	for _, p := range options.AllowPackages {
 +		h.allow[p] = true
@@ -542,6 +551,33 @@
 +		h.allowNodes[n] = true
 +	}
 +	return h
++}
++
++// parsePorts reads "from:to" or single ports. Ports below 1024 are never handed off: they belong to the system and to
++// Tailscale's own services.
++func parsePorts(list []string) (ports []portRange) {
++	for _, p := range list {
++		from, to, _ := strings.Cut(p, ":")
++		a, err1 := strconv.ParseUint(from, 10, 16)
++		b := a
++		var err2 error
++		if to != "" {
++			b, err2 = strconv.ParseUint(to, 10, 16)
++		}
++		if err1 == nil && err2 == nil && a >= 1024 && b >= a {
++			ports = append(ports, portRange{uint16(a), uint16(b)})
++		}
++	}
++	return
++}
++
++func inRanges(ranges []portRange, port uint16) bool {
++	for _, r := range ranges {
++		if port >= r.from && port <= r.to {
++			return true
++		}
++	}
++	return false
 +}
 +
 +func (h *handoff) portAllowed(port uint16) bool {
@@ -650,6 +686,9 @@
 +		h.access.Unlock()
 +		return false
 +	}
++	if len(b) >= 20 && b[0]>>4 == 4 && b[9] == 17 {
++		return h.inboundUDPLocked(tab, b) // unlocks
++	}
 +	p, ok := parseTCP4(b)
 +	if !ok {
 +		return h.inboundICMPLocked(tab, b) // unlocks
@@ -658,7 +697,7 @@
 +		h.access.Unlock()
 +		return false
 +	}
-+	key := flowKey{p.src, p.dst.Port()}
++	key := flowKey{p.src, p.dst.Port(), false}
 +	f := tab.flows[key]
 +	opening := p.flags&(tcpSYN|tcpACK|tcpRST|tcpFIN) == tcpSYN
 +	if f != nil && !(opening && p.seq != f.peerISN) {
@@ -689,7 +728,7 @@
 +
 +// open vets a peer's SYN by the app listening on its port, then delivers it to the system under a new flow.
 +func (h *handoff) open(tab *handoffTable, key flowKey, node string, p tcp4, b []byte) bool {
-+	packages, found := h.lookup(p.dst, p.src, handoffVetWait)
++	packages, found := h.lookup(false, p.dst, p.src, handoffVetWait)
 +	if !found {
 +		return false // no app of the VPN listens there: the stack's
 +	}
@@ -702,7 +741,7 @@
 +	if reason != "" {
 +		h.write(nil, false, rst4(p.dst, p.src, 0, p.seq+1, true))
 +		h.logger.Info("tun hand-off: refused ", p.src, " -> port ", p.dst.Port(), " (", reason, ": ", strings.Join(packages, ","), ")")
-+		h.record(p.src, node, p.dst.Port(), packages, false, reason)
++		h.record(false, p.src, node, p.dst.Port(), packages, false, reason)
 +		return true
 +	}
 +	now := time.Now()
@@ -785,6 +824,97 @@
 +	}
 +}
 +
++// inboundUDPLocked hands a peer's UDP datagram to the system when the exchange it belongs to was allowed: the first
++// datagram of an exchange (peer address and port, local port) waits for the platform to name the app holding the
++// port. Called with access held; unlocks it.
++func (h *handoff) inboundUDPLocked(tab *handoffTable, b []byte) bool {
++	p, ok := parseUDP4(b)
++	if !ok || p.dst.Addr() != tab.local || len(h.udpAllow) == 0 || !inRanges(h.udpPorts, p.dst.Port()) {
++		h.access.Unlock()
++		return false
++	}
++	key := flowKey{p.src, p.dst.Port(), true}
++	if f := tab.flows[key]; f != nil {
++		h.access.Unlock()
++		pkt := append([]byte(nil), b...)
++		f.mu.Lock()
++		defer f.mu.Unlock()
++		if f.state == flowAllowed && !f.retired.Load() {
++			f.lastActive = time.Now()
++			h.write(f, true, pkt)
++		}
++		return true // a refused exchange's datagrams are dropped until its tombstone ends
++	}
++	node, isPeer := h.peers[p.src.Addr()]
++	room := len(tab.flows) < handoffMaxFlows && tab.perPeer[p.src.Addr()] < handoffMaxPerPeer
++	h.access.Unlock()
++	if !isPeer || !room {
++		return false
++	}
++	return h.openUDP(tab, key, node, p, b)
++}
++
++// openUDP names the app holding the port, then starts an allowed exchange with the datagram, or a refused one.
++func (h *handoff) openUDP(tab *handoffTable, key flowKey, node string, p udp4, b []byte) bool {
++	packages, found := h.lookup(true, p.dst, p.src, handoffVetWait)
++	if !found {
++		return false // no app of the VPN holds the port: the stack's
++	}
++	reason := ""
++	if len(h.allowNodes) > 0 && !h.allowNodes[node] {
++		reason = "device"
++	} else if !h.allowedIn(h.udpAllow, packages) {
++		reason = h.refusal(packages)
++	}
++	now := time.Now()
++	f := &handoffFlow{key: key, node: node, local: tab.local, state: flowAllowed, lastActive: now, recheckAt: now.Add(handoffUDPRecheck)}
++	if reason != "" {
++		f.state, f.expires = flowDenied, now.Add(handoffUDPTombstone)
++	}
++	h.access.Lock()
++	if h.tab != tab || tab.flows[key] != nil || h.peers[p.src.Addr()] != node || len(tab.flows) >= handoffMaxFlows || tab.perPeer[p.src.Addr()] >= handoffMaxPerPeer {
++		h.access.Unlock()
++		return true // things changed during the lookup: dropped
++	}
++	tab.flows[key] = f
++	tab.perPeer[p.src.Addr()]++
++	h.access.Unlock()
++	h.record(true, p.src, node, p.dst.Port(), packages, reason == "", reason)
++	if reason != "" {
++		h.logger.Info("tun hand-off: refused udp ", p.src, " -> port ", p.dst.Port(), " (", reason, ": ", strings.Join(packages, ","), ")")
++		return true
++	}
++	h.logger.Info("tun hand-off: allowed udp ", p.src, " -> port ", p.dst.Port(), " (", strings.Join(packages, ","), ")")
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	h.write(f, true, append([]byte(nil), b...))
++	return true
++}
++
++// recheckUDP names the app holding an allowed exchange's port again: another app may hold it now.
++func (h *handoff) recheckUDP(f *handoffFlow) {
++	packages, found := h.lookup(true, netip.AddrPortFrom(f.local, f.key.port), f.key.peer, handoffCheckWait)
++	f.mu.Lock()
++	defer f.mu.Unlock()
++	f.rechecking = false
++	if f.retired.Load() || f.state != flowAllowed {
++		return
++	}
++	now := time.Now()
++	if !found {
++		f.recheckAt = now.Add(time.Second) // no answer yet (every lookup slot busy, or the socket closing): soon again
++		return
++	}
++	if h.allowedIn(h.udpAllow, packages) {
++		f.recheckAt = now.Add(handoffUDPRecheck)
++		return
++	}
++	reason := h.refusal(packages)
++	f.state, f.expires = flowDenied, now.Add(handoffUDPTombstone)
++	h.record(true, f.key.peer, f.node, f.key.port, packages, false, reason)
++	h.logger.Info("tun hand-off: refused udp ", f.key.peer, " -> port ", f.key.port, " (", reason, ": ", strings.Join(packages, ","), ")")
++}
++
 +// inboundICMPLocked hands an ICMP error about an allowed connection to the system, which owns that connection.
 +// Called with access held; unlocks it.
 +func (h *handoff) inboundICMPLocked(tab *handoffTable, b []byte) bool {
@@ -838,6 +968,20 @@
 +	if kind == keyOpening {
 +		h.release(f)
 +		return false // normal routing and policy
++	}
++	if kind == keyUDP {
++		f.mu.Lock()
++		defer f.mu.Unlock()
++		if f.state != flowAllowed || f.retired.Load() {
++			return false // not an allowed exchange: the app's own traffic, normal routing and policy
++		}
++		b, ok := packet(0)
++		if !ok {
++			return true
++		}
++		f.lastActive = time.Now()
++		h.write(f, false, append([]byte(nil), b...))
++		return true
 +	}
 +	b, ok := packet(0)
 +	if !ok {
@@ -983,7 +1127,7 @@
 +// lookup asks the platform which packages hold local's socket for peer: its listener before the handshake, the
 +// connection after it. The call can't be cancelled, so it runs on its own, under the process-wide limit, and its
 +// answer is awaited at most wait; found is false without an answer naming a package.
-+func (h *handoff) lookup(local, peer netip.AddrPort, wait time.Duration) (packages []string, found bool) {
++func (h *handoff) lookup(udp bool, local, peer netip.AddrPort, wait time.Duration) (packages []string, found bool) {
 +	select {
 +	case handoffCalls <- struct{}{}:
 +	default:
@@ -992,7 +1136,7 @@
 +	result := make(chan []string, 1)
 +	go func() {
 +		defer func() { <-handoffCalls }()
-+		packages, err := h.deps.owner(local, peer)
++		packages, err := h.deps.owner(udp, local, peer)
 +		if err != nil {
 +			packages = nil
 +		}
@@ -1021,7 +1165,7 @@
 +			h.decide(f, nil)
 +			return
 +		}
-+		if packages, found := h.lookup(local, f.key.peer, wait); found {
++		if packages, found := h.lookup(false, local, f.key.peer, wait); found {
 +			h.decide(f, packages)
 +			return
 +		}
@@ -1034,12 +1178,15 @@
 +}
 +
 +// allowed: every package of the user id is chosen and none is blocked.
-+func (h *handoff) allowed(packages []string) bool {
++func (h *handoff) allowed(packages []string) bool { return h.allowedIn(h.allow, packages) }
++
++// allowedIn: every package of the user id is in allow and none is blocked.
++func (h *handoff) allowedIn(allow map[string]bool, packages []string) bool {
 +	if len(packages) == 0 {
 +		return false
 +	}
 +	for _, name := range packages {
-+		if h.block[name] || !h.allow[name] {
++		if h.block[name] || !allow[name] {
 +			return false
 +		}
 +	}
@@ -1059,7 +1206,7 @@
 +		if len(packages) == 0 {
 +			reason = "unknown"
 +		}
-+		h.record(f.key.peer, f.node, f.key.port, packages, false, reason)
++		h.record(f.key.udp, f.key.peer, f.node, f.key.port, packages, false, reason)
 +		return
 +	}
 +	f.state = flowAllowed
@@ -1078,7 +1225,7 @@
 +	}
 +	h.dropHeldLocked(f)
 +	h.logger.Info("tun hand-off: allowed ", f.key.peer, " -> port ", f.key.port, " (", strings.Join(packages, ","), ")")
-+	h.record(f.key.peer, f.node, f.key.port, packages, true, "")
++	h.record(f.key.udp, f.key.peer, f.node, f.key.port, packages, true, "")
 +}
 +
 +// refusal says why packages that aren't allowed are refused: "blocked" when one of them is on Block, else "app".
@@ -1092,9 +1239,13 @@
 +}
 +
 +// record keeps a decision for the app to show (tunhandoff.Event): in memory only.
-+func (h *handoff) record(peer netip.AddrPort, node string, port uint16, packages []string, allowed bool, reason string) {
++func (h *handoff) record(udp bool, peer netip.AddrPort, node string, port uint16, packages []string, allowed bool, reason string) {
++	proto := "tcp"
++	if udp {
++		proto = "udp"
++	}
 +	tunhandoff.Record(tunhandoff.Event{
-+		Time: time.Now().UnixMilli(), Peer: peer.Addr().String(), Node: node, Port: port,
++		Time: time.Now().UnixMilli(), Peer: peer.Addr().String(), Node: node, Port: port, Proto: proto,
 +		Packages: append([]string(nil), packages...), Allowed: allowed, Reason: reason,
 +	})
 +}
@@ -1133,7 +1284,14 @@
 +					h.denyLocked(f)
 +				}
 +			case flowAllowed:
-+				if f.ending && now.After(f.expires) {
++				if f.key.udp {
++					if now.Sub(f.lastActive) > handoffUDPIdle {
++						dead = append(dead, f)
++					} else if now.After(f.recheckAt) && !f.rechecking {
++						f.rechecking = true
++						go h.recheckUDP(f)
++					}
++				} else if f.ending && now.After(f.expires) {
 +					dead = append(dead, f)
 +				} else if now.Sub(f.lastActive) > handoffIdle {
 +					h.denyLocked(f) // closed on purpose rather than left half-known
@@ -1189,6 +1347,28 @@
 +	}, true
 +}
 +
++// udp4 is the part of an IPv4 UDP datagram the hand-off needs.
++type udp4 struct{ src, dst netip.AddrPort }
++
++func parseUDP4(b []byte) (udp4, bool) {
++	if len(b) < 28 || b[0]>>4 != 4 || b[9] != 17 {
++		return udp4{}, false
++	}
++	ihl := int(b[0]&0x0f) * 4
++	total := int(binary.BigEndian.Uint16(b[2:4]))
++	if ihl < 20 || total > len(b) || total < ihl+8 || binary.BigEndian.Uint16(b[6:8])&0x3fff != 0 {
++		return udp4{}, false // fragments are not handed off
++	}
++	u := b[ihl:total]
++	if n := int(binary.BigEndian.Uint16(u[4:6])); n < 8 || n > len(u) {
++		return udp4{}, false
++	}
++	return udp4{
++		src: netip.AddrPortFrom(netip.AddrFrom4([4]byte(b[12:16])), binary.BigEndian.Uint16(u[0:2])),
++		dst: netip.AddrPortFrom(netip.AddrFrom4([4]byte(b[16:20])), binary.BigEndian.Uint16(u[2:4])),
++	}, true
++}
++
 +// next is the sequence number that follows this segment.
 +func (p tcp4) next() uint32 {
 +	n := p.seq + uint32(p.payload)
@@ -1205,6 +1385,7 @@
 +	keyTCP     = iota // a segment of a connection
 +	keyOpening        // the system opening a connection of its own
 +	keyICMP           // an ICMP error about a connection
++	keyUDP            // a datagram of a UDP exchange
 +)
 +
 +// systemKey finds the hand-off tuple of a packet from the system by its headers alone: a TCP segment from local, or
@@ -1228,10 +1409,17 @@
 +		}
 +		t := b[ihl:]
 +		peer := netip.AddrPortFrom(netip.AddrFrom4([4]byte(b[16:20])), binary.BigEndian.Uint16(t[2:4]))
-+		return flowKey{peer, binary.BigEndian.Uint16(t[0:2])}, kind, true
++		return flowKey{peer, binary.BigEndian.Uint16(t[0:2]), false}, kind, true
 +	case 1:
 +		key, ok := icmpError(b, local, true, false)
 +		return key, keyICMP, ok
++	case 17:
++		if len(b) < ihl+4 {
++			return flowKey{}, 0, false
++		}
++		t := b[ihl:]
++		peer := netip.AddrPortFrom(netip.AddrFrom4([4]byte(b[16:20])), binary.BigEndian.Uint16(t[2:4]))
++		return flowKey{peer, binary.BigEndian.Uint16(t[0:2]), true}, keyUDP, true
 +	}
 +	return flowKey{}, 0, false
 +}
@@ -1266,12 +1454,12 @@
 +		if outerSrc != local || inDst != local || outerDst != inSrc {
 +			return flowKey{}, false
 +		}
-+		return flowKey{netip.AddrPortFrom(inSrc, inSport), inDport}, true
++		return flowKey{netip.AddrPortFrom(inSrc, inSport), inDport, false}, true
 +	}
 +	if outerDst != local || inSrc != local {
 +		return flowKey{}, false
 +	}
-+	return flowKey{netip.AddrPortFrom(inDst, inDport), inSport}, true
++	return flowKey{netip.AddrPortFrom(inDst, inDport), inSport, false}, true
 +}
 +
 +// bareACK is the packet's headers alone, without data, FIN or urgent data, checksums recomputed.
@@ -1358,7 +1546,7 @@
 +}
 --- /dev/null
 +++ b/protocol/tailscale/handoff_endpoint.go
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,140 @@
 +//go:build with_gvisor
 +
 +package tailscale
@@ -1467,12 +1655,12 @@
 +	t.handoff.setLocal(local, peers)
 +}
 +
-+func (t *Endpoint) handoffOwner(local, peer netip.AddrPort) ([]string, error) {
++func (t *Endpoint) handoffOwner(udp bool, local, peer netip.AddrPort) ([]string, error) {
 +	if t.platformInterface == nil {
 +		return nil, E.New("no platform to name the app")
 +	}
 +	owner, err := t.platformInterface.FindConnectionOwner(&adapter.FindConnectionOwnerRequest{
-+		IpProtocol:         6,
++		IpProtocol:         protocol(udp),
 +		SourceAddress:      local.Addr().String(),
 +		SourcePort:         int32(local.Port()),
 +		DestinationAddress: peer.Addr().String(),
@@ -1492,9 +1680,16 @@
 +	unmatched, err := engine.InputPackets([][]byte{pkt})
 +	return err == nil && len(unmatched) == 0
 +}
++
++func protocol(udp bool) int32 {
++	if udp {
++		return 17
++	}
++	return 6
++}
 --- /dev/null
 +++ b/protocol/tailscale/handoff_test.go
-@@ -0,0 +1,671 @@
+@@ -0,0 +1,843 @@
 +//go:build with_gvisor
 +
 +package tailscale
@@ -1528,13 +1723,17 @@
 +	noListener bool
 +	owner      func() ([]string, error)
 +	writeErr   bool
++	lookups    int
 +}
 +
 +func (w *hoWorld) deps() handoffDeps {
 +	return handoffDeps{
-+		owner: func(local, peer netip.AddrPort) ([]string, error) {
++		owner: func(udp bool, local, peer netip.AddrPort) ([]string, error) {
++			w.mu.Lock()
++			w.lookups++
++			w.mu.Unlock()
 +			w.h.access.Lock()
-+			f := w.h.tab.flows[flowKey{peer, local.Port()}]
++			f := w.h.tab.flows[flowKey{peer, local.Port(), udp}]
 +			w.h.access.Unlock()
 +			if f == nil {
 +				if w.noListener {
@@ -1652,7 +1851,7 @@
 +func flowOf(h *handoff, peer netip.AddrPort) *handoffFlow {
 +	h.access.Lock()
 +	defer h.access.Unlock()
-+	return h.tab.flows[flowKey{peer, 1716}]
++	return h.tab.flows[flowKey{peer, 1716, false}]
 +}
 +
 +func stateOf(f *handoffFlow) handoffState {
@@ -2108,7 +2307,7 @@
 +	copy(icmp[16:20], l4[:])
 +	icmp[20] = 3
 +	copy(icmp[28:], tcpPacket(hoLocalEnd, hoPeerEnd, 1, 1, tcpACK, nil))
-+	if key, ok := icmpError(icmp, hoLocal, false, true); !ok || key != (flowKey{hoPeerEnd, 1716}) {
++	if key, ok := icmpError(icmp, hoLocal, false, true); !ok || key != (flowKey{hoPeerEnd, 1716, false}) {
 +		t.Fatalf("icmp quote %v %v", key, ok)
 +	}
 +	binary.BigEndian.PutUint16(icmp[28+6:28+8], 10) // the quote is a later fragment: no ports in it
@@ -2165,4 +2364,172 @@
 +		t.Fatalf("kept %d events, newest %d", len(ev), ev[len(ev)-1].Port)
 +	}
 +	tunhandoff.ClearEvents()
++}
++
++func udpPacket(src, dst netip.AddrPort, payload []byte) []byte {
++	b := make([]byte, 28+len(payload))
++	b[0], b[8], b[9] = 0x45, 64, 17
++	binary.BigEndian.PutUint16(b[2:4], uint16(len(b)))
++	s4, d4 := src.Addr().As4(), dst.Addr().As4()
++	copy(b[12:16], s4[:])
++	copy(b[16:20], d4[:])
++	binary.BigEndian.PutUint16(b[20:22], src.Port())
++	binary.BigEndian.PutUint16(b[22:24], dst.Port())
++	binary.BigEndian.PutUint16(b[24:26], uint16(8+len(payload)))
++	copy(b[28:], payload)
++	binary.BigEndian.PutUint16(b[10:12], checksum(b[:20], 0))
++	return b
++}
++
++func newUDPHandoff(t *testing.T, w *hoWorld, udpAllow []string) *handoff {
++	h := newHandoff(log.NewNOPFactory().NewLogger(""), &option.TailscaleTUNHandoffOptions{
++		TCPPorts: []string{"1714:1764"}, AllowPackages: []string{"a"}, UDPPorts: []string{"1024:65535"}, UDPAllowPackages: udpAllow,
++	}, w.deps())
++	w.h = h
++	h.setLocal(hoLocal, map[netip.Addr]string{hoPeer: "n1"})
++	t.Cleanup(h.close)
++	return h
++}
++
++func (w *hoWorld) systemCount() int { s, _ := w.counts(); return s }
++func (w *hoWorld) peerCount() int   { _, p := w.counts(); return p }
++func (w *hoWorld) lookupCount() int { w.mu.Lock(); defer w.mu.Unlock(); return w.lookups }
++
++var hoUDPLocal = netip.AddrPortFrom(hoLocal, 21027)
++
++func TestHandoffUDPAllowedBothWays(t *testing.T) {
++	tunhandoff.ClearEvents()
++	w := &hoWorld{listener: []string{"st"}, owner: func() ([]string, error) { return []string{"st"}, nil }}
++	h := newUDPHandoff(t, w, []string{"st"})
++	if !h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("hello"))) || w.systemCount() != 1 {
++		t.Fatal("first datagram of an allowed exchange not delivered")
++	}
++	h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("again")))
++	if w.systemCount() != 2 || w.lookupCount() != 1 {
++		t.Fatalf("later datagram: system %d, lookups %d", w.systemCount(), w.lookupCount())
++	}
++	if !fromSystem(h, udpPacket(hoUDPLocal, hoPeerEnd, []byte("reply"))) || w.peerCount() != 1 {
++		t.Fatal("the app's reply didn't reach the peer")
++	}
++	// The app's datagrams to anyone else are its own traffic.
++	if fromSystem(h, udpPacket(hoUDPLocal, netip.AddrPortFrom(hoPeer, 9), []byte("x"))) {
++		t.Fatal("took a datagram of no exchange")
++	}
++	if ev := tunhandoff.Events(); len(ev) != 1 || !ev[0].Allowed || ev[0].Proto != "udp" || ev[0].Port != 21027 {
++		t.Fatalf("events %+v", ev)
++	}
++}
++
++func TestHandoffUDPRefusals(t *testing.T) {
++	t.Run("app without UDP", func(t *testing.T) {
++		w := &hoWorld{listener: []string{"a"}, owner: func() ([]string, error) { return []string{"a"}, nil }}
++		h := newUDPHandoff(t, w, []string{"st"}) // "a" may take TCP only
++		if !h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("x"))) || w.systemCount() != 0 {
++			t.Fatal("UDP reached an app allowed TCP only")
++		}
++		h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("y")))
++		if w.lookupCount() != 1 || w.systemCount() != 0 {
++			t.Fatal("a refused exchange was looked up again or delivered")
++		}
++		if fromSystem(h, udpPacket(hoUDPLocal, hoPeerEnd, []byte("z"))) {
++			t.Fatal("a refused exchange took the app's own datagram")
++		}
++	})
++	t.Run("blocked app", func(t *testing.T) {
++		w := &hoWorld{listener: []string{"st"}, owner: func() ([]string, error) { return []string{"st"}, nil }}
++		h := newUDPHandoff(t, w, []string{"st"})
++		h.block["st"] = true
++		h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("x")))
++		if w.systemCount() != 0 {
++			t.Fatal("UDP reached a blocked app")
++		}
++	})
++	t.Run("device not chosen", func(t *testing.T) {
++		w := &hoWorld{listener: []string{"st"}, owner: func() ([]string, error) { return []string{"st"}, nil }}
++		h := newUDPHandoff(t, w, []string{"st"})
++		h.allowNodes = map[string]bool{"n2": true}
++		h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("x")))
++		if w.systemCount() != 0 {
++			t.Fatal("UDP from a device that isn't chosen")
++		}
++	})
++	t.Run("nobody holds the port, or UDP off", func(t *testing.T) {
++		w := &hoWorld{noListener: true, owner: func() ([]string, error) { return []string{"st"}, nil }}
++		h := newUDPHandoff(t, w, []string{"st"})
++		if h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("x"))) {
++			t.Fatal("took a datagram for a port nobody holds")
++		}
++		w2 := &hoWorld{listener: []string{"st"}, owner: func() ([]string, error) { return []string{"st"}, nil }}
++		h2 := newUDPHandoff(t, w2, nil)
++		if h2.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("x"))) || w2.lookupCount() != 0 {
++			t.Fatal("UDP handled with no app allowed it")
++		}
++		if h2.Inbound(udpPacket(hoPeerEnd, netip.AddrPortFrom(hoLocal, 53), []byte("x"))) {
++			t.Fatal("took a port below 1024")
++		}
++	})
++}
++
++func TestHandoffUDPRecheckAndIdle(t *testing.T) {
++	owner := []string{"st"}
++	var mu sync.Mutex
++	w := &hoWorld{listener: []string{"st"}, owner: func() ([]string, error) { mu.Lock(); defer mu.Unlock(); return owner, nil }}
++	h := newUDPHandoff(t, w, []string{"st"})
++	h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("x")))
++	key := flowKey{hoPeerEnd, 21027, true}
++	h.access.Lock()
++	f := h.tab.flows[key]
++	h.access.Unlock()
++	// Another app holds the port now: the next check refuses the exchange.
++	mu.Lock()
++	owner = []string{"other"}
++	mu.Unlock()
++	h.recheckUDP(f)
++	if s := stateOf(f); s != flowDenied {
++		t.Fatalf("exchange still %d after its port changed hands", s)
++	}
++	before := w.systemCount()
++	h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("late")))
++	if w.systemCount() != before {
++		t.Fatal("datagram delivered after the refusal")
++	}
++	// A refused exchange ends after its tombstone; an allowed one when idle.
++	h.sweepOnce(time.Now().Add(handoffUDPTombstone + time.Second))
++	h.access.Lock()
++	gone := h.tab.flows[key] == nil
++	h.access.Unlock()
++	if !gone {
++		t.Fatal("refused exchange not removed")
++	}
++	mu.Lock()
++	owner = []string{"st"}
++	mu.Unlock()
++	h.Inbound(udpPacket(hoPeerEnd, hoUDPLocal, []byte("new")))
++	h.sweepOnce(time.Now().Add(handoffUDPIdle + time.Second))
++	h.access.Lock()
++	gone = h.tab.flows[key] == nil
++	h.access.Unlock()
++	if !gone {
++		t.Fatal("idle exchange not removed")
++	}
++}
++
++func TestParseUDP(t *testing.T) {
++	b := udpPacket(hoPeerEnd, hoUDPLocal, []byte("x"))
++	if p, ok := parseUDP4(b); !ok || p.src != hoPeerEnd || p.dst != hoUDPLocal {
++		t.Fatalf("parse %+v %v", p, ok)
++	}
++	frag := append([]byte(nil), b...)
++	binary.BigEndian.PutUint16(frag[6:8], 0x2000) // more fragments
++	if _, ok := parseUDP4(frag); ok {
++		t.Fatal("took a fragment")
++	}
++	short := append([]byte(nil), b...)
++	binary.BigEndian.PutUint16(short[24:26], 200) // UDP length beyond the packet
++	if _, ok := parseUDP4(short); ok {
++		t.Fatal("took a datagram longer than its packet")
++	}
++	if _, ok := parseUDP4(b[:20]); ok {
++		t.Fatal("took a truncated packet")
++	}
 +}

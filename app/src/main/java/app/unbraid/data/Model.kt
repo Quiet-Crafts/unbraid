@@ -120,6 +120,9 @@ data class Home(
      */
     val reachable: Boolean = false,
     val reachableApps: List<String> = emptyList(),
+    /** Chosen apps that take UDP too; every chosen app takes TCP unless it is in [reachableNoTcp]. */
+    val reachableUdp: List<String> = emptyList(),
+    val reachableNoTcp: List<String> = emptyList(),
     /** Only [reachableDevices] may connect, not every device the access rules allow; none chosen: nobody. */
     val reachableOnly: Boolean = false,
     val reachableDevices: List<TailnetDevice> = emptyList(),

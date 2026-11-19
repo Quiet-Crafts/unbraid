@@ -31,6 +31,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -66,8 +68,33 @@ internal fun reachRefusal(s: Setup, pkg: String, lockdown: Boolean): String? = w
     else -> null
 }
 
-/** The chosen apps tailnet devices can reach now. */
-internal fun reachAllowed(s: Setup, lockdown: Boolean) = s.home.reachableApps.count { reachRefusal(s, it, lockdown) == null }
+internal const val REACH_PROTO_HINT = "Tap an app to choose TCP or UDP, or both."
+internal const val REACH_UDP_NOTE = "For UDP, $APP checks the receiving app before the first message passes and periodically " +
+    "afterward, while TCP gets a second check after its handshake before any data passes."
+
+/** Which protocols tailnet devices may use to reach a chosen app: TCP unless switched off, UDP only when switched on. */
+internal fun reachTcp(h: app.unbraid.data.Home, pkg: String) = pkg !in h.reachableNoTcp
+internal fun reachUdp(h: app.unbraid.data.Home, pkg: String) = pkg in h.reachableUdp
+
+/** "TCP", "UDP", "TCP and UDP", or null for neither. */
+internal fun protoLabel(tcp: Boolean, udp: Boolean) = when {
+    tcp && udp -> "TCP and UDP"
+    tcp -> "TCP"
+    udp -> "UDP"
+    else -> null
+}
+
+/** What a chosen app's row says. [on]: the switch is on. */
+internal fun reachAppSub(s: Setup, pkg: String, lockdown: Boolean, on: Boolean): String {
+    reachRefusal(s, pkg, lockdown)?.let { return it }
+    val label = protoLabel(reachTcp(s.home, pkg), reachUdp(s.home, pkg)) ?: return "Off · No protocols allowed"
+    return (if (on) "Allowed · " else "Allowed when switched on · ") + label
+}
+
+/** The chosen apps tailnet devices can reach now, by at least one protocol. */
+internal fun reachAllowed(s: Setup, lockdown: Boolean) = s.home.reachableApps.count {
+    reachRefusal(s, it, lockdown) == null && (reachTcp(s.home, it) || reachUdp(s.home, it))
+}
 
 /** What the switch's row says. [tsWaiting]: the VPN runs but Tailscale isn't connected. */
 internal fun reachSub(s: Setup, lockdown: Boolean, tsWaiting: Boolean): String {
@@ -86,7 +113,7 @@ internal fun reachSub(s: Setup, lockdown: Boolean, tsWaiting: Boolean): String {
 @Serializable
 internal data class ReachEvent(
     val time: Long, val peer: String, val node: String = "", val port: Int = 0,
-    val packages: List<String> = emptyList(), val allowed: Boolean = false, val reason: String = "",
+    val packages: List<String> = emptyList(), val allowed: Boolean = false, val reason: String = "", val proto: String = "tcp",
 )
 
 private val eventJson = Json { ignoreUnknownKeys = true }
@@ -103,13 +130,20 @@ internal fun eventDevice(e: ReachEvent, peers: List<TsNode>, chosen: List<Tailne
 internal fun eventTitle(device: String, e: ReachEvent, label: (String) -> String) =
     e.packages.firstOrNull()?.let { "$device to ${label(it)}" } ?: device
 
-/** Why a decision went as it did, as the engine recorded it then. */
-internal fun eventOutcome(e: ReachEvent): String = when {
-    e.allowed -> "Allowed"
-    e.reason == "device" -> "Refused · Device wasn't chosen"
-    e.reason == "blocked" -> "Refused · App was on Block"
-    e.reason == "app" -> "Refused · App wasn't chosen"
-    else -> "Refused · Android couldn't identify the app"
+/**
+ * Why a decision went as it did, as the engine recorded it then, with the protocol. A refusal of an app that is chosen
+ * ([chosen]) means that protocol was off for it.
+ */
+internal fun eventOutcome(e: ReachEvent, chosen: List<String> = emptyList()): String {
+    val proto = if (e.proto == "udp") "UDP" else "TCP"
+    return when {
+        e.allowed -> "Allowed · $proto"
+        e.reason == "device" -> "Refused · $proto · Device wasn't chosen"
+        e.reason == "blocked" -> "Refused · $proto · App was on Block"
+        e.reason == "app" && e.packages.any { it in chosen } -> "Refused · $proto · $proto was off for this app"
+        e.reason == "app" -> "Refused · $proto · App wasn't chosen"
+        else -> "Refused · $proto · Android couldn't identify the app"
+    }
 }
 
 /** How long ago, in short words. */
@@ -200,7 +234,7 @@ internal fun ReachSheet(ui: Ui, setup: Setup, lockdown: Boolean, disclose: () ->
             Choice(a.pkg, a.label, a.pkg, reachRefusal(setup, a.pkg, lockdown), setup.apps[a.pkg] == BLOCK, a.system && a.pkg !in setup.apps) { AppIcon(ui, a.pkg, a.label) }
         }
     }
-    ChooseSheet("Add apps", "Tailnet devices will be able to open the apps you add", Icons.lan, "Search apps", choices,
+    ChooseSheet("Add apps", "Tailnet devices will be able to open the apps you add. New apps start with TCP only.", Icons.lan, "Search apps", choices,
         { all -> if (all) "Every app is added already" else "No app matches" },
         if (disclosed) null else { {
             Column(Modifier.padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -221,4 +255,34 @@ internal fun DeviceSheet(peers: List<TsNode>, chosen: List<TailnetDevice>, onAdd
             Text("Connect with Tailscale on to see your tailnet's devices.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp))
         } },
         { ids -> onAdd(offered.filter { it.id in ids }.map { TailnetDevice(it.id, it.name) }) }, onDismiss)
+}
+
+/** One chosen app: which protocols tailnet devices may use to reach it, and removing it. Changes apply at once. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun ProtocolSheet(ui: Ui, pkg: String, label: String, tcp: Boolean, udp: Boolean, setTcp: (Boolean) -> Unit, setUdp: (Boolean) -> Unit, remove: () -> Unit, onDismiss: () -> Unit) {
+    ModalBottomSheet(onDismiss, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
+        Column(Modifier.padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.padding(horizontal = 24.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                AppIcon(ui, pkg, label, 48.dp)
+                Text(label, style = Type.title.copy(fontSize = Type.headline.fontSize * 0.5f))
+            }
+            ProtoRow("TCP connections", "$label: files, logins, sync and most apps", tcp, "TCP connections for $label", setTcp)
+            ProtoRow("UDP messages", REACH_UDP_NOTE, udp, "UDP messages for $label", setUdp)
+            Box(Modifier.padding(horizontal = 16.dp)) { Secondary("Remove from reachable apps", remove, color = Ink.bad) }
+        }
+    }
+}
+
+@Composable
+private fun ProtoRow(title: String, sub: String, on: Boolean, spoken: String, set: (Boolean) -> Unit) = Row(
+    Modifier.fillMaxWidth().heightIn(min = 64.dp).toggleable(on, role = Role.Switch) { set(it) }
+        .semantics(mergeDescendants = true) { contentDescription = spoken }.padding(horizontal = 24.dp, vertical = 8.dp),
+    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp),
+) {
+    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(title, style = Type.body, color = Ink.text)
+        Text(sub, style = Type.caption, color = Ink.dim)
+    }
+    Toggle(on)
 }

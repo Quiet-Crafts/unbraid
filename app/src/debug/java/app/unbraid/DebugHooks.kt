@@ -59,8 +59,10 @@ class DebugHooks : BroadcastReceiver() {
                         s.update { it.copy(home = it.home.copy(reachable = a != "off", reachableApps = if (a == "off") it.home.reachableApps else a.split(',').map(String::trim).filter(String::isNotEmpty))) }
                         "inbound ${if (a == "off") "off" else a}" }
                     // Which app Android names for a TCP tuple: "local:port,remote:port".
-                    "owner" -> { val (l, r) = i.getStringExtra("arg")!!.split(',').map { val (h, p) = it.split(':'); java.net.InetSocketAddress(h, p.toInt()) }
-                        val cm = ctx.getSystemService(android.net.ConnectivityManager::class.java); val uid = cm.getConnectionOwnerUid(6, l, r)
+                    // "local:port,remote:port", or "udp:local:port,remote:port" for a UDP socket.
+                    "owner" -> { val raw = i.getStringExtra("arg")!!; val udp = raw.startsWith("udp:")
+                        val (l, r) = raw.removePrefix("udp:").split(',').map { val (h, p) = it.split(':'); java.net.InetSocketAddress(h, p.toInt()) }
+                        val cm = ctx.getSystemService(android.net.ConnectivityManager::class.java); val uid = cm.getConnectionOwnerUid(if (udp) 17 else 6, l, r)
                         "owner uid=$uid ${ctx.packageManager.getPackagesForUid(uid)?.toList()}" }
                     "keys" -> app.unbraid.data.WgKeys.generate().let { "keys ok sdk=${android.os.Build.VERSION.SDK_INT} priv=${it.private.length} pub=${it.public.length}" }
                     else -> UnbraidVpn.state.value.toString() + UnbraidVpn.asked.value.let { a -> if (a == null) " asked=none" else " asked=${a.n}:${a.on}" }

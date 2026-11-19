@@ -15,6 +15,7 @@ import app.unbraid.ui.eventDevice
 import app.unbraid.ui.eventOutcome
 import app.unbraid.ui.eventTitle
 import app.unbraid.ui.reachEvents
+import app.unbraid.ui.reachAppSub
 import app.unbraid.ui.reachRefusal
 import app.unbraid.vpn.TsNode
 import app.unbraid.ui.reachSub
@@ -95,18 +96,38 @@ class InboundTest {
         assertEquals(listOf(2L, 1L), ev.map { it.time }) // newest first; unknown keys ignored
         assertEquals(emptyList<Any>(), reachEvents("not json")); assertEquals(emptyList<Any>(), reachEvents(null))
         val label = { p: String -> if (p == "org.kde.kdeconnect_tp") "KDE Connect" else p }
-        assertEquals("Allowed", eventOutcome(ev[0]))
-        assertEquals("Refused · Device wasn't chosen", eventOutcome(ev[1]))
+        assertEquals("Allowed · TCP", eventOutcome(ev[0]))
+        assertEquals("Refused · TCP · Device wasn't chosen", eventOutcome(ev[1]))
         val refused = { reason: String -> ev[0].copy(allowed = false, reason = reason) }
-        assertEquals("Refused · App was on Block", eventOutcome(refused("blocked")))
-        assertEquals("Refused · App wasn't chosen", eventOutcome(refused("app")))
-        assertEquals("Refused · Android couldn't identify the app", eventOutcome(refused("unknown")))
+        assertEquals("Refused · TCP · App was on Block", eventOutcome(refused("blocked")))
+        assertEquals("Refused · TCP · App wasn't chosen", eventOutcome(refused("app")))
+        assertEquals("Refused · UDP · UDP was off for this app", eventOutcome(refused("app").copy(proto = "udp"), listOf("org.kde.kdeconnect_tp")))
+        assertEquals("Refused · UDP · App wasn't chosen", eventOutcome(refused("app").copy(proto = "udp")))
+        assertEquals("Refused · TCP · TCP was off for this app", eventOutcome(refused("app"), listOf("org.kde.kdeconnect_tp")))
+        assertEquals("Refused · TCP · Android couldn't identify the app", eventOutcome(refused("unknown")))
         assertEquals("desktop to KDE Connect", eventTitle("desktop", ev[0], label))
         assertEquals("desktop", eventTitle("desktop", ev[0].copy(packages = emptyList()), label))
         assertEquals("desktop", eventDevice(ev[0], listOf(TsNode("desktop", "100.64.0.7", true, "n2")), emptyList()))
         assertEquals("old pc", eventDevice(ev[0], emptyList(), listOf(TailnetDevice("n2", "old pc"))))
         assertEquals("100.64.0.7", eventDevice(ev[0], emptyList(), emptyList()))
         assertEquals(listOf("just now", "2 min ago", "3 h ago", "1 d ago"), listOf(5_000L, 120_000L, 3 * 3_600_000L, 90_000_000L).map(::ago))
+    }
+
+    @Test fun udpOnlyForTheAppsThatHaveIt() {
+        val ib = Compiler.Inbound("100.64.0.5", listOf("1024:65535"), listOf("org.kde.kdeconnect_tp"), udp = listOf("org.kde.kdeconnect_tp", "com.outside"))
+        val gate = compile(base, ib).ts()["tun_handoff"]!!.jsonObject
+        assertEquals(listOf("1024:65535"), gate.strings("udp_ports"))
+        assertEquals(listOf("org.kde.kdeconnect_tp"), gate.strings("udp_allow_packages")) // outside the VPN: never
+        val udpOnly = compile(base, Compiler.Inbound("100.64.0.5", listOf("1024:65535"), emptyList(), udp = listOf("org.kde.kdeconnect_tp"))).ts()["tun_handoff"]!!.jsonObject
+        assertNull(udpOnly["tcp_ports"]) // no app takes TCP: TCP stays with the stack
+        assertNull(compile(base, wanted).ts()["tun_handoff"]!!.jsonObject["udp_ports"])
+        val kde = "org.kde.kdeconnect_tp"
+        val s = base.copy(home = base.home.copy(reachable = true, reachableApps = listOf(kde)))
+        assertEquals("Allowed · TCP", reachAppSub(s, kde, lockdown = false, on = true))
+        assertEquals("Allowed · TCP and UDP", reachAppSub(s.copy(home = s.home.copy(reachableUdp = listOf(kde))), kde, lockdown = false, on = true))
+        assertEquals("Allowed when switched on · UDP", reachAppSub(s.copy(home = s.home.copy(reachableUdp = listOf(kde), reachableNoTcp = listOf(kde))), kde, lockdown = false, on = false))
+        assertEquals("Off · No protocols allowed", reachAppSub(s.copy(home = s.home.copy(reachableNoTcp = listOf(kde))), kde, lockdown = false, on = true))
+        assertEquals("No apps selected", reachSub(s.copy(home = s.home.copy(reachableNoTcp = listOf(kde))), lockdown = false, tsWaiting = false))
     }
 
     @Test fun underLockdownNoAppIsOutsideSoAllStayAllowed() {

@@ -979,7 +979,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** Apps tailnet devices may reach ([app.unbraid.data.Home.reachable]); null = off, also when no device may connect. */
     private fun inboundApps(home: app.unbraid.data.Home = store.setup.value.home): List<String>? =
-        home.takeIf { it.reachable && !(it.reachableOnly && it.reachableDevices.isEmpty()) }?.reachableApps?.ifEmpty { null }
+        home.takeIf { it.reachable && !(it.reachableOnly && it.reachableDevices.isEmpty()) }
+            ?.let { h -> h.reachableApps.filter { it !in h.reachableNoTcp || it in h.reachableUdp } }?.ifEmpty { null }
 
     /**
      * Any port from 1024 up: the engine's check of the receiving app is what decides, not the port. Everything comes from
@@ -990,7 +991,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val apps = inboundApps(home) ?: return null
         val self4 = tsSelf4 ?: return null
         val nodes = if (home.reachableOnly) home.reachableDevices.map { it.id }.ifEmpty { return null } else emptyList()
-        return Compiler.Inbound(self4, listOf("1024:65535"), apps, nodes)
+        return Compiler.Inbound(self4, listOf("1024:65535"), apps.filter { it !in home.reachableNoTcp }, nodes, apps.filter { it in home.reachableUdp })
     }
 
     private fun watchTailscale() {

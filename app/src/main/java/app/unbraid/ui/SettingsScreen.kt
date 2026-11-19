@@ -12,6 +12,7 @@ import app.unbraid.vpn.UnbraidVpn
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -510,12 +511,12 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, disclose: 
                 chosen.forEachIndexed { i, pkg ->
                     item(key = "reach:$pkg") {
                         val label = labels[pkg] ?: pkg
-                        val refusal = reachRefusal(setup, pkg, vpn.lockdown)
-                        GroupRow(i, chosen.size, label, refusal ?: if (on) "Allowed" else "Allowed when switched on", leading = { AppIcon(ui, pkg, label) }, trailing = {
-                            Secondary("Remove", { ui.setHome { it.copy(reachableApps = it.reachableApps - pkg) } }, color = Ink.dim)
-                        })
+                        GroupRow(i, chosen.size, label, reachAppSub(setup, pkg, vpn.lockdown, on), onClick = { dialog = "reach:proto:$pkg" },
+                            leading = { AppIcon(ui, pkg, label) }, trailing = { Chevron() },
+                            modifier = Modifier.semantics { onClick(label = "Edit allowed protocols") { dialog = "reach:proto:$pkg"; true } })
                     }
                 }
+                if (chosen.isNotEmpty()) caption(REACH_PROTO_HINT)
                 item { Box(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Tonal("Add apps", Icons.add) { dialog = "reach:add" } } }
                 if (chosen.any { it == KDE_CONNECT || it.startsWith("$KDE_CONNECT.") }) group("How to connect", listOf(Item("KDE Connect", KDE_TIP))) // forks too (…_tp.shizuku)
 
@@ -551,7 +552,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, disclose: 
                         shown.forEachIndexed { i, e ->
                             item(key = "reachev:$i:${e.time}") {
                                 val device = eventDevice(e, vpn.tsPeers, home.reachableDevices)
-                                GroupRow(i, shown.size, eventTitle(device, e) { labels[it] ?: it }, eventOutcome(e) + " · " + ago(System.currentTimeMillis() - e.time),
+                                GroupRow(i, shown.size, eventTitle(device, e) { labels[it] ?: it }, eventOutcome(e, chosen) + " · " + ago(System.currentTimeMillis() - e.time),
                                     titleColor = if (e.allowed) Ink.text else Ink.bad)
                             }
                         }
@@ -800,6 +801,14 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, disclose: 
             val d = dialog.orEmpty()
             val arg = d.substringAfter(':')
             when {
+                d.startsWith("reach:proto:") -> arg.removePrefix("proto:").takeIf { it in home.reachableApps }?.let { pkg ->
+                    val label = installed.firstOrNull { it.pkg == pkg }?.label ?: pkg
+                    ProtocolSheet(ui, pkg, label, reachTcp(home, pkg), reachUdp(home, pkg),
+                        setTcp = { v -> ui.setHome { it.copy(reachableNoTcp = if (v) it.reachableNoTcp - pkg else (it.reachableNoTcp + pkg).distinct()) } },
+                        setUdp = { v -> ui.setHome { it.copy(reachableUdp = if (v) (it.reachableUdp + pkg).distinct() else it.reachableUdp - pkg) } },
+                        remove = { dialog = null; ui.setHome { it.copy(reachableApps = it.reachableApps - pkg, reachableUdp = it.reachableUdp - pkg, reachableNoTcp = it.reachableNoTcp - pkg) } },
+                    ) { dialog = null }
+                }
                 d.startsWith("opt:") -> opts.firstOrNull { "opt:${shown?.id}:${it.key}" == d }?.let { o ->
                     ModalBottomSheet({ dialog = null }, sheetState = fullSheet(), containerColor = Ink.surface, contentColor = Ink.text) {
                         Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 16.dp)) {
