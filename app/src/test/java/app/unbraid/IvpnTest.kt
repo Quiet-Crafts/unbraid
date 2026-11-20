@@ -14,8 +14,71 @@ import java.io.IOException
 import java.util.Base64
 
 class IvpnTest {
+    private companion object { val PSK: String = Base64.getEncoder().encodeToString(ByteArray(32) { 7 }) }
+
+    /** Stands in for the engine's Kyber: only the private key "kem" opens the ciphertext "good". */
+    @org.junit.Before fun fakeKyber() {
+        Ivpn.kyber = object : Ivpn.Kyber {
+            override fun keyPair() = "pub" to "kem"
+            override fun psk(private: String, cipher: String) = if (private == "kem" && cipher == "good") PSK else if (cipher == "short") "c2hvcnQ=" else throw IllegalArgumentException("bad")
+        }
+    }
+
+    /** Every sign-in gets the quantum-safe key; a reply without a usable one ends it, naming the session to close. */
+    @Test fun quantumSafeKeyIsRequired() {
+        val ok = Ivpn.account(Ivpn.session(200 to """{"status":200,"token":"tok","wireguard":{"ip_address":"172.16.1.2","kem_cipher1":"good"}}""", "a", "p", "kem"))
+        assertEquals(PSK, ok.psk)
+        assertEquals(PSK, Ivpn.link(list, Location("ivpn", countryCode = "NL"), ok).peer.presharedKey)
+        for (cipher in listOf(null, "bad", "short")) {
+            val wg = if (cipher == null) """{"ip_address":"172.16.1.2"}""" else """{"ip_address":"172.16.1.2","kem_cipher1":"$cipher"}"""
+            val e = try { Ivpn.session(200 to """{"status":200,"token":"tok2","wireguard":$wg}""", "a", "p", "kem"); null } catch (e: Ivpn.NoPq) { e }
+            assertEquals("tok2", e!!.token)
+            assertEquals(Ivpn.NO_PQ, e.message)
+        }
+        // Signed in before quantum-safe existed: still connects, the page says it isn't on yet.
+        val old = """{"accountId":"a","sessionToken":"t","privateKey":"k","ipAddress":"10.0.0.2"}"""
+        assertNull(Ivpn.account(old).psk)
+        assertFalse(Ivpn.quantumSafe(old))
+        assertTrue(Ivpn.quantumSafe(Ivpn.session(200 to """{"status":200,"token":"tok","wireguard":{"ip_address":"172.16.1.2","kem_cipher1":"good"}}""", "a", "p", "kem")))
+        assertNull(Ivpn.link(list, Location("ivpn", countryCode = "NL"), acct).peer.presharedKey)
+        // A tunnel cached from the earlier sign-in, without the quantum-safe key, never stands in for the new one.
+        val blob = Ivpn.session(200 to """{"status":200,"token":"tok","wireguard":{"ip_address":"172.16.1.2","kem_cipher1":"good"}}""", "a", acct.privateKey, "kem")
+        val nl = Location("ivpn", countryCode = "NL")
+        assertFalse(Ivpn.trusts(Ivpn.link(list, nl, acct), blob))
+        assertTrue(Ivpn.trusts(Ivpn.link(list, nl, Ivpn.account(blob)), blob))
+        assertFalse(Ivpn.trusts(Ivpn.link(list, nl, Ivpn.account(blob)), "not json"))
+    }
     private val list = Ivpn.parse(javaClass.getResource("/ivpn_servers.json")!!.readText())
     private val acct = Ivpn.Account("i-ABCD-EFGH-IJKL", "session", "cHJpdmF0ZS1wcml2YXRlLXByaXZhdGUtcHJpdmF0ZTE=", "172.16.34.56")
+
+    /** A new key is due by age, to finish a change, or to add the quantum-safe key; IVPN's answer decides what's kept. */
+    @Test fun keyRotation() {
+        val day = 86_400_000L
+        val a = acct.copy(psk = PSK, keyAt = 10 * day)
+        assertFalse(Ivpn.due(a, 7, 16 * day))
+        assertTrue(Ivpn.due(a, 7, 17 * day))
+        assertFalse(Ivpn.due(a, null, 400 * day)) // Never
+        assertTrue(Ivpn.due(acct, null, 0)) // no quantum-safe key yet: due whatever the setting
+        val p = Ivpn.Pending("bmV3LXByaXZhdGUtbmV3LXByaXZhdGUtbmV3LXByaXY=", "newpub", "kpub", "kem")
+        val pending = a.copy(pending = p)
+        assertTrue(Ivpn.due(pending, null, 0))
+        // Taken: the new key, its quantum-safe key and address replace the old ones, and the change is finished.
+        val next = Ivpn.rekeyed(200 to """{"status":200,"ip_address":"172.16.9.9","kem_cipher1":"good"}""", pending, 20 * day)
+        assertEquals(Ivpn.Account(a.accountId, a.sessionToken, p.privateKey, "172.16.9.9", psk = PSK, keyAt = 20 * day), next)
+        assertEquals(a.ipAddress, Ivpn.rekeyed(200 to """{"status":200,"kem_cipher1":"good"}""", pending, 0).ipAddress)
+        // Refused: the old key stays. Signed out elsewhere: a new sign-in. No usable quantum-safe key: never a plain key.
+        try { Ivpn.rekeyed(200 to """{"status":422,"message":"bad"}""", pending, 0); fail() } catch (e: Ivpn.Rejected) { }
+        try { Ivpn.rekeyed(200 to """{"status":601}""", pending, 0); fail() } catch (e: AuthException) { }
+        try { Ivpn.rekeyed(401 to "", pending, 0); fail() } catch (e: AuthException) { }
+        // Busy or failing: the earlier request may have gone through, so the new key is kept for another try.
+        for ((code, st) in listOf(429 to 429, 408 to 408, 500 to 500, 503 to 503, 503 to 422, 200 to 408)) try { Ivpn.rekeyed(code to """{"status":$st}""", pending, 0); fail() } catch (e: IOException) { assertFalse(e is Ivpn.Rejected || e is AuthException) }
+        for (c in listOf("", ""","kem_cipher1":"bad"""", ""","kem_cipher1":"short"""")) {
+            try { Ivpn.rekeyed(200 to """{"status":200,"ip_address":"172.16.9.9"$c}""", pending, 0); fail() } catch (e: IOException) { assertFalse(e is Ivpn.Rejected || e is AuthException) }
+        }
+        try { Ivpn.rekeyed(200 to """{"status":200,"ip_address":"10.0.0.1/8x","kem_cipher1":"good"}""", pending, 0); fail() } catch (e: IOException) { }
+        // An account saved before these fields existed still reads.
+        assertEquals(0L, Ivpn.account("""{"accountId":"a","sessionToken":"t","privateKey":"k","ipAddress":"10.0.0.2"}""").keyAt)
+    }
 
     @Test fun countriesAreGroupedAndKeyed() {
         val cs = Ivpn.countries(list)
@@ -113,33 +176,33 @@ class IvpnTest {
     }
 
     @Test fun sessionReplies() {
-        val ok = Ivpn.session(200 to """{"status":200,"token":"tok","vpn_username":"u","vpn_password":"p","service_status":{"is_active":true},"wireguard":{"status":200,"message":"Success","ip_address":"172.16.1.2"}}""", "i-ABCD-EFGH-IJKL", "priv")
-        assertEquals(Ivpn.Account("i-ABCD-EFGH-IJKL", "tok", "priv", "172.16.1.2"), Ivpn.account(ok))
+        val ok = Ivpn.session(200 to """{"status":200,"token":"tok","vpn_username":"u","vpn_password":"p","service_status":{"is_active":true},"wireguard":{"status":200,"message":"Success","ip_address":"172.16.1.2","kem_cipher1":"good"}}""", "i-ABCD-EFGH-IJKL", "priv", "kem")
+        Ivpn.account(ok).let { assertEquals(Ivpn.Account("i-ABCD-EFGH-IJKL", "tok", "priv", "172.16.1.2", psk = PSK, keyAt = it.keyAt), it); assertTrue(it.keyAt > 0) }
         // The device name and the plan's limit, for the IVPN page.
-        val named = Ivpn.session(200 to """{"status":200,"token":"tok","device_name":"Brave Owl","service_status":{"current_plan":"IVPN Standard","available_plans":[{"name":"Pro","device_limit":10},{"name":"Standard","device_limit":5}]},"wireguard":{"ip_address":"172.16.1.2"}}""", "a", "p")
+        val named = Ivpn.session(200 to """{"status":200,"token":"tok","device_name":"Brave Owl","service_status":{"current_plan":"IVPN Standard","available_plans":[{"name":"Pro","device_limit":10},{"name":"Standard","device_limit":5}]},"wireguard":{"ip_address":"172.16.1.2","kem_cipher1":"good"}}""", "a", "p", "kem")
         assertEquals("Brave Owl" to 5, Ivpn.account(named).let { it.device to it.limit })
         // A full account says how many devices and links to where they are listed.
-        val full = try { Ivpn.session(400 to """{"status":602,"message":"You've reached the maximum number of connected devices","data":{"limit":5}}""", "a", "p"); null } catch (e: AuthException) { e }
+        val full = try { Ivpn.session(400 to """{"status":602,"message":"You've reached the maximum number of connected devices","data":{"limit":5}}""", "a", "p", "kem"); null } catch (e: AuthException) { e }
         assertEquals("All 5 IVPN devices are in use. Sign out another device, then try again.", full!!.message)
         assertTrue(full.url!!.startsWith("https://www.ivpn.net/"))
         for (body in listOf("""{"status":401,"message":"The provided Account ID is not valid"}""", """{"status":702,"message":"inactive"}""", """{"status":70001}""")) {
-            try { Ivpn.session(400 to body, "a", "p"); fail() } catch (e: AuthException) { }
+            try { Ivpn.session(400 to body, "a", "p", "kem"); fail() } catch (e: AuthException) { }
         }
         // Two-factor and captcha are one more question, then the same sign-in again.
-        for (st in listOf(70011, 70012)) try { Ivpn.session(400 to """{"status":$st}""", "a", "p"); fail() } catch (e: Challenge) { assertEquals("confirmation", e.field.key); assertNull(e.image) }
+        for (st in listOf(70011, 70012)) try { Ivpn.session(400 to """{"status":$st}""", "a", "p", "kem"); fail() } catch (e: Challenge) { assertEquals("confirmation", e.field.key); assertNull(e.image) }
         val png = byteArrayOf(-119, 80, 78, 71)
-        try { Ivpn.session(400 to """{"status":70002,"captcha_id":"c-1","captcha_image":"data:image/png;base64,${Base64.getEncoder().encodeToString(png)}"}""", "a", "p"); fail() } catch (e: Challenge) {
+        try { Ivpn.session(400 to """{"status":70002,"captcha_id":"c-1","captcha_image":"data:image/png;base64,${Base64.getEncoder().encodeToString(png)}"}""", "a", "p", "kem"); fail() } catch (e: Challenge) {
             assertEquals("captcha", e.field.key); assertEquals(mapOf("captcha_id" to "c-1"), e.keep); assertTrue(png.contentEquals(e.image))
         }
-        try { Ivpn.session(502 to "<html>", "a", "p"); fail() } catch (e: IOException) { assertFalse(e is AuthException) }
+        try { Ivpn.session(502 to "<html>", "a", "p", "kem"); fail() } catch (e: IOException) { assertFalse(e is AuthException) }
     }
 
     @Test fun parseFailuresDoNotQuoteTheReply() {
-        for (f in listOf({ Ivpn.session(200 to """{"status":200,"token":"SECRET-TOKEN" """, "a", "p") }, { Ivpn.account("""{"sessionToken":"SECRET" """) }, { Ivpn.parse("SECRET-LIST") })) {
+        for (f in listOf({ Ivpn.session(200 to """{"status":200,"token":"SECRET-TOKEN" """, "a", "p", "kem") }, { Ivpn.account("""{"sessionToken":"SECRET" """) }, { Ivpn.parse("SECRET-LIST") })) {
             try { f(); fail() } catch (e: IOException) { assertFalse(e.message!!.contains("SECRET")); assertNull(e.cause) }
         }
-        try { Ivpn.session(200 to """{"status":200,"token":"t"}""", "a", "p"); fail() } catch (e: IOException) { assertFalse(e is AuthException) }
-        try { Ivpn.session(400 to """{"status":999,"message":"echoes SECRET"}""", "a", "p"); fail() } catch (e: IOException) { assertFalse(e.message!!.contains("SECRET")) }
+        try { Ivpn.session(200 to """{"status":200,"token":"t"}""", "a", "p", "kem"); fail() } catch (e: IOException) { assertFalse(e is AuthException) }
+        try { Ivpn.session(400 to """{"status":999,"message":"echoes SECRET"}""", "a", "p", "kem"); fail() } catch (e: IOException) { assertFalse(e.message!!.contains("SECRET")) }
     }
 
     @Test fun badAccountIdIsRejectedBeforeAnyRequest() {

@@ -9,6 +9,7 @@ import app.unbraid.data.Snapshot
 import app.unbraid.data.Surfshark
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -142,6 +143,8 @@ class KeySourcesTest {
         var readyAfter = 2
         var generated: String? = null
         var lists = 0
+        var renews = 0
+        var refuseRenew = false
 
         init {
             AirVpn.status = { res("airvpn_status.json") }
@@ -157,7 +160,7 @@ class KeySourcesTest {
                 "devices" -> when (q["action"]) {
                     null -> {
                         lists++
-                        devices.filter { it.status == "create" && lists >= it.readyAt }.forEach { it.status = "ready"; it.key = "k-${it.id}"; it.ip = "10.171.9.${devices.indexOf(it)}" }
+                        devices.filter { it.status == "create" && lists >= it.readyAt }.forEach { it.status = "ready"; it.key = "k-${it.id}-$renews"; it.ip = "10.171.9.${devices.indexOf(it) + 10 * renews}" }
                         """{"action":"list","devices":[${devices.joinToString(",") { """{"id":"${it.id}","name":"${it.name}","status":"${it.status}","wireguard_public_key":${it.key.ifEmpty { null }?.let { k -> "\"$k\"" }},"wireguard_ipv4":${it.ip.ifEmpty { null }?.let { i -> "\"$i\"" }}}""" }}],"result":"ok"}"""
                     }
                     "add" -> {
@@ -165,6 +168,10 @@ class KeySourcesTest {
                         val d = Dev("new${devices.size}", "New device", "create", "", "", lists + readyAfter).also { devices += it }
                         if (loseAdd) throw IOException("reply lost")
                         """{"action":"add","id":"${d.id}","result":"ok"}"""
+                    }
+                    // As AirVPN: queued, the old key gone at once, a new key and address once ready.
+                    "renew" -> if (refuseRenew) """{"error":"Not allowed"}""" else {
+                        renews++; devices.first { it.id == q["id"] }.apply { status = "create"; key = ""; readyAt = lists + 2 }; """{"action":"renew","result":"ok"}"""
                     }
                     "modify" -> { devices.first { it.id == q["id"] }.name = q.getValue("name"); """{"action":"modify","result":"ok"}""" }
                     "delete" -> when (val d = devices.firstOrNull { it.id == q["id"] }) {
@@ -192,6 +199,63 @@ class KeySourcesTest {
             }
         }
     }
+
+    /** Only unbraid's own device is renewed, when due; asked for once, finished where it stopped, dropped when refused or lost. */
+    @Test fun airvpnRenewsItsOwnDeviceKey() {
+        val air = FakeAir("Default")
+        val blob = airSignIn()
+        val a = AirVpn.account(blob)
+        val day = 86_400_000L
+        val due = a.keyAt + 8 * day
+        assertTrue(a.keyAt > 0)
+        assertTrue(AirVpn.options(blob).any { it.key == app.unbraid.data.ROTATE_OPT })
+        val saved = mutableListOf<String>()
+        val save = { b: String -> saved += b; true }
+        assertFalse(AirVpn.rotate(blob, 7, a.keyAt + day, false, save))
+        assertFalse(AirVpn.rotate(blob, null, a.keyAt + 400 * day, false, save)) // Never
+        assertFalse(AirVpn.rotate(blob, 7, due, true, save)) // health rounds only finish
+        assertTrue(saved.isEmpty() && air.renews == 0)
+        assertTrue(AirVpn.rotate(blob, 7, due, false, save))
+        assertEquals(1, air.renews)
+        assertEquals(due, AirVpn.account(saved[0]).renewing)
+        assertFalse(AirVpn.revoked(saved[0])) // mid-renewal: not taken for a device renewed elsewhere
+        val b = AirVpn.account(saved[1])
+        val dev = air.devices.last()
+        assertEquals(listOf(dev.key, "${dev.ip}/32", 0L, due), listOf(b.deviceKey, b.address.single(), b.renewing, b.keyAt))
+        assertTrue(b.deviceKey != a.deviceKey)
+        assertFalse(AirVpn.revoked(saved[1]))
+        // Cut short after asking (AirVPN still lists the old key for a while): looked for, never asked again.
+        saved.clear(); air.renews = 0
+        val asked = enc(b.copy(renewing = due))
+        assertFalse(AirVpn.revoked(asked))
+        try { AirVpn.rotate(asked, null, due + 60_000, true, save); fail() } catch (e: IOException) { }
+        assertEquals(0, air.renews)
+        assertTrue(saved.isEmpty())
+        // Still the old key an hour on: the request was lost, the old key stays.
+        assertFalse(AirVpn.rotate(asked, null, due + 2 * 3_600_000L, true, save))
+        assertEquals(listOf(0L), saved.map { AirVpn.account(it).renewing })
+        // The new key already there: fetched without asking again.
+        saved.clear()
+        assertTrue(AirVpn.rotate(enc(a.copy(renewing = due)), null, due, true, save))
+        assertEquals(0, air.renews)
+        assertEquals(dev.key, AirVpn.account(saved.single()).deviceKey)
+        // Refused: kept until the list settles it; the old key still listed, the renewal is dropped an hour on.
+        saved.clear()
+        air.refuseRenew = true
+        try { AirVpn.rotate(enc(b), 7, b.keyAt + 8 * day, false, save); fail() } catch (e: IOException) { }
+        assertEquals(listOf(b.keyAt + 8 * day), saved.map { AirVpn.account(it).renewing })
+        assertFalse(AirVpn.rotate(saved.single(), 7, b.keyAt + 9 * day, true, save))
+        assertEquals(0L, AirVpn.account(saved.last()).renewing)
+        // Deleted on the website meanwhile: signed out, renewal or not.
+        air.devices.removeAt(air.devices.size - 1)
+        assertTrue(AirVpn.revoked(enc(b.copy(renewing = due))))
+        // One of the user's own devices is never renewed.
+        val theirs = enc(a.copy(ownDevice = false))
+        assertFalse(AirVpn.rotate(theirs, 1, a.keyAt + 400 * day, false, save))
+        assertFalse(AirVpn.options(theirs).any { it.key == app.unbraid.data.ROTATE_OPT })
+    }
+
+    private fun enc(a: KeyProvider.Account) = app.unbraid.data.NordApi.json.encodeToString(KeyProvider.Account.serializer(), a)
 
     private fun airSignIn(device: String? = null) = AirVpn.signIn(mapOf("key" to " $apiKey\n") + listOfNotNull(device?.let { "device" to it }))
 

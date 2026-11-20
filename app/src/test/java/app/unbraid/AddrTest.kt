@@ -51,7 +51,7 @@ class AddrTest {
             {"hostname":"b","host":"1.2.3.4","public_key":"$key","local_ip":"172.16.0.1/12"}]}]}""")
         assertEquals(listOf("b"), l.wireguard.single().hosts.map { it.hostname })
         failsAsUnexpected {
-            Ivpn.session(200 to """{"status":200,"token":"tok","service_status":{"is_active":true},"wireguard":{"status":200,"ip_address":"172.16.1"}}""", "i-ABCD-EFGH-IJKL", "priv")
+            Ivpn.session(200 to """{"status":200,"token":"tok","service_status":{"is_active":true},"wireguard":{"status":200,"ip_address":"172.16.1"}}""", "i-ABCD-EFGH-IJKL", "priv", "kem")
         }
     }
 

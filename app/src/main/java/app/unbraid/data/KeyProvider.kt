@@ -31,6 +31,10 @@ abstract class KeyProvider : Provider {
         val deviceKey: String? = null,
         val deviceId: String? = null,
         val ownDevice: Boolean = false,
+        /** When the key was made (ms since 1970); 0 = not known. */
+        val keyAt: Long = 0,
+        /** When a new key was asked for (ms), until it is saved: the provider may already have dropped the old one. 0 = none. */
+        val renewing: Long = 0,
     )
 
     /** Comment lines ("# NetShield = 0") a provider writes into its configs that say how the key was made, to show them. */
@@ -63,7 +67,7 @@ abstract class KeyProvider : Provider {
     protected open fun peerKey(sv: Server, a: Account): String = sv.publicKey
 
     override fun trusts(link: Link, account: String): Boolean =
-        link !is WgLink || runCatching { link.peer.publicKey == peerKey(link.server, account(account)) && trustsKey(link.peer.publicKey, account(account)) }.getOrDefault(false)
+        link !is WgLink || runCatching { account(account).let { a -> link.peer.privateKey == a.privateKey && link.peer.publicKey == peerKey(link.server, a) && trustsKey(link.peer.publicKey, a) } }.getOrDefault(false)
 
     /**
      * The servers of [all] that suit [loc], best first and lazily, each complete enough to connect to. Providers whose

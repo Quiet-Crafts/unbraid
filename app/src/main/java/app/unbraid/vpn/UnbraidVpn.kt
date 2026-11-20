@@ -418,6 +418,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (setup.defaultMissing) throw Compiler.MissingDefault()
             // A saved Tailscale node that won't open fails here with its own message, not as an engine error.
             if (setup.tailscale && store.tsStored) store.tsState
+            // Due keys are replaced before any tunnel is built with them.
+            Rotation.run(setup, { store.accounts.value }, store::replaceAccount)
             val accounts = store.accounts.value
             // The app's own tests get a fresh way in with each engine start (see apply); none until it runs.
             probe = null
@@ -806,6 +808,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             }
             if (now < grace) continue
             val regular = now >= round
+            // A new key whose reply got lost may already be the only one IVPN takes: finish it as soon as it can be.
+            if (regular) Rotation.run(store.setup.value, { store.accounts.value }, store::replaceAccount, finishOnly = true)
             // A provider whose new key is still reaching its servers isn't judged yet.
             val settingUp = Providers.settingUp()
             val eligible = byTag.filter { (_, ids) -> ids.none { running?.route(it)?.let { r -> !r.imported && r.loc.provider in settingUp } == true } }.keys.filterNotNull()

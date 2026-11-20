@@ -1,0 +1,79 @@
+diff --git a/experimental/libbox/kem.go b/experimental/libbox/kem.go
+new file mode 100644
+index 0000000..e939d96
+--- /dev/null
++++ b/experimental/libbox/kem.go
+@@ -0,0 +1,48 @@
++package libbox
++
++import (
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/base64"
++	"errors"
++	"strings"
++
++	"github.com/cloudflare/circl/kem/kyber/kyber1024"
++)
++
++// Kyber1024KeyPair makes a Round-3 Kyber-1024 key pair (the variant IVPN's key exchange uses, not the final
++// ML-KEM). It returns "public|private", both base64.
++func Kyber1024KeyPair() (string, error) {
++	pk, sk, err := kyber1024.GenerateKeyPair(rand.Reader)
++	if err != nil {
++		return "", err
++	}
++	pkb, err := pk.MarshalBinary()
++	if err != nil {
++		return "", err
++	}
++	skb, err := sk.MarshalBinary()
++	if err != nil {
++		return "", err
++	}
++	return base64.StdEncoding.EncodeToString(pkb) + "|" + base64.StdEncoding.EncodeToString(skb), nil
++}
++
++// Kyber1024PSK decapsulates a base64 ciphertext with a base64 private key from Kyber1024KeyPair and returns
++// base64(SHA-256(shared secret)), the WireGuard preshared key.
++func Kyber1024PSK(private, cipher string) (string, error) {
++	skb, err := base64.StdEncoding.DecodeString(private)
++	if err != nil || len(skb) != kyber1024.PrivateKeySize {
++		return "", errors.New("bad Kyber-1024 private key")
++	}
++	ct, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(cipher), ""))
++	if err != nil || len(ct) != kyber1024.CiphertextSize {
++		return "", errors.New("bad Kyber-1024 ciphertext")
++	}
++	var sk kyber1024.PrivateKey
++	sk.Unpack(skb)
++	ss := make([]byte, kyber1024.SharedKeySize)
++	sk.DecapsulateTo(ss, ct)
++	h := sha256.Sum256(ss)
++	return base64.StdEncoding.EncodeToString(h[:]), nil
++}
+diff --git a/go.mod b/go.mod
+index 8d74d59..7063c0d 100644
+--- a/go.mod
++++ b/go.mod
+@@ -95,6 +95,7 @@ require (
+ 	github.com/axiomhq/hyperloglog v0.0.0-20240319100328-84253e514e02 // indirect
+ 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
+ 	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
++	github.com/cloudflare/circl v1.6.1
+ 	github.com/coreos/go-iptables v0.7.1-0.20240112124308-65c67c9f46e6 // indirect
+ 	github.com/coreos/go-oidc/v3 v3.17.0 // indirect
+ 	github.com/database64128/netx-go v0.1.1 // indirect
+diff --git a/go.sum b/go.sum
+index 8b2a775..ba0ed40 100644
+--- a/go.sum
++++ b/go.sum
+@@ -46,6 +46,8 @@ github.com/cilium/ebpf v0.16.0/go.mod h1:L7u2Blt2jMM/vLAVgjxluxtBKlz3/GWjB0dMOEn
+ github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
+ github.com/clipperhouse/uax29/v2 v2.2.0 h1:ChwIKnQN3kcZteTXMgb1wztSgaU+ZemkgWdohwgs8tY=
+ github.com/clipperhouse/uax29/v2 v2.2.0/go.mod h1:EFJ2TJMRUaplDxHKj1qAEhCtQPW2tJSwu5BF98AuoVM=
++github.com/cloudflare/circl v1.6.1 h1:zqIqSPIndyBh1bjLVVDHMPpVKqp8Su/V+6MeDzzQBQ0=
++github.com/cloudflare/circl v1.6.1/go.mod h1:uddAzsPgqdMAYatqJ0lsjX1oECcQLIlRpzZh3pJrofs=
+ github.com/cncf/udpa/go v0.0.0-20191209042840-269d4d468f6f/go.mod h1:M8M6+tZqaGXZJjfX53e64911xZQV5JYwmTeXPW+k8Sc=
+ github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
+ github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
