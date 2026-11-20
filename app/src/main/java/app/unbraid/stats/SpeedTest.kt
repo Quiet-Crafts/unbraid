@@ -338,7 +338,8 @@ object SpeedTest {
                         if (stop()) return@parallel // cancelled: nothing more is asked of M-Lab
                         val s = Ndt7.locate(tag(e), country)
                         // Outside the lock: a slow answer mustn't hold up a cancel on the main thread.
-                        val near = if (s == null && !stop()) Ndt7.locate(tag(e), country, strict = false) else null
+                        // Optional: a failed nearby lookup keeps the confirmed "none in its country"; M-Lab's limit still says so.
+                        val near = if (s == null && !stop()) runCatching { Ndt7.locate(tag(e), country, strict = false) }.getOrElse { if (it is Ndt7.Limited) throw it else null } else null
                         leg(e) { if (s != null) it.copy(server = s) else it.copy(missing = true, server = near) }
                     } catch (x: Ndt7.Limited) { leg(e) { it.copy(limited = true) } }
                     catch (x: Exception) { leg(e) { it.copy(error = "M-Lab couldn't be reached through it.") } }

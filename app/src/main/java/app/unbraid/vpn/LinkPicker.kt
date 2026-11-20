@@ -224,11 +224,11 @@ object LinkPicker {
         return p.trusts(l, acc)
     }
 
-    /** A pinned server always suits; an unpinned route's must suit its provider's page settings ([Provider.suits]). */
     /** Whether every provider route's [links] still suits its provider's settings as its latest list says. */
     fun stillSuits(setup: Setup, links: Map<String, Link>, providers: (String) -> Provider?) =
         setup.activeRoutes.all { r -> r.imported || links[r.id]?.let { suits(it, r, providers) } != false }
 
+    /** A pinned server always suits; an unpinned route's must suit its provider's page settings ([Provider.suits]). */
     private fun suits(l: Link, r: Route, providers: (String) -> Provider?) = r.loc.pinned != null || providers(r.loc.provider)?.suits(l.server) != false
 
     /** The first of [links] for unpinned route [r] whose server suits [p]'s settings as its last list confirmed; none is refused. */
