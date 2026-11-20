@@ -327,6 +327,8 @@ object AirVpn : KeyProvider() {
         val a = account(super.signIn(mapOf("key" to conf)))
         // A device AirVPN doesn't know gets the Default device's config: the address must be this device's own.
         if (!d.ipv4.isNullOrEmpty() && a.address.none { it.substringBefore('/') == d.ipv4 }) throw app.unbraid.vpn.Fail("AirVPN sent another device's config. Try again")
+        // Right after a renewal the generator can still hand out the old key: saved as new, the route would stay dead.
+        if (!d.key.isNullOrBlank() && WgKeys.publicOf(a.privateKey) != d.key.trim()) throw app.unbraid.vpn.Fail("AirVPN sent an older key for ${d.name}. Try again in a minute")
         return NordApi.json.encodeToString(Account.serializer(), a.copy(apiKey = key, device = d.name, deviceKey = d.key, deviceId = d.id.ifEmpty { null }, ownDevice = own, keyAt = System.currentTimeMillis()))
     }
 

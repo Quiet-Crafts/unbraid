@@ -7,6 +7,7 @@ import app.unbraid.data.Location
 import app.unbraid.data.Server
 import app.unbraid.data.Snapshot
 import app.unbraid.data.Surfshark
+import app.unbraid.data.WgKeys
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -128,7 +129,11 @@ class KeySourcesTest {
 
     private val apiKey = "0123456789abcdef".repeat(4)
 
-    private class Dev(val id: String, var name: String, var status: String, var key: String, var ip: String, var readyAt: Int = 0, var deleteUndone: Boolean = false)
+    private class Dev(val id: String, var name: String, var status: String, var key: String, var ip: String, var readyAt: Int = 0, var deleteUndone: Boolean = false) {
+        /** The private key the generator hands out; [key] is its public key, as AirVPN lists it. */
+        var priv = ""
+        fun newKey() { WgKeys.generate().let { priv = it.private; key = it.public } }
+    }
 
     /**
      * An AirVPN account as its API behaves: devices by id; an added one starts as "New device" and turns ready after
@@ -136,7 +141,7 @@ class KeySourcesTest {
      * own address, or the first (Default) device's for a name it doesn't know.
      */
     private inner class FakeAir(vararg names: String) {
-        val devices = names.mapIndexed { i, n -> Dev("id$i", n, "ready", "k$i", "10.171.0.${i + 1}") }.toMutableList()
+        val devices = names.mapIndexed { i, n -> Dev("id$i", n, "ready", "", "10.171.0.${i + 1}").apply { newKey() } }.toMutableList()
         val calls = mutableListOf<Pair<String, Map<String, String>>>()
         var refuseAdd = false
         var loseAdd = false
@@ -146,6 +151,8 @@ class KeySourcesTest {
         var renews = 0
         var refuseRenew = false
         var sessions = 0
+        /** A generator that still hands out a device's key from before its renewal. */
+        var stale: String? = null
 
         init {
             AirVpn.status = { res("airvpn_status.json") }
@@ -161,7 +168,7 @@ class KeySourcesTest {
                 "devices" -> when (q["action"]) {
                     null -> {
                         lists++
-                        devices.filter { it.status == "create" && lists >= it.readyAt }.forEach { it.status = "ready"; it.key = "k-${it.id}-$renews"; it.ip = "10.171.9.${devices.indexOf(it) + 10 * renews}" }
+                        devices.filter { it.status == "create" && lists >= it.readyAt }.forEach { it.status = "ready"; it.newKey(); it.ip = "10.171.9.${devices.indexOf(it) + 10 * renews}" }
                         """{"action":"list","devices":[${devices.joinToString(",") { """{"id":"${it.id}","name":"${it.name}","status":"${it.status}","wireguard_public_key":${it.key.ifEmpty { null }?.let { k -> "\"$k\"" }},"wireguard_ipv4":${it.ip.ifEmpty { null }?.let { i -> "\"$i\"" }}}""" }}],"result":"ok"}"""
                     }
                     "add" -> {
@@ -184,7 +191,7 @@ class KeySourcesTest {
                 "generator" -> generated ?: """
                     [Interface]
                     Address = ${(devices.firstOrNull { it.name == q["device"] } ?: devices.first()).ip}/32
-                    PrivateKey = $priv
+                    PrivateKey = ${stale ?: (devices.firstOrNull { it.name == q["device"] } ?: devices.first()).priv}
                     MTU = 1320
                     DNS = 10.128.0.1
 
@@ -199,6 +206,23 @@ class KeySourcesTest {
                 else -> fail(service).let { "" }
             }
         }
+    }
+
+    /** Right after a renewal the generator may still serve the old key: not saved as new, the renewal stays open. */
+    @Test fun airvpnRenewalRefusesTheOldKey() {
+        val air = FakeAir("Default")
+        val a = AirVpn.account(airSignIn())
+        val old = air.devices.last().priv
+        val due = a.keyAt + 8 * 86_400_000L
+        val saved = mutableListOf<String>()
+        air.stale = old
+        try { AirVpn.rotate(enc(a), 7, due, false) { saved += it; true }; fail() } catch (e: IOException) { assertTrue("older key" in e.message!!) }
+        assertEquals(listOf(due), saved.map { AirVpn.account(it).renewing }) // only the start of the renewal
+        air.stale = null
+        assertTrue(AirVpn.rotate(saved.single(), 7, due, true) { saved += it; true })
+        val b = AirVpn.account(saved.last())
+        assertEquals(listOf(0L, air.devices.last().key), listOf(b.renewing, b.deviceKey))
+        assertTrue(b.privateKey != old)
     }
 
     /** Only unbraid's own device is renewed, when due; asked for once, finished where it stopped, dropped when refused or lost. */
@@ -467,7 +491,7 @@ class KeySourcesTest {
         val blob = airSignIn("phone")
         val a = AirVpn.account(blob)
         assertEquals(listOf("10.171.0.2/32"), a.address)
-        assertEquals(listOf("Phone", "k1", "id1", false), listOf(a.device, a.deviceKey, a.deviceId, a.ownDevice))
+        assertEquals(listOf("Phone", air.devices[1].key, "id1", false), listOf(a.device, a.deviceKey, a.deviceId, a.ownDevice))
         // Answering the question never tries to add a device again.
         assertTrue(air.calls.none { it.second["action"] == "add" })
         assertEquals("Uses your device Phone. See all your devices in the AirVPN Client Area", AirVpn.device(blob)?.line)

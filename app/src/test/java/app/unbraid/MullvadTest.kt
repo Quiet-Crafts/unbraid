@@ -46,6 +46,15 @@ class MullvadTest {
         assertArrayEquals(hex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"), pub)
     }
 
+    /** RFC 7748 section 6.1 (Alice), and agreement with the platform's own key pairs. */
+    @Test fun publicKeyFromPrivate() {
+        val b64 = { h: String -> Base64.getEncoder().encodeToString(hex(h)) }
+        assertEquals(b64("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"), WgKeys.publicOf(b64("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")))
+        repeat(20) { WgKeys.generate().let { k -> assertEquals(k.public, WgKeys.publicOf(k.private)) } }
+        assertNull(WgKeys.publicOf("not a key"))
+        assertNull(WgKeys.publicOf(Base64.getEncoder().encodeToString(ByteArray(16))))
+    }
+
     @Test fun generatedKeysAreWireGuardFormat() {
         val k = WgKeys.generate()
         assertEquals(44, k.private.length)

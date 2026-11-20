@@ -7,6 +7,7 @@ import app.unbraid.data.Location
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import kotlinx.serialization.json.jsonArray
@@ -37,6 +38,9 @@ class IvpnTest {
             val e = try { Ivpn.session(200 to """{"status":200,"token":"tok2","wireguard":$wg}""", "a", "p", "kem"); null } catch (e: Ivpn.NoPq) { e }
             assertEquals("tok2", e!!.token)
             assertEquals(Ivpn.NO_PQ, e.message)
+            // The device this sign-in took is given back; when that fails, the user is told to remove it.
+            assertSame(e, Ivpn.unfreed(e, freed = true))
+            assertTrue("IVPN client area" in Ivpn.unfreed(e, freed = false).message!!)
         }
         // Signed in before quantum-safe existed: still connects, the page says it isn't on yet.
         val old = """{"accountId":"a","sessionToken":"t","privateKey":"k","ipAddress":"10.0.0.2"}"""

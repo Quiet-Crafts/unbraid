@@ -5,6 +5,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import java.io.IOException
+import java.math.BigInteger
 import java.net.URL
 import java.security.KeyPairGenerator
 import java.security.NoSuchAlgorithmException
@@ -33,6 +34,32 @@ internal object WgKeys {
         priv[0] = (priv[0].toInt() and 248).toByte()
         priv[31] = ((priv[31].toInt() and 127) or 64).toByte()
         return Keys(b64(priv), b64(raw(kp.public.encoded)))
+    }
+
+    /**
+     * The public key of a base64 WireGuard [private] key (X25519 with the base point, RFC 7748), or null when it isn't a
+     * key. Done here because Android's providers can't build a key from raw bytes on every version.
+     */
+    fun publicOf(private: String): String? {
+        val k = runCatching { Base64.getDecoder().decode(private.trim()) }.getOrNull()?.takeIf { it.size == 32 } ?: return null
+        k[0] = (k[0].toInt() and 248).toByte(); k[31] = ((k[31].toInt() and 127) or 64).toByte()
+        val p = BigInteger.ONE.shiftLeft(255) - BigInteger.valueOf(19)
+        val a24 = BigInteger.valueOf(121665)
+        var x2 = BigInteger.ONE; var z2 = BigInteger.ZERO; var x3 = BigInteger.valueOf(9); var z3 = BigInteger.ONE
+        var swap = 0
+        for (t in 254 downTo 0) {
+            val bit = (k[t / 8].toInt() shr (t % 8)) and 1
+            if ((swap xor bit) == 1) { x2 = x3.also { x3 = x2 }; z2 = z3.also { z3 = z2 } }
+            swap = bit
+            val a = (x2 + z2).mod(p); val aa = (a * a).mod(p); val b = (x2 - z2).mod(p); val bb = (b * b).mod(p)
+            val e = (aa - bb).mod(p); val c = (x3 + z3).mod(p); val d = (x3 - z3).mod(p)
+            val da = (d * a).mod(p); val cb = (c * b).mod(p)
+            x3 = (da + cb).pow(2).mod(p); z3 = (BigInteger.valueOf(9) * (da - cb).pow(2)).mod(p)
+            x2 = (aa * bb).mod(p); z2 = (e * (aa + a24 * e)).mod(p)
+        }
+        if (swap == 1) { x2 = x3; z2 = z3 }
+        val u = (x2 * z2.modPow(p - BigInteger.valueOf(2), p)).mod(p).toByteArray().reversedArray().copyOf(32)
+        return b64(u)
     }
 
     /** PKCS#8 / X.509 wrappers both end with the 32 raw key bytes. */

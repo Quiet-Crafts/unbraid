@@ -66,6 +66,10 @@ object Ivpn : Provider {
     /** A session IVPN opened without a usable quantum-safe key; [token] lets the sign-in close it again. */
     internal class NoPq(val token: String) : app.unbraid.vpn.Fail(NO_PQ)
     internal const val NO_PQ = "IVPN didn't send a quantum-safe key, so $APP didn't finish signing in. Try again later"
+    /** The sign-in's error, telling the user when the device it took couldn't be given back. */
+    internal fun unfreed(e: NoPq, freed: Boolean): Exception = if (freed) e else app.unbraid.vpn.Fail(
+        "IVPN didn't send a quantum-safe key, so $APP didn't finish signing in, and it couldn't free the device this sign-in took. " +
+            "Remove it in the IVPN client area, then try again later")
 
     @Serializable
     internal class Plan(val name: String = "", @SerialName("device_limit") val deviceLimit: Int = 0)
@@ -275,8 +279,8 @@ object Ivpn : Provider {
             session(postJsonRaw("$API/v4/session/new", sessionBody(acct, keys.public, kemPublic, input).toString()), acct, keys.private, kemPrivate, forced(acct, input))
         } catch (e: NoPq) {
             // Free the slot this sign-in just took: without the key this session is of no use.
-            runCatching { postJsonRaw("$API/v4/session/delete", buildJsonObject { put("session_token", e.token) }.toString()) }
-            throw e
+            val freed = runCatching { postJsonRaw("$API/v4/session/delete", buildJsonObject { put("session_token", e.token) }.toString()).first in 200..299 }.getOrDefault(false)
+            throw unfreed(e, freed)
         }
     }
 
