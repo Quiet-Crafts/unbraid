@@ -674,6 +674,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             throw Fail(failure)
         }
 
+    /** Whether route [id]'s running tunnel lacks the V2Ray disguise its provider page asks for. */
+    private fun plain(setup: Setup, id: String) = setup.route(id)?.takeIf { !it.imported }?.let { r ->
+        setup.opt(r.loc.provider, app.unbraid.data.DISGUISE_OPT) == "v2ray" && (links[id] as? app.unbraid.data.WgLink)?.let { it.disguise == null } == true
+    } == true
+
     /**
      * Applies the newest setup without dropping the tunnel; routes whose location is unchanged keep their server. Takes
      * [lock] itself and lets go of it while providers are asked for servers, so a newer change (one that must block an
@@ -699,7 +704,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // wait blocked if that is the one still waiting: never on their real address for the time it takes. A tunnel
             // whose account was signed out or refused stops now too, not once the others are found.
             // So does a running tunnel that now has to go through another route (Via): never straight while the entry is fetched.
-            val stopNow = ready.blocked.any { (id, e) -> (e is AuthException || setup.route(id)?.via != null) && id in links } ||
+            // And a running tunnel without the disguise its provider now asks for: never plain while a disguised one is fetched.
+            val stopNow = ready.blocked.any { (id, e) -> (e is AuthException || setup.route(id)?.via != null || plain(setup, id)) && id in links } ||
                 links.keys.any { id -> setup.route(id)?.via != applied?.route(id)?.via }
             if ((stopNow || LinkPicker.leavesDirect(applied, setup, setup.activeRoutes.mapTo(HashSet()) { it.id }, lastInput?.tsSuffix, store.tsSuffix)) && !install(srv, setup, ready, accounts, seen)) return
             Ask(srv, setup, accounts, ready, applied, appliedAccounts, refusedFor(setup, accounts), store.lastLinks, generation, seen)
@@ -860,7 +866,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 if (dropping != state.value.dropping) state.update { it.copy(dropping = dropping) }
                 val deadTags = checked.filter { t -> streaks[t]?.let { Health.dead(it, now, holds[t] ?: 0) } == true }
                 // A dead tunnel on Automatic also tries its provider's next port: a failed check can't tell a blocked port from a dead server.
-                fun steps(id: String) = current.route(id)?.takeIf { !it.imported }?.loc?.provider?.takeIf { p -> (links[id] as? app.unbraid.data.WgLink)?.ports.orEmpty().size > 1 && current.opt(p, app.unbraid.data.PORT_OPT) == app.unbraid.data.AUTO && current.opt(p, app.unbraid.data.DISGUISE_OPT) != "v2ray" }
+                fun steps(id: String) = current.route(id)?.takeIf { !it.imported }?.loc?.provider?.takeIf { p -> (links[id] as? app.unbraid.data.WgLink)?.ports.orEmpty().size > 1 && current.opt(p, app.unbraid.data.PORT_OPT) == app.unbraid.data.AUTO && current.opt(p, app.unbraid.data.DISGUISE_OPT) != "v2ray" && (links[id] as? app.unbraid.data.WgLink)?.hopEntry == null }
                 // Only what a move restarts every tunnel for spends the move budget; imported routes keep their warning.
                 deadTags.forEach { t ->
                     val acts = byTag[t].orEmpty().any { id -> current.route(id)?.let(Health::movable) == true || steps(id) != null }
@@ -876,9 +882,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 // Given up on: still checked for a removed device (each time its hold ends while dead), but neither moved nor
                 // port-stepped (each restarts every tunnel).
                 val moving = byTag.filterKeys { it in deadTags && it !in given }.values.flatten().filter { it in dead }
-                // An Automatic route whose WireGuard failed on every port on this network goes over OpenVPN TCP instead.
+                // An Automatic route whose WireGuard failed on every port on this network goes over OpenVPN TCP instead;
+                // not one going Via another route, which works over WireGuard only.
                 val toTcp = moving.filter { id ->
-                    val r = s.route(id) ?: return@filter false
+                    val r = s.route(id)?.takeIf { it.via == null } ?: return@filter false
                     val l = links[id] as? app.unbraid.data.WgLink ?: return@filter false
                     r.loc.protocol == app.unbraid.data.AUTO_PROTOCOL && (steps(id)?.let { p -> (portStep[p] ?: 0) + 1 >= l.ports.size } ?: true) && app.unbraid.data.AutoProtocol.toTcp(id)
                 }.toSet()
