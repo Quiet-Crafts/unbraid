@@ -215,17 +215,24 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val now = vpn.value.takeIf { it.phase == VpnState.Phase.On } ?: return@withContext true
         val running = UnbraidVpn.running ?: return@withContext true
         val answered = exits.value.filterValues { it.engine == now.engine && it.ip != null }
+        // While a speed test has Tailscale leave by another exit node, its address isn't the route's: asked once it is back.
+        val switched = { app.unbraid.stats.SpeedTest.testing || store.tsTestFrom != null }
+        val held = switched()
         val tags = UnbraidVpn.tags.filterKeys { id -> id !in answered && running.activeRoutes.any { it.id == id } }
-        if (tags.isEmpty()) return@withContext true
-        tried.let { (e, n) -> if (e == now.engine && n >= 4) return@withContext false; tried = now.engine to (if (e == now.engine) n + 1 else 1) }
+            .filterValues { !held || it != app.unbraid.vpn.Compiler.TS_TAG }
+        if (tags.isEmpty()) return@withContext !held
+        // A round while a test holds Tailscale's answer back isn't counted: the route is still asked once it ends.
+        if (!held) tried.let { (e, n) -> if (e == now.engine && n >= 4) return@withContext false; tried = now.engine to (if (e == now.engine) n + 1 else 1) }
         val seen = app.unbraid.vpn.ExitCheck.ask(tags.values)
         val at = System.currentTimeMillis()
-        val reports = tags.mapValues { (id, t) -> app.unbraid.vpn.ExitReport(seen[t], at, now.engine, now.servers[id]) }
+        // A test that started meanwhile may have switched it during the ask: that answer is dropped too.
+        val late = switched()
+        val reports = tags.filterValues { !late || it != app.unbraid.vpn.Compiler.TS_TAG }.mapValues { (id, t) -> app.unbraid.vpn.ExitReport(seen[t], at, now.engine, now.servers[id]) }
         // On the main thread, like the clearing above: a restart while asking means these answers are already stale.
         withContext(Dispatchers.Main) {
             if (vpn.value.phase == VpnState.Phase.On && vpn.value.engine == now.engine) exits.value = exits.value.filterValues { it.engine == now.engine } + reports
         }
-        reports.values.all { it.ip != null }
+        !held && !late && reports.values.all { it.ip != null }
     }
 
     fun acceptDisclosure() {

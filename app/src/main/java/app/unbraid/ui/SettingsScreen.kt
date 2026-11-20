@@ -225,6 +225,9 @@ private var path: List<String> = emptyList()
 /** The tour shows the hub: the next time Settings opens, it opens there. */
 fun settingsHub() { path = emptyList() }
 
+/** The next time Settings opens, it opens on Providers & servers (own servers, Tailscale). */
+fun settingsProviders() { path = listOf("providers") }
+
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefault: () -> Unit) {

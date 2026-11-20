@@ -284,8 +284,12 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     // for any that didn't answer yet: a tunnel can take some seconds to carry traffic. Only while Routes is on screen;
     // leaving it stops the asking.
     val activeIds = remember(setup) { setup.activeRoutes.map { it.id } }
-    var asking by remember(on, vpn.engine, activeIds) { mutableStateOf(on && ui.exitTriesLeft()) }
-    LaunchedEffect(on, vpn.engine, activeIds) {
+    // A speed test holds Tailscale's answer back (it may leave by another node meanwhile): asked again once the test ends.
+    val testRun by app.unbraid.stats.SpeedTest.run.collectAsStateWithLifecycle()
+    val testAll by app.unbraid.stats.SpeedTest.all.collectAsStateWithLifecycle()
+    val testing = remember(testRun, testAll) { app.unbraid.stats.SpeedTest.testing }
+    var asking by remember(on, vpn.engine, activeIds, testing) { mutableStateOf(on && ui.exitTriesLeft()) }
+    LaunchedEffect(on, vpn.engine, activeIds, testing) {
         if (!on) return@LaunchedEffect
         delay(3_000)
         for (wait in listOf(10_000L, 20_000L, 40_000L)) { if (ui.checkExits() || !ui.exitTriesLeft()) break; delay(wait) }

@@ -89,6 +89,7 @@ import app.unbraid.ui.VpnDisclosure
 import app.unbraid.ui.UpdateAsk
 import app.unbraid.ui.Welcome
 import app.unbraid.ui.settingsHub
+import app.unbraid.ui.settingsProviders
 import app.unbraid.ui.importTarget
 import app.unbraid.ui.reselected
 import app.unbraid.stats.Stats
@@ -301,6 +302,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 BackupHost(ui)
+                val appsState = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
                 Box(Modifier.fillMaxSize()) {
                 // While touring the app is looked at, not used: TalkBack reads the tour's note only.
                 Column(Modifier.fillMaxSize().background(Ink.ground).then(if (tour >= 0) Modifier.clearAndSetSemantics {} else Modifier)) {
@@ -324,11 +326,13 @@ class MainActivity : ComponentActivity() {
                                                     ui, target, close = { picker = null },
                                                     // Both come back here: Add provider closes onto the picker, Back from Settings reopens it.
                                                     settings = { pickerAfter = picker; picker = null; settingsHub(); tab = Tab.Settings }, addProvider = { adding = true },
+                                                    servers = { pickerAfter = picker; picker = null; settingsProviders(); tab = Tab.Settings },
                                                 )
                                             }
                                         }
                                         screen == Tab.Routes.name -> RoutesScreen(ui, ::connect, leakSetup = { sheet = "leak" }, quiet = tour < 0 && sheet == null && limit == null) { picker = it }
-                                        screen == Tab.Apps.name -> AppsScreen(ui, disclose = { sheet = "apps" }) { picker = it }
+                                        // Kept across tabs, as across a rotation: search, filter and system apps stay as left.
+                                        screen == Tab.Apps.name -> appsState.SaveableStateProvider(Tab.Apps.name) { AppsScreen(ui, disclose = { sheet = "apps" }) { picker = it } }
                                         screen == Tab.Stats.name -> StatsScreen(ui)
                                         else -> SettingsScreen(ui, addProvider = { adding = true }, tour = { tour = 0 }) { picker = "default" }
                                     }

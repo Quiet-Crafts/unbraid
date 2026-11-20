@@ -176,7 +176,7 @@ private suspend fun serverList(ui: Ui, loc: Location): Result<List<Server>> = wi
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit, addProvider: () -> Unit) {
+fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit, addProvider: () -> Unit, servers: () -> Unit = settings) {
     val context = LocalContext.current
     val setup by ui.setup.collectAsStateWithLifecycle()
     val catalogs by ui.countries.collectAsStateWithLifecycle()
@@ -384,7 +384,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
                 else "Add or manage servers in Settings.",
                 style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f),
             )
-            Secondary("Open Settings", settings)
+            Secondary("Open Settings", servers) // where own servers and Tailscale are: Providers & servers
         }
     }
 
