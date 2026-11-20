@@ -648,7 +648,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (netWorker == null) netWorker = scope.launch {
             // A new network always tries; a timer only if it is still the one set ([retryTicket]): an older one's kick that
             // waited in the channel would otherwise try early and move the backoff on.
-            for (k in netKicks) try { netWanted.getAndSet(-1).let { s -> if (s >= 0) reload(forSession = s.toInt()) else fired.getAndSet(0).takeIf { it != 0L }?.let { reload(timer = it) } } }
+            // Each wake looks at both: a stale network change must not swallow a timer that fired with it.
+            for (k in netKicks) try {
+                netWanted.getAndSet(-1).let { s -> if (s >= 0) reload(forSession = s.toInt()) }
+                fired.getAndSet(0).takeIf { it != 0L }?.let { reload(timer = it) }
+            }
             catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { Log.e(TAG, "retry: ${logLine(e)}") } // one failed try never ends the worker
         }
         val ticket = ++retryTicket
