@@ -243,7 +243,7 @@ class BackupFlow(private val ui: Ui) {
                 }
             }
             busy = false
-            r.onSuccess { sealed = it; sealedLeft = !withKeys && Backup.hasSecrets(setup); pickSave("unbraid-backup-${java.time.LocalDate.now()}.unbraid") }
+            r.onSuccess { sealed = it; sealedLeft = !withKeys && Backup.hasSecrets(setup); pickSave("unbraid-backup-${java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmm"))}.unbraid") }
                 .onFailure { e -> finish(false, (e as? Backup.Failed)?.message ?: "Couldn't make the backup. Try again.") }
         }
     }
@@ -307,10 +307,12 @@ class BackupFlow(private val ui: Ui) {
         if (!ready(here)) return
         var target: Setup? = null
         val keepAs = PREVIOUS.takeIf { keep && keepable == true }
-        // Counted first: the running engine's setup is gone once the store changes, so a refused reload must stop the VPN.
-        UnbraidVpn.restores.incrementAndGet()
         var moved = false
-        val saved = Unbraid.store.update { s -> if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)?.also { target = it } ?: s }
+        // Counted before the store changes, and only when the restore changes the setup: the running engine's setup is then
+        // gone, so a refused reload must stop the VPN. A restore that leaves the setup as it is (the same backup again)
+        // leaves the engine on a setup that still exists, and a later refused edit keeps it running as any refused edit does.
+        val saved = Unbraid.store.update { s -> if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)
+            ?.also { target = it; if (it != s) UnbraidVpn.restores.incrementAndGet() } ?: s }
         val t = target
         if (t == null || Unbraid.store.setup.value != t) {
             finish(false, if (t == null && !moved) KEEP_NO_ROOM else "Couldn't restore: your settings are busy. Try again.")
