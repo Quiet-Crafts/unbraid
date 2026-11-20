@@ -106,7 +106,8 @@ object LinkPicker {
         val host = setup.opt(p, app.unbraid.data.ENTRY_OPT)?.toIntOrNull()?.let { l.entries.getOrNull(it - 1) } ?: l.peer.endpoint.substringBeforeLast(':')
         val port = setup.opt(p, app.unbraid.data.PORT_OPT)?.toIntOrNull()?.takeIf { it in 1..65535 }
             ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[(step[p] ?: 0) % it.size] } ?: l.peer.endpoint.substringAfterLast(':')
-        return l.copy(peer = l.peer.copy(endpoint = "$host:$port", mtu = app.unbraid.data.mtu(setup.opt(p, app.unbraid.data.MTU_OPT))))
+        return l.copy(peer = l.peer.copy(endpoint = "$host:$port", mtu = app.unbraid.data.mtu(setup.opt(p, app.unbraid.data.MTU_OPT)),
+            junk = if (setup.opt(p, app.unbraid.data.JUNK_OPT) == "on") app.unbraid.data.JUNK_COUNT else 0))
     }
 
     /**

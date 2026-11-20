@@ -50,6 +50,8 @@ data class WgPeer(
     val mtu: Int = 1420,
     /** Seconds between keepalives as an imported config asks (0 = none); null = unbraid's 25. */
     val keepalive: Int? = null,
+    /** Random packets the engine sends before each handshake ([app.unbraid.data.JUNK_OPT]); 0 = none. */
+    val junk: Int = 0,
 )
 
 /** An imported OpenVPN profile (ExpressVPN, CyberGhost…): the raw .ovpn plus its login. */

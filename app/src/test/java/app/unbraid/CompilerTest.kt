@@ -692,6 +692,16 @@ class CompilerTest {
         assertEquals("r-a", dns["detour"]!!.jsonPrimitive.content)
     }
 
+    /** Junk packets: the provider page's switch reaches each of its WireGuard tunnels, and only those. */
+    @Test fun junkPacketsFollowTheProviderPage() {
+        val s = Setup(routes = listOf(Route("a", Location("nord", 1, "NL", "Netherlands"))), defaultRoute = "a")
+        val links = mapOf("a" to WgLink(sv("a"), Nord.peer(sv("a"), key)))
+        fun ep(setup: Setup) = compile(setup, links = app.unbraid.vpn.LinkPicker.ported(setup, links, emptyMap()))["endpoints"]!!.jsonArray.single().jsonObject
+        assertNull(ep(s)["junk"])
+        val on = s.copy(opts = mapOf("nord" to mapOf(app.unbraid.data.JUNK_OPT to "on")))
+        assertEquals(5, ep(on)["junk"]!!.jsonPrimitive.content.toInt())
+    }
+
     @Test fun differentKeyOrServerIsNotShared() {
         val other = "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30="
         assertEquals(listOf("r-a", "r-b"), two(WgLink(sv("a"), Nord.peer(sv("a"), other))).first.endpointTags())
