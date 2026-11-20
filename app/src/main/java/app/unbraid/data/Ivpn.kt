@@ -67,7 +67,7 @@ object Ivpn : Provider {
     internal class NoPq(val token: String) : app.unbraid.vpn.Fail(NO_PQ)
     internal const val NO_PQ = "IVPN didn't send a quantum-safe key, so $APP didn't finish signing in. Try again later"
     /** The sign-in's error, telling the user when the device it took couldn't be given back. */
-    internal fun unfreed(e: NoPq, freed: Boolean): Exception = if (freed) e else app.unbraid.vpn.Fail(
+    internal fun unfreed(e: NoPq, freed: Boolean): Exception = if (freed) e else DeviceLeftTaken(
         "IVPN didn't send a quantum-safe key, so $APP didn't finish signing in, and it couldn't free the device this sign-in took. " +
             "Remove it in the IVPN client area, then try again later")
 

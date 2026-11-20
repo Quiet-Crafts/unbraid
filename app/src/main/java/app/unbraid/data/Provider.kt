@@ -19,6 +19,9 @@ class SlotsFull(message: String, url: String?, val confirm: String, val retry: M
  */
 class Challenge(message: String, val field: Field, val image: ByteArray? = null, val keep: Map<String, String> = emptyMap()) : IOException(message)
 
+/** A sign-in that failed and left one of the account's devices taken: told also when its form was closed meanwhile. */
+class DeviceLeftTaken(message: String) : app.unbraid.vpn.Fail(message)
+
 /** A route asks for something this account can't do (a protocol it has no sign-in for): final, so no cached tunnel stands in. */
 class Unsupported(message: String) : app.unbraid.vpn.Fail(message)
 

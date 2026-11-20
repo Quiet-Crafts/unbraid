@@ -353,7 +353,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                     reads.merge(id, 1, Int::plus)
                     form.keys.filter { it.startsWith("$id:") }.forEach { form.remove(it) }
                 }
-                if (!dismissed.remove(id)) {
+                // Closed meanwhile: no form to show it in, but a device left taken still has to be removed by hand.
+                if (dismissed.remove(id)) { if (failure is app.unbraid.data.DeviceLeftTaken && error != null) warn(error) }
+                else {
                     error?.let { formError[id] = it }
                     (failure as? app.unbraid.data.AuthException)?.url?.let { formLink[id] = it }
                     // A new question replaces the last one (its answer is spent); any other outcome ends the questions.

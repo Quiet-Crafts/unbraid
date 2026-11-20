@@ -41,6 +41,9 @@ class IvpnTest {
             // The device this sign-in took is given back; when that fails, the user is told to remove it.
             assertSame(e, Ivpn.unfreed(e, freed = true))
             assertTrue("IVPN client area" in Ivpn.unfreed(e, freed = false).message!!)
+            // Told also when the sign-in form was closed before IVPN answered.
+            assertTrue(Ivpn.unfreed(e, freed = false) is app.unbraid.data.DeviceLeftTaken)
+            assertTrue(java.io.File("src/main/java/app/unbraid/ui/Ui.kt").readText().contains("if (dismissed.remove(id)) { if (failure is app.unbraid.data.DeviceLeftTaken && error != null) warn(error) }\n                else {"))
         }
         // Signed in before quantum-safe existed: still connects, the page says it isn't on yet.
         val old = """{"accountId":"a","sessionToken":"t","privateKey":"k","ipAddress":"10.0.0.2"}"""
