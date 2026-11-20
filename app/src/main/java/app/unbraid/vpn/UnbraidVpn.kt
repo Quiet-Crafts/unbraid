@@ -374,10 +374,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         pending++
         waiting.incrementAndGet()
         inbox.trySend(intent to locked)
-        // While paused (or asked to pause) Android must not start the service again on its own after killing it: that start
-        // would reconnect and end the pause early. The resume alarm survives the kill and reconnects at the pause's end.
-        val pausing = state.value.phase == VpnState.Phase.Paused || intent?.action == ACTION_PAUSE && !locked && state.value.phase != VpnState.Phase.Off
-        return if (intent?.action == ACTION_STOP && !locked || pausing) START_NOT_STICKY else START_STICKY
+        return if (intent?.action == ACTION_STOP && !locked) START_NOT_STICKY else START_STICKY
     }
 
     /** Android's Always-on and Block connections settings, which can change while connected. Caller holds [lock]. */
@@ -407,6 +404,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     if (state.value.phase == VpnState.Phase.On) { if (holding) notice(UNREADABLE) else notify(store.setup.value) } else stopWanted = state.value.phase == VpnState.Phase.Off
                     return
                 }
+                // Android's own start (after it killed the app, or Always-on) during a pause the user set: paused on until its end.
+                if ((intent == null || intent.action == VpnService.SERVICE_INTERFACE) && state.value.phase == VpnState.Phase.Off) PauseNote.left(this)?.let { pause(it, again = true); return }
                 connect(intent?.getBooleanExtra(EXTRA_UPDATED, false) == true)
             }
         }
@@ -503,6 +502,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * Runs the engine with every app's connections refused, until the saved settings open (the app's Try again) or the
      * user starts fresh; then connects with them. Disconnect and Pause work as always. Caller holds [lock].
      */
+    /** Whether [lastBlock] was noted down as spent; a hold on a block that wasn't answers no lookup ([hold]). */
+    private var lastNoted = true
+
     private fun hold() {
         forgetLookups(this)
         val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
@@ -510,7 +512,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val block = fakeBlock()
         // A block that couldn't be noted down is no reason to leave apps out: the hold still starts, offline, but answers no
         // lookup at all, as a stand-in address from that block could be handed out again by the next process.
-        val noted = block == lastBlock || runCatching { store.fakeBlock = block }.onFailure { Log.e(TAG, "hold: ${logLine(it)}") }.isSuccess
+        val noted = block == lastBlock && lastNoted || runCatching { store.fakeBlock = block }.onFailure { Log.e(TAG, "hold: ${logLine(it)}") }.isSuccess
+        lastNoted = noted
         val json = Compiler.blockAll(packageName, File(filesDir, "cache.db").path, block, lookups = noted)
         engine("The connection engine rejected this setup.") { Libbox.checkConfig(json) }
         if (block != lastBlock) blockSince = SystemClock.elapsedRealtime()
@@ -568,7 +571,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // A new block starts from a deleted table: never an old file, which a missing or bad one would follow into it.
             if (engine("$APP couldn't save its state. Try again.") { FakePool.spend(input.fakeBlock, lastBlock, filesDir) { store.fakeBlock = it } })
                 blockSince = SystemClock.elapsedRealtime()
-            lastBlock = input.fakeBlock
+            lastBlock = input.fakeBlock; lastNoted = true
             // The point of no return: the old engine's way in goes now, as it may be closed by the time the start fails.
             probe = null
             lastGood = null
@@ -618,6 +621,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * Routes blocked for a passing reason (no network, provider unreachable) try again after 5 s, 15 s, 30 s, 1 min,
      * then every 5 min; signed-out or refused ones wait for a sign-in, which reloads by itself.
      */
+    private val netKicks = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
+    private var netWorker: Job? = null
+
     private fun retryBlocked(blocked: Map<String, Exception>) {
         retry?.cancel(); retry = null
         retrying = blocked
@@ -627,8 +633,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             kotlinx.coroutines.delay(wait)
             reload()
         }
-        // A new network is the likeliest fix: try at once, with the backoff kept for what follows.
-        net.onChange = { scope.launch { lock.withLock { retry?.cancel(); retry = null }; reload() } }
+        // A new network is the likeliest fix: try at once, with the backoff kept for what follows. One at a time, the newest
+        // change last: an older try that fails after a newer one worked can't put its blocked result over it.
+        if (netWorker == null) netWorker = scope.launch { for (k in netKicks) { lock.withLock { retry?.cancel(); retry = null }; reload() } }
+        net.onChange = { netKicks.trySend(Unit) }
     }
 
     /** Providers of [blocked] routes, and whether one refused its account. */
@@ -651,7 +659,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         probe = null // the old engine's way in goes with it
         lastGood = null
         if (input.fakeBlock != lastBlock) blockSince = SystemClock.elapsedRealtime()
-        lastBlock = input.fakeBlock
+        lastBlock = input.fakeBlock; lastNoted = true
         lastInput = input
         state.update { it.copy(tsSuffix = input.tsSuffix) }
         openTable(true)
@@ -1117,34 +1125,44 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     private fun cancelResume() {
         resume?.cancel(); resume = null
+        PauseNote.clear(this)
         getSystemService(AlarmManager::class.java).cancel(resumeIntent)
     }
 
     /** Traffic leaves without the VPN until resumed, by hand or after [minutes]. Caller holds [lock]. */
-    private fun pause(minutes: Int) {
-        if (state.value.phase != VpnState.Phase.On) return
+    private fun pause(minutes: Int) = pause(if (minutes > 0) minutes * 60_000L else 0L, again = false)
+
+    /**
+     * Pauses for [ms] (0: until resumed by hand). [again]: a pause Android's own start found noted ([PauseNote]), in a
+     * new process with no engine running. Its end is noted and its alarm set before the engine stops, so a kill at any
+     * point after leaves a restart that pauses on, or reconnects.
+     */
+    private fun pause(ms: Long, again: Boolean) {
+        if (state.value.phase != (if (again) VpnState.Phase.Off else VpnState.Phase.On)) return
         AfterUpdate.off(this) // paused by the user: an update never turns it back on
         // Read now: what the pause notice promises (apps offline or not) depends on them.
         val lockdown = isLockdownEnabled
         val alwaysOn = isAlwaysOn
-        stopEngine()
-        stopWanted = false
         val pause = ++pauses
-        val until = if (minutes > 0) System.currentTimeMillis() + minutes * 60_000L else 0L
+        val until = if (ms > 0) System.currentTimeMillis() + ms else 0L
+        // One deadline on the clock that counts sleep and ignores clock changes, for the coroutine and the alarm alike.
+        val wake = if (ms > 0) SystemClock.elapsedRealtime() + ms else 0L
+        // Only a pause with an end is noted: one until resumed by hand, kept by a note that couldn't be cleared, would never end.
+        if (wake > 0) PauseNote.note(this, wake) else PauseNote.clear(this)
         // Short steps against the elapsed clock: a single delay doesn't count while the phone sleeps.
         var exact = true
-        if (until > 0) {
-            // One deadline on the clock that counts sleep and ignores clock changes, for the coroutine and the alarm alike.
-            val wake = SystemClock.elapsedRealtime() + minutes * 60_000L
-            resume = scope.launch {
-                while (SystemClock.elapsedRealtime() < wake) kotlinx.coroutines.delay((wake - SystemClock.elapsedRealtime()).coerceIn(1, 15_000))
-                lock.withLock { if (state.value.phase == VpnState.Phase.Paused && pauses == pause) connect() }
-            }
+        if (wake > 0) {
             // The coroutine stalls while the phone sleeps; this wakes it so background traffic doesn't stay unprotected.
             // On time when Android allows exact alarms; otherwise it may come somewhat later, and the notice says so.
             val am = getSystemService(AlarmManager::class.java)
             exact = am.canScheduleExactAlarms() && runCatching { am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, wake, resumeIntent) }.isSuccess
             if (!exact) am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, wake, resumeIntent)
+        }
+        if (!again) stopEngine()
+        stopWanted = false
+        if (wake > 0) resume = scope.launch {
+            while (SystemClock.elapsedRealtime() < wake) kotlinx.coroutines.delay((wake - SystemClock.elapsedRealtime()).coerceIn(1, 15_000))
+            lock.withLock { if (state.value.phase == VpnState.Phase.Paused && pauses == pause) connect() }
         }
         val at = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(until))
         getSystemService(NotificationManager::class.java).notify(1, notification(if (until <= 0) "Paused" else if (exact) "Paused until $at" else "Paused until about $at", paused = true))

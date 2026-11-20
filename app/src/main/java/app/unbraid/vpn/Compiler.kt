@@ -135,11 +135,13 @@ object Compiler {
         val s = Setup(routes = listOf(none), defaultRoute = none.id, home = Home(), prefs = app.unbraid.data.Prefs(lan = false))
         val json = compile(Input(s, emptyMap(), selfPackage, false, "", cacheFile, fakeBlock = fakeBlock, blocked = setOf(none.id)))
         if (lookups) return json
-        // [lookups] false: no stand-in address is handed out either, as one from a block not noted down could come again.
+        // [lookups] false (the app's storage failed): no stand-in address is handed out, as one from a block not noted down
+        // could come again, and no cache file is opened, so the hold doesn't depend on storage either.
         val o = Json.parseToJsonElement(json).jsonObject
         val dns = o["dns"]!!.jsonObject
         val rules = buildJsonArray { add(obj("action" to "reject")); dns["rules"]?.jsonArray?.forEach { add(it) } }
-        return JsonObject(o + ("dns" to JsonObject(dns + ("rules" to rules)))).toString()
+        val experimental = o["experimental"]?.jsonObject?.let { JsonObject(it - "cache_file") }
+        return JsonObject(o + ("dns" to JsonObject(dns + ("rules" to rules))) + (experimental?.let { mapOf("experimental" to it) } ?: emptyMap())).toString()
     }
 
     fun compile(i: Input): String {

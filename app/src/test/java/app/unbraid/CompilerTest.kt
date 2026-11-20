@@ -462,6 +462,7 @@ class CompilerTest {
         assertEquals("""{"action":"reject"}""", held["dns"]!!.jsonObject["rules"]!!.jsonArray.first().toString())
         val usual = Json.parseToJsonElement(Compiler.blockAll("app.unbraid", "/tmp/cache.db", 3)).jsonObject
         assertEquals(usual["route"], held["route"])
+        assertEquals(null, held["experimental"]?.jsonObject?.get("cache_file"))
         assertEquals(usual["dns"]!!.jsonObject["rules"]!!.jsonArray.size + 1, held["dns"]!!.jsonObject["rules"]!!.jsonArray.size)
     }
 
