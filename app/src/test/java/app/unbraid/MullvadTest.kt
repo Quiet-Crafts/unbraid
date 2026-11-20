@@ -1,8 +1,14 @@
 package app.unbraid
 
 import app.unbraid.data.AuthException
+import app.unbraid.data.Link
 import app.unbraid.data.Location
 import app.unbraid.data.Mullvad
+import app.unbraid.data.Provider
+import app.unbraid.data.Providers
+import app.unbraid.data.Route
+import app.unbraid.data.Setup
+import app.unbraid.vpn.LinkPicker
 import app.unbraid.data.WgKeys
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -133,6 +139,70 @@ class MullvadTest {
         try { Mullvad.link(list, Location("mullvad", countryCode = "US", region = "us-lax"), acct, ownedOnly = true); fail() } catch (e: IOException) { assertTrue("Mullvad-owned" in e.message!!) }
         val rented = Mullvad.link(list, Location("mullvad", countryCode = "US", region = "us-lax"), acct).server
         assertEquals(rented, Mullvad.link(list, Location("mullvad", pinned = rented), acct, ownedOnly = true).server)
+    }
+
+    /** Turned on, Mullvad-owned only moves a running or cached unpinned route off a rented server, or blocks it; a pin stays. */
+    @Test fun ownedOnlyMovesARunningRouteOffARentedServer() {
+        val before = Providers.opt
+        try {
+            var on = false
+            Providers.opt = { p, k -> if (k == "owned") (if (on) "on" else "off") else before(p, k) }
+            Mullvad.ownedRelays = list.usable.filter { it.owned }.mapTo(HashSet()) { Triple(it.hostname, it.ip, it.publicKey) }
+            val p = object : Provider by Mullvad { override fun connect(loc: Location, account: String): Link = Mullvad.link(list, loc, acct) }
+            val rented = Mullvad.link(list, Location("mullvad", countryCode = "US", region = "us-lax"), acct)
+            val accounts = mapOf("mullvad" to "acc")
+            fun picked(r: Route, offline: Boolean = false): LinkPicker.Result {
+                val s = Setup(routes = listOf(r), defaultRoute = r.id)
+                return LinkPicker.pick(s, mapOf(r.id to rented), s, accounts, accounts, mapOf(LinkPicker.cacheKey(r) to rented), offline = offline) { p }
+            }
+            val lax = Route("1", Location("mullvad", countryCode = "US", region = "us-lax"))
+            val us = Route("1", Location("mullvad", countryCode = "US"))
+            val pin = Route("1", Location("mullvad", countryCode = "US", pinned = rented.server))
+            assertEquals(rented.server, picked(lax).links.getValue("1").server)
+            on = true
+            // Before the provider is asked, the running tunnel already stops: its apps wait blocked ([LinkPicker.Unsuited]).
+            assertTrue(picked(lax, offline = true).blocked.getValue("1") is LinkPicker.Unsuited)
+            assertTrue(picked(pin, offline = true).links.containsKey("1"))
+            val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+            assertTrue(vpn.contains("(e is AuthException || e is LinkPicker.Unsuited) && id in links"))
+            val blocked = picked(lax)
+            assertTrue(blocked.links.isEmpty())
+            assertTrue("Mullvad-owned" in blocked.blocked.getValue("1").message!!)
+            val owned = picked(us).links.getValue("1").server
+            assertTrue(owned.host.startsWith("us-nyc-"))
+            assertEquals(rented.server, picked(pin).links.getValue("1").server)
+            // Owned is confirmed for the relay as listed: another address or key under its name isn't.
+            assertFalse(Mullvad.suits(owned.copy(ip = "203.0.113.99")))
+            assertFalse(Mullvad.suits(owned.copy(publicKey = "other")))
+            // Two unpinned routes on one server: the other one taken for the second must be confirmed owned too, else it
+            // shares the owned one already found.
+            val nyc = picked(us).links.getValue("1")
+            val q = object : Provider by Mullvad {
+                override fun connect(loc: Location, account: String): Link = if (loc.pinned != null) Mullvad.link(list, loc, acct) else nyc
+                override fun servers(loc: Location, account: String, limit: Int) = listOf(rented.server)
+            }
+            val two = Setup(routes = listOf(us, us.copy(id = "2")), defaultRoute = "1", apps = mapOf("app.two" to "2"))
+            val out = LinkPicker.pick(two, emptyMap(), null, emptyMap(), accounts, emptyMap()) { q }
+            assertEquals(nyc.server, out.links.getValue("2").server)
+            // A list read for the second route that no longer confirms the first one's server blocks the first.
+            val owned1 = Mullvad.ownedRelays
+            val nl = Route("2", Location("mullvad", countryCode = "NL"))
+            val refreshing = object : Provider by Mullvad {
+                override fun connect(loc: Location, account: String): Link = if (loc.countryCode == "NL")
+                    Mullvad.link(list, loc, acct, ownedOnly = false).also { Mullvad.ownedRelays = setOf(Triple(it.server.host, it.server.ip, it.server.publicKey)) }
+                else nyc
+            }
+            val later = LinkPicker.pick(Setup(routes = listOf(us, nl), defaultRoute = "1", apps = mapOf("app.two" to "2")), emptyMap(), null, emptyMap(), accounts, emptyMap()) { refreshing }
+            assertEquals(setOf("2"), later.links.keys)
+            assertTrue("suits your settings" in later.blocked.getValue("1").message!!)
+            Mullvad.ownedRelays = owned1
+            // Without a list read to confirm it, a saved server isn't taken for owned.
+            Mullvad.ownedRelays = null
+            assertFalse(Mullvad.suits(owned))
+        } finally {
+            Providers.opt = before
+            Mullvad.ownedRelays = null
+        }
     }
 
     @Test fun automaticPortsAndBlockingCategories() {

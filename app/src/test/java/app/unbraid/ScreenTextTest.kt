@@ -16,6 +16,10 @@ import app.unbraid.ui.importTarget
 import app.unbraid.ui.emptyApps
 import app.unbraid.ui.systemLine
 import app.unbraid.ui.noLocations
+import app.unbraid.ui.nordLabels
+import app.unbraid.ui.nordOpening
+import app.unbraid.ui.ticked
+import app.unbraid.ui.toSave
 import app.unbraid.ui.routeWarning
 import app.unbraid.ui.connectedLabel
 import app.unbraid.ui.missingAppsText
@@ -33,8 +37,13 @@ import app.unbraid.ui.routeState
 import app.unbraid.ui.tickedTile
 import app.unbraid.ui.followSub
 import app.unbraid.ui.outsideNote
+import app.unbraid.ui.keptWith
+import app.unbraid.ui.lookupsSub
+import app.unbraid.ui.AppInfo
 import app.unbraid.data.Filter
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** What the main screens say and tick, from the setup alone. */
@@ -141,6 +150,23 @@ class ScreenTextTest {
         assertEquals("No country offers P2P right now. Choose another server type in Route options." to false, noLocations(true, null, "P2P"))
     }
 
+    /** A restored Nord route naming NordLynx or the standard servers as Nord's API does opens on them; anything else shows as Other. */
+    @Test fun pickerOpensOnRestoredNordChoices() {
+        val restored = nordOpening(Location("nord", 153, "NL", "Netherlands", group = "legacy_standard", protocol = "wireguard_udp"))
+        assertEquals(null to null, restored)
+        assertEquals("Standard" to "NordLynx", nordLabels(restored.first, restored.second))
+        assertEquals("legacy_p2p" to "openvpn_tcp", nordOpening(Location("nord", group = "legacy_p2p", protocol = "openvpn_tcp")))
+        assertEquals("Other" to "Other", nordLabels("legacy_obfuscated_servers", "openvpn_xor_udp"))
+        assertEquals(null to null, nordOpening(null))
+        // The place stays ticked however the file names the standard servers.
+        assertTrue(ticked(Location("nord", 153, "NL", "Netherlands", group = "legacy_standard", protocol = "wireguard_udp"), Location("nord", 153, "NL", "Netherlands")))
+        assertFalse(ticked(Location("nord", 153, "NL", "Netherlands", group = "legacy_p2p"), Location("nord", 153, "NL", "Netherlands")))
+        // A restored favourite's pin (no address or key yet) is kept under NordLynx; a listed server without a NordLynx key is not.
+        val restoredPin = Server("Germany #1", "de1.nordvpn.com", "", "", -1)
+        assertEquals(restoredPin, toSave(Location("nord", 81, "DE", "Germany", pinned = restoredPin)).pinned)
+        assertEquals(null, toSave(Location("nord", 81, "DE", "Germany", pinned = restoredPin.copy(ip = "89.187.175.235", load = 3))).pinned)
+    }
+
     @Test fun routeCardWarnings() {
         assertEquals("Doesn't work on this network", routeWarning(stalled = true, notAnswering = true))
         assertEquals("Not answering. If this file came from a provider, it may have expired: download a new one.", routeWarning(stalled = false, notAnswering = true))
@@ -193,5 +219,19 @@ class ScreenTextTest {
         // Passed through for the filter: in the app, so not outside.
         val through = direct.copy(prefs = direct.prefs.copy(filter = Filter(id = "nextdns", value = "abc123", directApps = true)))
         assertEquals(null, outsideNote(through, "chose.direct", lockdown = false))
+        // Sharing its Android user id with an app on a VPN route, it stays inside with it (also under lockdown, where
+        // its own Direct rule would take that app along): said, naming the app. With another Direct app it is outside.
+        val kept = "Shares its Android user id with US app, so it can't be Direct on its own: it goes as that app does."
+        val usApp = listOf(AppInfo("chose.us", "US app", false, 10123))
+        assertEquals(listOf("US app"), keptWith(direct, "chose.direct", usApp))
+        assertEquals(kept, outsideNote(direct, "chose.direct", lockdown = false, keptBy = keptWith(direct, "chose.direct", usApp)))
+        assertEquals(kept, outsideNote(direct, "chose.direct", lockdown = true, keptBy = keptWith(direct, "chose.direct", usApp)))
+        assertEquals(emptyList<String>(), keptWith(direct, "chose.us", listOf(AppInfo("chose.direct", "Files", false, 10123))))
+        val twoDirect = direct.copy(apps = direct.apps + ("other.direct" to DIRECT))
+        assertEquals(emptyList<String>(), keptWith(twoDirect, "chose.direct", listOf(AppInfo("other.direct", "Files", false, 10123))))
+        // With its lookups filtered it is inside anyway, but still goes as the app on a route: its filter switch says so too.
+        assertEquals(listOf("US app"), keptWith(through, "chose.direct", usApp))
+        assertEquals("Not used now: its lookups go as US app's do", lookupsSub(true, "NextDNS", listOf("US app")))
+        assertEquals("Outside unbraid, with the phone's DNS", lookupsSub(false, "NextDNS"))
     }
 }

@@ -212,6 +212,9 @@ interface Provider {
     /** Setting up a tunnel contacts the server itself (not the provider's API), so it can't go through another route (Via). */
     val viaUnsafe: Boolean get() = false
 
+    /** Whether an unpinned route's saved tunnel to [server] still suits the page's settings (Mullvad-owned only). */
+    fun suits(server: Server): Boolean = true
+
     /** Its own blocking switch ([PROTECT]), first on its page and per route in the picker. */
     val protection: Opt? get() = null
     /** How the account's key was made, as its config says (Proton's options), for its page; null = nothing to show, "" = not known. */

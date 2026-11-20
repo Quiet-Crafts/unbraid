@@ -3,6 +3,7 @@ package app.unbraid
 import app.unbraid.data.AirVpn
 import app.unbraid.data.Catalog
 import app.unbraid.data.ExpressVpn
+import app.unbraid.data.Http
 import app.unbraid.data.Ivpn
 import app.unbraid.data.KeyProvider
 import app.unbraid.data.Location
@@ -15,6 +16,7 @@ import app.unbraid.data.ProtonFree
 import app.unbraid.data.Server
 import app.unbraid.data.Surfshark
 import app.unbraid.data.Windscribe
+import app.unbraid.data.WgLink
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -22,6 +24,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.io.IOException
+import java.net.URL
+import java.net.URLConnection
 import java.time.LocalDateTime
 
 class ProviderFixesTest {
@@ -108,6 +112,10 @@ class ProviderFixesTest {
         val list = AirVpn.parse(body, key1)
         val pinned = Server("B", "at.vpn.airdns.org", "9.9.9.9", key1, 0)
         assertEquals("1.2.3.5:1637", AirVpn.link(Location("airvpn", pinned = pinned), account.copy(port = 1637)) { list }.peer.endpoint)
+        // A server the list no longer has is gone, even when a namesake on its host now has its old address.
+        val onlyB = list.filter { it.serverName == "B" }
+        try { AirVpn.link(Location("airvpn", pinned = Server("A", "at.vpn.airdns.org", "1.2.3.5", key1, 0)), account.copy(port = 1637)) { onlyB }; fail() }
+        catch (e: app.unbraid.data.NoLongerOffered) {}
     }
 
     // ---- NordVPN
@@ -134,6 +142,42 @@ class ProviderFixesTest {
         assertEquals(listOf("us2943.nordvpn.com", "us2944.nordvpn.com"), mine.map { it.host })
         assertEquals("Dallas", mine.first().city)
         assertEquals(key1, mine.first().publicKey)
+    }
+
+    /**
+     * A pin made from Fastest anywhere has no country; restored without its address, its server's country finds it in
+     * Nord's list, or without one the whole list by its exact host name.
+     */
+    @Test fun nordPinWithoutACountryIsFoundAgainAfterARestore() {
+        val original = Http.open
+        val lists = mutableListOf<String>()
+        var countriesDown = false
+        Http.open = { u: URL ->
+            if (u.path == "/v1/servers") lists += u.query.orEmpty()
+            val body = when (u.path) {
+                "/v1/servers/countries" -> """[{"id":81,"name":"Germany","code":"DE"},{"id":228,"name":"United States","code":"US"}]"""
+                "/v1/servers" -> if ("country_id%5D=228" in u.query.orEmpty() || "country_id" !in u.query.orEmpty()) """[{"name":"United States #1234","hostname":"us1234.nordvpn.com","station":"89.187.175.235","load":3,
+                    "technologies":[{"identifier":"wireguard_udp","metadata":[{"name":"public_key","value":"$key1"}]}]}]""" else "[]"
+                else -> "[]"
+            }
+            FakeHttps(u, if (countriesDown && u.path == "/v1/servers/countries") 500 else 200, body) as URLConnection
+        }
+        try {
+            val pin = app.unbraid.data.Backup.bare(Location("nord", pinned = Server("United States #1234", "us1234.nordvpn.com", "89.187.175.1", key2, 5, "Dallas", "US"))).pinned
+            val acc = NordApi.json.encodeToString(Nord.Account.serializer(), Nord.Account("t", priv))
+            val l = Nord.connect(Location("nord", pinned = pin), acc) as WgLink
+            assertEquals("89.187.175.235:51820", l.peer.endpoint)
+            assertEquals(key1, l.peer.publicKey)
+            assertTrue(lists.single().contains("country_id%5D=228"))
+            // The server as Nord's list returned it, without a country (no locations), then restored: no id, code or address.
+            val bare = pin!!.copy(country = "")
+            assertEquals("89.187.175.235:51820", (Nord.connect(Location("nord", pinned = bare), acc) as WgLink).peer.endpoint)
+            assertFalse(lists.last().contains("country_id"))
+            // With its country code but Nord's countries unreadable, the whole list still finds it.
+            countriesDown = true
+            assertEquals("89.187.175.235:51820", (Nord.connect(Location("nord", pinned = pin), acc) as WgLink).peer.endpoint)
+            assertFalse(lists.last().contains("country_id"))
+        } finally { Http.open = original }
     }
 
     // ---- Windscribe, AirVPN

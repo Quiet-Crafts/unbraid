@@ -24,7 +24,9 @@ import app.unbraid.data.restoredFrom
 import app.unbraid.ui.WEAK_TITLE
 import app.unbraid.ui.homeNote
 import app.unbraid.ui.passProblem
+import app.unbraid.ui.saveInto
 import app.unbraid.ui.weakCaption
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -382,6 +384,37 @@ class BackupAdversarialTest {
         Backup.readBack(Backup.export(s.copy(apps = emptyMap()), "3.0.2", 0))
     }
 
+    /** A document the save picker gave; opening it for writing empties it, as mode "wt" does. */
+    private class Doc(var bytes: ByteArray, val refused: Boolean = false, val breaks: Boolean = false, val unreadable: Boolean = false) {
+        var opened = false
+        fun save(b: ByteArray) = saveInto(b, { check(!unreadable); bytes.isEmpty() }) {
+            if (refused) throw java.io.IOException("refused")
+            opened = true; bytes = ByteArray(0)
+            object : java.io.ByteArrayOutputStream() {
+                override fun write(x: ByteArray, off: Int, len: Int) { if (breaks) throw java.io.IOException("full") else super.write(x, off, len) }
+                override fun close() { bytes = toByteArray() }
+            }
+        }
+    }
+
+    /** A save never touches a file that holds something, as the one the user chose to replace: only an empty one is written to. */
+    @Test fun aSaveNeverTouchesTheFileItWasToReplace() {
+        val old = "an older backup".toByteArray()
+        // Whether the write would work, fail at the start or fail once the file is emptied: it is never opened. Nor one that can't be read.
+        for (doc in listOf(Doc(old), Doc(old, refused = true), Doc(old, breaks = true), Doc(ByteArray(0), unreadable = true))) {
+            val was = doc.bytes
+            assertNull(doc.save(byteArrayOf(1)))
+            assertFalse(doc.opened)
+            assertArrayEquals(was, doc.bytes)
+        }
+        // An empty one: written, or still there, empty, when the write fails.
+        Doc(ByteArray(0)).let { assertEquals(true, it.save(byteArrayOf(7))); assertArrayEquals(byteArrayOf(7), it.bytes) }
+        for (doc in listOf(Doc(ByteArray(0), refused = true), Doc(ByteArray(0), breaks = true))) {
+            assertEquals(false, doc.save(byteArrayOf(1)))
+            assertArrayEquals(ByteArray(0), doc.bytes)
+        }
+    }
+
     @Test fun aRouteWithoutAnOwnServerGetsItsConfigBackOnTheSamePhone() {
         val here = Setup(routes = listOf(Route("w", wg = wg)), defaultRoute = "w", apps = mapOf("org.example.a" to DIRECT), version = VERSION)
         val c = Backup.read(Backup.export(here, "3.0.2", 0, keys = false))
@@ -417,6 +450,28 @@ class BackupAdversarialTest {
         assertEquals("obfs-local", bare.ss!!.plugin)
         // The same route, plugin and all, still gives it back.
         assertEquals(ss, sThen.restoredFrom(so.setup, null, 0, so.keys)!!.route("s")!!.ss)
+    }
+
+    /** An own server saved without keys gets its config back only from this phone's server of that id with everything the file keeps the same. */
+    @Test fun anOwnServerWithoutKeysTakesItsConfigBackOnlyFromAnIdenticalOne() {
+        val ss = app.unbraid.data.SsProfile("Box", "203.0.113.30", 8388, "aes-256-gcm", "secret", "obfs-local", "obfs=http")
+        val then = Setup(routes = listOf(Route("s", ss = ss, own = "x")), defaultRoute = "s", servers = listOf(OwnServer("x", ss = ss)), version = VERSION)
+        val c = Backup.read(Backup.export(then, "3.0.2", 0, keys = false))
+        // Here the server of that id, name, address, port and method has no plugin: it is not taken for the file's.
+        val plain = ss.copy(plugin = null, pluginOpts = null)
+        val r = then.copy(routes = listOf(Route("s", ss = plain, own = "x")), servers = listOf(OwnServer("x", ss = plain))).restoredFrom(c.setup, null, 0, c.keys)!!
+        assertTrue(r.servers.single().keyless && r.route("s")!!.keyless)
+        assertEquals("obfs-local", r.servers.single().ss!!.plugin)
+        // Nor one with other allowed addresses, for WireGuard.
+        val wThen = Setup(routes = listOf(Route("w", wg = wg, own = "y")), defaultRoute = "w", servers = listOf(OwnServer("y", wg = wg)), version = VERSION)
+        val w = Backup.read(Backup.export(wThen, "3.0.2", 0, keys = false))
+        val narrow = wg.copy(allowedIps = listOf("10.0.0.0/8"))
+        assertTrue(wThen.copy(routes = listOf(Route("w", wg = narrow, own = "y")), servers = listOf(OwnServer("y", wg = narrow))).restoredFrom(w.setup, null, 0, w.keys)!!.servers.single().keyless)
+        // The same server, plugin and all, still gives it back.
+        val same = then.restoredFrom(c.setup, null, 0, c.keys)!!
+        assertEquals(OwnServer("x", ss = ss), same.servers.single())
+        assertEquals(ss, same.route("s")!!.ss)
+        assertEquals(wg, wThen.restoredFrom(w.setup, null, 0, w.keys)!!.servers.single().wg)
     }
 
     @Test fun everySaveNeedsEightCharactersAndKeysNeedAHardOne() {

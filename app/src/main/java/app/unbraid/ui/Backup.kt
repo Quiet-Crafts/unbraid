@@ -2,7 +2,6 @@
 package app.unbraid.ui
 
 import android.net.Uri
-import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -39,7 +38,7 @@ import androidx.lifecycle.viewModelScope
 import app.unbraid.BuildConfig
 import app.unbraid.Unbraid
 import app.unbraid.data.Backup
-import app.unbraid.data.PREVIOUS
+import app.unbraid.data.BEFORE_RESTORE
 import app.unbraid.data.Providers
 import app.unbraid.data.RestoreTraffic
 import app.unbraid.data.Setup
@@ -57,7 +56,8 @@ import kotlinx.coroutines.withContext
 private const val KEYS_OFF = "Off: own servers are saved without keys or passwords, and home WireGuard is left out. On another phone, add each server's config again; until then its apps stay offline."
 private const val KEYS_ON = "The file holds your own servers' keys and passwords, so it needs a strong passphrase."
 private const val KEYS_NONE = "You have no own servers or home WireGuard, so there are no keys or passwords to include."
-private const val KEEP_NO_ROOM = "There's no room for another profile. Turn off keeping your current setup, or cancel."
+private const val KEEP_TOO_MUCH = "Your current setup can't be kept beside this backup: together they hold more profiles, routes or own servers than unbraid keeps, or more than one backup file can hold."
+private const val KEEP_NO_ROOM = "$KEEP_TOO_MUCH Turn off keeping your current setup, or cancel."
 
 /** What a backup file holds, for the captions. */
 const val BACKUP_HOLDS = "Your routes, app and website choices, favourites, profiles, own servers and your settings. Keys and passwords of your own servers and home WireGuard only if you choose."
@@ -76,6 +76,20 @@ fun passProblem(pass: String, again: String, keys: Boolean): String? = when {
     else -> null
 }
 
+/** Said when the save picker gave a file that already holds something ([saveInto]). */
+private const val SAVE_TAKEN = "unbraid saves a backup only to a new file, so that one was left as it is. Save again and choose a new name."
+
+/**
+ * Writes [sealed] through [open] to the document the save picker gave, only if it is [empty] before, as a new one the
+ * picker made is. One that holds something (a file the user chose to replace) or can't be read is never opened, as
+ * opening it for writing empties it: null. False when the write failed. Nothing is ever deleted: whether the picker
+ * made the document or the user chose an empty one can't be told.
+ */
+fun saveInto(sealed: ByteArray, empty: () -> Boolean, open: () -> java.io.OutputStream): Boolean? {
+    if (!runCatching { empty() }.getOrDefault(false)) return null
+    return runCatching { open().use { it.write(sealed) } }.isSuccess
+}
+
 /** The keys switch for a setup: whether it can be turned on (only with something to include), and its caption. */
 fun keysSwitch(secrets: Boolean, on: Boolean): Pair<Boolean, String> = secrets to when { !secrets -> KEYS_NONE; on -> KEYS_ON; else -> KEYS_OFF }
 
@@ -86,7 +100,8 @@ fun keysSwitch(secrets: Boolean, on: Boolean): Pair<Boolean, String> = secrets t
  */
 class RestoreGate {
     /** What the confirm sheet says of a backup: its sentences, its weak servers, whether the setup here can be kept, and own servers left without config. */
-    class Result(val notes: List<String>, val weak: List<String>, val keepable: Boolean, val missing: Int)
+    /** [keptAs]: the name the setup here would be kept under, when it can be kept. */
+    class Result(val notes: List<String>, val weak: List<String>, val keepable: Boolean, val missing: Int, val keptAs: String? = null)
     /** One check asked: of [backup] over [here], keeping the setup here as a profile or not. */
     class Ask(val here: Setup, val backup: Backup.Contents, val keep: Boolean)
 
@@ -118,12 +133,14 @@ class RestoreGate {
 
     companion object {
         /** Works [a] out: slow for a large setup, never on the main thread. [kin]: the apps sharing a user id with an app; [tick] may throw to stop it. */
-        fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }, tick: () -> Unit = {}): Result {
+        fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }, tick: () -> Unit = {}, installedAt: (String) -> Long? = { null }): Result {
             val c = a.backup
-            val plain = a.here.restoredFrom(c.setup, null, 0, c.keys)!!
-            val keepable = !a.here.untouched && a.here.restoredFrom(c.setup, PREVIOUS, 0, c.keys) != null
-            val next = if (a.keep && keepable) a.here.restoredFrom(c.setup, PREVIOUS, 0, c.keys)!! else plain
-            return Result(RestoreTraffic.notes(a.here, next, kin, tick), Backup.weak(plain, a.here), keepable, plain.servers.count { it.keyless })
+            // As of now, as Restore works it out: a wait over by then only keeps less, so what can be kept here still can be.
+            val now = System.currentTimeMillis()
+            val plain = a.here.restoredFrom(c.setup, null, now, c.keys)!!
+            val kept = if (a.here.untouched) null else a.here.restoredFrom(c.setup, BEFORE_RESTORE, now, c.keys, installedAt)
+            val next = if (a.keep && kept != null) kept else plain
+            return Result(RestoreTraffic.notes(a.here, next, kin, tick), Backup.weak(plain, a.here), kept != null, plain.servers.count { it.keyless }, kept?.profiles?.lastOrNull()?.name)
         }
     }
 }
@@ -150,6 +167,11 @@ class BackupFlow(private val ui: Ui) {
     var ok by mutableStateOf(false)
         private set
     private var file: ByteArray? = null
+    /** The backup sealed for the save picker, made before a file is chosen; [sealedLeft]: without own servers' keys and passwords. */
+    private var sealed by mutableStateOf<ByteArray?>(null)
+    private var sealedLeft = false
+    /** A backup is being made or waits for its file: the passphrases and the keys switch it was made with can't change. */
+    val sealing get() = busy || sealed != null
     var opened by mutableStateOf<Backup.Contents?>(null)
         private set
     private var judging: Job? = null
@@ -162,6 +184,7 @@ class BackupFlow(private val ui: Ui) {
     val weak: List<String> get() = seen.let { gate.result?.weak.orEmpty() }
     /** Whether the setup here can be kept as a profile beside [opened]'s; null while it is worked out. */
     val keepable: Boolean? get() = seen.let { gate.result?.keepable }
+    val keptAs: String? get() = seen.let { gate.result?.keptAs }
     /** Own servers [opened] leaves without their config here: the ones this phone doesn't already have. */
     val missing: Int get() = seen.let { gate.result?.missing ?: 0 }
     /** The user accepts the weak security of servers in [opened] ([Backup.weak]): Restore waits for it. */
@@ -173,7 +196,7 @@ class BackupFlow(private val ui: Ui) {
     internal var pickOpen: () -> Unit = {}
     private val app get() = ui.getApplication<android.app.Application>()
 
-    fun close() { if (!busy) { step = null; pass = ""; pass2 = ""; file = null; opened(null); message = null; keep = true; keys = false } }
+    fun close() { if (!busy) { step = null; pass = ""; pass2 = ""; file = null; sealed = null; opened(null); message = null; keep = true; keys = false } }
 
     /** A new backup shown (or none): nothing worked out or accepted for another one carries over. */
     private fun opened(c: Backup.Contents?) { opened = c; judging?.cancel(); judging = null; gate.open(c); seen++ }
@@ -188,6 +211,7 @@ class BackupFlow(private val ui: Ui) {
         seen++
         judging?.cancel()
         val pm = app.packageManager
+        val installedAt = ui.installedAt()
         judging = ui.viewModelScope.launch {
             val r = withContext(Dispatchers.Default) {
                 // The installed apps by user id, read once.
@@ -195,7 +219,7 @@ class BackupFlow(private val ui: Ui) {
                 val uid = all.associate { it.packageName to it.uid }
                 val byUid = all.groupBy({ it.uid }, { it.packageName })
                 // Stopped as soon as the sheet is closed or the check asked again.
-                RestoreGate.check(ask, { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }) { ensureActive() }
+                RestoreGate.check(ask, { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }, { ensureActive() }, installedAt)
             }
             gate.answer(ask, r); seen++
         }
@@ -206,25 +230,12 @@ class BackupFlow(private val ui: Ui) {
 
     fun startSave() { close(); step = "save" }
 
-    /** The passphrases match: choose where the file goes. */
+    /** The passphrases match: the backup is made and sealed first, then the file it goes to is chosen. */
     fun chooseFile() {
         message = null
-        pickSave("unbraid-backup-${java.time.LocalDate.now()}.unbraid")
-    }
-
-    /** The picker's answer for saving: sealed and written, or nothing left behind. */
-    fun saveTo(uri: Uri?) {
-        if (uri == null) return
-        if (step != "save" || pass.isEmpty()) {
-            // The app was closed while the picker was open: the passphrase is gone (it is never saved), so the empty file goes.
-            ui.viewModelScope.launch(Dispatchers.IO) { runCatching { DocumentsContract.deleteDocument(app.contentResolver, uri) } }
-            finish(false, "The backup wasn't saved because unbraid was closed meanwhile. Start it again.")
-            return
-        }
         val p = pass
         val setup = Unbraid.store.setup.value
         val withKeys = keys
-        val left = !withKeys && Backup.hasSecrets(setup)
         busy = true
         ui.viewModelScope.launch {
             val r = withContext(Dispatchers.Default) {
@@ -234,11 +245,32 @@ class BackupFlow(private val ui: Ui) {
                     try { Backup.readBack(plain); Backup.seal(plain, p) } finally { plain.fill(0) }
                 }
             }
-            val wrote = r.getOrNull()?.let { b -> withContext(Dispatchers.IO) { runCatching { app.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(b) } }.isSuccess } } == true
-            if (!wrote) withContext(Dispatchers.IO) { runCatching { DocumentsContract.deleteDocument(app.contentResolver, uri) } }
             busy = false
-            finish(wrote, if (wrote) "Backup saved${if (left) " without server keys and passwords" else ""}. Keep the file and your passphrase: without the passphrase nobody can open it, not even you."
-                else (r.exceptionOrNull() as? Backup.Failed)?.message ?: "Couldn't save the backup there. Try another place.")
+            r.onSuccess { sealed = it; sealedLeft = !withKeys && Backup.hasSecrets(setup); pickSave("unbraid-backup-${java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmm"))}.unbraid") }
+                .onFailure { e -> finish(false, (e as? Backup.Failed)?.message ?: "Couldn't make the backup. Try again.") }
+        }
+    }
+
+    /** The picker's answer for saving (null: none chosen, the form can change again): the backup sealed before is written there, or the file is left as it was ([saveInto]). */
+    fun saveTo(uri: Uri?) {
+        val b = sealed.takeIf { step == "save" }
+        val left = sealedLeft
+        sealed = null
+        if (uri == null) return
+        // The app was closed while the picker was open: the backup was in memory only. A new file the picker made stays,
+        // empty, as it can't be told from an empty one the user chose.
+        if (b == null) return finish(false, "The backup wasn't saved because unbraid was closed meanwhile. A new file made for it is left empty: save over it or delete it.")
+        busy = true
+        val cr = app.contentResolver
+        ui.viewModelScope.launch {
+            val wrote = withContext(Dispatchers.IO) { saveInto(b, { cr.openInputStream(uri)!!.use { it.read() == -1 } }, { cr.openOutputStream(uri, "wt")!! }) }
+            busy = false
+            when (wrote) {
+                true -> finish(true, "Backup saved${if (left) " without server keys and passwords" else ""}. Keep the file and your passphrase: without the passphrase nobody can open it, not even you.")
+                // The form stays, passphrases and all, for another try.
+                null -> message = SAVE_TAKEN
+                false -> finish(false, "Couldn't save the backup there. The file may be left empty or cut: delete it, and try another place.")
+            }
         }
     }
 
@@ -277,13 +309,22 @@ class BackupFlow(private val ui: Ui) {
         // Only over the setup and keep choice the sheet's check was made for, and with weak servers accepted.
         if (!ready(here)) return
         var target: Setup? = null
-        val keepAs = PREVIOUS.takeIf { keep && keepable == true }
-        // Counted first: the running engine's setup is gone once the store changes, so a refused reload must stop the VPN.
-        UnbraidVpn.restores.incrementAndGet()
+        val keepAs = BEFORE_RESTORE.takeIf { keep && keepable == true }
         var moved = false
-        val saved = Unbraid.store.update { s -> if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)?.also { target = it } ?: s }
+        var counted = false
+        // Counted before the store changes, and only when the restore changes the setup: the running engine's setup is then
+        // gone, so a refused reload must stop the VPN. A restore that leaves the setup as it is (the same backup again)
+        // leaves the engine on a setup that still exists, and a later refused edit keeps it running as any refused edit does.
+        var taken = false
+        val installedAt = ui.installedAt()
+        var changes = false
+        // Counted once the store takes it, before it holds it: a restore the store refuses (a sign-out under way holds the
+        // default) is never counted.
+        val saved = Unbraid.store.update({ ok -> taken = ok; if (ok && changes && !counted) { UnbraidVpn.restores.incrementAndGet(); counted = true } }) { s ->
+            if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys, installedAt)
+                ?.also { target = it; changes = it != s } ?: s }
         val t = target
-        if (t == null || Unbraid.store.setup.value != t) {
+        if (t == null || moved || !taken) {
             finish(false, if (t == null && !moved) KEEP_NO_ROOM else "Couldn't restore: your settings are busy. Try again.")
             return
         }
@@ -305,7 +346,7 @@ class BackupFlow(private val ui: Ui) {
     fun signIns(s: Setup) = s.routes.filter { !it.imported }.map { it.loc.provider }.distinct().filter { it !in Unbraid.store.accounts.value }
         .map { Providers.get(it)?.name ?: it }.takeIf { it.isNotEmpty() }?.joinToString(", ")
 
-    private fun finish(success: Boolean, text: String) { pass = ""; pass2 = ""; file = null; opened(null); ok = success; message = text; step = "done" }
+    private fun finish(success: Boolean, text: String) { pass = ""; pass2 = ""; file = null; sealed = null; opened(null); ok = success; message = text; step = "done" }
 }
 
 /** The pickers and the sheet, wherever the app is: a backup can also be picked from the import of a config file. */
@@ -314,7 +355,7 @@ fun BackupHost(ui: Ui) {
     val flow = ui.backup
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { flow.saveTo(it) }
     val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { flow.restoreFrom(it) }
-    flow.pickSave = { name -> runCatching { save.launch(name) } }
+    flow.pickSave = { name -> runCatching { save.launch(name) }.onFailure { flow.saveTo(null) } }
     flow.pickOpen = { runCatching { open.launch(arrayOf("*/*")) } }
     if (flow.step != null) BackupSheet(ui, flow)
 }
@@ -337,10 +378,11 @@ private fun BackupSheet(ui: Ui, flow: BackupFlow) {
                     val here by ui.setup.collectAsStateWithLifecycle()
                     val secrets = Backup.hasSecrets(here)
                     val (canInclude, keysText) = keysSwitch(secrets, flow.keys)
-                    Switch("Include server keys and passwords", keysText, flow.keys && canInclude, canInclude) { flow.keys = it }
+                    Switch("Include server keys and passwords", keysText, flow.keys && canInclude, canInclude && !flow.sealing) { flow.keys = it }
                     Text(BACKUP_LEAVES, style = Type.caption, color = Ink.dim)
-                    DialogField(flow.pass, { flow.pass = it }, "Passphrase", secret = true)
-                    DialogField(flow.pass2, { flow.pass2 = it }, "Passphrase again", secret = true)
+                    // Locked while the backup made with them waits for its file.
+                    DialogField(flow.pass, { if (!flow.sealing) flow.pass = it }, "Passphrase", secret = true)
+                    DialogField(flow.pass2, { if (!flow.sealing) flow.pass2 = it }, "Passphrase again", secret = true)
                     val problem = passProblem(flow.pass, flow.pass2, flow.keys && secrets)
                     if (flow.pass.isNotEmpty()) Backup.strength(flow.pass).let { (n, text) -> Text(text, style = Type.caption, color = if (n == 0) Ink.bad else Ink.dim) }
                     problem?.takeIf { it.isNotEmpty() }?.let { Text(it, style = Type.caption, color = Ink.bad) }
@@ -394,7 +436,8 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
     else if (notes.isNotEmpty()) Text(notes.joinToString("\n"), style = Type.caption, color = Ink.bad)
     if (notes != null && flow.weak.isNotEmpty()) Switch(WEAK_TITLE, weakCaption(flow.weak), flow.acceptWeak) { flow.acceptWeak = it }
     if (vpn.phase == VpnState.Phase.On) Text("unbraid is connected. It reconnects with the restored setup, and apps may be offline for a few seconds.", style = Type.caption, color = Ink.dim)
-    if (canKeep) Switch("Keep my current setup", "Saved as the profile $PREVIOUS, to switch back later. Your other profiles here are replaced.", flow.keep) { flow.keep = it }
+    if (canKeep) Switch("Keep my current setup", "Saved as the profile ${flow.keptAs ?: BEFORE_RESTORE}, to switch back later. Your other profiles here are replaced.", flow.keep) { flow.keep = it }
+    else if (flow.keepable == false && !here.untouched) Text(KEEP_TOO_MUCH, style = Type.caption, color = Ink.dim)
     Buttons(flow, "Restore", enabled = flow.ready(here)) { flow.apply() }
 }
 

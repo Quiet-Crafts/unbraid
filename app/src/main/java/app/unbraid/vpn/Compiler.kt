@@ -19,7 +19,11 @@ import app.unbraid.data.Setup
 import app.unbraid.data.Sites
 import app.unbraid.data.WgPeer
 import java.security.MessageDigest
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -75,12 +79,24 @@ object Compiler {
         /** Tailscale asks the user to sign in (it gave a login link): only then do its sign-in pages skip the exit. */
         val tsLoginPending: Boolean = false,
         /**
-         * Apps that share their Android user id with an app on Block. Android leaves an app outside the VPN by user id,
-         * so none of these may be left outside (a Direct one would take the blocked app out with it); inside, the engine
-         * refuses the whole id, as the blocked app's rule matches any app of it.
+         * Apps on Direct that share their Android user id with an app that keeps them from going Direct alone ([keptIn]).
+         * Android leaves an app outside the VPN by user id, so none of these may be left outside (it would take a blocked
+         * or routed app out with it); inside, the engine knows the user id, not which of its apps asked, so they go as that app does.
          */
         val blockedKin: Set<String> = emptySet(),
     )
+
+    /**
+     * Whether [other], an app of Direct app [p]'s Android user id, keeps [p] from going Direct on its own: it goes through
+     * a route, is blocked or follows a VPN default; or [p] would be left outside and take [other] out of unbraid with it.
+     */
+    fun keeps(s: Setup, p: String, other: String) = s.routeOf(other) != DIRECT || s.outside(p) && !s.outside(other)
+
+    /**
+     * The apps on Direct that another app of their Android user id [keeps], as [Input.blockedKin]. [kin] gives every app
+     * of an app's user id, null when that can't be told: then it is kept too.
+     */
+    fun keptIn(s: Setup, kin: (String) -> Set<String>?): Set<String> = s.apps.keys.filterTo(HashSet()) { p -> s.apps[p] == DIRECT && kin(p)?.any { keeps(s, p, it) } != false }
 
     /**
      * Inbound tag of the app's own way into a chosen exit, for speed and health tests: a proxy on 127.0.0.1 whose
@@ -115,14 +131,24 @@ object Compiler {
      * while the saved settings can't be read, so no app falls back to the normal connection. Built as a setup whose only
      * route, the default, has no tunnel: the same config a signed-out default gets.
      */
-    fun blockAll(selfPackage: String, cacheFile: String, fakeBlock: Int): String {
+    fun blockAll(selfPackage: String, cacheFile: String, fakeBlock: Int, lookups: Boolean = true): String {
         val none = Route("unreadable", app.unbraid.data.Location())
         val s = Setup(routes = listOf(none), defaultRoute = none.id, home = Home(), prefs = app.unbraid.data.Prefs(lan = false))
-        return compile(Input(s, emptyMap(), selfPackage, false, "", cacheFile, fakeBlock = fakeBlock, blocked = setOf(none.id)))
+        val json = compile(Input(s, emptyMap(), selfPackage, false, "", cacheFile, fakeBlock = fakeBlock, blocked = setOf(none.id)))
+        if (lookups) return json
+        // [lookups] false (the app's storage failed): no stand-in address is handed out, as one from a block not noted down
+        // could come again, and no cache file is opened, so the hold doesn't depend on storage either.
+        val o = Json.parseToJsonElement(json).jsonObject
+        val dns = o["dns"]!!.jsonObject
+        val rules = buildJsonArray { add(obj("action" to "reject")); dns["rules"]?.jsonArray?.forEach { add(it) } }
+        val experimental = o["experimental"]?.jsonObject?.let { JsonObject(it - "cache_file") }
+        return JsonObject(o + ("dns" to JsonObject(dns + ("rules" to rules))) + (experimental?.let { mapOf("experimental" to it) } ?: emptyMap())).toString()
     }
 
     fun compile(i: Input): String {
-        val s = i.setup
+        // An app on Direct kept inside for another app of its user id ([Input.blockedKin]) has no rule of its own, filtered or
+        // not: the engine knows the user id, not which of its apps asked, so its rule would take the other app Direct too.
+        val s = i.setup.let { it.copy(apps = it.apps.filter { (p, r) -> r != DIRECT || p !in i.blockedKin }) }
         if (s.defaultMissing) throw MissingDefault()
         // Blocked routes get no tunnel, DNS server or probe; their apps still match, to be refused. So do apps on a route
         // that no longer exists.
@@ -161,14 +187,30 @@ object Compiler {
         val tcpOnly = { id: String -> (i.links[id] as? SsLink)?.profile?.plugin != null }
         val dnsFor = { id: String -> if (id == FILTERED) "dns-filter" else if (id == DIRECT) "local" else if (ovpnDns(id)) "dns-ovpn-${tag(id)}" else "dns-r-$id" }
         val directFiltered = filter != null && s.prefs.filter.direct && s.defaultRoute == DIRECT
+        // Direct websites are looked up with the filter when Direct traffic passing through is: also when the only filtered
+        // Direct app lost its rule above, kept inside for another app of its user id.
+        val directSitesFiltered = directFiltered || through.isNotEmpty() || i.setup.apps.any { (p, r) -> r == DIRECT && s.prefs.filter.through(p) }
         val defaultDns = if (directFiltered && !defaultBlocked) "dns-filter" else if (s.defaultRoute == DIRECT || defaultBlocked || active.isEmpty()) "local" else dnsFor(s.defaultRoute)
         // Every tunnel the app can test, with the DNS of a route on it; Tailscale even without an exit route (its nodes).
         val probeTags = active.groupBy { tag(it.id) }.mapValues { (_, rs) -> dnsFor(rs.first().id) }.toMutableMap()
             .apply { if (s.tailscale) putIfAbsent(TS_TAG, defaultDns); if (app.unbraid.BuildConfig.DEBUG) put("direct", "local") } // debug: the line itself, for comparisons
-        // Apps with their own route, grouped. Direct only appears here under lockdown (otherwise excluded at OS level).
+        // Apps with their own route, grouped. Direct only appears here under lockdown (otherwise excluded at OS level); also
+        // on the Direct default while that asks the filter, as those apps' lookups go to the phone's DNS.
         val perApp = s.apps.entries.groupBy({ if (it.key in through) FILTERED else it.value }, { it.key }).toSortedMap()
-            .filterKeys { id -> id != s.defaultRoute && when (id) { DIRECT -> i.lockdown; BLOCK -> false; else -> true } }
+            .filterKeys { id -> (id != s.defaultRoute || id == DIRECT && directFiltered) && when (id) { DIRECT -> i.lockdown; BLOCK -> false; else -> true } }
             .mapValues { (_, p) -> JsonArray(p.sorted().map(::JsonPrimitive)) }
+        // With Direct as the default, what Android can't name the app of may be an app kept on a VPN: refused, connections and lookups.
+        val unnamedRefused = s.defaultRoute == DIRECT && perApp.keys.any { it != DIRECT && it != FILTERED }
+        // A lookup of the phone's apps that Android names no app for (the tailnet's own lookups come in another way and name
+        // none either). Android often can't name the app of an ordinary app's lookup (seen for about a quarter of a
+        // browser's), so addresses are answered with stand-ins as for every app, and their connections are decided by the
+        // app they turn out to be from. Any other type would go where no app's rule sends it, so while an app has a rule
+        // of its own: HTTPS and SVCB answered empty (only hints are lost), the rest refused.
+        val unnamedOdd = barred.isNotEmpty() || perApp.isNotEmpty()
+        val unnamed = listOf(obj("inbound" to arr("tun")), obj("package_name_regex" to arr("."), "invert" to true))
+        val unnamedLookups = listOf(
+            obj("type" to "logical", "mode" to "and", "rules" to JsonArray(unnamed + obj("query_type" to arr("HTTPS", "SVCB"))), "action" to "predefined", "rcode" to "NOERROR"),
+            obj("type" to "logical", "mode" to "and", "rules" to JsonArray(unnamed + obj("query_type" to arr("A", "AAAA"), "invert" to true)), "action" to "reject"))
         // Destination rules that beat any app rule. Repeated after every resolve, because fake-IP connections
         // only get a real address there.
         val network = buildList {
@@ -178,7 +220,7 @@ object Compiler {
         }
 
         // A Direct website is looked up like other Direct traffic that passes through: with the filter where one applies to it.
-        val siteDns = { id: String -> if (id == DIRECT && filter != null && (directFiltered || through.isNotEmpty())) "dns-filter" else dnsFor(id) }
+        val siteDns = { id: String -> if (id == DIRECT && filter != null && directSitesFiltered) "dns-filter" else dnsFor(id) }
         // Websites with a route of their own: each run matches its names and every name under them. A rule for a name the
         // tailnet's or the local network's lookup rule answers first is left out: it could never apply.
         val match = { names: List<String> -> arrayOf<Pair<String, Any>>("domain" to JsonArray(names.map(::JsonPrimitive)), "domain_suffix" to JsonArray(names.map { JsonPrimitive(".$it") })) }
@@ -216,7 +258,7 @@ object Compiler {
                         }
                     }
                     // Direct traffic the filter applies to goes to it straight, not through a tunnel.
-                    if (filter != null && (directFiltered || through.isNotEmpty())) add(filterDns(filter, "dns-filter", filterVia ?: "direct", if (filterVia != null) "dns-tailnet" else "local"))
+                    if (filter != null && directSitesFiltered) add(filterDns(filter, "dns-filter", filterVia ?: "direct", if (filterVia != null) "dns-tailnet" else "local"))
                     active.filter { ovpnDns(it.id) }.map { tag(it.id) }.distinct().forEach { t ->
                         // A server that pushes no DNS at all is answered by Quad9 through the same tunnel (an engine patch).
                         add(obj("type" to "openvpn", "tag" to "dns-ovpn-$t", "endpoint" to t, "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9"))
@@ -232,7 +274,14 @@ object Compiler {
                         else obj("type" to "logical", "mode" to "and", "rules" to JsonArray(listOf(obj(*match(names)), obj(*match(own), "invert" to true))), "action" to "reject")
                     })
                     if (homeTs && tsDomains.isNotEmpty()) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
+                    // With the local network blocked too for blocked apps, a local name Android names no app for may be a blocked
+                    // app's: never asked of the local network's resolver.
+                    if (s.prefs.lan && barred.isNotEmpty() && s.prefs.blockLan)
+                        add(obj("type" to "logical", "mode" to "and", "rules" to JsonArray(unnamed + obj("domain_suffix" to arr(*LOCAL_NAMES.toTypedArray()))), "action" to "reject"))
                     if (s.prefs.lan) add(obj("domain_suffix" to arr(*LOCAL_NAMES.toTypedArray()), "server" to "local"))
+                    // While an app is blocked, a lookup Android names no app for may be that app's: other than an address (or
+                    // a name of the tailnet or the local network, answered above), refused before any website's rule.
+                    if (barred.isNotEmpty()) unnamedLookups.forEach { add(it) }
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
                     // HTTPS and SVCB records can carry address hints, which a program would connect to as they are: not stand-in
                     // addresses, so the website's rule would be skipped. They are answered empty, which costs the hints,
@@ -243,6 +292,9 @@ object Compiler {
                         add(if (id in refused) obj(*names, "action" to "reject") else obj(*names, "server" to siteDns(id)))
                     }
                     for ((id, pkgs) in perApp) add(if (id in refused) obj("package_name" to pkgs, "action" to "reject") else obj("package_name" to pkgs, "server" to dnsFor(id)))
+                    // A lookup Android names no app for matches no app rule: an address one got a stand-in above (its connection
+                    // is decided by the app it is from); any other type would go to the default's resolver.
+                    if (unnamedOdd && barred.isEmpty()) unnamedLookups.forEach { add(it) }
                     // A blocked default never falls back to another resolver: the phone's network would see the names.
                     if (defaultBlocked) add(obj("action" to "reject"))
                 }
@@ -396,8 +448,8 @@ object Compiler {
                     // A connection Android can't name the app of matches no app rule. With Direct as the default it may
                     // be one of an app kept on a VPN, so it is refused rather than sent out on the phone's own connection.
                     // After the LAN and home rules for addresses, before the default's lookup, so its name isn't asked
-                    // on the normal connection. Lookups were answered above, as for every app.
-                    if (s.defaultRoute == DIRECT && perApp.keys.any { it != DIRECT && it != FILTERED }) add(obj("package_name_regex" to arr("."), "invert" to true, "action" to "reject"))
+                    // on the normal connection. Lookups were answered above: a stand-in address as for every app, other types refused.
+                    if (unnamedRefused) add(obj("package_name_regex" to arr("."), "invert" to true, "action" to "reject"))
                     add(obj("action" to "resolve", "server" to defaultDns))
                     network.forEach { add(it) }
                     // Ping has no owner the engine can look up, so it never matches an app's rule and lands here: with

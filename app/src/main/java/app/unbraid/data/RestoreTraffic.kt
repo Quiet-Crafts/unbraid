@@ -153,6 +153,8 @@ object RestoreTraffic {
         val routeBy = decided(rules)
         /** Refusals of what no app is named for, or of pings: there to keep a VPN app's traffic off Direct, they count as a tunnel ([level]). */
         val held = rules.map { r -> r.str("action") == "reject" && ("network" in keys(r) || unnamed(r)) }
+        /** The same for lookups: those of what no app is named for. */
+        val heldDns = dnsRules.map { r -> r.str("action") == "reject" && unnamed(r) }
         private fun unnamed(r: JsonObject): Boolean = ((r["invert"] as? JsonPrimitive)?.booleanOrNull == true && "package_name_regex" in r) ||
             (r["rules"] as? JsonArray).orEmpty().any { it is JsonObject && unnamed(it) }
         /** Every network and port a rule tests is one the walk knows: TCP, UDP, a ping, and UDP to port 53 taken over as a lookup. */
@@ -246,9 +248,8 @@ object RestoreTraffic {
         val p = LinkPicker.pick(s, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { Providers.get(it) }
         val providers = s.activeRoutes.filter { !it.imported || (given && p.blocked[it.id] is LinkPicker.KeyLeftOut) }
         val links = p.links + providers.mapIndexed { n, r -> r.id to standIn(r, n) }
-        val kinOfBlocked = s.apps.filterValues { it == BLOCK }.keys.flatMapTo(HashSet()) { kin(it) + it }
         Config(Compiler.compile(Compiler.Input(s, links, "app.unbraid", at.lockdown, "", "", at.suffix, blocked = p.blocked.keys - providers.map { it.id }.toSet(),
-            tsLoginPending = at.signIn, blockedKin = kinOfBlocked)), s)
+            tsLoginPending = at.signIn, blockedKin = Compiler.keptIn(s, kin))), s)
     }.getOrNull()
 
     /** About how many entries [s]'s config holds, known before it is built: the address rules come again after every app group and website. */
@@ -294,7 +295,7 @@ object RestoreTraffic {
             val r = i?.let(c.dnsRules::get)
             val server = r?.str("server") ?: if (r == null) c.dnsFinal else null
             when {
-                r?.str("action") == "reject" -> return Step(Outcome(REJECT), c.dnsBy[i], c.dnsBy[i])
+                r?.str("action") == "reject" -> return Step(Outcome(if (c.heldDns[i]) HELD else REJECT), c.dnsBy[i], c.dnsBy[i])
                 server == "fake" -> { ip = c.fake; real = false }
                 server != null -> { resolver = server; host = null; rby = i?.let(c.dnsBy::get) ?: By.None }
                 else -> return null
@@ -326,7 +327,7 @@ object RestoreTraffic {
             if (!(match(c, r, pkgs, name, null, false, type, "udp", null) ?: return null)) continue
             val by = c.dnsBy[i]
             return when (r.str("action")) {
-                "reject" -> Step(Outcome(REJECT), by, by)
+                "reject" -> Step(Outcome(if (c.heldDns[i]) HELD else REJECT), by, by)
                 "predefined" -> Step(Outcome(EMPTY), by, by)
                 else -> (r.str("server") ?: return null).let { Step(answer(c, it), by, by, it) }
             }
@@ -636,8 +637,8 @@ object RestoreTraffic {
     /** What loss [l] of a class other than an app's own traffic is said for ([RestoreTraffic] point 5); [place]: whose name a name is. */
     private fun who(n: Name, a: Address?, d: Duo, own: Duo, pe: Set<Who>, place: (String, Boolean) -> Who, loss: Loss): Set<Who>? {
         // Held off Direct only for want of an app to tie it to: said for that traffic; the local and home networks are
-        // left as they are for every app without a hold.
-        if (d.was.out.exit == HELD) return if (a?.home == true || a?.local == true) null else pe
+        // left as they are for every app without a hold: by address, and for a lookup by name.
+        if (d.was.out.exit == HELD) return if (a?.home == true || a?.local == true || a == null && n.members.all { place(it, false).let { w -> w == Who.Local || w == Who.Home } }) null else pe
         // A refusal lifted to Direct is said for what refused it, both ways.
         val l = if (loss == Loss.ToDirect && Loss.Unblocked in d.losses) Loss.Unblocked else loss
         // Going as the app's own traffic goes, or as an app decided before anything else: the app's.

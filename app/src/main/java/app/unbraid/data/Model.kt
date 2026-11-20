@@ -165,9 +165,8 @@ data class OwnServer(
     val name get() = wg?.name ?: ovpn?.name ?: ss?.name.orEmpty()
     val kind get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; else -> "Shadowsocks" }
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OVPN"; else -> "SS" }
-    /** The same server as [o] by what can be told without keys: kind, name and, where known, address and peer key. */
-    fun sameAs(o: OwnServer) = kind == o.kind && name == o.name && (wg == null || (wg.endpoint == o.wg?.endpoint && wg.publicKey == o.wg.publicKey)) &&
-        (ss == null || (ss.server == o.ss?.server && ss.port == o.ss.port && ss.method == o.ss.method))
+    /** The same server as [o] by everything a file saved without keys keeps of it ([withoutSecrets]): a Shadowsocks plugin and WireGuard's allowed addresses too. */
+    fun sameAs(o: OwnServer) = withoutSecrets() == o.withoutSecrets()
 }
 
 /** [wg]'s private and preshared keys left out. */
@@ -206,6 +205,8 @@ val NET_KINDS = setOf(WIFI, MOBILE)
 const val MAX_PROFILES = 20
 /** The profile a quick-settings tile saves a setup in no profile as before switching, as it can't ask (an older one is replaced). */
 const val PREVIOUS = "Previous"
+/** The profile a restore keeps the setup it replaces as: never [PREVIOUS], which a switch by network saves over. */
+const val BEFORE_RESTORE = "Old setup"
 /** A profile name's length in characters people see: an emoji or an accented letter counts once. */
 const val PROFILE_NAME = 12
 
@@ -261,6 +262,8 @@ data class Setup(
     /** Apps a restore brought that weren't on this phone yet: they keep their route until [waitingUntil] (epoch ms), to be installed. */
     val waiting: Set<String> = emptySet(),
     val waitingUntil: Long = 0,
+    /** Choices of waiting apps a later restore kept ([restoredFrom]), app → route → deadline: each until its own instead of [waitingUntil]. */
+    val waitingEach: Map<String, Map<String, Long>> = emptyMap(),
     /** Routes without apps connected only for a combined speed test; never saved. */
     @kotlinx.serialization.Transient val testing: Set<String> = emptySet(),
 ) {

@@ -209,6 +209,17 @@ class CompilerTest {
         val d = example.copy(defaultRoute = DIRECT, apps = mapOf("com.a" to "us"), prefs = Prefs(filter = quad9.copy(direct = true)))
         assertEquals("dns-filter", compile(d)["dns"]!!.jsonObject.str("final"))
         assertEquals("local", compile(d.copy(prefs = Prefs(filter = quad9)))["dns"]!!.jsonObject.str("final"))
+        // An app set to Direct with its lookups unfiltered keeps the phone's DNS under lockdown, where it passes through,
+        // also when the Direct default asks the filter; one set to pass through asks the filter.
+        val both = d.copy(apps = mapOf("com.a" to "us", "com.x" to DIRECT, "com.y" to DIRECT), prefs = Prefs(filter = quad9.copy(direct = true, apps = mapOf("com.y" to true))))
+        for (lockdown in listOf(false, true)) {
+            val c = compile(both, lockdown)
+            val of = { pkg: String -> c["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }.firstOrNull { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf(pkg) }?.str("server") }
+            assertEquals("lockdown=$lockdown", if (lockdown) "local" else null, of("com.x"))
+            assertEquals("lockdown=$lockdown", lockdown, c.rules().any { it["package_name"]?.jsonArray?.map { p -> p.jsonPrimitive.content } == listOf("com.x") && it.str("server") == "local" })
+            assertEquals("lockdown=$lockdown", "dns-filter", of("com.y"))
+            assertEquals("lockdown=$lockdown", if (lockdown) listOf("app.unbraid") else listOf("com.x", "app.unbraid"), c.excluded())
+        }
         // NextDNS needs a profile; an own server by name is looked up first, through the same tunnel.
         assertNull(Filter("nextdns").server())
         assertEquals("/abc123", Filter("nextdns", "abc123").server()!!.path)
@@ -444,13 +455,34 @@ class CompilerTest {
         assertEquals(emptyList<JsonObject>(), icmp(directDefault.copy(apps = mapOf("com.x" to DIRECT))))
     }
 
-    /** A connection with no known app could be a VPN app's: with Direct as the default it is refused, never sent direct. */
+    /** A connection or lookup with no known app could be a VPN app's: with Direct as the default it is refused, never sent direct. */
+    /** The hold for unreadable settings answers no lookup when its block of stand-in addresses couldn't be noted down. */
+    @Test fun aHoldWithAnUnnotedBlockAnswersNoLookup() {
+        val held = Json.parseToJsonElement(Compiler.blockAll("app.unbraid", "/tmp/cache.db", 3, lookups = false)).jsonObject
+        assertEquals("""{"action":"reject"}""", held["dns"]!!.jsonObject["rules"]!!.jsonArray.first().toString())
+        val usual = Json.parseToJsonElement(Compiler.blockAll("app.unbraid", "/tmp/cache.db", 3)).jsonObject
+        assertEquals(usual["route"], held["route"])
+        assertEquals(null, held["experimental"]?.jsonObject?.get("cache_file"))
+        assertEquals(usual["dns"]!!.jsonObject["rules"]!!.jsonArray.size + 1, held["dns"]!!.jsonObject["rules"]!!.jsonArray.size)
+    }
+
     @Test fun unknownOwnerIsRefusedWhenDirectDefaultAndAnAppUsesAVpn() {
         val unknown = """{"package_name_regex":["."],"invert":true,"action":"reject"}"""
+        // A lookup's: from the phone's apps only, as the tailnet's own lookups name no app either. Addresses pass (a
+        // stand-in, as for every app: Android often can't name the app of an ordinary app's lookup); HTTPS and SVCB are
+        // answered empty; the rest is refused.
+        val who = """[{"inbound":["tun"]},{"package_name_regex":["."],"invert":true}"""
+        val unknownLookups = listOf(
+            """{"type":"logical","mode":"and","rules":$who,{"query_type":["HTTPS","SVCB"]}],"action":"predefined","rcode":"NOERROR"}""",
+            """{"type":"logical","mode":"and","rules":$who,{"query_type":["A","AAAA"],"invert":true}],"action":"reject"}""")
         fun rules(s: Setup) = compile(s).rules()
-        fun has(s: Setup) = rules(s).count { it.toString() == unknown }
+        fun dnsOf(c: JsonObject) = c["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.toString() }
+        fun conns(s: Setup, lockdown: Boolean = false, blocked: Set<String> = emptySet()) = compile(s, lockdown, blocked = blocked).rules().count { it.toString() == unknown }
+        fun lookups(s: Setup, lockdown: Boolean = false, blocked: Set<String> = emptySet()) =
+            dnsOf(compile(s, lockdown, blocked = blocked)).filter { it in unknownLookups }.also { assertTrue(it.isEmpty() || it == unknownLookups) }.isNotEmpty()
         val directDefault = example.copy(defaultRoute = DIRECT)
-        assertEquals(1, has(directDefault))
+        assertEquals(1, conns(directDefault))
+        assertTrue(lookups(directDefault))
         // After every app rule and the LAN and home rules, before the default's own lookup.
         val r = rules(directDefault)
         val at = r.indexOfFirst { it.toString() == unknown }
@@ -459,17 +491,94 @@ class CompilerTest {
         assertEquals("""{"action":"resolve","server":"local"}""", r[at + 1].toString())
         // Lookups and the app's own probes come first and are left alone.
         assertTrue(r.indexOfFirst { it["action"]?.jsonPrimitive?.content == "hijack-dns" } < at)
-        assertTrue(compile(directDefault)["dns"].toString().let { "package_name_regex" !in it })
+        // A lookup with no known app: after the stand-in addresses and every app's own rule.
+        val dns = dnsOf(compile(directDefault))
+        val asked = dns.indexOf(unknownLookups[0])
+        assertEquals(asked + 1, dns.indexOf(unknownLookups[1]))
+        val dnsObjs = compile(directDefault)["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(asked > dnsObjs.indexOfFirst { it.str("server") == "fake" })
+        assertTrue(asked > dnsObjs.indexOfLast { it["package_name"] != null })
+        assertEquals("local", compile(directDefault)["dns"]!!.jsonObject.str("final"))
+        val probe = RoutingProbe.compiled(directDefault, null).first
+        assertEquals("fake", RoutingProbe.lookup(probe, "com.a", "example.org", "A"))
+        assertEquals("dns-r-us", RoutingProbe.lookup(probe, "com.a", "example.org", "TXT"))
+        assertEquals("fake", RoutingProbe.lookup(probe, "", "example.org", "A"))
+        assertEquals("reject", RoutingProbe.lookup(probe, "", "example.org", "TXT"))
+        assertEquals("empty", RoutingProbe.lookup(probe, "", "example.org", "HTTPS"))
+        val walked = app.unbraid.data.RestoreTraffic.compile(directDefault.copy(home = Home()), { emptySet() })!!
+        assertEquals(app.unbraid.data.RestoreTraffic.HELD, app.unbraid.data.RestoreTraffic.lookup(walked, emptySet(), "example.org", "TXT")!!.out.exit)
         // An app on a route that is blocked or missing still counts (its apps are refused).
-        assertEquals(1, compile(directDefault, blocked = setOf("us")).rules().count { it.toString() == unknown })
-        assertEquals(1, has(directDefault.copy(apps = mapOf("com.a" to "gone", "com.x" to DIRECT))))
-        // Nothing changes when the default is a VPN route, or no app leaves Direct (Direct apps, filtered or not).
-        assertEquals(0, has(example))
-        assertEquals(0, has(directDefault.copy(apps = mapOf("com.x" to DIRECT))))
-        assertEquals(0, has(directDefault.copy(apps = mapOf("com.x" to DIRECT), prefs = Prefs(filter = Filter("quad9", directApps = true)))))
-        // Under Block connections without VPN, Direct apps pass through unbraid: still no VPN app.
-        assertEquals(0, compile(directDefault.copy(apps = mapOf("com.x" to DIRECT)), true).rules().count { it.toString() == unknown })
-        assertEquals(0, has(directDefault.copy(apps = emptyMap())))
+        assertEquals(1, conns(directDefault, blocked = setOf("us")))
+        assertEquals(1, conns(directDefault.copy(apps = mapOf("com.a" to "gone", "com.x" to DIRECT))))
+        // Connections: nothing changes when the default is a VPN route, or no app leaves Direct.
+        assertEquals(0, conns(example))
+        assertEquals(0, conns(directDefault.copy(apps = mapOf("com.x" to DIRECT))))
+        assertEquals(0, conns(directDefault.copy(apps = mapOf("com.x" to DIRECT)), lockdown = true))
+        assertEquals(0, conns(directDefault.copy(apps = emptyMap())))
+        // Lookups: refused whenever an app has a rule of its own, a VPN default with an app on another VPN included (its
+        // TXT lookups would go to the default's resolver); not while every app goes the default's way.
+        assertTrue(lookups(example))
+        // There an app's TXT lookup Android names no app for would reach the default VPN's resolver, not the app's own.
+        val vpnProbe = RoutingProbe.compiled(example, null).first
+        assertEquals("reject", RoutingProbe.lookup(vpnProbe, "", "example.org", "TXT"))
+        assertEquals("fake", RoutingProbe.lookup(vpnProbe, "", "example.org", "A"))
+        assertFalse(lookups(example.copy(apps = emptyMap())))
+        assertFalse(lookups(directDefault.copy(apps = mapOf("com.x" to DIRECT))))
+        assertFalse(lookups(directDefault.copy(apps = emptyMap())))
+        // With an app on Block, also with no app on a VPN: a lookup of no known app may be the blocked app's.
+        val block = directDefault.copy(apps = mapOf("com.b" to app.unbraid.data.BLOCK))
+        assertTrue(lookups(block))
+        val blockProbe = RoutingProbe.compiled(block, null).first
+        assertEquals("reject", RoutingProbe.lookup(blockProbe, "", "example.org", "TXT"))
+        // Addresses still get a stand-in: an ordinary app's lookup Android can't name must not fail under Block.
+        assertEquals("fake", RoutingProbe.lookup(blockProbe, "", "example.org", "A"))
+        assertEquals("reject", RoutingProbe.lookup(blockProbe, "com.b", "example.org", "A"))
+        assertEquals("local", RoutingProbe.lookup(blockProbe, "com.x", "example.org", "TXT"))
+        // Blocked apps are kept off the local network too (the default): a local name of no known app is refused, as its
+        // connections are; ordinary apps' are answered. Letting blocked apps reach it answers every local name.
+        assertEquals("reject", RoutingProbe.lookup(blockProbe, "", "printer.lan", "A"))
+        assertEquals("local", RoutingProbe.lookup(blockProbe, "com.x", "printer.lan", "A"))
+        val openProbe = RoutingProbe.compiled(block.copy(prefs = block.prefs.copy(blockLan = false)), null).first
+        assertEquals("local", RoutingProbe.lookup(openProbe, "", "printer.lan", "A"))
+        val walkedBlock = app.unbraid.data.RestoreTraffic.compile(block.copy(home = Home()), { emptySet() })!!
+        assertEquals(app.unbraid.data.RestoreTraffic.HELD, app.unbraid.data.RestoreTraffic.lookup(walkedBlock, emptySet(), "example.org", "TXT")!!.out.exit)
+    }
+
+    /**
+     * Android leaves apps out of the VPN by user id: a Direct app that shares one with an app on a VPN route stays inside,
+     * with no rule of its own, so the user id goes as that app does instead of taking it out.
+     */
+    @Test fun aDirectAppSharingAUserIdWithARoutedAppStaysInside() {
+        val s = example.copy(apps = mapOf("com.a" to "us", "com.x" to DIRECT, "com.y" to DIRECT))
+        val kin = { p: String -> if (p == "com.a" || p == "com.x") setOf("com.a", "com.x") else setOf(p) }
+        val kept = Compiler.keptIn(s, kin)
+        assertEquals(setOf("com.x"), kept)
+        // A failed lookup keeps the app inside too; one with no other app on its user id (or not installed) is left out.
+        assertEquals(setOf("com.x", "com.y"), Compiler.keptIn(s) { p -> if (p == "com.y") null else kin(p) })
+        assertEquals(emptySet<String>(), Compiler.keptIn(s) { emptySet() })
+        for (lockdown in listOf(false, true)) {
+            val c = Json.parseToJsonElement(Compiler.compile(Compiler.Input(s, links(s), "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db", blockedKin = kept))).jsonObject
+            assertEquals(if (lockdown) listOf("app.unbraid") else listOf("com.y", "app.unbraid"), c.excluded())
+            assertFalse("lockdown=$lockdown", c.toString().contains("\"com.x\""))
+        }
+        // The engine sees the user id's apps together: com.x's connections take com.a's exit.
+        val walked = app.unbraid.data.RestoreTraffic.compile(s.copy(home = Home()), kin)!!
+        assertEquals("r-us", app.unbraid.data.RestoreTraffic.connect(walked, setOf("com.a", "com.x"), "example.org")!!.exit)
+        // With its lookups filtered it passes through anyway, but its own filtered Direct rule would take com.a along: none either.
+        val filtered = s.copy(prefs = Prefs(filter = Filter("quad9", apps = mapOf("com.x" to true))))
+        assertEquals(setOf("com.x"), Compiler.keptIn(filtered, kin))
+        val f = Json.parseToJsonElement(Compiler.compile(Compiler.Input(filtered, links(filtered), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", blockedKin = setOf("com.x")))).jsonObject
+        assertFalse(f.toString().contains("\"com.x\""))
+        assertEquals(listOf("com.y", "app.unbraid"), f.excluded())
+        assertEquals("r-us", app.unbraid.data.RestoreTraffic.connect(app.unbraid.data.RestoreTraffic.compile(filtered.copy(home = Home()), kin)!!, setOf("com.a", "com.x"), "example.org")!!.exit)
+        // A Direct website is still looked up with the filter: the filtered app kept inside was the only one passing through.
+        val site = filtered.copy(sites = mapOf("example.net" to DIRECT))
+        fun siteServer(kept: Set<String>) = Json.parseToJsonElement(Compiler.compile(Compiler.Input(site, links(site), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", blockedKin = kept))).jsonObject["dns"]!!
+            .jsonObject["rules"]!!.jsonArray.map { it.jsonObject }.first { it["domain"]?.toString()?.contains("example.net") == true && it["server"] != null }.str("server")
+        assertEquals("dns-filter", siteServer(emptySet()))
+        assertEquals("dns-filter", siteServer(setOf("com.x")))
+        // Next to an app that only follows a Direct default, a filtered one keeps its filter: both go Direct anyway.
+        assertEquals(emptySet<String>(), Compiler.keptIn(filtered.copy(defaultRoute = DIRECT, apps = mapOf("com.x" to DIRECT)), kin))
     }
 
     /** Over plain HTTP the Headscale key exchange could be faked, so such a control URL is refused, not used. */

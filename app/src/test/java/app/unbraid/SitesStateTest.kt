@@ -64,6 +64,24 @@ class SitesStateTest {
     /**
      * On Headscale only once Tailscale reports the domain the user allowed; before, the website applies.
      */
+    /**
+     * After connect the lists and widgets judge by the tailnet domain the running config was compiled with: the first On
+     * state carries it, as a reload that changes nothing never sets it again. Without it this website counted on Italy
+     * while the engine sent it to the tailnet.
+     */
+    @Test fun connectShowsTheTailnetDomainItRunsWith() {
+        val s = base.copy(home = Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example"), sites = mapOf("box.corp.example" to "it"))
+        val compiled = Compiler.Input(s, emptyMap(), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", "corp.example")
+        val on = app.unbraid.vpn.VpnState(app.unbraid.vpn.VpnState.Phase.On, tsSuffix = compiled.tsSuffix)
+        assertEquals(emptyMap<String, String>(), Sites.applied(s, reported = on.tsSuffix))
+        assertEquals(s.sites, Sites.applied(s, reported = null)) // what the first On state said before
+        val connect = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+            .substringAfter("private fun connect(").substringBefore("\n    }\n")
+        val first = connect.indexOf("state.value = VpnState(VpnState.Phase.On,")
+        assertTrue(connect.substring(first).substringBefore("\n").contains("tsSuffix = lastInput?.tsSuffix"))
+        assertTrue(connect.indexOf("apply(srv, setup, picked, accounts)") in 0 until first)
+    }
+
     @Test fun answeredByAHeadscaleTailnet() {
         val s = base.copy(home = Home(tailscale = true, tsControlUrl = "https://hs.example.org", tsSuffixAllowed = "corp.example"), sites = mapOf("box.corp.example" to "it"))
         cell(s, "box.corp.example", "Not applied: your tailnet answers this name while Reach your tailnet is on", false, "home-ts", "reject", reported = "corp.example")
@@ -128,6 +146,19 @@ class SitesStateTest {
         }
         val tailnet = base.copy(home = Home(tailscale = true), sites = mapOf("64.100.in-addr.arpa" to "it"))
         assertEquals("dns-r-it", RoutingProbe.lookup(RoutingProbe.compiled(tailnet, null).first, browser, "9.0.64.100.in-addr.arpa", "PTR"))
+    }
+
+    /** A name that answers with a local and a public address: the local route gets the local one, never the public one. */
+    @Test fun aMixedAnswerTakesNoPublicAddressOutOfTheVpn() {
+        val onItaly = base.copy(apps = mapOf(browser to "it"), prefs = base.prefs.copy(lan = true))
+        val mixed = listOf("192.168.1.10", "203.0.113.5")
+        val (dns, route) = RoutingProbe.compiled(onItaly, null)
+        assertEquals("fake", RoutingProbe.lookup(dns, browser, "nas.example.com", "A"))
+        assertEquals("direct" to listOf("192.168.1.10"), RoutingProbe.dial(route, dns, browser, "nas.example.com", answer = mixed))
+        assertEquals("r-it" to listOf("203.0.113.5"), RoutingProbe.dial(route, dns, browser, "nas.example.com", answer = listOf("203.0.113.5")))
+        // The same for the home tunnel: the public address never enters the tailnet.
+        val (tsDns, tsRoute) = RoutingProbe.compiled(onItaly.copy(home = Home(tailscale = true)), null)
+        assertEquals(Compiler.TS_TAG to listOf("100.64.0.7"), RoutingProbe.dial(tsRoute, tsDns, browser, "nas.example.com", answer = listOf("100.64.0.7", "203.0.113.5")))
     }
 
     /** Tailscale running only for an exit node (Reach your tailnet off): no rule answers a tailnet name, so a website rule for one applies. */

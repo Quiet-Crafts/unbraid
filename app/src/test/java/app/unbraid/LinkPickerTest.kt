@@ -231,6 +231,50 @@ class LinkPickerTest {
         assertTrue(out.blocked.getValue("1") is app.unbraid.data.NoLongerOffered)
     }
 
+    /** Two pins restored without addresses that share AirVPN's host name stay on their own servers, also from the cache. */
+    @Test fun restoredPinsSharingAHostNameKeepTheirOwnServers() {
+        val ips = mapOf("Aladfar" to "203.0.113.10", "Aquila" to "203.0.113.20")
+        var gone = ""
+        val p = object : Provider by Fake(listOf(a)) {
+            override val id = "airvpn"
+            override fun connect(loc: Location, account: String): Link = loc.pinned!!.let { pin ->
+                if (pin.name == gone) throw app.unbraid.data.NoLongerOffered(pin) else link(pin.copy(ip = ips.getValue(pin.name)))
+            }
+        }
+        fun pin(name: String) = app.unbraid.data.Backup.bare(Location("airvpn", countryCode = "US", pinned = Server(name, "us.vpn.airdns.org", ips.getValue(name), "pub", 0)))
+        val s = setup(Route("1", pin("Aladfar")), Route("2", pin("Aquila")))
+        val accounts = mapOf("airvpn" to "acc")
+        val first = LinkPicker.pick(s, emptyMap(), null, emptyMap(), accounts, emptyMap()) { p }
+        val again = LinkPicker.pick(s, emptyMap(), null, emptyMap(), accounts, first.remember) { p }
+        assertEquals(mapOf("1" to "203.0.113.10", "2" to "203.0.113.20"), again.links.mapValues { it.value.server.ip })
+        // One of them no longer offered leaves its namesake running.
+        gone = "Aquila"
+        val out = LinkPicker.pick(s, emptyMap(), null, emptyMap(), accounts, first.remember) { p }
+        assertEquals(setOf("1"), out.links.keys)
+        assertTrue(out.blocked.getValue("2") is app.unbraid.data.NoLongerOffered)
+        // The service remembers a server no longer offered by the same key, so a later pick doesn't block the namesake either.
+        assertTrue(LinkPicker.pinKey("airvpn", pin("Aladfar").pinned!!) != LinkPicker.pinKey("airvpn", pin("Aquila").pinned!!))
+        assertEquals(LinkPicker.pinKey("nord", a), LinkPicker.pinKey("nord", a.copy(name = "renamed")))
+        val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+        assertEquals(2, Regex("""LinkPicker\.goneKey\(""").findAll(vpn).count())
+        // Gone for its protocol only: a Nord server missing from one protocol's list leaves routes on another running.
+        val nord = Location("nord", pinned = a)
+        assertTrue(LinkPicker.goneKey(nord.copy(protocol = "wireguard_udp")) != LinkPicker.goneKey(nord.copy(protocol = "openvpn_udp")))
+    }
+
+    /**
+     * After the update, a pin restored without its address doesn't take the tunnel 3.1.1 saved under its host name alone:
+     * that one may be another server of the same host name. With the provider unreachable it waits for its list.
+     */
+    @Test fun aRestoredPinsOlderCacheEntryIsNotTaken() {
+        val down = object : Provider by Fake(listOf(a), online = false) { override val id = "airvpn" }
+        fun pin(name: String) = Location("airvpn", countryCode = "US", pinned = Server(name, "us.vpn.airdns.org", "", "", -1))
+        val older = "airvpn|${pin("x").copy(pinned = null)}|us.vpn.airdns.org"
+        val last = mapOf(older to link(Server("Aladfar", "us.vpn.airdns.org", "203.0.113.10", "pub", 0)))
+        val out = LinkPicker.pick(setup(Route("1", pin("Aladfar")), Route("2", pin("Aquila"))), emptyMap(), null, emptyMap(), mapOf("airvpn" to "acc"), last) { down }
+        assertTrue(out.links.isEmpty())
+    }
+
     @Test fun aSignedOutProvidersRouteIsBlockedAndTheOthersStillRun() {
         val other = object : Provider by Fake(listOf(b)) { override val id = "other" }
         val s = setup(Route("1", Location("fake", countryCode = "NL")), Route("2", Location("other", countryCode = "DE")))

@@ -41,6 +41,8 @@ object Backup {
     const val MAX = 4 shl 20
     /** The most app choices a setup may hold for the restore sheet to check it in full; a backup with more still opens. */
     const val MAX_APPS = 5000
+    /** The most routes, and the most own servers, a setup may hold ([valid]). */
+    const val MAX_EACH = 500
 
     enum class Reason(val text: String) {
         NotBackup("This file isn't an unbraid backup."),
@@ -282,7 +284,7 @@ object Backup {
      */
     fun contents(s: Setup, keys: Boolean = true): Setup {
         val c = s.copy(home = Home(wg = s.home.wg), prefs = s.prefs.copy(stats = false), pristine = false,
-            waiting = emptySet(), waitingUntil = 0, version = VERSION, testing = emptySet())
+            waiting = emptySet(), waitingUntil = 0, waitingEach = emptyMap(), version = VERSION, testing = emptySet())
         if (keys) return c
         val linked = linked(c)
         return linked.copy(home = Home(), servers = linked.servers.map { it.withoutSecrets() }, routes = linked.routes.map { it.withoutSecrets() })
@@ -401,7 +403,7 @@ object Backup {
      */
     fun valid(s: Setup): Setup {
         // As many app choices as the file holds: the restore sheet checks as many as it can ([MAX_APPS]) and says so.
-        need(s.routes.size <= 500 && s.servers.size <= 500 && s.favorites.size <= 2000 && s.profiles.size <= MAX_PROFILES, "it holds more than unbraid keeps")
+        need(s.routes.size <= MAX_EACH && s.servers.size <= MAX_EACH && s.favorites.size <= 2000 && s.profiles.size <= MAX_PROFILES, "it holds more than unbraid keeps")
         val routeIds = s.routes.mapTo(HashSet()) { it.id }
         val serverById = s.servers.associateBy { it.id }
         need(s.routes.all { ID.matches(it.id) && !builtIn(it.id) } && s.routes.map { it.id }.toSet().size == s.routes.size, "a route has a missing or repeated name")
@@ -502,10 +504,14 @@ const val WAIT_MS = 30 * 86_400_000L
  * This phone's setup replaced by backup [b] ([Backup.valid]). Tailscale and the statistics consent stay as they are
  * here. Apps in it wait for [WAIT_MS] to be installed. With [keepAs] (and something set up here), the setup in use is
  * kept as a profile of that name (or that name and a number), with its routes and own servers: a route or server
- * whose name the backup uses for something else gets a new one. Null when there is no room for that profile.
+ * whose name the backup uses for something else gets a new one. Null when there is no room for that profile, or the two
+ * together hold more routes or own servers than a setup may ([Backup.MAX_EACH]).
  */
-fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true): Setup? {
-    // Saved without keys: an own server this phone still has gets its config back here, and the home peer stays as it is.
+fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true, installedAt: (String) -> Long? = { null }): Setup? {
+    // Read once an app: an install during the restore can't count one way here and another below.
+    val seenAt = HashMap<String, Long?>()
+    val installedAt = { p: String -> seenAt.getOrPut(p) { installedAt(p) } }
+    // Saved without keys: an own server this phone still has, the same in everything the file keeps, gets its config back here, and the home peer stays as it is.
     // A route that had no own server here got one made up in the file: this phone's route of that id gives it back, only
     // only where everything the file keeps of that server is the same here (plugin and allowed addresses too); an OpenVPN
     // one holds just a name, so its route waits for its config.
@@ -521,22 +527,25 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     )
     val pkgs = b.apps.keys + b.profiles.flatMap { it.apps.keys }
     var r = b.copy(home = home.copy(wg = if (keys) b.home.wg else home.wg), prefs = b.prefs.copy(stats = prefs.stats), pristine = false, version = VERSION,
-        waiting = pkgs, waitingUntil = if (pkgs.isEmpty()) 0 else now + WAIT_MS, testing = emptySet())
+        waiting = pkgs, waitingUntil = if (pkgs.isEmpty()) 0 else now + WAIT_MS, waitingEach = emptyMap(), testing = emptySet())
     if (keepAs == null || untouched) return r
     if (r.profiles.size >= MAX_PROFILES) return null
     val name = (listOf(keepAs) + (2..MAX_PROFILES + 1).map { "$keepAs $it" }).firstNotNullOfOrNull { r.profileName(it) } ?: return null
     val fresh = { prefix: String, taken: Set<String> -> generateSequence { prefix + java.util.UUID.randomUUID().toString().take(8) }.first { it !in taken } }
     val here = routes.mapTo(HashSet()) { it.id }
     val ok = { id: String -> builtIn(id) || id in here }
-    val apps = apps.filterValues(ok)
+    val due = { p: String, x: String -> waitingEach[p]?.get(x) ?: waitingUntil }
+    // A choice whose wait is over is not kept: the backup's wait for the same app must not bring it back.
+    // One installed before it ([installedAt]) keeps its choice, also when nothing has looked at the installed apps since.
+    val apps = apps.filter { (p, x) -> ok(x) && (p !in waiting || now < due(p, x) || installedAt(p)?.let { it < due(p, x) } == true) }
     val sites = sites.filterValues(ok)
     // Without profiles every route here shows, those no app uses too: all of them are kept, as saving a first profile does.
     val listed = if (profiles.isEmpty()) (added + (routes.map { it.id } - (setOf(defaultRoute) + apps.values + sites.values + added))).distinct() else added
     val used = (setOf(defaultRoute) + apps.values + sites.values + listed).mapNotNull(::route)
     val serverIds = r.servers.map { it.id }.toMutableSet()
     val sv = HashMap<String, String>()
-    val owns = used.mapNotNullTo(HashSet()) { it.own }
-    val addServers = servers.filter { it.id in owns }.mapNotNull { s ->
+    // Every own server here stays, one no route uses too: keeping replaces only profiles, favourites and settings.
+    val addServers = servers.mapNotNull { s ->
         val there = r.servers.firstOrNull { it.id == s.id }
         val id = if (there == null) s.id else if (there == s) { sv[s.id] = s.id; return@mapNotNull null } else fresh("s", serverIds)
         sv[s.id] = id; serverIds += id; s.copy(id = id)
@@ -554,10 +563,23 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
         val id = if (there == null) x.id else fresh("r", routeIds)
         rt[x.id] = id; routeIds += id; c.copy(id = id)
     }
+    // More than a setup may hold would restore, then fail every backup of it: counted as a backup without keys holds it,
+    // with an own server made for every imported route that has none.
+    if (Backup.contents(r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers), keys = false).let { it.routes.size > Backup.MAX_EACH || it.servers.size > Backup.MAX_EACH }) return null
     if (pins.isNotEmpty()) r = r.copy(routes = r.routes.map { x -> pins[x.id]?.let { x.copy(loc = it) } ?: x })
     val m = { id: String -> rt[id] ?: id }
     // The first profile: every route shown until now stays listed, as when the first profile is saved ([Setup.saveAs]).
     if (r.profiles.isEmpty()) r = r.copy(added = (r.added + (r.routes.map { it.id } - (setOf(r.defaultRoute) + r.apps.values + r.sites.values + r.added))).distinct())
     val kept = Profile(name, if (ok(defaultRoute) && defaultRoute.isNotEmpty()) m(defaultRoute) else "", apps.mapValues { m(it.value) }, listed.filter(ok).map(m), sites.mapValues { m(it.value) })
-    return r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers, profiles = r.profiles + kept)
+    // Choices of the kept setup's apps still waiting to be installed wait on, each until the deadline it had: otherwise the
+    // next look at the installed apps drops them, Block too. One the backup has as well waits as the backup's do.
+    val still = apps.filterKeys { it in waiting && installedAt(it) == null }.mapNotNull { (p, x) ->
+        due(p, x).takeIf { b.apps[p] != m(x) && b.profiles.none { f -> f.apps[p] == m(x) } }?.let { p to mapOf(m(x) to it) }
+    }.toMap()
+    // The older fields hold them too (until the latest deadline), so a version before per-app deadlines keeps them as well.
+    val merged = r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers, profiles = r.profiles + kept, waiting = r.waiting + still.keys,
+        waitingUntil = maxOf(r.waitingUntil, still.values.flatMap { it.values }.maxOrNull() ?: 0), waitingEach = still)
+    // Kept, it must still fit a backup with keys: large OpenVPN configs of both setups together could pass the counts but not the size.
+    if (runCatching { Backup.export(merged, "", now, true).size + 1024 > Backup.MAX }.getOrDefault(false)) return null
+    return merged
 }

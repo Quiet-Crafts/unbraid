@@ -109,9 +109,23 @@ internal fun tickedTile(s: Setup, pkg: String) = s.apps[pkg] ?: FOLLOW
 /** The line under "Follow default": where the default goes. A Direct default still runs through the app (filter, home). */
 internal fun followSub(s: Setup): String? = if (s.defaultRoute == DIRECT) "Direct, through $APP" else s.route(s.defaultRoute)?.name
 
-/** Said under app [pkg]'s routes when Android leaves it outside the app; never under lockdown, which keeps every app in. */
-internal fun outsideNote(s: Setup, pkg: String, lockdown: Boolean): String? =
-    "Outside $APP: no filter, no home network".takeIf { !lockdown && s.outside(pkg) }
+/** The apps of [kin], the others of app [pkg]'s Android user id, that keep it from going Direct on its own, by label. */
+internal fun keptWith(s: Setup, pkg: String, kin: List<AppInfo>) = kin.filter { s.apps[pkg] == DIRECT && app.unbraid.vpn.Compiler.keeps(s, pkg, it.pkg) }.map { it.label }
+
+/**
+ * Said under app [pkg]'s routes when Android leaves it outside the app (never under lockdown, which keeps every app in),
+ * or when apps of its Android user id ([keptBy], from [keptWith]) keep it inside: it then goes as they do.
+ */
+internal fun outsideNote(s: Setup, pkg: String, lockdown: Boolean, keptBy: List<String> = emptyList()): String? =
+    if (keptBy.isNotEmpty()) "Shares its Android user id with ${keptBy.joinToString()}, so it can't be Direct on its own: it goes as ${if (keptBy.size == 1) "that app does" else "those apps do"}."
+    else "Outside $APP: no filter, no home network".takeIf { !lockdown && s.outside(pkg) }
+
+/** The line under a Direct app's "Filter its lookups": with [filter] or the phone's DNS, or neither while apps of its user id ([keptBy]) keep it inside. */
+internal fun lookupsSub(on: Boolean, filter: String?, keptBy: List<String> = emptyList()) = when {
+    keptBy.isNotEmpty() -> "Not used now: its lookups go as ${keptBy.joinToString()}'s do"
+    on -> "Through $APP, with $filter. The app can see a VPN is on"
+    else -> "Outside $APP, with the phone's DNS"
+}
 
 /** What TalkBack hears for app [pkg]'s route: where it goes, and whether it chose that or follows the default. */
 internal fun routeState(s: Setup, pkg: String): String {
@@ -133,6 +147,8 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     val setup by ui.shown.collectAsStateWithLifecycle()
     val viewing by ui.viewing.collectAsStateWithLifecycle()
     val apps by ui.apps.collectAsStateWithLifecycle()
+    // Apps by Android user id: an app on Direct may have to go as another app of its id ([keptWith]).
+    val byUid = remember(apps) { apps.groupBy { it.uid } }
     val lockdown = ui.vpn.collectAsStateWithLifecycle().value.lockdown
     val switchTo = rememberProfileSwitch(ui)
     var q by rememberSaveable { mutableStateOf("") }
@@ -267,7 +283,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
             // Regrouping slides rows to their new place instead of jumping.
             Box(Modifier.animateItem(fadeInSpec = null, placementSpec = motion.defaultSpatialSpec(), fadeOutSpec = null).then(if (i == 0) tourAnchor(TourStop.AppsList) else Modifier)) {
                 Rise("apps", i, reveal) {
-                    AppRow(ui, a, setup, offered, expanded = open == a.pkg, onToggle = {
+                    AppRow(ui, a, setup, offered, byUid[a.uid].orEmpty().filter { it.pkg != a.pkg }, expanded = open == a.pkg, onToggle = {
                         if (open == a.pkg) { if (openedAs != setup.routeOf(a.pkg)) land = a.pkg; open = null; openedAs = null }
                         else { open = a.pkg; openedAs = setup.routeOf(a.pkg) }
                     }, openPicker, draft = viewing != null && viewing != setup.profile, lockdown = lockdown)
@@ -306,9 +322,11 @@ private fun FilterChip(label: String, dot: Color?, on: Boolean, direct: Boolean 
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.data.Route>, expanded: Boolean, onToggle: () -> Unit, openPicker: (String) -> Unit, draft: Boolean = false, lockdown: Boolean = false) {
+private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.data.Route>, kin: List<AppInfo>, expanded: Boolean, onToggle: () -> Unit, openPicker: (String) -> Unit, draft: Boolean = false, lockdown: Boolean = false) {
     val haptic = LocalHapticFeedback.current
     val explicit = setup.apps[a.pkg]
+    // Apps of its user id that keep it from going Direct on its own: said in its menu and under its filter switch.
+    val keptBy = keptWith(setup, a.pkg, kin)
     val current = setup.routeOf(a.pkg)
     val motion = MaterialTheme.motionScheme
     val ground by animateColorAsState(if (expanded) Ink.surface else Color.Transparent, motion.fastEffectsSpec(), label = "row")
@@ -341,7 +359,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
                 Tile(FOLLOW, "Follow default", Icons.layers, d?.let { Ink.route(it.hue) } ?: Ink.direct, tinted = false,
                     sub = followSub(setup)).takeIf { setup.defaultRoute.isNotEmpty() },
             ) + routeTiles(setup, offered) + Tile("", "More locations", Icons.more, Ink.dim, tinted = false)
-            RouteTiles(tiles, tickedTile(setup, a.pkg), outsideNote(setup, a.pkg, lockdown) ?: BLOCK_NOTE.takeIf { explicit == BLOCK }) { id ->
+            RouteTiles(tiles, tickedTile(setup, a.pkg), outsideNote(setup, a.pkg, lockdown, keptBy) ?: BLOCK_NOTE.takeIf { explicit == BLOCK }) { id ->
                 when (id) { "" -> openPicker("app:${a.pkg}"); FOLLOW -> ui.followDefault(a.pkg); else -> ui.assign(a.pkg, id) }
             }
         }
@@ -350,7 +368,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
         // A setting of every profile: not offered while editing a profile not in use.
         if (expanded && explicit == DIRECT && f.server() != null && !draft) {
             val on = f.through(a.pkg)
-            GroupRow(0, 1, "Filter its lookups", if (on) "Through $APP, with ${f.server()?.name}. The app can see a VPN is on" else "Outside $APP, with the phone's DNS",
+            GroupRow(0, 1, "Filter its lookups", lookupsSub(on, f.server()?.name, keptBy),
                 onClick = { ui.setPrefs { p -> p.copy(filter = p.filter.copy(apps = if (!on == p.filter.directApps) p.filter.apps - a.pkg else p.filter.apps + (a.pkg to !on))) } },
                 checked = on, trailing = { Toggle(on) }, modifier = Modifier.padding(start = 60.dp, end = 6.dp, bottom = 12.dp))
         }

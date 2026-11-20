@@ -75,11 +75,12 @@ object NordApi {
 
     /**
      * A city's servers for [tech], or a country's without a city (the API can't look one up by host name), cut down to
-     * what a [Server] needs: a few hundred at most per city, some thousands for a whole large country.
+     * what a [Server] needs: a few hundred at most per city, some thousands for a whole large country. Without either,
+     * every server: only for a pinned server whose country isn't known.
      */
-    fun inPlace(countryId: Int, cityId: Int?, tech: String): List<Server> = parseServers(get(
+    fun inPlace(countryId: Int?, cityId: Int?, tech: String): List<Server> = parseServers(get(
         "/servers?" + query(
-            (if (cityId != null) "filters[country_city_id]" to "$cityId" else "filters[country_id]" to "$countryId"),
+            *listOfNotNull(if (cityId != null) "filters[country_city_id]" to "$cityId" else countryId?.let { "filters[country_id]" to "$it" }).toTypedArray(),
             "filters[servers_technologies][identifier]" to tech, "limit" to "20000",
             *listOf("name", "hostname", "station", "load", "locations.country.code", "locations.country.city.name", "technologies.identifier", "technologies.metadata")
                 .map { "fields[servers.$it]" to null }.toTypedArray(),

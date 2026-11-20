@@ -79,7 +79,7 @@ object SpeedTest {
     fun nodes(): List<TsNode> {
         val s = UnbraidVpn.state.value
         if (Compiler.TS_TAG !in UnbraidVpn.tags.values && !Unbraid.store.setup.value.tailscale) return emptyList()
-        val routed = Unbraid.store.setup.value.tsExit
+        val routed = (UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit
         return s.tsExitNodes.filter { it.online && it.id.isNotEmpty() && it.ip != routed }
     }
 
@@ -162,13 +162,13 @@ object SpeedTest {
             }
         }
         // A test through Tailscale's routed node first switches back from a tested node, so it never measures that one.
-        if (node == null) { if (tag == Compiler.TS_TAG) tsq.execute { if (stop()) return@execute; if (Unbraid.store.tsTestFrom != null) switchBack(); Thread(test, "speedtest").start() } else Thread(test, "speedtest").start() }
+        if (node == null) { if (tag == Compiler.TS_TAG) tsq.execute { if (stop()) return@execute; if (Unbraid.store.tsTestFrom != null && !switchBack { !stop() }) { set { it.copy(phase = Phase.Failed, error = "Tailscale couldn't go back to its exit node. Try again.") }; return@execute }; if (stop()) return@execute; Thread(test, "speedtest").start() } else Thread(test, "speedtest").start() }
         else tsq.execute {
             if (stop()) return@execute // cancelled before its turn: switch nothing
             if (moved()) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; return@execute }
             // Switching is a blocking call; give Tailscale a moment to reach the new node before measuring.
             // The routed node's stable ID (the switch back needs one), noted with the route's setting it belongs to.
-            if (Unbraid.store.tsTestFrom == null) Unbraid.store.tsTestFrom = Unbraid.store.setup.value.tsExit?.let { r -> restoreTo(r, null, UnbraidVpn.state.value.tsExitNodes)?.let { "$r\n$it" } }.orEmpty()
+            if (Unbraid.store.tsTestFrom == null) Unbraid.store.tsTestFrom = (UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit?.let { r -> restoreTo(r, null, UnbraidVpn.state.value.tsExitNodes)?.let { "$r\n$it" } }.orEmpty()
             val ok = runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, node.id) }.isSuccess
             // A restart during the switch may have switched its new engine: switched back at once, never counted there.
             if (ok && moved()) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; restoreNode(); return@execute }
@@ -329,13 +329,16 @@ object SpeedTest {
                     up.filter { UnbraidVpn.tags[it] == null }.forEach { e -> leg(e) { it.copy(error = "It didn't connect for the test.") } }
                 }
                 // A cut-off test of another node may have left Tailscale on it: the routed node first, as for a single test.
-                if (Unbraid.store.tsTestFrom != null && legs.any { UnbraidVpn.tags[it] == Compiler.TS_TAG }) runCatching { tsq.submit(::switchBack).get() }
+                if (Unbraid.store.tsTestFrom != null && legs.any { UnbraidVpn.tags[it] == Compiler.TS_TAG } && runCatching { tsq.submit<Boolean> { !stop() && switchBack { !stop() } }.get() }.getOrDefault(false) != true)
+                    legs.filter { UnbraidVpn.tags[it] == Compiler.TS_TAG }.forEach { e -> leg(e) { it.copy(error = "Tailscale couldn't go back to its exit node.") } }
+                if (stop()) return@Thread // cancelled while it waited to switch back: nothing is asked of M-Lab
                 parallel(_all.value?.legs.orEmpty().filter { it.error == null }.map { it.exit }) { e ->
                     val country = setup.route(e)?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()
                     try {
+                        if (stop()) return@parallel // cancelled: nothing more is asked of M-Lab
                         val s = Ndt7.locate(tag(e), country)
                         // Outside the lock: a slow answer mustn't hold up a cancel on the main thread.
-                        val near = if (s == null) Ndt7.locate(tag(e), country, strict = false) else null
+                        val near = if (s == null && !stop()) Ndt7.locate(tag(e), country, strict = false) else null
                         leg(e) { if (s != null) it.copy(server = s) else it.copy(missing = true, server = near) }
                     } catch (x: Ndt7.Limited) { leg(e) { it.copy(limited = true) } }
                     catch (x: Exception) { leg(e) { it.copy(error = "M-Lab couldn't be reached through it.") } }
@@ -412,12 +415,20 @@ object SpeedTest {
     }
 
     /** On [tsq] only. */
-    private fun switchBack() {
-        val want = restoreTo(Unbraid.store.setup.value.tsExit, Unbraid.store.tsTestFrom, UnbraidVpn.state.value.tsExitNodes)
+    /**
+     * Puts Tailscale back on the node the running engine routes to. Under the VPN's own lock, so no engine starts while it
+     * is chosen and set. True when that node (or no exit, when none is routed) was set; the note stays otherwise, and a
+     * routed test doesn't start on an unknown node. Never on the main thread.
+     */
+    private fun switchBack(alive: () -> Boolean = { true }): Boolean = UnbraidVpn.underLock {
+        if (!alive()) return@underLock false // cancelled while it waited for the lock
         // A node Tailscale won't take back (gone, no longer an exit) is no reason to stay on the tested one: no exit then.
         val set = { id: String -> runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, id) }.isSuccess }
-        if (set(want.orEmpty()) && want != null) Unbraid.store.tsTestFrom = null else if (want != "") set("")
-    }
+        val want = restoreTo((UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit, Unbraid.store.tsTestFrom, UnbraidVpn.state.value.tsExitNodes)
+        val ok = set(want.orEmpty()) && want != null
+        if (ok) Unbraid.store.tsTestFrom = null else if (want != "") set("")
+        ok
+    } ?: false
 
     /**
      * The stable ID to switch back to, for the route's setting now ([routed], an address, ID or name): "" for no exit

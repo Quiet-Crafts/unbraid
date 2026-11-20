@@ -18,7 +18,10 @@ import app.unbraid.data.WgLink
 /** Chooses the tunnel each active route runs. Kept free of Android so it can be tested. */
 object LinkPicker {
     /** An offline pick's route that needs its provider for a tunnel. */
-    class Waiting : Fail("waiting for a server")
+    open class Waiting : Fail("waiting for a server")
+
+    /** A running tunnel a provider setting now rules out (Mullvad-owned only): its apps wait blocked, not on it. */
+    class Unsuited : Waiting()
 
     /** A route restored without its keys: blocked, never retried, until its own server gets its config again. */
     class KeyLeftOut(name: String) : AuthException("Add the config for $name again in Settings, Providers & servers")
@@ -29,9 +32,29 @@ object LinkPicker {
     /** Fallback-cache key: a pinned route is its own entry, so it can never inherit another server's tunnel. */
     fun serverKey(r: Route, l: Link) = "${r.loc.provider}|${serverId(l.server)}"
 
-    fun cacheKey(r: Route) = "${r.loc.provider}|${r.loc.copy(pinned = null)}|${r.loc.pinned?.let(::serverId).orEmpty()}"
+    fun cacheKey(r: Route) = "${r.loc.provider}|${r.loc.copy(pinned = null)}|${r.loc.pinned?.let(::pinId).orEmpty()}"
 
     private fun serverId(s: Server) = s.ip.ifEmpty { s.host }
+
+    /** A pin restored without its address is its name too: AirVPN gives every server of a country one host name. */
+    private fun pinId(s: Server) = if (s.ip.isEmpty()) "${s.host}|${s.name}" else s.ip
+
+    /** A pinned server as its provider finds it again: by host name, and on AirVPN, whose servers share one per country, by name too. */
+    fun pinKey(provider: String, s: Server) = "$provider|${s.host}" + if (provider == "airvpn") "|${s.name}" else ""
+
+    /** A pinned server no longer offered, for its protocol: Nord's lists differ by protocol, so one list without it rules out only routes on it. */
+    fun goneKey(l: app.unbraid.data.Location) = l.pinned?.let { pinKey(l.provider, it) + "|" + if (l.provider == "nord") app.unbraid.data.Nord.tech(l) else l.protocol.orEmpty() }
+
+    /**
+     * The route's saved tunnel. A pin's is its own server's only ([pinKey]), also under the key 3.1.1 saved a pin restored
+     * without its address with (its host name alone), until a pick saves it under its own.
+     */
+    private fun saved(r: Route, last: Map<String, Link>): Link? {
+        val pin = r.loc.pinned ?: return last[cacheKey(r)]
+        val older = "${r.loc.provider}|${r.loc.copy(pinned = null)}|${serverId(pin)}"
+        // Not for a pin without its address: under 3.1.1 that key could hold another server of the same host name.
+        return listOfNotNull(cacheKey(r), older.takeIf { pin.ip.isNotEmpty() }).firstNotNullOfOrNull { k -> last[k]?.takeIf { pinKey(r.loc.provider, it.server) == pinKey(r.loc.provider, pin) } }
+    }
 
     /**
      * Imported configs as they are; provider routes keep the current server if the route's location didn't change, else
@@ -72,7 +95,8 @@ object LinkPicker {
                 else -> keep[r.id]?.takeIf {
                     applied?.route(r.id)?.let { a -> !a.imported && a.loc == r.loc } == true && appliedAccounts[r.loc.provider] == accounts[r.loc.provider] &&
                         trusted(it, r, accounts, providers) && Addr.usable(it) && app.unbraid.data.AutoProtocol.matches(r, it) && disguised(setup, r, it) && (it as? WgLink)?.hopEntry == null
-                } ?: if (offline) throw if (accounts[r.loc.provider] == null) AuthException("Sign in to ${providers(r.loc.provider)?.name ?: r.loc.provider} for ${r.name}") else Waiting()
+                } ?: if (offline) throw if (accounts[r.loc.provider] == null) AuthException("Sign in to ${providers(r.loc.provider)?.name ?: r.loc.provider} for ${r.name}")
+                        else if (keep[r.id]?.let { suits(it, r, providers) } == false) Unsuited() else Waiting()
                     else fresh(r, accounts, last, used, providers).also {
                         if (!Addr.usable(it)) throw Addr.refused(it.server.name)
                         if (!disguised(setup, r, it)) throw Fail("${r.name}: ${it.server.name} can't be reached through V2Ray right now. Pick another server, or turn Disguise off on the ${providers(r.loc.provider)?.name} page")
@@ -82,11 +106,14 @@ object LinkPicker {
             out[r.id] = link
         }
         // A server no longer offered is gone for every route pinned to it, not only the one that asked.
-        val gone = blocked.entries.filter { it.value is app.unbraid.data.NoLongerOffered }.mapNotNull { (id, e) -> setup.route(id)?.loc?.let { l -> l.pinned?.let { "${l.provider}|${it.host}" to e } } }.toMap()
-        setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> r.loc.pinned?.let { gone["${r.loc.provider}|${it.host}"] }?.let { blocked[r.id] = it; out.remove(r.id) } }
+        val gone = blocked.entries.filter { it.value is app.unbraid.data.NoLongerOffered }.mapNotNull { (id, e) -> setup.route(id)?.loc?.let(::goneKey)?.let { it to e } }.toMap()
+        setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> goneKey(r.loc)?.let { gone[it] }?.let { blocked[r.id] = it; out.remove(r.id) } }
         // A provider that refused its account refuses it for every route: none of them keeps a tunnel on it.
         val refusedBy = blocked.entries.filter { it.value is AuthException }.mapNotNull { (id, e) -> setup.route(id)?.takeIf { !it.imported }?.let { it.loc.provider to e } }.toMap()
         setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> refusedBy[r.loc.provider]?.let { blocked[r.id] = it; out.remove(r.id) } }
+        // A list read for a later route can rule out an earlier one's server: every unpinned route is checked against the last.
+        setup.activeRoutes.filter { !it.imported && it.loc.pinned == null && out[it.id]?.let { l -> suits(l, it, providers) } == false }
+            .forEach { r -> out.remove(r.id); blocked[r.id] = unsuited(providers(r.loc.provider)?.name ?: r.loc.provider, r) }
         // The provider's own multi-hop: the exit's tunnel goes to its forwarding port at the entry's server. The entry needs
         // no tunnel of its own: its server is asked for when no app uses it. Anything missing blocks the route.
         val bases = HashMap<String, Link>() // the exits as picked, for the fallback cache: a multi-hop is never reused
@@ -191,31 +218,47 @@ object LinkPicker {
     /** A kept or cached tunnel is reused only if its provider still vouches for its server key ([Provider.trusts]). */
     private fun trusted(l: Link, r: Route, accounts: Map<String, String>, providers: (String) -> Provider?): Boolean {
         val p = providers(r.loc.provider) ?: return true
+        // A page setting can rule out the server of an unpinned route: it is picked again, or blocked, never kept.
+        if (!suits(l, r, providers)) return false
         val acc = accounts[p.id] ?: return true
         return p.trusts(l, acc)
     }
+
+    /** A pinned server always suits; an unpinned route's must suit its provider's page settings ([Provider.suits]). */
+    /** Whether every provider route's [links] still suits its provider's settings as its latest list says. */
+    fun stillSuits(setup: Setup, links: Map<String, Link>, providers: (String) -> Provider?) =
+        setup.activeRoutes.all { r -> r.imported || links[r.id]?.let { suits(it, r, providers) } != false }
+
+    private fun suits(l: Link, r: Route, providers: (String) -> Provider?) = r.loc.pinned != null || providers(r.loc.provider)?.suits(l.server) != false
+
+    /** The first of [links] for unpinned route [r] whose server suits [p]'s settings as its last list confirmed; none is refused. */
+    private fun suited(p: Provider, r: Route, vararg links: Link?) = links.filterNotNull().firstOrNull { p.suits(it.server) } ?: throw unsuited(p.name, r)
+
+    private fun unsuited(provider: String, r: Route) = Fail("No $provider server for ${r.name} suits your settings right now")
 
     private fun fresh(r: Route, accounts: Map<String, String>, last: Map<String, Link>, used: Set<String>, providers: (String) -> Provider?): Link {
         val p = providers(r.loc.provider) ?: error("Unknown provider ${r.loc.provider}")
         val acc = accounts[p.id] ?: throw AuthException("Sign in to ${p.name} for ${r.name}")
         val pinned = r.loc.pinned
         // A pinned server starts from its last refreshed copy, so going offline never brings back older details.
-        val loc = (pinned?.let { pin -> last[cacheKey(r)]?.server?.takeIf { it.host == pin.host }?.let { r.loc.copy(pinned = it) } } ?: r.loc)
+        val loc = (pinned?.let { saved(r, last)?.server?.let { r.loc.copy(pinned = it) } } ?: r.loc)
             .let { it.copy(protocol = app.unbraid.data.AutoProtocol.of(r)) }
         val l = try {
             again(p, r, acc, last, used) ?: p.connect(loc, acc)
         } catch (e: Exception) {
             if (e is AuthException || e is app.unbraid.data.NoLongerOffered || e is app.unbraid.data.Unsupported || e is Addr.Refused) throw e
-            val cached = last[cacheKey(r)]?.takeIf { pinned == null || it.server.host == pinned.host }?.takeIf { trusted(it, r, accounts, providers) && app.unbraid.data.AutoProtocol.matches(r, it) && (it as? WgLink)?.hopEntry == null }
+            val cached = saved(r, last)?.takeIf { trusted(it, r, accounts, providers) && app.unbraid.data.AutoProtocol.matches(r, it) && (it as? WgLink)?.hopEntry == null }
             // A cached tunnel at an address that can't be used is no fallback: the user is told to pick the server again.
             if (cached != null && !Addr.usable(cached)) throw Addr.refused(cached.server.name)
             cached ?: throw if (pinned != null) Fail("${r.name}: ${pinned.name} is unreachable") else e
         }
-        if (pinned != null || "${p.id}|${serverId(l.server)}" !in used) return l
+        if (pinned != null) return l
+        if ("${p.id}|${serverId(l.server)}" !in used) return suited(p, r, l)
         val other = runCatching {
             p.servers(loc, acc, 10).firstOrNull { "${p.id}|${serverId(it)}" !in used }?.let { p.connect(loc.copy(pinned = it), acc) }
         }.onFailure { if (it is AuthException) throw it }.getOrNull()
-        return other ?: l
+        // Another server, else the one already found (shared with the route that has it), whichever still suits.
+        return suited(p, r, other, l)
     }
 
     /**

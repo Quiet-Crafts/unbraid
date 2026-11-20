@@ -22,6 +22,7 @@ import app.unbraid.data.WgConf
 import app.unbraid.data.withoutSecrets
 import app.unbraid.vpn.Compiler
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Random
@@ -67,7 +68,13 @@ class RestoreOracleTest {
     private fun under(n: String, s: String) = n == s || n.endsWith(".$s")
 
     /** The setup, read as the compiler states it decides. [given]: routes waiting for their config have it. */
-    private inner class Model(val s: Setup, val lockdown: Boolean, val given: Boolean = false) {
+    private inner class Model(setup: Setup, val lockdown: Boolean, val given: Boolean = false) {
+        /**
+         * An app on Direct goes as another app of its user id when that one goes through a route, is blocked or follows a
+         * VPN default, or would be taken out of unbraid with it: as if it had no choice of its own.
+         */
+        // Typed: the model's own `filter` would otherwise make this read itself.
+        val s: Setup = setup.copy(apps = setup.apps.filter { (p, r) -> r != DIRECT || kin(p).none { k -> setup.routeOf(k) != DIRECT || setup.outside(p) && !setup.outside(k) } })
         val f = s.prefs.filter
         val filter = f.server() != null
         val barred = s.apps.filterValues { it == BLOCK }.keys
@@ -79,7 +86,7 @@ class RestoreOracleTest {
         /** A filter at an address of the home network is asked through the home tunnel. */
         val filterVia = f.server()?.ip?.takeIf { a -> Compiler.ipv4(a) != null && home.any { within(a, it) } }?.let { "home-wg" }
         /** An app's own group of rules, null when it has none (it follows the default). */
-        fun group(app: String): String? = s.apps[app]?.let { r -> if (through(app)) "filtered" else r }?.takeIf { g -> g != s.defaultRoute && g != BLOCK && (g != DIRECT || lockdown) }
+        fun group(app: String): String? = s.apps[app]?.let { r -> if (through(app)) "filtered" else r }?.takeIf { g -> (g != s.defaultRoute || g == DIRECT && directFiltered) && g != BLOCK && (g != DIRECT || lockdown) }
         val vpnApps = s.apps.keys.any { group(it).let { g -> g != null && g != DIRECT && g != "filtered" } }
         val anyGroupNotDirect = s.apps.keys.any { group(it).let { g -> g != null && g != DIRECT } }
         val lanOut = s.prefs.lan && !lockdown && (barred.isEmpty() || !s.prefs.blockLan)
@@ -98,7 +105,13 @@ class RestoreOracleTest {
             Resolver.Local -> Outcome("direct", k)
             else -> Outcome(exit(id), k)
         }
-        fun siteKind(id: String) = if (id == DIRECT && filter && (directFiltered || s.apps.keys.any(through))) Resolver.Filter else kind(id)
+        /** Direct traffic passes through the filter as saved, an app kept inside for another app of its user id included. */
+        val throughAny = setup.apps.any { (p, r) -> r == DIRECT && f.through(p) }
+        fun siteKind(id: String) = if (id == DIRECT && filter && (directFiltered || throughAny)) Resolver.Filter else kind(id)
+        /** A lookup of no known app is refused (HTTPS and SVCB answered empty) while an app has a rule of its own; addresses never. */
+        val unnamedOdd = barred.isNotEmpty() || s.apps.keys.any { group(it) != null }
+        fun unnamed(app: String?, type: String): Outcome? = if (app == null && unnamedOdd && type != "A" && type != "AAAA")
+            Outcome(if (type == "HTTPS" || type == "SVCB") RestoreTraffic.EMPTY else RestoreTraffic.HELD) else null
         val defaultKind = if (directFiltered && !defaultBlocked) Resolver.Filter else if (s.defaultRoute == DIRECT || defaultBlocked) Resolver.Local else kind(s.defaultRoute)
         val sites = Sites.applied(s)
         fun site(n: String) = Sites.match(n, sites.keys.filter { sites[it] != BLOCK })
@@ -167,12 +180,15 @@ class RestoreOracleTest {
             val step = { o: Outcome, by: By -> Step(o, by, by) }
             if (app in barred) return step(Outcome(REJECT), By.AppFirst)
             if (blockedSite(name)) return step(Outcome(REJECT), By.Name)
+            if (local(name) && app == null && barred.isNotEmpty() && s.prefs.blockLan) return step(Outcome(RestoreTraffic.HELD), By.App)
             if (local(name)) return step(Outcome("direct", Resolver.Local), By.Name)
+            if (barred.isNotEmpty()) unnamed(app, type)?.let { return step(it, By.App) }
             site(name)?.let { sites.getValue(it) }?.let { id ->
                 if (refused(id)) return step(Outcome(REJECT), By.Name)
-                return step(if (type == "HTTPS") Outcome(RestoreTraffic.EMPTY) else answer(id, siteKind(id)), By.Name)
+                return step(if (type == "HTTPS" || type == "SVCB") Outcome(RestoreTraffic.EMPTY) else answer(id, siteKind(id)), By.Name)
             }
             app?.let(::group)?.let { g -> return step(if (refused(g)) Outcome(REJECT) else answer(g, kind(g)), By.App) }
+            if (barred.isEmpty()) unnamed(app, type)?.let { return step(it, By.App) }
             if (defaultBlocked) return step(Outcome(REJECT), By.None)
             return step(answer(s.defaultRoute, defaultKind), By.None)
         }
@@ -268,7 +284,7 @@ class RestoreOracleTest {
         val place = { ip: String -> if (homeRanges.any { within(ip, it) }) Who.Home else if (localOn && lan.any { within(ip, it) }) Who.Local else null }
         for (l in listOf(false, true)) {
             val dflt = duo(a, b, l) { it.connect(OTHER, "free.test", "203.0.113.80") }
-            val dfltLookup = listOf("TXT", "HTTPS").associateWith { q -> duo(a, b, l, true) { it.lookup(OTHER, "free.test", q) } }
+            val dfltLookup = listOf("TXT", "HTTPS", "SVCB").associateWith { q -> duo(a, b, l, true) { it.lookup(OTHER, "free.test", q) } }
             for (p in listOf(OTHER, OWNERLESS, PING) + appKeys) {
                 val ownName = if (p == PING) null else "free.test"
                 val own = duo(a, b, l) { it.connect(p, ownName, "203.0.113.80") }
@@ -283,10 +299,12 @@ class RestoreOracleTest {
                         if (net != "udp" && n == ownName && ip == "203.0.113.80") continue
                         each(duo(a, b, l) { it.connect(p, n, ip, net) }, own, pe) { d, o, e, x -> if (x == Loss.ToDirect && Loss.Unblocked in d.losses && d.now.by == By.Address) null else who(n, place(ip), d, o, e, sites, x) }
                     }
-                if (p != PING) for (q in listOf("TXT", "HTTPS")) {
+                if (p != PING) for (q in listOf("TXT", "HTTPS", "SVCB")) {
                     val ownL = duo(a, b, l, true) { it.lookup(p, "free.test", q) }
                     val peL = mine(ownL, dfltLookup.getValue(q))
-                    for (n in names - "free.test") each(duo(a, b, l, true) { it.lookup(p, n, q) }, ownL, peL) { d, o, e, x -> who(n, null, d, o, e, sites, x) }
+                    for (n in names - "free.test") each(duo(a, b, l, true) { it.lookup(p, n, q) }, ownL, peL) { d, o, e, x ->
+                        // A hold lifted at a local name is the local network's, as at its addresses.
+                        if (d.was.out.exit == RestoreTraffic.HELD && localOn && localSuffixes.any { under(n, it) }) null else who(n, null, d, o, e, sites, x) }
                 }
             }
         }
@@ -372,18 +390,17 @@ class RestoreOracleTest {
             base.copy(defaultRoute = DIRECT, sites = mapOf("s.example" to DIRECT)) to base.copy(defaultRoute = DIRECT),
             // UDP refused by a plugin's exit, then carried.
             base.copy(apps = mapOf(appKeys[1] to "ss")) to base.copy(apps = mapOf(appKeys[1] to "w")),
-            // An app sharing its user id goes with the app.
-            base.copy() to base.copy(apps = mapOf(appKeys[0] to DIRECT)),
             // A website that could not be reached, blocked or on a route waiting for its config, goes Direct.
             base.copy(sites = mapOf("s.example" to BLOCK)) to base.copy(sites = mapOf("s.example" to DIRECT)),
             base.copy(sites = mapOf("s.example" to "k1")) to base.copy(sites = mapOf("s.example" to DIRECT)),
         )
-        val want = listOf(Loss.Blocking, Loss.Filter, Loss.Lookups, Loss.Lookups, Loss.Udp, Loss.ToDirect, Loss.ToDirect, Loss.ToDirect)
+        val want = listOf(Loss.Blocking, Loss.Filter, Loss.Lookups, Loss.Lookups, Loss.Udp, Loss.ToDirect, Loss.ToDirect)
         for ((i, c) in cases.withIndex()) {
             assertTrue("case $i", agree(c.first, c.second, "case $i"))
             val got = RestoreTraffic.found(c.first, c.second, kin)!!
             assertTrue("case $i: $got", (got.losses.values + got.later.values).any { want[i] in it })
         }
-        assertEquals(setOf(Who.App(appKeys[0]), Who.App(KIN, appKeys[0])), RestoreTraffic.found(cases[5].first, cases[5].second, kin)!!.losses.keys.filterIsInstance<Who.App>().toSet())
+        // An app set to Direct whose user id it shares with one that isn't stays inside with it: nothing goes Direct, nothing is said.
+        assertFalse(agree(base, base.copy(apps = mapOf(appKeys[0] to DIRECT)), "kin"))
     }
 }
