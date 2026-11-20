@@ -11,7 +11,7 @@ object Nord : Provider {
     override val protocols = listOf<Triple<String?, String, String>>(
         Triple(null, "NordLynx", "Fastest. Built on WireGuard"),
         Triple("openvpn_udp", "OpenVPN UDP", "Wider compatibility"),
-        Triple("openvpn_tcp", "OpenVPN TCP", "For networks that block VPNs"),
+        Triple("openvpn_tcp", "OpenVPN TCP", "For networks that block VPNs. Much slower than the others"),
     )
     /** Groups only served over OpenVPN. */
     val openVpnOnly = setOf("legacy_double_vpn", "legacy_onion_over_vpn")

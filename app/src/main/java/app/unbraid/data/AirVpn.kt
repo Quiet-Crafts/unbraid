@@ -109,8 +109,8 @@ object AirVpn : KeyProvider() {
     override val protocols = listOf<Triple<String?, String, String>>(
         Triple(null, "WireGuard", "Fastest"),
         Triple("openvpn_udp", "OpenVPN UDP", "Wider compatibility. Needs the API key sign-in"),
-        Triple("openvpn_tcp", "OpenVPN TCP", "For networks that block VPNs. Needs the API key sign-in"),
-        Triple(AUTO_PROTOCOL, "Automatic", "WireGuard, then OpenVPN TCP when a network blocks it. TCP needs the API key sign-in"),
+        Triple("openvpn_tcp", "OpenVPN TCP", "For networks that block VPNs. Much slower than the others. Needs the API key sign-in"),
+        Triple(AUTO_PROTOCOL, "Automatic", "WireGuard, then the slower OpenVPN TCP when a network blocks it. TCP needs the API key sign-in"),
     )
     /** Generator protocol per route protocol: entry number (1 standard, 2 alternative in [WgLink.entries] order), transport, wrapper. */
     private class Ovpn(val generator: String, val entry: Int, val transport: String, val wrap: String)
