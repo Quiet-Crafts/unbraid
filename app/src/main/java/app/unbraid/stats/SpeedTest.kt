@@ -328,15 +328,16 @@ object SpeedTest {
                     up.filter { UnbraidVpn.tags[it] == null }.forEach { e -> leg(e) { it.copy(error = "It didn't connect for the test.") } }
                 }
                 // A cut-off test of another node may have left Tailscale on it: the routed node first, as for a single test.
-                if (Unbraid.store.tsTestFrom != null && legs.any { UnbraidVpn.tags[it] == Compiler.TS_TAG } && runCatching { tsq.submit(::switchBack).get() }.getOrDefault(false) != true)
+                if (Unbraid.store.tsTestFrom != null && legs.any { UnbraidVpn.tags[it] == Compiler.TS_TAG } && runCatching { tsq.submit<Boolean> { !stop() && switchBack() }.get() }.getOrDefault(false) != true)
                     legs.filter { UnbraidVpn.tags[it] == Compiler.TS_TAG }.forEach { e -> leg(e) { it.copy(error = "Tailscale couldn't go back to its exit node.") } }
                 if (stop()) return@Thread // cancelled while it waited to switch back: nothing is asked of M-Lab
                 parallel(_all.value?.legs.orEmpty().filter { it.error == null }.map { it.exit }) { e ->
                     val country = setup.route(e)?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()
                     try {
+                        if (stop()) return@parallel // cancelled: nothing more is asked of M-Lab
                         val s = Ndt7.locate(tag(e), country)
                         // Outside the lock: a slow answer mustn't hold up a cancel on the main thread.
-                        val near = if (s == null) runCatching { Ndt7.locate(tag(e), null) }.getOrNull() else null
+                        val near = if (s == null && !stop()) runCatching { Ndt7.locate(tag(e), null) }.getOrNull() else null
                         leg(e) { if (s != null) it.copy(server = s) else it.copy(missing = true, server = near) }
                     } catch (x: Ndt7.Limited) { leg(e) { it.copy(limited = true) } }
                     catch (x: Exception) { leg(e) { it.copy(error = "M-Lab couldn't be reached through it.") } }

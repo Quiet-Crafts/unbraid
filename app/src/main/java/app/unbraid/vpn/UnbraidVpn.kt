@@ -630,7 +630,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * then every 5 min; signed-out or refused ones wait for a sign-in, which reloads by itself.
      */
     private val netKicks = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
-    private val netWanted = java.util.concurrent.atomic.AtomicBoolean()
+    /** The connection ([session]) a network change asked a try for; -1 when none waits. */
+    private val netWanted = java.util.concurrent.atomic.AtomicLong(-1)
     /** The backoff timer set last; only its firing tries ([reload] checks under [lock]). Changed under [lock]. */
     @Volatile private var retryTicket = 0L
     /** The newest timer that fired and wasn't tried yet. */
@@ -640,14 +641,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun retryBlocked(blocked: Map<String, Exception>) {
         retry?.cancel(); retry = null
         retrying = blocked
-        if (blocked.values.all { it is AuthException }) { retries = 0; net.onChange = null; return }
+        if (blocked.values.all { it is AuthException }) { retries = 0; net.onChange = null; retryTicket++; return }
         val wait = listOf(5, 15, 30, 60, 300)[minOf(retries++, 4)] * 1000L
         // Every try, timed or for a new network, runs on one worker, one at a time with the newest asked for last: an older
         // try that fails after a newer one worked can't put its blocked result over it. The timer only asks.
         if (netWorker == null) netWorker = scope.launch {
             // A new network always tries; a timer only if it is still the one set ([retryTicket]): an older one's kick that
             // waited in the channel would otherwise try early and move the backoff on.
-            for (k in netKicks) try { if (netWanted.getAndSet(false)) reload() else fired.getAndSet(0).takeIf { it != 0L }?.let { reload(timer = it) } }
+            for (k in netKicks) try { netWanted.getAndSet(-1).let { s -> if (s >= 0) reload(forSession = s.toInt()) else fired.getAndSet(0).takeIf { it != 0L }?.let { reload(timer = it) } } }
             catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { Log.e(TAG, "retry: ${logLine(e)}") } // one failed try never ends the worker
         }
         val ticket = ++retryTicket
@@ -657,7 +658,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             netKicks.trySend(Unit)
         }
         // A new network is the likeliest fix: try at once, with the backoff kept for what follows.
-        net.onChange = { netWanted.set(true); netKicks.trySend(Unit) }
+        val mine = session
+        net.onChange = { netWanted.set(mine.toLong()); netKicks.trySend(Unit) }
     }
 
     /** Providers of [blocked] routes, and whether one refused its account. */
@@ -745,7 +747,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * [lock] itself and lets go of it while providers are asked for servers, so a newer change (one that must block an
      * app at once) never waits for them; what they answer is applied only if nothing changed meanwhile.
      */
-    private suspend fun reload(keep: Map<String, Link>? = null, avoid: Set<String> = emptySet(), keepFrom: Int = generation, forInstall: Boolean = false, timer: Long = 0) {
+    private suspend fun reload(keep: Map<String, Link>? = null, avoid: Set<String> = emptySet(), keepFrom: Int = generation, forInstall: Boolean = false, timer: Long = 0, forSession: Int = -1) {
         class Ask(val srv: CommandServer, val setup: Setup, val accounts: Map<String, String>, val ready: LinkPicker.Result, val applied: Setup?,
                   val appliedAccounts: Map<String, String>, val refused: Map<String, Exception>, val last: Map<String, Link>, val generation: Int, val seen: Long)
         val ask = lock.withLock {
@@ -754,6 +756,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (destroyed || state.value.phase != VpnState.Phase.On || holding) return
             // A timer that is no longer the one set (a newer one replaced it, or the retries stopped) tries nothing.
             if (timer != 0L && timer != retryTicket) return
+            // Nor does a network change seen on a connection that has since ended (a pause and resume between).
+            if (forSession >= 0 && forSession != session) return
             // An install retry that another reload caught up with, or that the VPN stopping cancelled, does nothing.
             if (forInstall && (installs.get() == builtInstalls || !kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]!!.isActive)) return
             val srv = server ?: return
@@ -805,10 +809,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // every tunnel isn't, so a failing server never takes all apps offline every few minutes (a network change
         // still tries again). A refused edit is never retried this way: it waits for the next edit.
         if (restored && restarted) { retry?.cancel(); retry = null; retryTicket++ }
+        else if (restored && setup == applied && accounts == appliedAccounts) retryBlocked(retrying)
         // An install that may change what Android leaves out ([installs]) is not left to the next edit: tried once more.
         val pending = installs.get()
         if (pending != builtInstalls && pending != retriedInstalls) { retriedInstalls = pending; installRetry?.cancel(); installRetry = scope.launch { kotlinx.coroutines.delay(30_000); reload(forInstall = true) } }
-        else if (restored && setup == applied && accounts == appliedAccounts) retryBlocked(retrying)
         if (restored) retime() // a new engine, numbered afresh
         if (restored && ranRestores != restores.get()) teardown(RESTORE_REFUSED)
         else if (restored) state.update { it.copy(error = Redact.message(e, "Change not applied"), refused = setup.hashCode()) } else teardown(Redact.message(e, "Connection lost"))
