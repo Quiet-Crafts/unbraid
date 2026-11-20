@@ -25,7 +25,7 @@ index 6d31495..5ec061d 100644
  			return common.Must1(dialer.NewDefault(ctx, option.DialerOptions{
  				AbstractDialerOptions: option.AbstractDialerOptions{
 diff --git a/transport/wireguard/client_bind.go b/transport/wireguard/client_bind.go
-index f1a6584..b2f306f 100644
+index f1a6584..b466fa2 100644
 --- a/transport/wireguard/client_bind.go
 +++ b/transport/wireguard/client_bind.go
 @@ -2,6 +2,8 @@ package wireguard
@@ -45,20 +45,43 @@ index f1a6584..b2f306f 100644
  }
  
  func NewClientBind(ctx context.Context, logger logger.Logger, dialer N.Dialer, isConnect bool, connectAddr netip.AddrPort, reserved [3]uint8) *ClientBind {
-@@ -186,6 +189,18 @@ func (c *ClientBind) Send(bufs [][]byte, ep conn.Endpoint, offset int) error {
+@@ -52,15 +55,7 @@ func NewClientBind(ctx context.Context, logger logger.Logger, dialer N.Dialer, i
+ }
+ 
+ func (c *ClientBind) connect() (*wireConn, error) {
+-	serverConn := c.conn
+-	if serverConn != nil {
+-		select {
+-		case <-serverConn.done:
+-			serverConn = nil
+-		default:
+-			return serverConn, nil
+-		}
+-	}
++	// c.conn is read and written only under connAccess: the receive goroutine and the sender both come here.
+ 	c.connAccess.Lock()
+ 	defer c.connAccess.Unlock()
+ 	select {
+@@ -68,7 +63,7 @@ func (c *ClientBind) connect() (*wireConn, error) {
+ 		return nil, net.ErrClosed
+ 	default:
+ 	}
+-	serverConn = c.conn
++	serverConn := c.conn
+ 	if serverConn != nil {
+ 		select {
+ 		case <-serverConn.done:
+@@ -186,6 +181,15 @@ func (c *ClientBind) Send(bufs [][]byte, ep conn.Endpoint, offset int) error {
  			}
  			copy(buf[1:4], reserved[:])
  		}
 +		// A handshake initiation (type 1, 148 bytes) goes after a burst of random packets, so it doesn't open the flow.
-+		// If the burst can't be sent, neither is the handshake: it is retried as a whole.
++		// The burst is best effort: a packet that can't be sent never stops the handshake.
 +		if c.junk > 0 && len(buf) == 148 && buf[0] == 1 {
 +			for i := 0; i < c.junk; i++ {
 +				junk := make([]byte, 30+mrand.IntN(71))
 +				_, _ = rand.Read(junk)
-+				if _, err = udpConn.WriteToUDPAddrPort(junk, destination); err != nil {
-+					udpConn.Close()
-+					return err
-+				}
++				_, _ = udpConn.WriteToUDPAddrPort(junk, destination)
 +			}
 +		}
  		_, err = udpConn.WriteToUDPAddrPort(buf, destination)
@@ -66,15 +89,18 @@ index f1a6584..b2f306f 100644
  			udpConn.Close()
 diff --git a/transport/wireguard/client_bind_junk_test.go b/transport/wireguard/client_bind_junk_test.go
 new file mode 100644
-index 0000000..33742a1
+index 0000000..81d4fcc
 --- /dev/null
 +++ b/transport/wireguard/client_bind_junk_test.go
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,144 @@
 +package wireguard
 +
 +import (
 +	"context"
++	"errors"
 +	"net"
++	"net/netip"
++	"sync"
 +	"testing"
 +	"time"
 +
@@ -132,6 +158,84 @@ index 0000000..33742a1
 +	if sizes[6] != 64 {
 +		t.Fatalf("data packet got junk too: %v", sizes)
 +	}
++}
++
++// A socket that refuses every packet shorter than a handshake initiation, as a transient send error on the junk would.
++type junkRefusingConn struct {
++	net.PacketConn
++	sent [][]byte
++}
++
++func (c *junkRefusingConn) WriteTo(b []byte, addr net.Addr) (int, error) {
++	if len(b) < 148 {
++		return 0, errors.New("send failed")
++	}
++	c.sent = append(c.sent, append([]byte(nil), b...))
++	return len(b), nil
++}
++
++// Junk is best effort: an error sending it never stops the handshake, and never closes the socket.
++func TestJunkErrorDoesNotStopHandshake(t *testing.T) {
++	l, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer l.Close()
++	peer := l.LocalAddr().(*net.UDPAddr).AddrPort()
++	b := NewClientBind(context.Background(), logger.NOP(), N.SystemDialer, false, netip.AddrPort{}, [3]uint8{})
++	b.junk = 3
++	if _, _, err := b.Open(0); err != nil {
++		t.Fatal(err)
++	}
++	defer b.Close()
++	fake := &junkRefusingConn{PacketConn: l}
++	w := &wireConn{PacketConn: fake, done: make(chan struct{})}
++	b.conn = w
++	hs := make([]byte, 148)
++	hs[0] = 1
++	if err := b.Send([][]byte{hs}, remoteEndpoint(peer), 0); err != nil {
++		t.Fatalf("handshake not sent: %v", err)
++	}
++	if len(fake.sent) != 1 || len(fake.sent[0]) != 148 {
++		t.Fatalf("handshake not written once: %d writes", len(fake.sent))
++	}
++	select {
++	case <-w.done:
++		t.Fatal("socket closed after a junk error")
++	default:
++	}
++}
++
++// The receive goroutine and a sender open or replace the socket at the same time (run with -race).
++func TestConnectConcurrent(t *testing.T) {
++	l, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer l.Close()
++	b := NewClientBind(context.Background(), logger.NOP(), N.SystemDialer, true, l.LocalAddr().(*net.UDPAddr).AddrPort(), [3]uint8{})
++	if _, _, err := b.Open(0); err != nil {
++		t.Fatal(err)
++	}
++	defer b.Close()
++	var wg sync.WaitGroup
++	for i := 0; i < 8; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			for j := 0; j < 200; j++ {
++				w, err := b.connect()
++				if err != nil {
++					t.Error(err)
++					return
++				}
++				if j%20 == 0 {
++					w.Close() // the next connect replaces it
++				}
++			}
++		}()
++	}
++	wg.Wait()
 +}
 diff --git a/transport/wireguard/endpoint.go b/transport/wireguard/endpoint.go
 index 407bf0f..1d9a949 100644
