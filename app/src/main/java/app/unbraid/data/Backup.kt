@@ -572,5 +572,10 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val still = apps.filterKeys { it in waiting }.mapNotNull { (p, x) ->
         due(p, x).takeIf { b.apps[p] != m(x) && b.profiles.none { f -> f.apps[p] == m(x) } }?.let { p to mapOf(m(x) to it) }
     }.toMap()
-    return r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers, profiles = r.profiles + kept, waiting = r.waiting + still.keys, waitingEach = still)
+    // The older fields hold them too (until the latest deadline), so a version before per-app deadlines keeps them as well.
+    val merged = r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers, profiles = r.profiles + kept, waiting = r.waiting + still.keys,
+        waitingUntil = maxOf(r.waitingUntil, still.values.flatMap { it.values }.maxOrNull() ?: 0), waitingEach = still)
+    // Kept, it must still fit a backup with keys: large OpenVPN configs of both setups together could pass the counts but not the size.
+    if (runCatching { Backup.export(merged, "", now, true).size + 1024 > Backup.MAX }.getOrDefault(false)) return null
+    return merged
 }

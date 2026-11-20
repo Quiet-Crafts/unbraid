@@ -99,13 +99,14 @@ private inline fun Setup.removing(gone: Set<String>, name: String, refused: (app
  * [s] without the choices of apps Android no longer knows ([known]: installed or archived), in the setup and every saved
  * profile: an uninstalled app must not keep a route (and a tunnel) alive, nor bring it back with a profile used later.
  */
-internal fun keepKnown(s: Setup, known: Set<String>, now: Long = System.currentTimeMillis()): Setup {
+internal fun keepKnown(s: Setup, known: Set<String>, now: Long = System.currentTimeMillis(), installedAt: (String) -> Long? = { null }): Setup {
     // Restored apps not installed yet keep their choice for a while, one a later restore kept until its own deadline; an
     // installed one no longer waits. A kept one goes at its own deadline even for an app found installed only after it:
     // there's no telling when it was, and the app's choice the last restore brought is the one to follow.
     val each = { p: String, r: String -> s.waitingEach[p]?.get(r) }
     val waits = { p: String, r: String -> p in s.waiting && p !in known && now < (each(p, r) ?: s.waitingUntil) }
-    val keep = { m: Map<String, String> -> m.filter { (p, r) -> if (p in known) each(p, r)?.let { now < it } ?: true else waits(p, r) } }
+    // An installed one keeps it when it was installed before its deadline, as far as Android tells ([installedAt]).
+    val keep = { m: Map<String, String> -> m.filter { (p, r) -> if (p in known) each(p, r)?.let { (installedAt(p) ?: now) < it } ?: true else waits(p, r) } }
     val apps = keep(s.apps)
     val profiles = s.profiles.map { p -> p.copy(apps = keep(p.apps)) }
     val wait = (apps.keys + profiles.flatMap { it.apps.keys }).filterTo(HashSet()) { it in s.waiting && it !in known }
@@ -570,7 +571,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         } ?: return@launch
         if (n != appsAsked) return@launch // a newer read is under way (checked and applied here, on the main thread)
         _apps.value = list
-        if (keepKnown(store.setup.value, known) != store.setup.value) store.edit { keepKnown(it, known) }
+        val installedAt = { p: String -> runCatching { pm.getPackageInfo(p, 0).firstInstallTime }.getOrNull() }
+        if (keepKnown(store.setup.value, known, installedAt = installedAt) != store.setup.value) store.edit { keepKnown(it, known, installedAt = installedAt) }
     } }
 
     /** A config file picked in a sign-in form, read here so a rotation during a slow read doesn't lose it. */

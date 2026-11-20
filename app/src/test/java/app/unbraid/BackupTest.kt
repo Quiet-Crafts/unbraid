@@ -303,6 +303,12 @@ class BackupTest {
         assertEquals(setOf("org.example.b"), k3.apps.keys); assertTrue(k3.waiting.isEmpty()); assertEquals(0, k3.waitingUntil)
     }
 
+    /** The profile a restore keeps the setup in use as is a valid name, and never the one a switch by network saves over. */
+    @Test fun theKeptSetupHasANameOfItsOwn() {
+        assertNotNull(Setup().profileName(app.unbraid.data.BEFORE_RESTORE))
+        assertFalse(app.unbraid.data.BEFORE_RESTORE.equals(PREVIOUS, ignoreCase = true))
+    }
+
     /** An app a restore left waiting to be installed keeps its choice, Block too, in the setup a second restore keeps. */
     @Test fun aWaitingAppKeepsItsChoiceInTheKeptSetup() {
         val pkg = "org.example.later"
@@ -334,6 +340,12 @@ class BackupTest {
         assertFalse(pkg in installed.profiles.single { it.name == PREVIOUS }.apps)
         assertTrue(installed.waiting.isEmpty())
         assertEquals(DIRECT, keepKnown(both, setOf(pkg), now = 3000).profiles.single { it.name == PREVIOUS }.apps[pkg])
+        // Installed in time but seen only later: Android's install time counts, not the time of the look.
+        assertEquals(DIRECT, keepKnown(both, setOf(pkg), now = 9000 + WAIT_MS, installedAt = { 3000 }).profiles.single { it.name == PREVIOUS }.apps[pkg])
+        assertFalse(pkg in keepKnown(both, setOf(pkg), now = 9000 + WAIT_MS, installedAt = { 1500 + WAIT_MS }).profiles.single { it.name == PREVIOUS }.apps)
+        // The older fields cover the kept choice too, so a version before per-app deadlines keeps it as long.
+        assertTrue(pkg in both.waiting)
+        assertTrue(both.waitingUntil >= 1000 + WAIT_MS)
         // A wait that is over is not carried, nor its choice kept: the backup's wait for the app doesn't bring it back.
         assertFalse(pkg in first.restoredFrom(Backup.read(Backup.export(full(), "", 0)).setup, PREVIOUS, 1000 + WAIT_MS)!!.waiting)
         val over = old.restoredFrom(Setup(routes = listOf(nl), defaultRoute = "nl", apps = mapOf(pkg to BLOCK), version = VERSION), PREVIOUS, 1000 + WAIT_MS)!!

@@ -38,7 +38,7 @@ import androidx.lifecycle.viewModelScope
 import app.unbraid.BuildConfig
 import app.unbraid.Unbraid
 import app.unbraid.data.Backup
-import app.unbraid.data.PREVIOUS
+import app.unbraid.data.BEFORE_RESTORE
 import app.unbraid.data.Providers
 import app.unbraid.data.RestoreTraffic
 import app.unbraid.data.Setup
@@ -137,8 +137,8 @@ class RestoreGate {
             // As of now, as Restore works it out: a wait over by then only keeps less, so what can be kept here still can be.
             val now = System.currentTimeMillis()
             val plain = a.here.restoredFrom(c.setup, null, now, c.keys)!!
-            val keepable = !a.here.untouched && a.here.restoredFrom(c.setup, PREVIOUS, now, c.keys) != null
-            val next = if (a.keep && keepable) a.here.restoredFrom(c.setup, PREVIOUS, now, c.keys)!! else plain
+            val keepable = !a.here.untouched && a.here.restoredFrom(c.setup, BEFORE_RESTORE, now, c.keys) != null
+            val next = if (a.keep && keepable) a.here.restoredFrom(c.setup, BEFORE_RESTORE, now, c.keys)!! else plain
             return Result(RestoreTraffic.notes(a.here, next, kin, tick), Backup.weak(plain, a.here), keepable, plain.servers.count { it.keyless })
         }
     }
@@ -306,15 +306,18 @@ class BackupFlow(private val ui: Ui) {
         // Only over the setup and keep choice the sheet's check was made for, and with weak servers accepted.
         if (!ready(here)) return
         var target: Setup? = null
-        val keepAs = PREVIOUS.takeIf { keep && keepable == true }
+        val keepAs = BEFORE_RESTORE.takeIf { keep && keepable == true }
         var moved = false
+        var counted = false
         // Counted before the store changes, and only when the restore changes the setup: the running engine's setup is then
         // gone, so a refused reload must stop the VPN. A restore that leaves the setup as it is (the same backup again)
         // leaves the engine on a setup that still exists, and a later refused edit keeps it running as any refused edit does.
         val saved = Unbraid.store.update { s -> if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)
-            ?.also { target = it; if (it != s) UnbraidVpn.restores.incrementAndGet() } ?: s }
+            ?.also { target = it; if (it != s) { UnbraidVpn.restores.incrementAndGet(); counted = true } } ?: s }
         val t = target
         if (t == null || Unbraid.store.setup.value != t) {
+            // Refused by the store after it was counted (a sign-out under way holds the default): the running setup stays.
+            if (counted && Unbraid.store.setup.value != t) UnbraidVpn.restores.decrementAndGet()
             finish(false, if (t == null && !moved) KEEP_NO_ROOM else "Couldn't restore: your settings are busy. Try again.")
             return
         }
@@ -426,7 +429,7 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
     else if (notes.isNotEmpty()) Text(notes.joinToString("\n"), style = Type.caption, color = Ink.bad)
     if (notes != null && flow.weak.isNotEmpty()) Switch(WEAK_TITLE, weakCaption(flow.weak), flow.acceptWeak) { flow.acceptWeak = it }
     if (vpn.phase == VpnState.Phase.On) Text("unbraid is connected. It reconnects with the restored setup, and apps may be offline for a few seconds.", style = Type.caption, color = Ink.dim)
-    if (canKeep) Switch("Keep my current setup", "Saved as the profile $PREVIOUS, to switch back later. Your other profiles here are replaced.", flow.keep) { flow.keep = it }
+    if (canKeep) Switch("Keep my current setup", "Saved as the profile $BEFORE_RESTORE, to switch back later. Your other profiles here are replaced.", flow.keep) { flow.keep = it }
     else if (flow.keepable == false && !here.untouched) Text(KEEP_TOO_MUCH, style = Type.caption, color = Ink.dim)
     Buttons(flow, "Restore", enabled = flow.ready(here)) { flow.apply() }
 }

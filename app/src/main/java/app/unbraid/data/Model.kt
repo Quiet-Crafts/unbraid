@@ -180,6 +180,8 @@ val NET_KINDS = setOf(WIFI, MOBILE)
 const val MAX_PROFILES = 20
 /** The profile a quick-settings tile saves a setup in no profile as before switching, as it can't ask (an older one is replaced). */
 const val PREVIOUS = "Previous"
+/** The profile a restore keeps the setup it replaces as: never [PREVIOUS], which a switch by network saves over. */
+const val BEFORE_RESTORE = "Old setup"
 /** A profile name's length in characters people see: an emoji or an accented letter counts once. */
 const val PROFILE_NAME = 12
 
