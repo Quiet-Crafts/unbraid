@@ -67,8 +67,9 @@ object Limits {
     /**
      * Separate tunnels [s] opens to [provider]: one per active route, since unpinned routes are spread over different
      * servers ([app.unbraid.vpn.LinkPicker.pick]); routes pinned to one server over the same protocol share its tunnel.
+     * A server is its host and name together: AirVPN gives every server in a country one host name.
      */
-    fun tunnels(s: Setup, provider: String) = s.activeRoutes.filter { !it.imported && it.loc.provider == provider }.map { r -> r.loc.pinned?.let { "${it.host}|${r.loc.protocol}" } ?: r.id }.distinct().size
+    fun tunnels(s: Setup, provider: String) = s.activeRoutes.filter { !it.imported && it.loc.provider == provider }.map { r -> r.loc.pinned?.let { "${it.host}|${it.name}|${r.loc.protocol}" } ?: r.id }.distinct().size
 
     /**
      * The first provider counted per tunnel that [new] takes over its known limit with more tunnels than [old] had,

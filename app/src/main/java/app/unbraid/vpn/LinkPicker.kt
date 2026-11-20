@@ -69,7 +69,7 @@ object LinkPicker {
                 r.tsExit != null -> TsLink(Server(r.name, r.tsExit, "", "", 0))
                 else -> keep[r.id]?.takeIf {
                     applied?.route(r.id)?.let { a -> !a.imported && a.loc == r.loc } == true && appliedAccounts[r.loc.provider] == accounts[r.loc.provider] &&
-                        trusted(it, r, accounts, providers) && Addr.usable(it)
+                        trusted(it, r, accounts, providers) && Addr.usable(it) && app.unbraid.data.AutoProtocol.matches(r, it)
                 } ?: if (offline) throw if (accounts[r.loc.provider] == null) AuthException("Sign in to ${providers(r.loc.provider)?.name ?: r.loc.provider} for ${r.name}") else Waiting()
                     else fresh(r, accounts, last, used, providers).also { if (!Addr.usable(it)) throw Addr.refused(it.server.name) }
             } } catch (e: Exception) { blocked[r.id] = e; continue }
@@ -143,19 +143,20 @@ object LinkPicker {
         val acc = accounts[p.id] ?: throw AuthException("Sign in to ${p.name} for ${r.name}")
         val pinned = r.loc.pinned
         // A pinned server starts from its last refreshed copy, so going offline never brings back older details.
-        val loc = pinned?.let { pin -> last[cacheKey(r)]?.server?.takeIf { it.host == pin.host }?.let { r.loc.copy(pinned = it) } } ?: r.loc
+        val loc = (pinned?.let { pin -> last[cacheKey(r)]?.server?.takeIf { it.host == pin.host }?.let { r.loc.copy(pinned = it) } } ?: r.loc)
+            .let { it.copy(protocol = app.unbraid.data.AutoProtocol.of(r)) }
         val l = try {
             again(p, r, acc, last, used) ?: p.connect(loc, acc)
         } catch (e: Exception) {
-            if (e is AuthException || e is app.unbraid.data.NoLongerOffered || e is Addr.Refused) throw e
-            val cached = last[cacheKey(r)]?.takeIf { pinned == null || it.server.host == pinned.host }?.takeIf { trusted(it, r, accounts, providers) }
+            if (e is AuthException || e is app.unbraid.data.NoLongerOffered || e is app.unbraid.data.Unsupported || e is Addr.Refused) throw e
+            val cached = last[cacheKey(r)]?.takeIf { pinned == null || it.server.host == pinned.host }?.takeIf { trusted(it, r, accounts, providers) && app.unbraid.data.AutoProtocol.matches(r, it) }
             // A cached tunnel at an address that can't be used is no fallback: the user is told to pick the server again.
             if (cached != null && !Addr.usable(cached)) throw Addr.refused(cached.server.name)
             cached ?: throw if (pinned != null) Fail("${r.name}: ${pinned.name} is unreachable") else e
         }
         if (pinned != null || "${p.id}|${serverId(l.server)}" !in used) return l
         val other = runCatching {
-            p.servers(r.loc, acc, 10).firstOrNull { "${p.id}|${serverId(it)}" !in used }?.let { p.connect(r.loc.copy(pinned = it), acc) }
+            p.servers(loc, acc, 10).firstOrNull { "${p.id}|${serverId(it)}" !in used }?.let { p.connect(loc.copy(pinned = it), acc) }
         }.onFailure { if (it is AuthException) throw it }.getOrNull()
         return other ?: l
     }

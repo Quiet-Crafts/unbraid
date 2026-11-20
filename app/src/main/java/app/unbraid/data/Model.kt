@@ -25,7 +25,7 @@ data class Location(
     /** Provider-specific region/city id (e.g. Mullvad "se-got", PIA "de-frankfurt"). */
     val region: String? = null,
     val group: String? = null,
-    /** NordVPN only: null = NordLynx, else openvpn_udp / openvpn_tcp. Double VPN and Onion always use OpenVPN. */
+    /** One of its provider's [Provider.protocols] (NordVPN, AirVPN): null = the default, else openvpn_udp / openvpn_tcp. NordVPN's Double VPN and Onion always use OpenVPN. */
     val protocol: String? = null,
     val pinned: Server? = null,
 ) {

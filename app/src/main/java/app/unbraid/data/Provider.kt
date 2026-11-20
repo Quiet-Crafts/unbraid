@@ -19,6 +19,9 @@ class SlotsFull(message: String, url: String?, val confirm: String, val retry: M
  */
 class Challenge(message: String, val field: Field, val image: ByteArray? = null, val keep: Map<String, String> = emptyMap()) : IOException(message)
 
+/** A route asks for something this account can't do (a protocol it has no sign-in for): final, so no cached tunnel stands in. */
+class Unsupported(message: String) : app.unbraid.vpn.Fail(message)
+
 /** The provider's list was read and no longer has a pinned server: final, so no older copy of it is used instead. */
 class NoLongerOffered(server: Server) : app.unbraid.vpn.Fail("${server.name} is no longer offered. Pick another server")
 
@@ -34,6 +37,26 @@ const val PROTECT = "protect"
 
 /** Key of a WireGuard provider's port setting: [AUTO] or a port number. */
 const val PORT_OPT = "port"
+
+/** A route protocol: WireGuard, switching to OpenVPN TCP when WireGuard doesn't get through ([AutoProtocol]). */
+const val AUTO_PROTOCOL = "auto"
+
+/**
+ * Routes on [AUTO_PROTOCOL] whose WireGuard failed on every port on the current network, so they connect over OpenVPN
+ * TCP until the network changes or the VPN starts again. In memory only, by route id.
+ */
+object AutoProtocol {
+    private val tcp = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    fun onTcp(route: String) = route in tcp
+    fun toTcp(route: String) = tcp.add(route)
+    fun reset() = tcp.clear()
+
+    /** The protocol [r] connects with now: Automatic resolved to WireGuard (null) or OpenVPN TCP. */
+    fun of(r: Route) = if (r.loc.protocol == AUTO_PROTOCOL) "openvpn_tcp".takeIf { onTcp(r.id) } else r.loc.protocol
+
+    /** Whether [l], kept or cached, was made with the protocol [r] uses now. */
+    fun matches(r: Route, l: Link) = r.loc.protocol != AUTO_PROTOCOL || (l is OvpnLink) == onTcp(r.id)
+}
 const val AUTO = "auto"
 /** Key of every WireGuard provider's MTU setting: [AUTO] is 1280, as in Mullvad's Android app; else up to 1420. */
 const val MTU_OPT = "mtu"
@@ -120,8 +143,10 @@ interface Provider {
     val hasLoad: Boolean get() = false
     /** One WireGuard key per account: moving it to another server can stall the tunnel, so reconnects keep the last server. */
     val oneKey: Boolean get() = false
-    /** The tunnel protocol its servers are reached with, shown in the picker (NordVPN lets the user choose). */
+    /** The tunnel protocol its servers are reached with, shown in the picker when it offers no [protocols]. */
     val protocol: String get() = "WireGuard"
+    /** Protocols a route can choose in the picker ([Location.protocol] key, null = the default; label; note); empty = no choice. */
+    val protocols: List<Triple<String?, String, String>> get() = emptyList()
 
     /** Releases what [signIn] registered (device slot, session). False if that failed; the account is forgotten regardless. */
     fun signOut(account: String): Boolean = true

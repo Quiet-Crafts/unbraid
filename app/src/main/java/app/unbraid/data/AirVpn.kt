@@ -100,6 +100,64 @@ object AirVpn : KeyProvider() {
             .takeIf { runCatching { account(account).let { it.ownDevice && it.apiKey != null && it.deviceId != null } }.getOrDefault(false) },
     )
 
+    /**
+     * OpenVPN from AirVPN's generator, made for this device when a route connects: UDP 443 on the standard entry
+     * (tls-auth), TCP 443 on the alternative one (tls-crypt, which hides even the OpenVPN start). Needs the API key.
+     */
+    override val protocols = listOf<Triple<String?, String, String>>(
+        Triple(null, "WireGuard", "Fastest"),
+        Triple("openvpn_udp", "OpenVPN UDP", "Wider compatibility. Needs the API key sign-in"),
+        Triple("openvpn_tcp", "OpenVPN TCP", "For networks that block VPNs. Needs the API key sign-in"),
+        Triple(AUTO_PROTOCOL, "Automatic", "WireGuard, then OpenVPN TCP when a network blocks it. TCP needs the API key sign-in"),
+    )
+    /** Generator protocol per route protocol: entry number (1 standard, 2 alternative in [WgLink.entries] order), transport, wrapper. */
+    private class Ovpn(val generator: String, val entry: Int, val transport: String, val wrap: String)
+    private val OPENVPN = mapOf("openvpn_udp" to Ovpn("openvpn_1_udp_443", 1, "udp", "tls-auth"), "openvpn_tcp" to Ovpn("openvpn_3_tcp_443", 2, "tcp", "tls-crypt"))
+    /** Lines that say where or how OpenVPN connects (with or without the command-line dashes). */
+    private val WHERE = Regex("(?m)^\\s*(?:--)?(remote|proto|port|rport)(?:[ \\t]+(.*))?[ \\t]*$")
+    private const val NO_KEY = "AirVPN's OpenVPN needs a sign-in with an API key. Sign in again with one, or choose WireGuard for this route"
+
+    /** A WireGuard route as [KeyProvider]; an OpenVPN one takes the same server, with a profile the generator makes for this device. */
+    override fun connect(loc: Location, account: String): Link {
+        // Automatic is resolved per route before connecting ([AutoProtocol.of]); anything else asking gets WireGuard.
+        if (loc.protocol == AUTO_PROTOCOL) return connect(loc.copy(protocol = null), account)
+        val o = loc.protocol?.let { OPENVPN[it] ?: throw app.unbraid.data.Unsupported("AirVPN doesn't offer that protocol. Choose another in the route") } ?: return super.connect(loc, account)
+        val a = account(account)
+        val key = a.apiKey ?: throw app.unbraid.data.Unsupported(NO_KEY)
+        a.device ?: throw app.unbraid.data.Unsupported(NO_KEY)
+        // The device by its id (or name and key): a renamed one gets its new name, and the generator never falls back to Default.
+        val device = devices(key).firstOrNull { (a.deviceId?.let { id -> it.id == id } ?: (it.name == a.device)) && it.key == a.deviceKey }
+            ?: throw AuthException("$APP's AirVPN device is gone or was renewed. Sign in to AirVPN again", DEVICES)
+        val wg = super.connect(loc, account) as WgLink
+        val sv = wg.server
+        val at = if (o.entry == 1) wg.entries.getOrNull(0) ?: sv.ip else wg.entries.getOrNull(o.entry - 1)
+            ?: throw app.unbraid.vpn.Fail("AirVPN's server list can't be read right now, and OpenVPN TCP needs it to check ${sv.name}. Try again later")
+        val text = api("generator", key, listOf(
+            "protocols" to o.generator, "servers" to sv.name, "device" to device.name, "system" to "linux",
+            "resolve" to "on", "iplayer_entry" to "ipv4", "iplayer_exit" to "ipv4",
+        ))
+        if (text.trimStart().startsWith("{")) { failed(text); throw app.unbraid.vpn.Fail("AirVPN didn't make an OpenVPN profile for ${sv.name}. Try again later") }
+        if (!ovpnFits(text, at, o)) throw app.unbraid.vpn.Fail("AirVPN's OpenVPN profile doesn't match ${sv.name}. Try again")
+        return OvpnLink(sv, Manual.parseOvpn(text, sv.name, "", ""))
+    }
+
+    /** Every place the profile connects to is [at], port 443, over [o]'s transport, with its wrapper; nothing else can be dialled. */
+    private fun ovpnFits(text: String, at: String, o: Ovpn): Boolean {
+        if (Regex("(?i)<connection>").containsMatchIn(text) || "<${o.wrap}>" !in text) return false
+        val lines = WHERE.findAll(text).map { it.groupValues[1] to it.groupValues[2].trim().split(Regex("\\s+")).filter(String::isNotEmpty) }.toList()
+        val remotes = lines.filter { it.first == "remote" }
+        // Port and transport must be stated: left out, OpenVPN would fall back to UDP 1194.
+        val port = remotes.all { it.second.getOrNull(1) != null } || lines.any { it.first == "port" || it.first == "rport" }
+        val transport = remotes.all { it.second.getOrNull(2) != null } || lines.any { it.first == "proto" }
+        return remotes.isNotEmpty() && port && transport && lines.all { (k, args) ->
+            when (k) {
+                "remote" -> args.getOrNull(0) == at && args.getOrNull(1).let { it == null || it == "443" } && args.getOrNull(2).let { it == null || it.startsWith(o.transport) }
+                "proto" -> args.getOrNull(0)?.startsWith(o.transport) == true
+                else -> args.getOrNull(0) == "443"
+            }
+        }
+    }
+
     /** Shown in the Client Area for every plan. */
     override fun limit(account: String) = Limit("connection", perTunnel = true, 5)
 
