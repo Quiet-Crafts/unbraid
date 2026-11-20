@@ -305,16 +305,28 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     /**
-     * An app installed while connected can join the Android user id of an app that is left out of the VPN, and Android
-     * would leave it out too. When that changes which Direct apps another app of their user id keeps inside
-     * ([blockedKin]), the setup is applied again.
+     * An app installed while connected (or connecting) can matter to what Android leaves out of the VPN: one with a choice of
+     * its own saved (a Direct one installed again, an app a restore waits for), or one joining the user id of an app left
+     * out ([leftOut]), which Android would leave out with it whatever its choice. Then the setup is applied again, so the
+     * user id is judged with every app it now has ([blockedKin]). [installedWhileStarting]: one seen before the VPN was on,
+     * taken up once it is ([connect]).
      */
     private val installed = object : android.content.BroadcastReceiver() {
         override fun onReceive(c: Context, intent: Intent) {
-            if (destroyed || state.value.phase != VpnState.Phase.On) return
-            scope.launch { if (runCatching { blockedKin(store.setup.value) }.getOrNull() != lastInput?.blockedKin) reload() }
+            if (destroyed || intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return // an update keeps its user id
+            val pkg = intent.data?.schemeSpecificPart ?: return
+            scope.launch {
+                val uid = intent.getIntExtra(Intent.EXTRA_UID, -1)
+                val joins = uid >= 0 && runCatching { packageManager.getPackagesForUid(uid)?.any { it in leftOut } == true }.getOrDefault(true)
+                if (!joins && pkg !in store.setup.value.apps) return@launch
+                installedWhileStarting = true // first, then the phase: [connect] sets the phase, then reads this
+                if (state.value.phase == VpnState.Phase.On) { installedWhileStarting = false; reload() }
+            }
         }
     }
+    @Volatile private var installedWhileStarting = false
+    /** The apps Android was told to leave out of the VPN when the tunnel was last built. */
+    @Volatile private var leftOut: Set<String> = emptySet()
 
     private fun stopIfIdle() {
         if (pending > 0 || !stopWanted || destroyed) return
@@ -463,6 +475,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     (s != applied || a != appliedAccounts) && (s to a) != rejected
                 }) scope.launch { reload() }
             }.launchIn(scope)
+            // An app installed while this was starting: judged now, with the VPN on.
+            if (installedWhileStarting) { installedWhileStarting = false; scope.launch { reload() } }
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${logLine(e)}")
             // After an update the notice offers the reconnect; a tap shows what fails, in the app.
@@ -1209,7 +1223,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             o.inet4RouteExcludeAddress.forEach { b.excludeRoute(it.ipPrefix()) }
             o.inet6RouteExcludeAddress.forEach { b.excludeRoute(it.ipPrefix()) }
             o.includePackage.forEachString { runCatching { b.addAllowedApplication(it) } }
-            o.excludePackage.forEachString { runCatching { b.addDisallowedApplication(it) } }
+            leftOut = buildSet { o.excludePackage.forEachString { p -> if (runCatching { b.addDisallowedApplication(p) }.isSuccess) add(p) } }
         }
         val pfd = b.establish() ?: error("VPN permission revoked")
         tun?.close()

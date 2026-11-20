@@ -180,11 +180,12 @@ class RestoreOracleTest {
             val step = { o: Outcome, by: By -> Step(o, by, by) }
             if (app in barred) return step(Outcome(REJECT), By.AppFirst)
             if (blockedSite(name)) return step(Outcome(REJECT), By.Name)
+            if (local(name) && app == null && barred.isNotEmpty() && s.prefs.blockLan) return step(Outcome(RestoreTraffic.HELD), By.App)
             if (local(name)) return step(Outcome("direct", Resolver.Local), By.Name)
             if (barred.isNotEmpty()) unnamed(app, type)?.let { return step(it, By.App) }
             site(name)?.let { sites.getValue(it) }?.let { id ->
                 if (refused(id)) return step(Outcome(REJECT), By.Name)
-                return step(if (type == "HTTPS") Outcome(RestoreTraffic.EMPTY) else answer(id, siteKind(id)), By.Name)
+                return step(if (type == "HTTPS" || type == "SVCB") Outcome(RestoreTraffic.EMPTY) else answer(id, siteKind(id)), By.Name)
             }
             app?.let(::group)?.let { g -> return step(if (refused(g)) Outcome(REJECT) else answer(g, kind(g)), By.App) }
             if (barred.isEmpty()) unnamed(app, type)?.let { return step(it, By.App) }

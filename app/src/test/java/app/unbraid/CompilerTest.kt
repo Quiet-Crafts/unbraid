@@ -524,6 +524,12 @@ class CompilerTest {
         assertEquals("fake", RoutingProbe.lookup(blockProbe, "", "example.org", "A"))
         assertEquals("reject", RoutingProbe.lookup(blockProbe, "com.b", "example.org", "A"))
         assertEquals("local", RoutingProbe.lookup(blockProbe, "com.x", "example.org", "TXT"))
+        // Blocked apps are kept off the local network too (the default): a local name of no known app is refused, as its
+        // connections are; ordinary apps' are answered. Letting blocked apps reach it answers every local name.
+        assertEquals("reject", RoutingProbe.lookup(blockProbe, "", "printer.lan", "A"))
+        assertEquals("local", RoutingProbe.lookup(blockProbe, "com.x", "printer.lan", "A"))
+        val openProbe = RoutingProbe.compiled(block.copy(prefs = block.prefs.copy(blockLan = false)), null).first
+        assertEquals("local", RoutingProbe.lookup(openProbe, "", "printer.lan", "A"))
         val walkedBlock = app.unbraid.data.RestoreTraffic.compile(block.copy(home = Home()), { emptySet() })!!
         assertEquals(app.unbraid.data.RestoreTraffic.HELD, app.unbraid.data.RestoreTraffic.lookup(walkedBlock, emptySet(), "example.org", "TXT")!!.out.exit)
     }
