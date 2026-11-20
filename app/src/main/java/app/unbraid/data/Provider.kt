@@ -48,6 +48,10 @@ const val ENTRY_OPT = "entry"
  * A setting on a provider's page, saved in [Setup.opts]. No [choices] = an on/off switch ("on"/"off"). [advanced]: one
  * most people never need, which can stop routes connecting: listed under the page's Advanced settings.
  */
+/** The key-rotation setting on a provider page: days between new keys, or "off". */
+const val ROTATE_OPT = "rotate"
+val ROTATE_CHOICES = listOf("1" to "Every day", "3" to "Every 3 days", "7" to "Every week", "14" to "Every 2 weeks", "30" to "Every month", "off" to "Never")
+
 data class Opt(val key: String, val label: String, val sub: String, val choices: List<Pair<String, String>> = emptyList(), val advanced: Boolean = false)
 
 /** What a provider says about the device slot this phone holds: one line, where the user sees all their devices, and how many the account has in use, if it says. */
@@ -131,6 +135,13 @@ interface Provider {
     val protection: Opt? get() = null
     /** How the account's key was made, as its config says (Proton's options), for its page; null = nothing to show, "" = not known. */
     fun facts(account: String): String? = null
+    /**
+     * Gives [account] a new key on the same device when its key is [days] old (null = only to finish an earlier change
+     * or to add a missing quantum-safe key), saving each step through [save] (false = not saved: stop). True when the
+     * key changed. [finishOnly]: only an earlier change left unfinished. Throws when the provider couldn't be asked or refused.
+     */
+    fun rotate(account: String, days: Int?, now: Long, finishOnly: Boolean, save: (String) -> Boolean): Boolean = false
+
     /** Whether the account's key has a quantum-safe preshared key; null = the provider has no quantum-safe exchange. */
     fun quantumSafe(account: String): Boolean? = null
     /** Help about what is managed in the provider's own account (config expiry, forwarded ports) and where, for its page. */

@@ -408,9 +408,9 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                         { dialog = "limit:${pr.id}" }, icon = Icons.phone) { Chevron() }
                     // A provider whose only server list is gluetun's public one: how old it is.
                     val list = pr.listSource?.let { c -> Item("Server list", "From gluetun's public list" + (app.unbraid.Unbraid.store.catalogDates.value[c]?.let { ", published ${publishedOn(it)}" } ?: ""), null, icon = Icons.dns) }
-                    // Set when the key is registered, so an account from before it existed needs a new sign-in.
+                    // Set when a key is registered: an account from before it existed gets it with its next new key.
                     val pq = pr.quantumSafe(acc)?.let { on ->
-                        Item("Quantum-safe connection", if (on) "On · recorded traffic stays safe from future quantum computers" else "Not yet · sign in again to turn it on", null, icon = Icons.lock)
+                        Item("Quantum-safe connection", if (on) "On · recorded traffic stays safe from future quantum computers" else "Not yet · it comes with the next new key, when $APP connects", null, icon = Icons.lock)
                     }
                     group(null, listOfNotNull(Item("Account", listOfNotNull("Signed in", plan).joinToString(" · "), null, icon = Icons.vpnKey), pq, counted, list, device?.let { d ->
                         Item("This phone", d.line, d.url?.let { u -> { context.openUrl(u) } }, icon = Icons.info) { if (d.url != null) Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) }

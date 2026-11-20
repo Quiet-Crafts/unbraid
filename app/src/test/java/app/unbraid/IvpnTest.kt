@@ -51,6 +51,35 @@ class IvpnTest {
     private val list = Ivpn.parse(javaClass.getResource("/ivpn_servers.json")!!.readText())
     private val acct = Ivpn.Account("i-ABCD-EFGH-IJKL", "session", "cHJpdmF0ZS1wcml2YXRlLXByaXZhdGUtcHJpdmF0ZTE=", "172.16.34.56")
 
+    /** A new key is due by age, to finish a change, or to add the quantum-safe key; IVPN's answer decides what's kept. */
+    @Test fun keyRotation() {
+        val day = 86_400_000L
+        val a = acct.copy(psk = PSK, keyAt = 10 * day)
+        assertFalse(Ivpn.due(a, 7, 16 * day))
+        assertTrue(Ivpn.due(a, 7, 17 * day))
+        assertFalse(Ivpn.due(a, null, 400 * day)) // Never
+        assertTrue(Ivpn.due(acct, null, 0)) // no quantum-safe key yet: due whatever the setting
+        val p = Ivpn.Pending("bmV3LXByaXZhdGUtbmV3LXByaXZhdGUtbmV3LXByaXY=", "newpub", "kpub", "kem")
+        val pending = a.copy(pending = p)
+        assertTrue(Ivpn.due(pending, null, 0))
+        // Taken: the new key, its quantum-safe key and address replace the old ones, and the change is finished.
+        val next = Ivpn.rekeyed(200 to """{"status":200,"ip_address":"172.16.9.9","kem_cipher1":"good"}""", pending, 20 * day)
+        assertEquals(Ivpn.Account(a.accountId, a.sessionToken, p.privateKey, "172.16.9.9", psk = PSK, keyAt = 20 * day), next)
+        assertEquals(a.ipAddress, Ivpn.rekeyed(200 to """{"status":200,"kem_cipher1":"good"}""", pending, 0).ipAddress)
+        // Refused: the old key stays. Signed out elsewhere: a new sign-in. No usable quantum-safe key: never a plain key.
+        try { Ivpn.rekeyed(200 to """{"status":422,"message":"bad"}""", pending, 0); fail() } catch (e: Ivpn.Rejected) { }
+        try { Ivpn.rekeyed(200 to """{"status":601}""", pending, 0); fail() } catch (e: AuthException) { }
+        try { Ivpn.rekeyed(401 to "", pending, 0); fail() } catch (e: AuthException) { }
+        // Busy or failing: the earlier request may have gone through, so the new key is kept for another try.
+        for ((code, st) in listOf(429 to 429, 408 to 408, 500 to 500, 503 to 503, 503 to 422, 200 to 408)) try { Ivpn.rekeyed(code to """{"status":$st}""", pending, 0); fail() } catch (e: IOException) { assertFalse(e is Ivpn.Rejected || e is AuthException) }
+        for (c in listOf("", ""","kem_cipher1":"bad"""", ""","kem_cipher1":"short"""")) {
+            try { Ivpn.rekeyed(200 to """{"status":200,"ip_address":"172.16.9.9"$c}""", pending, 0); fail() } catch (e: IOException) { assertFalse(e is Ivpn.Rejected || e is AuthException) }
+        }
+        try { Ivpn.rekeyed(200 to """{"status":200,"ip_address":"10.0.0.1/8x","kem_cipher1":"good"}""", pending, 0); fail() } catch (e: IOException) { }
+        // An account saved before these fields existed still reads.
+        assertEquals(0L, Ivpn.account("""{"accountId":"a","sessionToken":"t","privateKey":"k","ipAddress":"10.0.0.2"}""").keyAt)
+    }
+
     @Test fun countriesAreGroupedAndKeyed() {
         val cs = Ivpn.countries(list)
         assertEquals(listOf("Argentina", "Netherlands", "Sweden", "United States"), cs.map { it.name })
@@ -148,7 +177,7 @@ class IvpnTest {
 
     @Test fun sessionReplies() {
         val ok = Ivpn.session(200 to """{"status":200,"token":"tok","vpn_username":"u","vpn_password":"p","service_status":{"is_active":true},"wireguard":{"status":200,"message":"Success","ip_address":"172.16.1.2","kem_cipher1":"good"}}""", "i-ABCD-EFGH-IJKL", "priv", "kem")
-        assertEquals(Ivpn.Account("i-ABCD-EFGH-IJKL", "tok", "priv", "172.16.1.2", psk = PSK), Ivpn.account(ok))
+        Ivpn.account(ok).let { assertEquals(Ivpn.Account("i-ABCD-EFGH-IJKL", "tok", "priv", "172.16.1.2", psk = PSK, keyAt = it.keyAt), it); assertTrue(it.keyAt > 0) }
         // The device name and the plan's limit, for the IVPN page.
         val named = Ivpn.session(200 to """{"status":200,"token":"tok","device_name":"Brave Owl","service_status":{"current_plan":"IVPN Standard","available_plans":[{"name":"Pro","device_limit":10},{"name":"Standard","device_limit":5}]},"wireguard":{"ip_address":"172.16.1.2","kem_cipher1":"good"}}""", "a", "p", "kem")
         assertEquals("Brave Owl" to 5, Ivpn.account(named).let { it.device to it.limit })

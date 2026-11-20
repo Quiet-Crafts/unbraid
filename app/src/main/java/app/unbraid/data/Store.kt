@@ -365,6 +365,19 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
         return ok
     }
 
+    /**
+     * Replaces [provider]'s account with [blob] only while it is still [expect], so a sign-out or new sign-in meanwhile
+     * wins. False, with nothing changed, when it wasn't or the change couldn't be written.
+     */
+    @Synchronized
+    fun replaceAccount(provider: String, expect: String, blob: String): Boolean {
+        if (_unreadable.value || _accounts.value[provider] != expect) return false
+        _accounts.update { it + (provider to blob) }
+        if (saveAccounts()) return true
+        _accounts.update { it + (provider to expect) }
+        return false
+    }
+
     /** Preview builds kept the Nord token and key in their own files. Only while there is no accounts file at all. */
     private fun migrateNord(): Map<String, String> {
         val t = runCatching { open("token.bin") }.getOrNull() ?: return emptyMap()
