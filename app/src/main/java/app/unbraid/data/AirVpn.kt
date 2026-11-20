@@ -86,10 +86,13 @@ object AirVpn : KeyProvider() {
     /** Entry 1, then entry 3 ([parse] keeps both only when the status API lists both). */
     override fun addresses(e: Catalog.Entry) = e.ips.takeIf { it.size == 2 }.orEmpty()
 
-    override val defaults = mapOf(PORT_OPT to AUTO, ENTRY_OPT to "1")
-    override fun options(account: String) = listOf(
+    override val defaults = mapOf(PORT_OPT to AUTO, ENTRY_OPT to "1", ROTATE_OPT to "off")
+    override fun options(account: String) = listOfNotNull(
         Opt(PORT_OPT, "Port", "Automatic tries one, then the other when a network blocks it", listOf(AUTO to "Automatic") + ports.map { "$it" to "UDP $it" }, advanced = true),
         Opt(ENTRY_OPT, "Entry address", "Alternative reaches each server on another address, for networks that block the standard one", listOf("1" to "Standard", "2" to "Alternative"), advanced = true),
+        // Only the device $APP made: renewing one of the user's own would cut off their other apps.
+        Opt(ROTATE_OPT, "New key", "How often AirVPN gives $APP's device a new key and tunnel address, when $APP connects", ROTATE_CHOICES, advanced = true)
+            .takeIf { runCatching { account(account).let { it.ownDevice && it.apiKey != null && it.deviceId != null } }.getOrDefault(false) },
     )
 
     /** Shown in the Client Area for every plan. */
@@ -111,12 +114,48 @@ object AirVpn : KeyProvider() {
         return Plans.line(u.expires.takeIf { u.premium && it > 0 })
     }
 
-    /** With an API key: the device was deleted, or renewed (a new key), in the Client Area. */
+    /** With an API key: the device was deleted, or renewed (a new key), in the Client Area; not while $APP renews it. */
     override fun revoked(account: String): Boolean = try {
         val a = account(account)
         val key = a.apiKey
-        key != null && devices(key).none { (a.deviceId?.let { id -> it.id == id } ?: (it.name == a.device)) && it.key == a.deviceKey }
+        key != null && devices(key).let { l -> if (a.renewing > 0) l.none { it.id == a.deviceId && it.status != "deleted" } else l.none { (a.deviceId?.let { id -> it.id == id } ?: (it.name == a.device)) && it.key == a.deviceKey } }
     } catch (e: java.io.IOException) { false }
+
+    /**
+     * A new key for $APP's own device (`devices?action=renew`, which AirVPN queues, dropping the old key at once). The
+     * time is saved just before asking, so a renewal cut short is finished, never asked for twice: a later check only
+     * looks for the new key and fetches its config like at sign-in. One that shows no new key within [LOST] was lost or
+     * refused, and the old key, still listed, stays.
+     */
+    override fun rotate(account: String, days: Int?, now: Long, finishOnly: Boolean, save: (String) -> Boolean): Boolean {
+        var a = account(account)
+        val key = a.apiKey ?: return false
+        val id = a.deviceId?.takeIf { a.ownDevice } ?: return false
+        if (a.renewing == 0L && (finishOnly || days == null || now - a.keyAt < days * 86_400_000L)) return false
+        fun mine() = devices(key).firstOrNull { it.id == id && it.status != "deleted" } ?: throw AuthException("$APP's AirVPN device is gone. Sign in again", DEVICES)
+        if (a.renewing == 0L) {
+            if (mine().key != a.deviceKey) return false // renewed elsewhere: [revoked] tells the user
+            a = a.copy(renewing = now); if (!save(encode(a))) return false
+            val r = reply(api("devices", key, listOf("action" to "renew", "id" to id)))
+            // A refusal may answer a resent copy of a request that went through: kept, and settled by what the list shows.
+            if (r.error != null) throw app.unbraid.vpn.Fail("AirVPN didn't renew the key. It is checked again")
+        }
+        // Health rounds look once; a start waits a little for AirVPN's queue.
+        val tries = if (finishOnly) 1 else 11 // a start looks for 20 s
+        for (i in 1..tries) {
+            val d = mine()
+            if (d.status == "ready" && !d.key.isNullOrBlank() && d.key != a.deviceKey) {
+                return save(NordApi.json.encodeToString(Account.serializer(), account(signed(key, d, own = true)).copy(keyAt = now)))
+            }
+            if (d.status == "ready" && d.key == a.deviceKey && now - a.renewing > LOST) { save(encode(a.copy(renewing = 0))); return false }
+            if (i < tries) pause(2_000)
+        }
+        throw app.unbraid.vpn.Fail("AirVPN is still making the new key. It is tried again")
+    }
+
+    private const val LOST = 3_600_000L
+
+    private fun encode(a: Account) = NordApi.json.encodeToString(Account.serializer(), a)
 
     /** Removes the device $APP made; one of the user's own stays. A device already gone counts as removed. */
     override fun signOut(account: String): Boolean = try {
@@ -215,7 +254,7 @@ object AirVpn : KeyProvider() {
         val a = account(super.signIn(mapOf("key" to conf)))
         // A device AirVPN doesn't know gets the Default device's config: the address must be this device's own.
         if (!d.ipv4.isNullOrEmpty() && a.address.none { it.substringBefore('/') == d.ipv4 }) throw app.unbraid.vpn.Fail("AirVPN sent another device's config. Try again")
-        return NordApi.json.encodeToString(Account.serializer(), a.copy(apiKey = key, device = d.name, deviceKey = d.key, deviceId = d.id.ifEmpty { null }, ownDevice = own))
+        return NordApi.json.encodeToString(Account.serializer(), a.copy(apiKey = key, device = d.name, deviceKey = d.key, deviceId = d.id.ifEmpty { null }, ownDevice = own, keyAt = System.currentTimeMillis()))
     }
 
     internal fun devices(key: String): List<DeviceInfo> {
