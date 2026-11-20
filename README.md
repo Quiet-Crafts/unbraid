@@ -19,6 +19,7 @@ all at the same time. Tailscale runs inside it too, so you can reach your tailne
   &nbsp;·&nbsp; <a href="https://unbraid.app/download/#obtainium">Add to Obtainium</a>
   &nbsp;·&nbsp; <a href="https://github.com/quiet-crafts/unbraid-mac">unbraid for Mac</a>
   &nbsp;·&nbsp; <a href="https://unbraid.app">Website</a>
+  &nbsp;·&nbsp; <a href="https://www.youtube.com/watch?v=aqTlrJdAUgw">Watch the 2-minute video</a>
   &nbsp;·&nbsp; <a href="https://unbraid.app/privacy">Privacy policy</a>
   &nbsp;·&nbsp; <a href="https://github.com/quiet-crafts/unbraid/issues">Report a bug</a>
 </p>
