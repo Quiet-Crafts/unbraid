@@ -105,7 +105,13 @@ class RestoreOracleTest {
             Resolver.Local -> Outcome("direct", k)
             else -> Outcome(exit(id), k)
         }
-        fun siteKind(id: String) = if (id == DIRECT && filter && (directFiltered || s.apps.keys.any(through))) Resolver.Filter else kind(id)
+        /** Direct traffic passes through the filter as saved, an app kept inside for another app of its user id included. */
+        val throughAny = setup.apps.any { (p, r) -> r == DIRECT && f.through(p) }
+        fun siteKind(id: String) = if (id == DIRECT && filter && (directFiltered || throughAny)) Resolver.Filter else kind(id)
+        /** A lookup of no known app is refused (HTTPS and SVCB answered empty) while an app has a rule of its own; addresses never. */
+        val unnamedOdd = barred.isNotEmpty() || s.apps.keys.any { group(it) != null }
+        fun unnamed(app: String?, type: String): Outcome? = if (app == null && unnamedOdd && type != "A" && type != "AAAA")
+            Outcome(if (type == "HTTPS" || type == "SVCB") RestoreTraffic.EMPTY else RestoreTraffic.HELD) else null
         val defaultKind = if (directFiltered && !defaultBlocked) Resolver.Filter else if (s.defaultRoute == DIRECT || defaultBlocked) Resolver.Local else kind(s.defaultRoute)
         val sites = Sites.applied(s)
         fun site(n: String) = Sites.match(n, sites.keys.filter { sites[it] != BLOCK })
@@ -133,7 +139,6 @@ class RestoreOracleTest {
             var rby = By.None
             if (name != null) when {
                 app in barred -> return Step(Outcome(REJECT), By.AppFirst, By.AppFirst)
-                app == null && barred.isNotEmpty() -> return Step(Outcome(RestoreTraffic.HELD), By.AppFirst, By.AppFirst)
                 blockedSite(name) -> return Step(Outcome(REJECT), By.Name, By.Name)
                 local(name) -> { real = true; ans = Outcome("direct", Resolver.Local); rby = By.Name }
             }
@@ -174,15 +179,15 @@ class RestoreOracleTest {
             if (app != null && leftOut(app)) return Step(Outcome("direct", Resolver.Local), By.AppFirst, By.AppFirst)
             val step = { o: Outcome, by: By -> Step(o, by, by) }
             if (app in barred) return step(Outcome(REJECT), By.AppFirst)
-            if (app == null && barred.isNotEmpty()) return step(Outcome(RestoreTraffic.HELD), By.AppFirst)
             if (blockedSite(name)) return step(Outcome(REJECT), By.Name)
             if (local(name)) return step(Outcome("direct", Resolver.Local), By.Name)
+            if (barred.isNotEmpty()) unnamed(app, type)?.let { return step(it, By.App) }
             site(name)?.let { sites.getValue(it) }?.let { id ->
                 if (refused(id)) return step(Outcome(REJECT), By.Name)
                 return step(if (type == "HTTPS") Outcome(RestoreTraffic.EMPTY) else answer(id, siteKind(id)), By.Name)
             }
             app?.let(::group)?.let { g -> return step(if (refused(g)) Outcome(REJECT) else answer(g, kind(g)), By.App) }
-            if (s.defaultRoute == DIRECT && vpnApps && app == null) return step(Outcome(RestoreTraffic.HELD), By.App)
+            if (barred.isEmpty()) unnamed(app, type)?.let { return step(it, By.App) }
             if (defaultBlocked) return step(Outcome(REJECT), By.None)
             return step(answer(s.defaultRoute, defaultKind), By.None)
         }

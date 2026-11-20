@@ -290,6 +290,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         cm = getSystemService(ConnectivityManager::class.java)
         net = NetMonitor(cm)
         current = this
+        registerReceiver(installed, android.content.IntentFilter(Intent.ACTION_PACKAGE_ADDED).apply { addDataScheme("package") }, RECEIVER_NOT_EXPORTED)
         scope.launch {
             // Off the main thread: loading the engine takes long enough to freeze the connect animation. Every command
             // that needs it runs below, after it.
@@ -300,6 +301,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 handled(intent)
                 kotlinx.coroutines.withContext(Dispatchers.Main) { pending--; stopIfIdle() }
             }
+        }
+    }
+
+    /**
+     * An app installed while connected can join the Android user id of an app that is left out of the VPN, and Android
+     * would leave it out too. When that changes which Direct apps another app of their user id keeps inside
+     * ([blockedKin]), the setup is applied again.
+     */
+    private val installed = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: Context, intent: Intent) {
+            if (destroyed || state.value.phase != VpnState.Phase.On) return
+            scope.launch { if (runCatching { blockedKin(store.setup.value) }.getOrNull() != lastInput?.blockedKin) reload() }
         }
     }
 
@@ -1111,6 +1124,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // lifecycle lock (a connect finishing its provider calls), so nothing it starts afterwards survives.
         destroyed = true
         if (current === this) current = null
+        runCatching { unregisterReceiver(installed) }
         asked.update { a -> a?.takeIf { it.n > delivered } } // what it was handed it never will; newer ones go to the next
         cancelResume()
         scope.cancel()
