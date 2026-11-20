@@ -58,6 +58,8 @@ object Ivpn : Provider {
         val host: String,
         @SerialName("public_key") val publicKey: String,
         @SerialName("local_ip") val localIp: String,
+        /** The host's V2Ray address, for the disguise; empty when it has none. */
+        val v2ray: String = "",
         val load: Double = 0.0,
     )
 
@@ -74,7 +76,11 @@ object Ivpn : Provider {
     internal data class Port(val type: String = "", val port: Int? = null)
 
     @Serializable
-    internal data class Ports(val wireguard: List<Port> = emptyList())
+    internal data class Ports(val wireguard: List<Port> = emptyList(), val v2ray: V2ray = V2ray())
+
+    /** IVPN's V2Ray: the account-wide VMess user id, and the WireGuard port its servers forward to. */
+    @Serializable
+    internal data class V2ray(val id: String = "", val wireguard: List<Port> = emptyList())
 
     @Serializable
     internal data class Blocklist(@SerialName("Description") val name: String = "", @SerialName("Normal") val normal: String = "", @SerialName("Hardcore") val hardcore: String = "")
@@ -107,7 +113,7 @@ object Ivpn : Provider {
     private const val LIST = "list"
     private const val HARDCORE = "hardcore"
     private const val CLIENT_AREA = "https://www.ivpn.net/account/"
-    override val defaults = mapOf(PROTECT to "off", LIST to OISD, HARDCORE to "off", PORT_OPT to AUTO)
+    override val defaults = mapOf(PROTECT to "off", LIST to OISD, HARDCORE to "off", PORT_OPT to AUTO, DISGUISE_OPT to "off")
 
     /** One session serves every IVPN route, so this phone is always one device. */
     override fun device(account: String): Device {
@@ -132,6 +138,8 @@ object Ivpn : Provider {
         Opt(LIST, "Block list", "What AntiTracker blocks, from IVPN's own lists", l.config.antitracker.lists.map { "${it.normal}|${it.hardcore}" to it.name })
             .takeIf { it.choices.isNotEmpty() },
         Opt(HARDCORE, "Hardcore mode", "Also blocks Google and Facebook, and sites that need them", advanced = true),
+        Opt(DISGUISE_OPT, "Disguise", "V2Ray wraps the tunnel so it looks like ordinary web traffic, for networks that block VPNs. A little slower",
+            listOf("off" to "Off", "v2ray" to "V2Ray"), advanced = true).takeIf { l.config.ports.v2ray.id.isNotBlank() },
         Opt(PORT_OPT, "Port", "Automatic tries 2049 first, then other ports when a network blocks it",
             listOf(AUTO to "Automatic") + l.ports.sorted().map { "$it" to "UDP $it" }, advanced = true),
     )
@@ -233,9 +241,11 @@ object Ivpn : Provider {
 
     internal fun link(l: ServerList?, loc: Location, a: Account): WgLink {
         val pinned = loc.pinned
+        var host: Host? = null
         val (sv, dns) = if (l == null) pinned!! to DNS else {
             val (g, h) = if (pinned != null) l.wireguard.flatMap { g -> g.hosts.map { g to it } }.firstOrNull { it.second.hostname == pinned.host } ?: throw NoLongerOffered(pinned)
                 else l.match(loc).minByOrNull { it.second.load } ?: throw IOException("No IVPN server for ${loc.label}")
+            host = h
             server(g, h) to h.localIp.substringBefore('/')
         }
         Addr.usable(sv)
@@ -247,8 +257,19 @@ object Ivpn : Provider {
                 publicKey = sv.publicKey, endpoint = "${sv.ip}:$PORT", allowedIps = listOf("0.0.0.0/0"), dns = listOf(dns),
             ),
             ports,
+            disguise = disguise(l, host),
         )
     }
+
+    /** How [h] takes a disguised tunnel: its V2Ray address on TCP 80 with the list's user id, to the list's WireGuard port. */
+    internal fun disguise(l: ServerList?, h: Host?): Disguise? {
+        val v = l?.config?.ports?.v2ray ?: return null
+        val port = v.wireguard.firstNotNullOfOrNull { it.port?.takeIf { p -> p in 1..65535 } } ?: return null
+        val ip = h?.v2ray?.trim()?.takeIf { Addr.server(it) } ?: return null
+        return Disguise(Vmess(ip, 80, v.id.trim().takeIf { UUID.matches(it) } ?: return null), port)
+    }
+
+    private val UUID = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
     private fun server(g: Gateway, h: Host) = Server(h.hostname, h.hostname, h.host, h.publicKey, h.load.roundToInt(), g.city)
 }

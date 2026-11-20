@@ -17,6 +17,34 @@ class IvpnTest {
     private val list = Ivpn.parse(javaClass.getResource("/ivpn_servers.json")!!.readText())
     private val acct = Ivpn.Account("i-ABCD-EFGH-IJKL", "session", "cHJpdmF0ZS1wcml2YXRlLXByaXZhdGUtcHJpdmF0ZTE=", "172.16.34.56")
 
+    /** With Disguise on, an IVPN tunnel goes inside V2Ray to the server's WireGuard port behind it; off, nothing changes. */
+    @Test fun disguiseUsesV2Ray() {
+        val id = "27de860d-5601-412d-8b71-baa048a94b98"
+        val v2 = list.copy(config = list.config.copy(ports = list.config.ports.copy(v2ray = Ivpn.V2ray(id, listOf(Ivpn.Port("UDP", 15351))))))
+        assertTrue(Ivpn.options(v2).any { it.key == app.unbraid.data.DISGUISE_OPT })
+        assertFalse(Ivpn.options(list).any { it.key == app.unbraid.data.DISGUISE_OPT }) // the list names no V2Ray id
+        val loc = Location("ivpn", countryCode = "NL")
+        val l = Ivpn.link(v2, loc, acct)
+        val host = v2.wireguard.flatMap { it.hosts }.single { it.hostname == l.server.host }
+        assertEquals(app.unbraid.data.Disguise(app.unbraid.data.Vmess(host.v2ray, 80, id), 15351), l.disguise)
+        assertNull(Ivpn.link(list, loc, acct).disguise)
+        fun ported(on: String) = app.unbraid.vpn.LinkPicker.ported(app.unbraid.data.Setup(routes = listOf(app.unbraid.data.Route("r", loc)), defaultRoute = "r",
+            opts = mapOf("ivpn" to mapOf(app.unbraid.data.DISGUISE_OPT to on, app.unbraid.data.PORT_OPT to "443"))), mapOf("r" to l), emptyMap())["r"] as app.unbraid.data.WgLink
+        assertEquals("${l.server.ip}:15351" to l.disguise!!.vmess, ported("v2ray").peer.let { it.endpoint to it.vmess })
+        assertEquals("${l.server.ip}:443" to null, ported("off").peer.let { it.endpoint to it.vmess })
+        // Disguise on but none for this server (the list didn't say): the route is blocked, never connected plain.
+        val r = app.unbraid.data.Route("r", loc)
+        val on = app.unbraid.data.Setup(routes = listOf(r), defaultRoute = "r", opts = mapOf("ivpn" to mapOf(app.unbraid.data.DISGUISE_OPT to "v2ray")))
+        val blob = app.unbraid.data.NordApi.json.encodeToString(Ivpn.Account.serializer(), acct)
+        val plain = Ivpn.link(list, loc, acct)
+        val picked = app.unbraid.vpn.LinkPicker.pick(on, mapOf("r" to plain), on, mapOf("ivpn" to blob), mapOf("ivpn" to blob), emptyMap(), emptySet(), emptyMap(), true) { Ivpn }
+        assertTrue(picked.links.isEmpty() && "r" in picked.blocked)
+        // A host without a V2Ray address, or a malformed id, gives no disguise.
+        assertNull(Ivpn.disguise(v2, host.copy(v2ray = "")))
+        assertNull(Ivpn.disguise(v2.copy(config = v2.config.copy(ports = v2.config.ports.copy(v2ray = Ivpn.V2ray(id, listOf(Ivpn.Port("UDP", 65536)))))), host))
+        assertNull(Ivpn.disguise(v2.copy(config = v2.config.copy(ports = v2.config.ports.copy(v2ray = Ivpn.V2ray("not-an-id", listOf(Ivpn.Port("UDP", 15351)))))), host))
+    }
+
     @Test fun countriesAreGroupedAndKeyed() {
         val cs = Ivpn.countries(list)
         assertEquals(listOf("Argentina", "Netherlands", "Sweden", "United States"), cs.map { it.name })

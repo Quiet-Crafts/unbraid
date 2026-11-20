@@ -28,6 +28,8 @@ const val PROTECT = "protect"
 
 /** Key of a WireGuard provider's port setting: [AUTO] or a port number. */
 const val PORT_OPT = "port"
+/** Provider page setting: "v2ray" carries the provider's WireGuard tunnels inside V2Ray ([WgLink.disguise]); "off". */
+const val DISGUISE_OPT = "disguise"
 const val AUTO = "auto"
 /** Key of every WireGuard provider's MTU setting: [AUTO] is 1280, as in Mullvad's Android app; else up to 1420. */
 const val MTU_OPT = "mtu"
@@ -64,7 +66,11 @@ sealed interface Link {
  * server's entry addresses in the order its provider page numbers them ([ENTRY_OPT]); empty = only the endpoint's.
  */
 @Serializable
-data class WgLink(override val server: Server, val peer: WgPeer, val ports: List<Int> = emptyList(), val entries: List<String> = emptyList()) : Link
+data class WgLink(override val server: Server, val peer: WgPeer, val ports: List<Int> = emptyList(), val entries: List<String> = emptyList(), val disguise: Disguise? = null) : Link
+
+/** How this server takes a disguised tunnel ([DISGUISE_OPT]): its V2Ray server, and the WireGuard port behind it. */
+@Serializable
+data class Disguise(val vmess: Vmess, val wgPort: Int)
 
 @Serializable
 data class OvpnLink(override val server: Server, val profile: OvpnProfile) : Link

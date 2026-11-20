@@ -852,7 +852,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 if (dropping != state.value.dropping) state.update { it.copy(dropping = dropping) }
                 val deadTags = checked.filter { t -> streaks[t]?.let { Health.dead(it, now, holds[t] ?: 0) } == true }
                 // A dead tunnel on Automatic also tries its provider's next port: a failed check can't tell a blocked port from a dead server.
-                fun steps(id: String) = current.route(id)?.takeIf { !it.imported }?.loc?.provider?.takeIf { p -> (links[id] as? app.unbraid.data.WgLink)?.ports.orEmpty().size > 1 && current.opt(p, app.unbraid.data.PORT_OPT) == app.unbraid.data.AUTO }
+                fun steps(id: String) = current.route(id)?.takeIf { !it.imported }?.loc?.provider?.takeIf { p -> (links[id] as? app.unbraid.data.WgLink)?.ports.orEmpty().size > 1 && current.opt(p, app.unbraid.data.PORT_OPT) == app.unbraid.data.AUTO && current.opt(p, app.unbraid.data.DISGUISE_OPT) != "v2ray" }
                 // Only what a move restarts every tunnel for spends the move budget; imported routes keep their warning.
                 deadTags.forEach { t ->
                     val acts = byTag[t].orEmpty().any { id -> current.route(id)?.let(Health::movable) == true || steps(id) != null }
