@@ -50,10 +50,11 @@ providers. It needs macOS 26 or later.
 - Give a website its own route too, in the apps that go through unbraid. A website's route wins over the app's.
 - Block an app or a website: a blocked app gets no internet connection while unbraid is connected.
 - Use the VPN accounts you already have. One route can go through Mullvad while another uses NordVPN.
-- Send a route through another route first (Via), even across two providers, or use IVPN's own multi-hop.
+- Send a WireGuard route through one other route first (Via), even one of another provider, or use IVPN's own multi-hop.
 - On networks that block VPNs: IVPN's V2Ray disguise, junk packets before each WireGuard handshake, and OpenVPN TCP
   for AirVPN and NordVPN (much slower), which AirVPN's *Automatic* switches to by itself.
-- IVPN connections get a quantum-safe key at sign-in, and a new key every week.
+- IVPN sign-ins add a Kyber key that protects recorded traffic against future quantum computers, and the key is
+  renewed when it is a week old.
 - Reach your home network through Tailscale or Headscale, or send chosen apps out through a Tailscale exit node.
 - A low-load server is picked for you when the provider publishes load, or you can pin one server yourself.
 - Ad and tracker blocking per route with the provider's own blocking DNS, where it has one.
@@ -147,7 +148,8 @@ would cover every website that ends in it; add the website itself.
 
 An app on Block gets no internet connection while unbraid is connected: not through a route, not Direct, and no
 names are looked up for it. A switch decides whether it can still reach devices on your local network. While any
-app is blocked, unbraid refuses pings, connections and lookups that Android can't tie to an app. A blocked website can't be
+app is blocked, unbraid refuses pings and connections that Android can't tie to an app; a name lookup Android can't
+tie to an app still gets a stand-in address, and other kinds of such lookups are refused. A blocked website can't be
 looked up in the apps that go through unbraid. Block works only while unbraid is connected; for the time it is
 off, use Android's "Block connections without VPN".
 
@@ -208,7 +210,8 @@ VPN by Android itself, unless you turn on "Block connections without VPN" or set
 traffic. Then they go through unbraid and are sent straight out from inside the app. Android does this by user id,
 which a few apps share (such as Google Play services and Google Services Framework): an app set to Direct that shares
 one with an app that uses a VPN route or Block goes as that app does, filtered or not, and its Apps menu says so
-(an app installed or removed while connected is matched up at once). Apps that only follow a Direct default route always go through unbraid. Only the default route and the routes your apps and websites use are connected.
+(while connected, unbraid applies your setup again when an app with a saved choice is installed or an install or
+removal changes which apps share a user id). Apps that only follow a Direct default route always go through unbraid. Only the default route, the routes your apps and websites use, and the routes those go *Via* are connected.
 
 A website rule matches the name unbraid itself answered with a fake address, never a name read from the connection,
 so an app can't claim another site's route. A name whose answer holds both local and public addresses goes to your local
@@ -234,7 +237,7 @@ tools/build-libbox.sh                 # builds app/libs/libbox.aar from sing-box
 The build script keeps its work files in `~/.cache/unbraid-libbox`. Set `WORK` to use another folder. The patches
 in `tools/` stop libbox from writing the running configuration, which holds private keys, to disk, seal the
 Tailscale node state with an Android Keystore key, refuse files sent through Taildrop, give an OpenVPN tunnel a
-resolver inside it when its server pushes none, add the Kyber key exchange IVPN's quantum-safe keys need, send
+resolver inside it when its server pushes none, add the Kyber key exchange IVPN uses for its extra WireGuard key, send
 optional junk packets before each WireGuard handshake, let the app's connection checks look up their servers through
 the tunnel being checked, release every network part a tunnel built when it stops or fails to start, send a connection
 that the local network or home rules take to only the addresses those rules cover, and never
@@ -269,7 +272,8 @@ release build is signed only if `.secrets/signing.properties` exists, so a plain
 We add no advertising or analytics of our own.
 You don't need an unbraid account. Your provider credentials are encrypted with
 an Android Keystore key and are only sent to the service they belong to. The app's own requests (provider sign-ins and key changes, server lists, the optional
-update check, a server's history from AirVPN when you tap to ask, and the connectivity check when every tunnel is down) use your phone's normal connection, not the VPN,
+update check, a server's history from AirVPN when you tap to ask, and the direct connectivity check when every tunnel
+checked in a round fails) use your phone's normal connection, not the VPN,
 so those services see your own IP address. The list of installed apps is read on the
 phone so you can assign routes, and it never leaves the phone. "Copy a report" in the app's settings only copies text to the clipboard: the phone
 model, Android version, app version, which providers and countries you use, and counts. It holds no keys, accounts,
