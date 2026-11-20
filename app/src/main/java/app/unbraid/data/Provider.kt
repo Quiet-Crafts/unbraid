@@ -48,7 +48,10 @@ const val ENTRY_OPT = "entry"
  * A setting on a provider's page, saved in [Setup.opts]. No [choices] = an on/off switch ("on"/"off"). [advanced]: one
  * most people never need, which can stop routes connecting: listed under the page's Advanced settings.
  */
-data class Opt(val key: String, val label: String, val sub: String, val choices: List<Pair<String, String>> = emptyList(), val advanced: Boolean = false)
+/** A provider-page setting; [custom]: number ranges the user may type instead of a choice (a port, say). */
+data class Opt(val key: String, val label: String, val sub: String, val choices: List<Pair<String, String>> = emptyList(), val advanced: Boolean = false, val custom: List<IntRange> = emptyList()) {
+    fun allows(typed: String) = typed.toIntOrNull()?.let { n -> custom.any { n in it } } == true
+}
 
 /** What a provider says about the device slot this phone holds: one line, where the user sees all their devices, and how many the account has in use, if it says. */
 data class Device(val line: String, val url: String? = null, val used: Int? = null)

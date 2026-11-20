@@ -92,6 +92,8 @@ object Ivpn : Provider {
     }
 
     private const val API = "https://api.ivpn.net"
+    /** Besides its listed ports, IVPN's WireGuard servers answer on any UDP port in these ranges (IVPN's port guide). */
+    internal val PORT_RANGES = listOf(5500..19999, 30000..65000)
     private const val PORT = 2049
     /** Automatic port: the default first, then the ones restrictive networks most often let through. Only those IVPN lists. */
     private val FALLBACK = listOf(PORT, 443, 53, 80, 123, 2050, 1194, 500, 4500)
@@ -133,7 +135,7 @@ object Ivpn : Provider {
             .takeIf { it.choices.isNotEmpty() },
         Opt(HARDCORE, "Hardcore mode", "Also blocks Google and Facebook, and sites that need them", advanced = true),
         Opt(PORT_OPT, "Port", "Automatic tries 2049 first, then other ports when a network blocks it",
-            listOf(AUTO to "Automatic") + l.ports.sorted().map { "$it" to "UDP $it" }, advanced = true),
+            listOf(AUTO to "Automatic") + l.ports.sorted().map { "$it" to "UDP $it" }, advanced = true, custom = PORT_RANGES),
     )
     override val fields = listOf(Field("account", "Account ID", hint = "i-XXXX-XXXX-XXXX", qr = true))
     override val help = "Your account ID (i-XXXX-XXXX-XXXX, or ivpn plus 8 characters on older accounts): in the IVPN client area, or on any device already logged in. " +

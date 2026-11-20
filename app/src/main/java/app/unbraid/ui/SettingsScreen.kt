@@ -415,7 +415,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                     val optItem = { o: app.unbraid.data.Opt ->
                         val v = setup.opt(pr.id, o.key)
                         if (o.choices.isEmpty()) Item(o.label, o.sub, { ui.setOpt(pr.id, o.key, if (v == "on") "off" else "on"); Unit }, checked = v == "on") { Toggle(v == "on") }
-                        else Item(o.label, o.choices.firstOrNull { it.first == v }?.second ?: o.sub, { dialog = "opt:${pr.id}:${o.key}" }) { Chevron() }
+                        else Item(o.label, o.choices.firstOrNull { it.first == v }?.second ?: v?.takeIf(o::allows)?.let { "UDP $it" } ?: o.sub, { dialog = "opt:${pr.id}:${o.key}" }) { Chevron() }
                     }
                     // Every provider's own blocking under one name and in one place; unbraid's filter on VPN routes replaces it
                     // (shown off, the choice kept). Without a switch the row leads to the filter.
@@ -722,10 +722,24 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                             Text(o.label, style = Type.title, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
                             Text(o.sub, style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 8.dp))
                             val v = shown?.let { setup.opt(it.id, o.key) }
+                            val rows = o.choices.size + if (o.custom.isEmpty()) 0 else 1
                             o.choices.forEachIndexed { i, (value, label) ->
-                                GroupRow(i, o.choices.size, label, null, onClick = { shown?.let { ui.setOpt(it.id, o.key, value) }; dialog = null; Unit }, selected = v == value, trailing = { Radio(v == value) })
+                                GroupRow(i, rows, label, null, onClick = { shown?.let { ui.setOpt(it.id, o.key, value) }; dialog = null; Unit }, selected = v == value, trailing = { Radio(v == value) })
+                            }
+                            // A number of the user's own, within the ranges the provider takes.
+                            if (o.custom.isNotEmpty()) {
+                                val typed = v != null && o.choices.none { it.first == v } && o.allows(v)
+                                GroupRow(rows - 1, rows, "Another port", if (typed) "UDP $v" else o.custom.joinToString(" or ") { "${it.first}–${it.last}" }, onClick = { dialog = "num:${d.substringAfter(':')}"; Unit }, selected = typed, trailing = { Radio(typed) })
                             }
                         }
+                    }
+                }
+                d.startsWith("num:") -> opts.firstOrNull { "num:${shown?.id}:${it.key}" == d }?.let { o ->
+                    var text by rememberSaveable(d) { mutableStateOf(shown?.let { setup.opt(it.id, o.key) }?.takeIf(o::allows).orEmpty()) }
+                    val ranges = o.custom.joinToString(" or ") { "${it.first}–${it.last}" }
+                    Prompt("Another port", "Save", { shown?.let { ui.setOpt(it.id, o.key, text) }; dialog = null }, { dialog = null }, enabled = o.allows(text)) {
+                        Text("${shown?.name} also answers on any UDP port from $ranges. Try one when a network blocks the listed ports.", style = Type.sub)
+                        DialogField(text, { t -> text = t.trim().take(6) }, "Port", "e.g. 12345")
                     }
                 }
                 d.startsWith("limit:") -> Providers.get(arg)?.let { pr -> accounts[pr.id]?.let { pr to it } }?.let { (pr, acc) ->

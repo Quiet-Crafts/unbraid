@@ -17,6 +17,17 @@ class IvpnTest {
     private val list = Ivpn.parse(javaClass.getResource("/ivpn_servers.json")!!.readText())
     private val acct = Ivpn.Account("i-ABCD-EFGH-IJKL", "session", "cHJpdmF0ZS1wcml2YXRlLXByaXZhdGUtcHJpdmF0ZTE=", "172.16.34.56")
 
+    /** The Port setting also takes a number of the user's own, only inside IVPN's ranges; a typed port is used as is. */
+    @Test fun typedPortStaysInIvpnsRanges() {
+        val port = Ivpn.options(list).single { it.key == app.unbraid.data.PORT_OPT }
+        assertEquals(listOf(5500..19999, 30000..65000), port.custom)
+        for (ok in listOf("5500", "12345", "19999", "30000", "65000")) assertTrue(ok, port.allows(ok))
+        for (no in listOf("", "53", "5499", "20000", "29999", "65001", "abc", "-1")) assertFalse(no, port.allows(no))
+        val setup = app.unbraid.data.Setup(routes = listOf(app.unbraid.data.Route("r", Location("ivpn", countryCode = "NL"))), defaultRoute = "r", opts = mapOf("ivpn" to mapOf(app.unbraid.data.PORT_OPT to "12345")))
+        val l = app.unbraid.vpn.LinkPicker.ported(setup, mapOf("r" to Ivpn.link(list, Location("ivpn", countryCode = "NL"), acct)), emptyMap())["r"] as app.unbraid.data.WgLink
+        assertTrue(l.peer.endpoint.endsWith(":12345"))
+    }
+
     @Test fun countriesAreGroupedAndKeyed() {
         val cs = Ivpn.countries(list)
         assertEquals(listOf("Argentina", "Netherlands", "Sweden", "United States"), cs.map { it.name })
