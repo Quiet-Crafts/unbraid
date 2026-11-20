@@ -22,6 +22,9 @@ private val COUNTRY_PREFIX = Regex("^[A-Z]{2} (?=.)")
  * TLS to a WireGuard server is by IP, pinned to PIA's CA, with the server's `cn` as host name.
  */
 object Pia : Provider {
+    /** Its key is registered with the server itself (port 1337), which would see the phone's address before any Via. */
+    override val viaUnsafe = true
+
     @Serializable
     data class Account(val username: String, val password: String, val token: String, val tokenTime: Long, val privateKey: String, val publicKey: String)
 

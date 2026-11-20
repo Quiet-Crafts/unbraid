@@ -436,6 +436,24 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
                 }
             }
             if (!mine && provider == null) Gap(8.dp)
+            // Via: this route's tunnel goes through another route first. Saved at once, apart from the location.
+            // Also shown for a Via the route can no longer use (it changed protocol, say), so it can always be cleared.
+            if (route != null && (route.via != null || route.wg != null || !route.imported && route.loc.protocol?.startsWith("openvpn") != true)) {
+                val entries = setup.routes.filter { it.id != route.id && it.via == null && it.tsExit == null }
+                fun label(r: app.unbraid.data.Route) = listOfNotNull(r.name, Providers.short(r.loc.provider).takeIf { !r.imported }).joinToString(" · ")
+                Row(Modifier.padding(horizontal = Gutter).padding(bottom = 8.dp)) {
+                    val hops = Providers.get(route.loc.provider)?.takeIf { !route.imported && it.nativeHop }
+                    Dropdown("Via", setup.route(route.via.orEmpty())?.let { label(it) + if (route.viaNative) ", one tunnel" else "" } ?: "None, straight to the server") { done ->
+                        MenuRow("None", "Straight to the server", selected = route.via == null, tint = tint) { ui.setVia(route.id, null); done() }
+                        entries.forEach { e ->
+                            MenuRow(label(e), "Two tunnels: it sees your address, this server only its", selected = route.via == e.id && !route.viaNative, tint = tint) { ui.setVia(route.id, e.id); done() }
+                            // The provider's own multi-hop: one tunnel, forwarded by its entry server.
+                            if (hops != null && !e.imported && e.loc.provider == route.loc.provider)
+                                MenuRow("${label(e)}, one tunnel", "${hops.name}'s multi-hop: its server there forwards to this one. Faster, but your network can tell which server you leave from", selected = route.via == e.id && route.viaNative, tint = tint) { ui.setVia(route.id, e.id, native = true); done() }
+                        }
+                    }
+                }
+            }
             SearchField(q, { q = it }, if (mine) "Server or device" else "Country or city")
             Gap(4.dp)
         },

@@ -68,7 +68,8 @@ class OlderBackupsTest {
         val s = Backup.shown(raw)
         val made = (s.routes.map { it.id } + s.servers.map { it.id }).filter { it !in known }.withIndex().associate { (i, id) -> id to "made$i" }
         val m = { id: String -> made[id] ?: id }
-        return s.copy(
+        // The format number moves with every format (4 for Via); what it holds is what is compared.
+        return s.copy(version = 0,
             routes = s.routes.map { it.copy(id = m(it.id), own = it.own?.let(m), loc = Backup.bare(it.loc)) }, servers = s.servers.map { it.copy(id = m(it.id)) },
             favorites = s.favorites.map(Backup::bare), opts = s.opts.mapValues { (p, o) -> if (p == "ivpn") o - "list" else o },
             defaultRoute = m(s.defaultRoute), apps = s.apps.mapValues { m(it.value) }, sites = s.sites.mapValues { m(it.value) }, added = s.added.map(m),

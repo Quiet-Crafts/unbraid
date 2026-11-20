@@ -99,6 +99,16 @@ data class Route(
     val checkInternet: Boolean? = null,
     /** Restored from a backup saved without keys: blocked until its own server gets its config again ([OwnServer.keyless]). */
     val keyless: Boolean = false,
+    /**
+     * Another route this one's WireGuard tunnel goes through first ("Via"): the entry sees the phone's address, this
+     * route's server only the entry's. Two hops at most; null = straight to its server.
+     */
+    val via: String? = null,
+    /**
+     * With [via]: one tunnel the provider forwards from the entry's server to this one (its own multi-hop, IVPN), instead
+     * of two tunnels. The entry route then needs no tunnel of its own.
+     */
+    val viaNative: Boolean = false,
 ) {
     val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: tsName ?: tsExit ?: loc.country ?: "Fastest"
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OV"; ss != null -> "SS"; tsExit != null -> "TS"; else -> loc.code }
@@ -212,7 +222,7 @@ fun String.takeGraphemes(n: Int): String = chars(this).let { b -> var end = 0; r
  * The newest [Setup.version]. 2: every value is written, defaults too (older files left out those equal to a default).
  * 3: website routes, which an older build would drop without a word; only a setup that has one is saved as 3 ([Setup.stamped]).
  */
-const val VERSION = 3
+const val VERSION = 4
 
 @Serializable
 data class Setup(
@@ -448,6 +458,29 @@ data class Setup(
      * answers a name; a route used only by a website that is "Not applied" keeps its tunnel open.
      */
     val activeRoutes get() = routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) }
+        .let { used -> val entries = used.filter { !it.viaNative }.mapNotNullTo(HashSet()) { it.via }; if (entries.isEmpty()) used else routes.filter { it in used || it.id in entries } }
+
+    /**
+     * Why [r]'s Via can't be used, or null when it can (or it has none): the entry must be another route that goes
+     * straight to its server and isn't a Tailscale exit, and [r] itself a WireGuard route.
+     */
+    fun viaProblem(r: Route): String? {
+        val v = r.via ?: return null
+        val e = route(v) ?: return "${r.name} goes through a route that no longer exists. Choose another in its Via"
+        return when {
+            e.id == r.id || e.via != null -> "${r.name} can go through a route that goes straight to its server only"
+            e.tsExit != null -> "${r.name} can't go through a Tailscale exit node"
+            r.viaNative && (r.imported || e.imported || e.loc.provider != r.loc.provider || Providers.get(r.loc.provider)?.nativeHop != true) -> "One-tunnel multi-hop needs two routes of the same provider that offers it"
+            r.viaNative && e.loc.countryCode != null && e.loc.countryCode == r.loc.countryCode -> "${r.name} and its entry must be in different countries for ${Providers.get(r.loc.provider)?.name}'s multi-hop"
+            e.ss?.plugin != null -> "${r.name} can't go through a Shadowsocks server with a plugin"
+            r.ovpn != null || r.ss != null || r.tsExit != null || r.loc.protocol?.startsWith("openvpn") == true -> "Via works for WireGuard routes only"
+            // Its sign-up talks to the exit server itself, which would see the phone's address.
+            !r.imported && Providers.get(r.loc.provider)?.viaUnsafe == true -> "${Providers.get(r.loc.provider)?.name} routes can't use Via: setting one up contacts its server directly"
+            // A name would be looked up outside the entry, telling the local network where the tunnel goes.
+            r.wg != null && app.unbraid.vpn.Compiler.ipv4(r.wg.endpoint.substringBeforeLast(':').removePrefix("[").removeSuffix("]")) == null && ':' !in r.wg.endpoint.substringBeforeLast(':') -> "${r.name} needs a server address, not a name, to go through another route"
+            else -> null
+        }
+    }
     /** The Tailscale exit node in use, if any active route goes out through one (Tailscale allows one at a time). */
     val tsExit get() = activeRoutes.firstNotNullOfOrNull { it.tsExit }
     /** Tailscale runs for home access or for an exit-node route. */
@@ -459,10 +492,15 @@ data class Setup(
     fun site(name: String?, site: String, routeId: String?) = editing(name) { it.copy(sites = if (routeId == null) it.sites - site else it.sites + (site to routeId)) }
 
     /**
-     * As saved: format 3 only with a website route or a Block somewhere, so a setup without either still opens in a build
-     * from before them (which would drop the websites, and take a blocked app for one on a route that is gone).
+     * As saved: format 4 only with a Via somewhere, format 3 only with a website route or a Block, so a setup without
+     * them still opens in a build from before them. An older build would drop them: send a Via route straight to its
+     * server, drop the websites, and take a blocked app for one on a route that is gone.
      */
-    val stamped get() = copy(version = if ((profiles + live).all { it.sites.isEmpty() && BLOCK !in it.apps.values }) minOf(version, 2) else VERSION)
+    val stamped get() = copy(version = when {
+        routes.any { it.via != null } -> 4
+        (profiles + live).all { it.sites.isEmpty() && BLOCK !in it.apps.values } -> minOf(version, 2)
+        else -> 3
+    })
 
     /** [provider]'s page setting [key], or its default. */
     fun opt(provider: String, key: String) = opts[provider]?.get(key) ?: Providers.get(provider)?.defaults?.get(key) ?: app.unbraid.data.COMMON_DEFAULTS[key]

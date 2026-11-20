@@ -108,6 +108,10 @@ sealed interface Link {
 data class WgLink(
     override val server: Server, val peer: WgPeer, val ports: List<Int> = emptyList(), val entries: List<String> = emptyList(),
     val portEntry: Map<Int, Int> = emptyMap(), val disguise: Disguise? = null,
+    /** The port this server takes forwarded tunnels on from the provider's other servers (its multi-hop), if it does. */
+    val hopPort: Int? = null,
+    /** Set once this tunnel goes to [hopPort] through this entry server's address (the provider's multi-hop). */
+    val hopEntry: String? = null,
 ) : Link
 
 /** How this server takes a disguised tunnel ([DISGUISE_OPT]): its V2Ray server, and the WireGuard port behind it. */
@@ -176,6 +180,15 @@ interface Provider {
      * reached) may be reused. Providers whose server keys must come from a trusted source check the saved key here.
      */
     fun trusts(link: Link, account: String): Boolean = true
+
+    /** Offers its own multi-hop ([WgLink.hopPort]), used for a Via between two of its routes when the user picks it. */
+    val nativeHop: Boolean get() = false
+
+    /** The ad-blocking resolver to use on its multi-hop instead of [dns] (from [blockingDns]); null = none known, so blocked. */
+    fun hopDns(dns: String): String? = null
+
+    /** Setting up a tunnel contacts the server itself (not the provider's API), so it can't go through another route (Via). */
+    val viaUnsafe: Boolean get() = false
 
     /** Its own blocking switch ([PROTECT]), first on its page and per route in the picker. */
     val protection: Opt? get() = null

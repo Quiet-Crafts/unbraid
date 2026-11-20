@@ -9,6 +9,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 import java.io.IOException
 import java.util.Base64
@@ -117,6 +120,51 @@ class IvpnTest {
         assertNull(Ivpn.disguise(v2, host.copy(v2ray = "")))
         assertNull(Ivpn.disguise(v2.copy(config = v2.config.copy(ports = v2.config.ports.copy(v2ray = Ivpn.V2ray(id, listOf(Ivpn.Port("UDP", 65536)))))), host))
         assertNull(Ivpn.disguise(v2.copy(config = v2.config.copy(ports = v2.config.ports.copy(v2ray = Ivpn.V2ray("not-an-id", listOf(Ivpn.Port("UDP", 15351)))))), host))
+    }
+
+    /** IVPN's multi-hop for a Via between two IVPN routes: one tunnel to the exit's forwarding port at the entry's server. */
+    @Test fun nativeMultiHop() {
+        val nl = Location("ivpn", countryCode = "NL"); val se = Location("ivpn", countryCode = "SE")
+        val setup = app.unbraid.data.Setup(routes = listOf(app.unbraid.data.Route("nl", nl), app.unbraid.data.Route("se", se, via = "nl", viaNative = true)),
+            defaultRoute = "se", apps = mapOf("x" to "nl"))
+        val keep = mapOf("nl" to Ivpn.link(list, nl, acct), "se" to Ivpn.link(list, se, acct))
+        val exit = list.wireguard.flatMap { it.hosts }.single { it.hostname == keep.getValue("se").server.host }
+        assertTrue(exit.multihopPort > 0)
+        val blob = app.unbraid.data.NordApi.json.encodeToString(Ivpn.Account.serializer(), acct)
+        fun pick(s: app.unbraid.data.Setup) = app.unbraid.vpn.LinkPicker.pick(s, keep, s, mapOf("ivpn" to blob), mapOf("ivpn" to blob), emptyMap(), offline = true) { Ivpn }
+        val r = pick(setup)
+        val l = r.links.getValue("se") as app.unbraid.data.WgLink
+        assertEquals("${keep.getValue("nl").server.ip}:${exit.multihopPort}" to keep.getValue("nl").server.ip, l.peer.endpoint to l.hopEntry)
+        assertEquals(exit.publicKey, l.peer.publicKey)
+        // The engine gets one ordinary tunnel (no detour), with the page's MTU, not moved by the port setting.
+        val ported = app.unbraid.vpn.LinkPicker.ported(setup.copy(opts = mapOf("ivpn" to mapOf(app.unbraid.data.PORT_OPT to "443"))), r.links, emptyMap())["se"] as app.unbraid.data.WgLink
+        assertEquals(l.peer.endpoint, ported.peer.endpoint)
+        assertEquals(1280, ported.peer.mtu)
+        val c = kotlinx.serialization.json.Json.parseToJsonElement(app.unbraid.vpn.Compiler.compile(app.unbraid.vpn.Compiler.Input(setup, app.unbraid.vpn.LinkPicker.ported(setup, r.links, emptyMap()), "app.unbraid", false, "/tmp/ts", "/tmp/c.db")))
+        val ep = c.jsonObject["endpoints"]!!.jsonArray.map { it.jsonObject }.single { it["tag"]!!.jsonPrimitive.content == "r-se" }
+        assertNull(ep["detour"])
+        // The entry route isn't needed for it: unused by apps, it has no tunnel of its own.
+        assertEquals(listOf("se"), setup.copy(apps = emptyMap()).activeRoutes.map { it.id })
+        // Same country, another provider's entry, or blocking with a list that has no multi-hop resolver: blocked.
+        val same = setup.copy(routes = listOf(setup.routes[0], setup.routes[1].copy(loc = nl)))
+        assertTrue(same.viaProblem(same.route("se")!!) != null)
+        val blocking = setup.copy(opts = mapOf("ivpn" to mapOf(app.unbraid.data.PROTECT to "on", "list" to "10.0.254.6|10.0.254.7")))
+        assertTrue("se" in pick(blocking).blocked)
+        val oisd = setup.copy(opts = mapOf("ivpn" to mapOf(app.unbraid.data.PROTECT to "on")))
+        val dns = kotlinx.serialization.json.Json.parseToJsonElement(app.unbraid.vpn.Compiler.compile(app.unbraid.vpn.Compiler.Input(oisd, app.unbraid.vpn.LinkPicker.ported(oisd, pick(oisd).links, emptyMap()), "app.unbraid", false, "/tmp/ts", "/tmp/c.db")))
+            .jsonObject["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }.single { it["tag"]!!.jsonPrimitive.content == "dns-r-se" }
+        assertEquals("10.0.254.102", dns["server"]!!.jsonPrimitive.content)
+        // The same exit server straight from another route too: one key there by two paths, a clash.
+        val twin = setup.copy(routes = setup.routes + app.unbraid.data.Route("se2", se), apps = mapOf("x" to "nl", "y" to "se2"))
+        val t = app.unbraid.vpn.LinkPicker.pick(twin, keep + ("se2" to keep.getValue("se")), twin, mapOf("ivpn" to blob), mapOf("ivpn" to blob), emptyMap(), offline = true) { Ivpn }
+        assertTrue("se" in t.blocked && "se2" in t.links)
+        // Never kept: the next pick builds it again from the current Via, so a changed or removed one never lingers.
+        val again = app.unbraid.vpn.LinkPicker.pick(setup.copy(routes = listOf(setup.routes[0], setup.routes[1].copy(via = null, viaNative = false))), keep + ("se" to l), setup,
+            mapOf("ivpn" to blob), mapOf("ivpn" to blob), emptyMap(), offline = true) { Ivpn }
+        assertTrue("se" in again.blocked || (again.links["se"] as? app.unbraid.data.WgLink)?.hopEntry == null)
+        // Offline with the entry not running: waits (blocked), never straight.
+        val waiting = pick(setup.copy(apps = emptyMap()))
+        assertTrue("se" in waiting.blocked)
     }
 
     @Test fun countriesAreGroupedAndKeyed() {

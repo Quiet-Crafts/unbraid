@@ -96,7 +96,8 @@ object Compiler {
         require(clashes(s, links).isEmpty()) { CLASH } // [LinkPicker] blocks them first
         return routes.associate { r ->
             val link = links[r.id] ?: error("No server for ${r.name}")
-            r.id to owners.getOrPut(linkKey(r, link)) { "r-${r.id}" }
+            // A tunnel through another route is a tunnel of its own, never shared with one that goes straight there.
+            r.id to owners.getOrPut(linkKey(r, link) + "|via=" + r.via.orEmpty()) { "r-${r.id}" }
         }
     }
 
@@ -292,7 +293,8 @@ object Compiler {
             putJsonArray("endpoints") {
                 active.filter { shared[it.id] == "r-${it.id}" }.forEach { r ->
                     when (val l = i.links.getValue(r.id)) {
-                        is WgLink -> add(wg(tag(r.id), l.peer, r.name))
+                        // The provider's own multi-hop is one ordinary tunnel to the entry's server: no detour.
+                        is WgLink -> add(wg(tag(r.id), l.peer, r.name, r.via?.takeIf { !r.viaNative }?.let { v -> shared[v] ?: error("${r.name}: its Via isn't connected") }))
                         // Keeps the pushed DNS if any route on this tunnel uses it, not only the route that owns it.
                         is OvpnLink -> Manual.ovpnEndpoint(tag(r.id), l.profile).let { e -> add(if (active.any { tag(it.id) == tag(r.id) && (ovpnDns(it.id) || ovpnBoot(it.id)) }) openVpn(e) else e) }
                         is SsLink, is TsLink -> Unit
@@ -477,13 +479,17 @@ object Compiler {
     /** Resolver inside a route's tunnel: the provider's blocking resolver if on, else the tunnel's own, else Nord's, else Quad9. */
     private fun dnsServer(s: Setup, r: app.unbraid.data.Route, link: Link?): String {
         val provider = r.takeIf { !it.imported }?.loc?.provider
-        return provider?.takeIf { s.protects(r) }?.let { p -> app.unbraid.data.Providers.get(p)?.blockingDns { s.opt(p, it) } }
+        return provider?.takeIf { s.protects(r) }?.let { p -> app.unbraid.data.Providers.get(p)?.let { pr ->
+            // On the provider's multi-hop its blocking answers elsewhere ([LinkPicker] blocks a route with none known).
+            pr.blockingDns { s.opt(p, it) }?.let { d -> if ((link as? WgLink)?.hopEntry != null) pr.hopDns(d) ?: error("No multi-hop blocking resolver") else d }
+        } }
             ?: (link as? WgLink)?.peer?.dns?.firstOrNull()
             ?: if (provider == "nord") NORD_DNS else "9.9.9.9"
     }
 
     /** The engine's error for a bad key quotes it, so every key is checked here and never named. */
-    private fun wg(tag: String, p: WgPeer, name: String) = buildJsonObject {
+    /** [detour]: the tunnel this one goes through (Via). */
+    private fun wg(tag: String, p: WgPeer, name: String, detour: String? = null) = buildJsonObject {
         require(validWgKey(p.privateKey) && validWgKey(p.publicKey) && p.presharedKey?.let(::validWgKey) != false) { "Invalid WireGuard key for $name" }
         put("type", "wireguard"); put("tag", tag)
         // 1280 fits every mobile path (cellular, 464XLAT); 1420 makes 1480-byte packets that stall big uploads there.
@@ -503,7 +509,9 @@ object Compiler {
                 put("persistent_keepalive_interval", keepalive(p))
             })
         }
-        if (p.vmess != null) put("detour", "v2-$tag")
+        // A disguised tunnel goes through its V2Ray hop; Via with a disguise is refused before this ([LinkPicker]).
+        require(p.vmess == null || detour == null) { "$name: Disguise doesn't work with Via yet" }
+        (p.vmess?.let { "v2-$tag" } ?: detour)?.let { put("detour", it) }
     }
 
     /**
@@ -607,7 +615,16 @@ object Compiler {
         val seen = HashMap<String, String>().apply { s.home.wg?.let { put(wgIdentity(it), "home") } }
         return s.activeRoutes.filter { it.tsExit == null }.mapNotNullTo(HashSet()) { r ->
             val p = (links[r.id] as? WgLink)?.peer ?: return@mapNotNullTo null
-            r.id.takeIf { seen.getOrPut(wgIdentity(p)) { wgKey(p) }.let { it == "home" || it != wgKey(p) } }
+            // The same key on the same server by another path (Via or not) clashes too.
+            val key = wgKey(p) + "|via=" + r.via.orEmpty()
+            // The same key to the same exit server, straight and by the provider's multi-hop (another address, the same
+            // server key): the server can't tell them apart, so they clash too.
+            // Two multi-hop paths to one exit (through two entries) likewise: the later one gives way.
+            val active = s.activeRoutes.map { it.id }
+            val hop = (links[r.id] as? WgLink)?.hopEntry != null
+            val twin = hop && links.any { (id, o) -> id != r.id && id in active && o is WgLink && o.peer.publicKey == p.publicKey && o.peer.privateKey == p.privateKey &&
+                o.peer.endpoint != p.endpoint && (o.hopEntry == null || active.indexOf(id) < active.indexOf(r.id)) }
+            r.id.takeIf { twin || seen.getOrPut(wgIdentity(p)) { key }.let { it == "home" || it != key } }
         }
     }
 

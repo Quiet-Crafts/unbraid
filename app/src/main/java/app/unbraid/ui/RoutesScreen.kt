@@ -192,7 +192,11 @@ internal fun serverId(r: Route, s: Server): String? = if (r.imported) null else 
     "${s.load}% load".takeIf { s.load >= 0 && Providers.get(r.loc.provider)?.hasLoad == true },
 ).joinToString(" · ")
 
-private fun place(r: Route, live: Map<String, Server>) = when {
+/** [r]'s line, with the route it goes through first when it has a Via. */
+private fun place(r: Route, live: Map<String, Server>, routes: List<Route> = emptyList()) =
+    listOfNotNull(where(r, live), r.via?.let { v -> "via ${routes.firstOrNull { it.id == v }?.name ?: "a removed route"}${if (r.viaNative) ", one tunnel" else ""}" }).joinToString(" · ")
+
+private fun where(r: Route, live: Map<String, Server>) = when {
     r.wg != null -> "WireGuard"
     r.ovpn != null -> "OpenVPN"
     r.ss != null -> "Shadowsocks"
@@ -433,7 +437,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     else Rise("routes", 0, reveal) { DefaultTile(
                         key = shown.defaultRoute,
                         apps = defaultLabel(defaultPkgs.size.takeIf { disclosed }, chosenDefault), code = route?.code, chip = if (lit && route != null) Ink.route(route.hue) else Ink.dim, direct = route == null,
-                        title = route?.name ?: "Direct", meta = route?.let { place(it, live) } ?: "No VPN for these apps",
+                        title = route?.name ?: "Direct", meta = route?.let { place(it, live, setup.routes) } ?: "No VPN for these apps",
                         extra = if (route != null && server != null) serverId(route, server) else null,
                         border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
                         exit = exitOf(shown.defaultRoute)?.takeIf { offlineExit(vpn, route) == null }?.let { it to pendingOf(it) },
@@ -846,7 +850,7 @@ private fun RouteRow(
     }
     val where = @Composable { end: Boolean ->
         Text(route?.name ?: if (blocked) "Block" else "Direct", style = Type.title, color = Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
-        Text(route?.let { place(it, live) } ?: if (blocked) "No traffic" else "Skips the VPN", style = Type.caption, color = Ink.dim, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
+        Text(route?.let { place(it, live, ui.setup.value.routes) } ?: if (blocked) "No traffic" else "Skips the VPN", style = Type.caption, color = Ink.dim, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
         warning?.let { Text(it, style = Type.caption, color = Ink.bad, textAlign = if (end) TextAlign.End else null) }
         if (!wide) exit?.let { (r, pending) -> ExitLine(r, pending) }
     }
