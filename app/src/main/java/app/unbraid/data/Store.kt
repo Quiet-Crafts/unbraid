@@ -115,6 +115,10 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     @Synchronized
     fun update(f: (Setup) -> Setup): Boolean = change(f) && saveSetup()
 
+    /** As [update]; [taken] hears whether [f]'s setup was taken or the store kept the old one ([reserve]). */
+    @Synchronized
+    fun update(taken: (Boolean) -> Unit, f: (Setup) -> Setup): Boolean = change(f, taken) && saveSetup()
+
     /**
      * Applies [f] at once and writes it on [writer], so a tap never waits for the Keystore and the disk. Each write
      * takes the newest setup, so the last one on disk is always the latest; a failed one shows [unsaved], as [update].
@@ -135,11 +139,11 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     // Wherever a route is removed, what used it is mended here: only the routes this change removed, so a setup read with a
     // missing route keeps naming it (the screens say so; the engine refuses or blocks it).
     // False while [unreadable]: nothing changes then. A change that makes a [reserve]d route a default is dropped.
-    private fun change(f: (Setup) -> Setup) = synchronized(changing) {
+    private fun change(f: (Setup) -> Setup, taken: (Boolean) -> Unit = {}) = synchronized(changing) {
         if (_unreadable.value) false else {
             _setup.update { old ->
                 f(old).let { new -> new.tidy(old.routes.map { it.id }.toSet() - new.routes.map { it.id }.toSet()).after(old) }
-                    .takeIf { new -> reserved.none { g -> new.refusesRemoving(g(new), "") != null } } ?: old
+                    .takeIf { new -> reserved.none { g -> new.refusesRemoving(g(new), "") != null } }.also { taken(it != null) } ?: old
             }
             true
         }

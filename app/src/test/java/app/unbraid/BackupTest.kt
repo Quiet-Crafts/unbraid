@@ -343,6 +343,11 @@ class BackupTest {
         // Installed in time but seen only later: Android's install time counts, not the time of the look.
         assertEquals(DIRECT, keepKnown(both, setOf(pkg), now = 9000 + WAIT_MS, installedAt = { 3000 }).profiles.single { it.name == PREVIOUS }.apps[pkg])
         assertFalse(pkg in keepKnown(both, setOf(pkg), now = 9000 + WAIT_MS, installedAt = { 1500 + WAIT_MS }).profiles.single { it.name == PREVIOUS }.apps)
+        // A later restore keeps the choice of one installed in time, though nothing looked at the installed apps since.
+        val late2 = first.restoredFrom(Backup.read(Backup.export(full(), "", 0)).setup, PREVIOUS, 9000 + WAIT_MS, installedAt = { 1500 })!!
+        assertEquals(BLOCK, late2.profiles.single { it.name == PREVIOUS }.apps[pkg])
+        assertFalse(pkg in late2.waitingEach)
+        assertFalse(pkg in first.restoredFrom(Backup.read(Backup.export(full(), "", 0)).setup, PREVIOUS, 9000 + WAIT_MS)!!.profiles.single { it.name == PREVIOUS }.apps)
         // The older fields cover the kept choice too, so a version before per-app deadlines keeps it as long.
         assertTrue(pkg in both.waiting)
         assertTrue(both.waitingUntil >= 1000 + WAIT_MS)

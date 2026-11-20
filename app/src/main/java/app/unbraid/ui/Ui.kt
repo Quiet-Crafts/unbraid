@@ -554,6 +554,17 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun refreshApps() { if (disclosed.value) loadApps() }
     @Volatile private var appsAsked = 0
 
+    /**
+     * When Android installed an app, archived ones too; null when it isn't installed or the installed apps may not be
+     * looked at yet (before the installed-apps notice).
+     */
+    fun installedAt(): (String) -> Long? = if (!disclosed.value) { _ -> null } else { p ->
+        runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= 35) pm.getPackageInfo(p, PackageManager.PackageInfoFlags.of(PackageManager.MATCH_ARCHIVED_PACKAGES)).firstInstallTime
+            else pm.getPackageInfo(p, 0).firstInstallTime
+        }.getOrNull()
+    }
+
     private fun loadApps() = (++appsAsked).let { n -> viewModelScope.launch {
         val self = getApplication<Application>().packageName
         // A failed read keeps the list as it was.
@@ -571,7 +582,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         } ?: return@launch
         if (n != appsAsked) return@launch // a newer read is under way (checked and applied here, on the main thread)
         _apps.value = list
-        val installedAt = { p: String -> runCatching { pm.getPackageInfo(p, 0).firstInstallTime }.getOrNull() }
+        val installedAt = installedAt()
         if (keepKnown(store.setup.value, known, installedAt = installedAt) != store.setup.value) store.edit { keepKnown(it, known, installedAt = installedAt) }
     } }
 

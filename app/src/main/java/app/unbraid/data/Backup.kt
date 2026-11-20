@@ -507,7 +507,7 @@ const val WAIT_MS = 30 * 86_400_000L
  * whose name the backup uses for something else gets a new one. Null when there is no room for that profile, or the two
  * together hold more routes or own servers than a setup may ([Backup.MAX_EACH]).
  */
-fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true): Setup? {
+fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true, installedAt: (String) -> Long? = { null }): Setup? {
     // Saved without keys: an own server this phone still has, the same in everything the file keeps, gets its config back here, and the home peer stays as it is.
     // A route that had no own server here got one made up in the file: this phone's route of that id gives it back, only
     // only where everything the file keeps of that server is the same here (plugin and allowed addresses too); an OpenVPN
@@ -533,7 +533,8 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val ok = { id: String -> builtIn(id) || id in here }
     val due = { p: String, x: String -> waitingEach[p]?.get(x) ?: waitingUntil }
     // A choice whose wait is over is not kept: the backup's wait for the same app must not bring it back.
-    val apps = apps.filter { (p, x) -> ok(x) && (p !in waiting || now < due(p, x)) }
+    // One installed before it ([installedAt]) keeps its choice, also when nothing has looked at the installed apps since.
+    val apps = apps.filter { (p, x) -> ok(x) && (p !in waiting || now < due(p, x) || installedAt(p)?.let { it < due(p, x) } == true) }
     val sites = sites.filterValues(ok)
     // Without profiles every route here shows, those no app uses too: all of them are kept, as saving a first profile does.
     val listed = if (profiles.isEmpty()) (added + (routes.map { it.id } - (setOf(defaultRoute) + apps.values + sites.values + added))).distinct() else added
@@ -569,7 +570,7 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val kept = Profile(name, if (ok(defaultRoute) && defaultRoute.isNotEmpty()) m(defaultRoute) else "", apps.mapValues { m(it.value) }, listed.filter(ok).map(m), sites.mapValues { m(it.value) })
     // Choices of the kept setup's apps still waiting to be installed wait on, each until the deadline it had: otherwise the
     // next look at the installed apps drops them, Block too. One the backup has as well waits as the backup's do.
-    val still = apps.filterKeys { it in waiting }.mapNotNull { (p, x) ->
+    val still = apps.filterKeys { it in waiting && installedAt(it) == null }.mapNotNull { (p, x) ->
         due(p, x).takeIf { b.apps[p] != m(x) && b.profiles.none { f -> f.apps[p] == m(x) } }?.let { p to mapOf(m(x) to it) }
     }.toMap()
     // The older fields hold them too (until the latest deadline), so a version before per-app deadlines keeps them as well.

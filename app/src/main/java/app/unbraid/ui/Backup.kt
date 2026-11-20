@@ -56,7 +56,7 @@ import kotlinx.coroutines.withContext
 private const val KEYS_OFF = "Off: own servers are saved without keys or passwords, and home WireGuard is left out. On another phone, add each server's config again; until then its apps stay offline."
 private const val KEYS_ON = "The file holds your own servers' keys and passwords, so it needs a strong passphrase."
 private const val KEYS_NONE = "You have no own servers or home WireGuard, so there are no keys or passwords to include."
-private const val KEEP_TOO_MUCH = "Your current setup can't be kept beside this backup: together they hold more profiles, routes or own servers than unbraid keeps."
+private const val KEEP_TOO_MUCH = "Your current setup can't be kept beside this backup: together they hold more profiles, routes or own servers than unbraid keeps, or more than one backup file can hold."
 private const val KEEP_NO_ROOM = "$KEEP_TOO_MUCH Turn off keeping your current setup, or cancel."
 
 /** What a backup file holds, for the captions. */
@@ -100,7 +100,8 @@ fun keysSwitch(secrets: Boolean, on: Boolean): Pair<Boolean, String> = secrets t
  */
 class RestoreGate {
     /** What the confirm sheet says of a backup: its sentences, its weak servers, whether the setup here can be kept, and own servers left without config. */
-    class Result(val notes: List<String>, val weak: List<String>, val keepable: Boolean, val missing: Int)
+    /** [keptAs]: the name the setup here would be kept under, when it can be kept. */
+    class Result(val notes: List<String>, val weak: List<String>, val keepable: Boolean, val missing: Int, val keptAs: String? = null)
     /** One check asked: of [backup] over [here], keeping the setup here as a profile or not. */
     class Ask(val here: Setup, val backup: Backup.Contents, val keep: Boolean)
 
@@ -132,14 +133,14 @@ class RestoreGate {
 
     companion object {
         /** Works [a] out: slow for a large setup, never on the main thread. [kin]: the apps sharing a user id with an app; [tick] may throw to stop it. */
-        fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }, tick: () -> Unit = {}): Result {
+        fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }, tick: () -> Unit = {}, installedAt: (String) -> Long? = { null }): Result {
             val c = a.backup
             // As of now, as Restore works it out: a wait over by then only keeps less, so what can be kept here still can be.
             val now = System.currentTimeMillis()
             val plain = a.here.restoredFrom(c.setup, null, now, c.keys)!!
-            val keepable = !a.here.untouched && a.here.restoredFrom(c.setup, BEFORE_RESTORE, now, c.keys) != null
-            val next = if (a.keep && keepable) a.here.restoredFrom(c.setup, BEFORE_RESTORE, now, c.keys)!! else plain
-            return Result(RestoreTraffic.notes(a.here, next, kin, tick), Backup.weak(plain, a.here), keepable, plain.servers.count { it.keyless })
+            val kept = if (a.here.untouched) null else a.here.restoredFrom(c.setup, BEFORE_RESTORE, now, c.keys, installedAt)
+            val next = if (a.keep && kept != null) kept else plain
+            return Result(RestoreTraffic.notes(a.here, next, kin, tick), Backup.weak(plain, a.here), kept != null, plain.servers.count { it.keyless }, kept?.profiles?.lastOrNull()?.name)
         }
     }
 }
@@ -183,6 +184,7 @@ class BackupFlow(private val ui: Ui) {
     val weak: List<String> get() = seen.let { gate.result?.weak.orEmpty() }
     /** Whether the setup here can be kept as a profile beside [opened]'s; null while it is worked out. */
     val keepable: Boolean? get() = seen.let { gate.result?.keepable }
+    val keptAs: String? get() = seen.let { gate.result?.keptAs }
     /** Own servers [opened] leaves without their config here: the ones this phone doesn't already have. */
     val missing: Int get() = seen.let { gate.result?.missing ?: 0 }
     /** The user accepts the weak security of servers in [opened] ([Backup.weak]): Restore waits for it. */
@@ -209,6 +211,7 @@ class BackupFlow(private val ui: Ui) {
         seen++
         judging?.cancel()
         val pm = app.packageManager
+        val installedAt = ui.installedAt()
         judging = ui.viewModelScope.launch {
             val r = withContext(Dispatchers.Default) {
                 // The installed apps by user id, read once.
@@ -216,7 +219,7 @@ class BackupFlow(private val ui: Ui) {
                 val uid = all.associate { it.packageName to it.uid }
                 val byUid = all.groupBy({ it.uid }, { it.packageName })
                 // Stopped as soon as the sheet is closed or the check asked again.
-                RestoreGate.check(ask, { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }) { ensureActive() }
+                RestoreGate.check(ask, { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }, { ensureActive() }, installedAt)
             }
             gate.answer(ask, r); seen++
         }
@@ -312,12 +315,14 @@ class BackupFlow(private val ui: Ui) {
         // Counted before the store changes, and only when the restore changes the setup: the running engine's setup is then
         // gone, so a refused reload must stop the VPN. A restore that leaves the setup as it is (the same backup again)
         // leaves the engine on a setup that still exists, and a later refused edit keeps it running as any refused edit does.
-        val saved = Unbraid.store.update { s -> if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys)
-            ?.also { target = it; if (it != s) { UnbraidVpn.restores.incrementAndGet(); counted = true } } ?: s }
+        var taken = false
+        val installedAt = ui.installedAt()
+        val saved = Unbraid.store.update({ taken = it }) { s -> if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys, installedAt)
+            ?.also { target = it; if (it != s && !counted) { UnbraidVpn.restores.incrementAndGet(); counted = true } } ?: s }
         val t = target
-        if (t == null || Unbraid.store.setup.value != t) {
+        if (t == null || moved || !taken) {
             // Refused by the store after it was counted (a sign-out under way holds the default): the running setup stays.
-            if (counted && Unbraid.store.setup.value != t) UnbraidVpn.restores.decrementAndGet()
+            if (counted) UnbraidVpn.restores.decrementAndGet()
             finish(false, if (t == null && !moved) KEEP_NO_ROOM else "Couldn't restore: your settings are busy. Try again.")
             return
         }
@@ -429,7 +434,7 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
     else if (notes.isNotEmpty()) Text(notes.joinToString("\n"), style = Type.caption, color = Ink.bad)
     if (notes != null && flow.weak.isNotEmpty()) Switch(WEAK_TITLE, weakCaption(flow.weak), flow.acceptWeak) { flow.acceptWeak = it }
     if (vpn.phase == VpnState.Phase.On) Text("unbraid is connected. It reconnects with the restored setup, and apps may be offline for a few seconds.", style = Type.caption, color = Ink.dim)
-    if (canKeep) Switch("Keep my current setup", "Saved as the profile $BEFORE_RESTORE, to switch back later. Your other profiles here are replaced.", flow.keep) { flow.keep = it }
+    if (canKeep) Switch("Keep my current setup", "Saved as the profile ${flow.keptAs ?: BEFORE_RESTORE}, to switch back later. Your other profiles here are replaced.", flow.keep) { flow.keep = it }
     else if (flow.keepable == false && !here.untouched) Text(KEEP_TOO_MUCH, style = Type.caption, color = Ink.dim)
     Buttons(flow, "Restore", enabled = flow.ready(here)) { flow.apply() }
 }
