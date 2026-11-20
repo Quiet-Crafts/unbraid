@@ -34,7 +34,14 @@ data class Location(
 }
 
 @Serializable
-data class Server(val name: String, val host: String, val ip: String, val publicKey: String, val load: Int, val city: String = "", val country: String = "")
+data class Server(val name: String, val host: String, val ip: String, val publicKey: String, val load: Int, val city: String = "", val country: String = "") {
+    /**
+     * For the server list only, never saved or compared: what the provider says about it ("Low packet loss", the
+     * hosting company), and [flagged] when that is a problem, so it is listed after the others.
+     */
+    @kotlinx.serialization.Transient var note: String = ""
+    @kotlinx.serialization.Transient var flagged: Boolean = false
+}
 
 /** A plain WireGuard peer, e.g. a FRITZ!Box export. */
 @Serializable

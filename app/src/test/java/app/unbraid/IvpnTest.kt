@@ -49,6 +49,15 @@ class IvpnTest {
         val loc = Location("ivpn", countryCode = "NL")
         assertEquals(nl[1].hostname, Ivpn.link(list.copy(down = setOf(nl[0].hostname)), loc, acct).server.host)
         assertEquals(nl[0].hostname, Ivpn.link(list.copy(down = nl.map { it.hostname }.toSet()), loc, acct).server.host)
+        // The server list says so, with the hosting company, and lists it last; a saved server never keeps the note.
+        val listed = Ivpn.listed(list.copy(down = setOf(nl[0].hostname)), loc, 20)
+        assertEquals(nl[0].hostname, listed.last().host)
+        assertEquals("Out of service · ${nl[0].isp}" to true, listed.last().note to listed.last().flagged)
+        assertEquals(nl[1].isp to false, listed.first().note to listed.first().flagged)
+        assertTrue(nl[0].isp.isNotBlank())
+        val saved = app.unbraid.data.NordApi.json.decodeFromString(app.unbraid.data.Server.serializer(), app.unbraid.data.NordApi.json.encodeToString(app.unbraid.data.Server.serializer(), listed.last()))
+        assertEquals("" to false, saved.note to saved.flagged)
+        assertEquals(listed.last(), saved)
     }
 
     @Test fun countryLinkPicksTheLeastLoadedHost() {

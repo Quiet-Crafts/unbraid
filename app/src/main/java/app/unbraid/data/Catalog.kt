@@ -88,5 +88,5 @@ object Catalog {
     fun code(country: String): String = norm(country).let { n -> codes[n] ?: aliases[n] } ?: "··"
 
     fun server(e: Entry, name: String = e.serverName ?: e.hostname.substringBefore('.')) =
-        Server(name, e.hostname, e.ipv4!!, e.wgpubkey.orEmpty(), e.load, e.city.orEmpty(), code(e.place))
+        Server(name, e.hostname, e.ipv4!!, e.wgpubkey.orEmpty(), e.load, e.city.orEmpty(), code(e.place)).apply { e.warning?.let { note = it; flagged = true } }
 }

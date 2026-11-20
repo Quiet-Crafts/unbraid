@@ -59,6 +59,8 @@ object Ivpn : Provider {
         @SerialName("public_key") val publicKey: String,
         @SerialName("local_ip") val localIp: String,
         val load: Double = 0.0,
+        /** The hosting company, shown in the server list. */
+        val isp: String = "",
     )
 
     @Serializable
@@ -225,7 +227,13 @@ object Ivpn : Provider {
     override fun connect(loc: Location, account: String): Link = link(if (loc.pinned == null) fetch(true) else runCatching { fetch() }.getOrNull(), loc, account(account))
 
     override fun servers(loc: Location, account: String, limit: Int): List<Server> =
-        fetch(true).let { l -> l.match(loc).sortedWith(l.best).take(limit).map { (g, h) -> server(g, h) } }
+        listed(fetch(true), loc, limit)
+
+    /** [loc]'s servers best first, each with its note: out of service (inactive or in maintenance), and the hosting company. */
+    internal fun listed(l: ServerList, loc: Location, limit: Int) = l.match(loc).sortedWith(l.best).take(limit).map { (g, h) -> server(g, h).apply {
+            val down = h.hostname in l.down
+            note = listOfNotNull("Out of service".takeIf { down }, h.isp.trim().take(40).ifEmpty { null }).joinToString(" · "); flagged = down
+        } }
 
     /** The server list; with [status], also which hosts are down, from IVPN's status list (left out if that fails). */
     private fun fetch(status: Boolean = false) = parse(Http.get("$API/v5/servers.json"))

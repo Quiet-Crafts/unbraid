@@ -348,6 +348,8 @@ class KeyProvidersTest {
             {"public_name":"C","country_name":"Austria","country_code":"at","location":"Vienna","continent":"Europe","ip_v4_in1":"1.2.3.6","health":"error"}]}"""
         // A warning without a reason still counts as one; a server in error refuses connections and is left out.
         assertEquals(listOf("1.2.3.4" to "Warning", "1.2.3.5" to null), AirVpn.parse(body, serverKey).map { it.ips.single() to it.warning })
+        // The server list shows the reason and flags it.
+        assertEquals(listOf("Warning" to true, "" to false), AirVpn.parse(body, serverKey).map { Catalog.server(it).let { s -> s.note to s.flagged } })
     }
 
     @Test fun airvpnNeedsTheWholeConf() {
