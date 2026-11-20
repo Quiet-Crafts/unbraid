@@ -268,6 +268,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     val formLink = mutableStateMapOf<String, String>()
     /** A question the provider asked before it signs in (a two-factor code, a captcha), per provider id. */
     val challenge = mutableStateMapOf<String, app.unbraid.data.Challenge>()
+    /** A provider that can free a slot by signing out the account's other devices, once the user agrees, per provider id. */
+    val slotsFull = mutableStateMapOf<String, app.unbraid.data.SlotsFull>()
 
     /** Files being read into a form, per provider: closing the form or picking another file makes an older read moot. Main thread. */
     private val reads = HashMap<String, Int>()
@@ -281,7 +283,12 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         // A sign-in in flight still finishes (a device slot it registers must be saved), but its form is gone for good.
         if (id in signing.value) dismissed += id
         form.keys.filter { it.startsWith("$id:") }.forEach { form.remove(it) }
-        formError.remove(id); formLink.remove(id); challenge.remove(id)
+        formError.remove(id); formLink.remove(id); challenge.remove(id); slotsFull.remove(id)
+    }
+    /** Every agreement to sign out other devices, and every question asked under one, is dropped (a form left by a shortcut). */
+    fun discardForced() {
+        slotsFull.clear()
+        challenge.entries.filter { it.value.keep.containsKey("force") }.map { it.key }.forEach { challenge.remove(it) }
     }
     /** Sign-ins whose form was closed while they ran: a failure leaves no error and brings nothing back. */
     private val dismissed: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
@@ -293,18 +300,19 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     /**
      * Signs in to [provider] using [input] as typed: secrets are never trimmed. The outcome lands in [formError]
-     * (or [accounts] on success). Ignored while one is already running for this provider.
+     * (or [accounts] on success). Ignored while one is already running for this provider. [extra] is what a
+     * [app.unbraid.data.SlotsFull] asked to add, only after the user agreed to it.
      */
-    fun signIn(provider: Provider, input: Map<String, String>) {
+    fun signIn(provider: Provider, input: Map<String, String>, extra: Map<String, String> = emptyMap()) {
         val id = provider.id
         if (id in _signing.value) return
         if (id in store.accounts.value) { formError[id] = "Already signed in to ${provider.name}"; return }
-        formError.remove(id); formLink.remove(id)
+        formError.remove(id); formLink.remove(id); slotsFull.remove(id)
         val asked = challenge[id]
         _signing.update { it + id }
         viewModelScope.launch(Dispatchers.IO) {
             val failure = runCatching {
-                val clean = (provider.fields + listOfNotNull(asked?.field)).associate { f -> f.key to input[f.key].orEmpty().let { if (f.secret) it else it.trim() } } + asked?.keep.orEmpty()
+                val clean = (provider.fields + listOfNotNull(asked?.field)).associate { f -> f.key to input[f.key].orEmpty().let { if (f.secret) it else it.trim() } } + asked?.keep.orEmpty() + extra
                 // No release of this provider runs meanwhile, and none of an earlier sign-out runs after: it could remove
                 // the device this sign-in uses ([app.unbraid.data.Store.account] drops them).
                 val (blob, saved) = lock(id).withLock {
@@ -333,6 +341,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                     // A new question replaces the last one (its answer is spent); any other outcome ends the questions.
                     val c = failure as? app.unbraid.data.Challenge
                     if (c != null) { challenge[id] = c; form.remove("$id:${c.field.key}") } else challenge.remove(id)
+                    (failure as? app.unbraid.data.SlotsFull)?.let { slotsFull[id] = it }
                 }
                 _signing.update { it - id }
             }
@@ -582,7 +591,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val text = uri?.let { withContext(Dispatchers.IO) { decodeQr(getApplication(), it) } }
         if (reads[provider] != mine || uri == null) return@launch // closed, cancelled, or another read started meanwhile
         if (text.isNullOrBlank()) formError[provider] = "No QR code found in that picture. Try again closer, or type it in."
-        else { form[formKey] = text.trim().take(200); formError.remove(provider); formLink.remove(provider); challenge.remove(provider) }
+        else { form[formKey] = text.trim().take(200); formError.remove(provider); formLink.remove(provider); challenge.remove(provider); slotsFull.remove(provider) }
     }
 
     private val icons = LruCache<String, Bitmap>(200)

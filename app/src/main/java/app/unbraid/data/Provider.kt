@@ -8,6 +8,12 @@ import java.io.IOException
 open class AuthException(message: String, val url: String? = null) : IOException(message)
 
 /**
+ * Every device slot is taken, and the provider can free one by signing out all the account's other devices: [confirm]
+ * says so to the user, who must agree first; signing in again with [retry] added to the form does it.
+ */
+class SlotsFull(message: String, url: String?, val confirm: String, val retry: Map<String, String>) : AuthException(message, url)
+
+/**
  * A sign-in needs one more answer (a two-factor code, the characters in a captcha [image]): asked with [field], then
  * the same sign-in is sent again with it and the hidden [keep] values.
  */

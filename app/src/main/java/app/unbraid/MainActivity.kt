@@ -241,6 +241,7 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(routesWanted) {
                     if (!routesWanted) return@LaunchedEffect
                     ui.routesWanted.value = false
+                    if (adding) ui.discardForced()
                     picker = null; adding = false; pickerAfter = null; tab = Tab.Routes
                 }
 

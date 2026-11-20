@@ -206,9 +206,26 @@ class IvpnTest {
         val named = Ivpn.session(200 to """{"status":200,"token":"tok","device_name":"Brave Owl","service_status":{"current_plan":"IVPN Standard","available_plans":[{"name":"Pro","device_limit":10},{"name":"Standard","device_limit":5}]},"wireguard":{"ip_address":"172.16.1.2","kem_cipher1":"good"}}""", "a", "p", "kem")
         assertEquals("Brave Owl" to 5, Ivpn.account(named).let { it.device to it.limit })
         // A full account says how many devices and links to where they are listed.
-        val full = try { Ivpn.session(400 to """{"status":602,"message":"You've reached the maximum number of connected devices","data":{"limit":5}}""", "a", "p", "kem"); null } catch (e: AuthException) { e }
-        assertEquals("All 5 IVPN devices are in use. Sign out another device, then try again.", full!!.message)
+        val limit = """{"status":602,"message":"You've reached the maximum number of connected devices","data":{"limit":5}}"""
+        val full = try { Ivpn.session(400 to limit, "a", "p", "kem"); null } catch (e: app.unbraid.data.SlotsFull) { e }
+        assertEquals("All 5 IVPN devices are in use.", full!!.message)
         assertTrue(full.url!!.startsWith("https://www.ivpn.net/"))
+        // It offers to sign out the other devices, says it's all of them, and only a sign-in carrying its retry does it.
+        assertTrue("every other device" in full.confirm)
+        assertEquals(mapOf("force" to "a"), full.retry)
+        assertEquals("false", Ivpn.sessionBody("a", "pub", "kpub", mapOf("account" to "a"))["force"].toString())
+        assertEquals("true", Ivpn.sessionBody("a", "pub", "kpub", mapOf("account" to "a") + full.retry)["force"].toString())
+        // The agreement is for that account only: another ID typed or scanned since, or any other value, is never forced.
+        assertEquals("false", Ivpn.sessionBody("b", "pub", "kpub", mapOf("account" to "b") + full.retry)["force"].toString())
+        for (v in listOf("true", "yes", "")) assertEquals("false", Ivpn.sessionBody("a", "pub", "kpub", mapOf("force" to v))["force"].toString())
+        // Still full after forcing: no second offer, the plain message.
+        val again = try { Ivpn.session(400 to limit, "a", "p", "kem", force = true); null } catch (e: AuthException) { e }
+        assertFalse(again is app.unbraid.data.SlotsFull)
+        assertEquals("All 5 IVPN devices are in use. Sign out another device, then try again.", again!!.message)
+        // A forced sign-in that IVPN asks a two-factor code or captcha for stays forced when answered; an unforced one doesn't.
+        try { Ivpn.session(400 to """{"status":70011}""", "a", "p", "kem", force = true); fail() } catch (e: Challenge) { assertEquals(mapOf("force" to "a"), e.keep) }
+        try { Ivpn.session(400 to """{"status":70011}""", "a", "p", "kem"); fail() } catch (e: Challenge) { assertTrue(e.keep.isEmpty()) }
+        try { Ivpn.session(400 to """{"status":70001,"captcha_id":"c-2"}""", "a", "p", "kem", force = true); fail() } catch (e: Challenge) { assertEquals(mapOf("captcha_id" to "c-2", "force" to "a"), e.keep) }
         for (body in listOf("""{"status":401,"message":"The provided Account ID is not valid"}""", """{"status":702,"message":"inactive"}""", """{"status":70001}""")) {
             try { Ivpn.session(400 to body, "a", "p", "kem"); fail() } catch (e: AuthException) { }
         }
