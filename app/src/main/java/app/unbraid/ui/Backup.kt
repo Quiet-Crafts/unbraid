@@ -317,12 +317,14 @@ class BackupFlow(private val ui: Ui) {
         // leaves the engine on a setup that still exists, and a later refused edit keeps it running as any refused edit does.
         var taken = false
         val installedAt = ui.installedAt()
-        val saved = Unbraid.store.update({ taken = it }) { s -> if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys, installedAt)
-            ?.also { target = it; if (it != s && !counted) { UnbraidVpn.restores.incrementAndGet(); counted = true } } ?: s }
+        var changes = false
+        // Counted once the store takes it, before it holds it: a restore the store refuses (a sign-out under way holds the
+        // default) is never counted.
+        val saved = Unbraid.store.update({ ok -> taken = ok; if (ok && changes && !counted) { UnbraidVpn.restores.incrementAndGet(); counted = true } }) { s ->
+            if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys, installedAt)
+                ?.also { target = it; changes = it != s } ?: s }
         val t = target
         if (t == null || moved || !taken) {
-            // Refused by the store after it was counted (a sign-out under way holds the default): the running setup stays.
-            if (counted) UnbraidVpn.restores.decrementAndGet()
             finish(false, if (t == null && !moved) KEEP_NO_ROOM else "Couldn't restore: your settings are busy. Try again.")
             return
         }

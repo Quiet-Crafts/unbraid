@@ -559,10 +559,10 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      * looked at yet (before the installed-apps notice).
      */
     fun installedAt(): (String) -> Long? = if (!disclosed.value) { _ -> null } else { p ->
-        runCatching {
-            if (android.os.Build.VERSION.SDK_INT >= 35) pm.getPackageInfo(p, PackageManager.PackageInfoFlags.of(PackageManager.MATCH_ARCHIVED_PACKAGES)).firstInstallTime
-            else pm.getPackageInfo(p, 0).firstInstallTime
-        }.getOrNull()
+        // Installed, else archived (Android 15+): only one Android says is archived, not one uninstalled with its data kept.
+        runCatching { pm.getPackageInfo(p, 0).firstInstallTime }.getOrNull() ?: if (android.os.Build.VERSION.SDK_INT >= 35) runCatching {
+            pm.getPackageInfo(p, PackageManager.PackageInfoFlags.of(PackageManager.MATCH_ARCHIVED_PACKAGES)).takeIf { it.applicationInfo?.isArchived == true }?.firstInstallTime
+        }.getOrNull() else null
     }
 
     private fun loadApps() = (++appsAsked).let { n -> viewModelScope.launch {
