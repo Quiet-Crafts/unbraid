@@ -57,6 +57,10 @@ object AutoProtocol {
     /** Whether [l], kept or cached, was made with the protocol [r] uses now. */
     fun matches(r: Route, l: Link) = r.loc.protocol != AUTO_PROTOCOL || (l is OvpnLink) == onTcp(r.id)
 }
+
+/** Provider page setting: "v2ray" carries the provider's WireGuard tunnels inside V2Ray ([WgLink.disguise]); "off". */
+const val DISGUISE_OPT = "disguise"
+
 const val AUTO = "auto"
 /** Key of every WireGuard provider's MTU setting: [AUTO] is 1280, as in Mullvad's Android app; else up to 1420. */
 const val MTU_OPT = "mtu"
@@ -103,8 +107,12 @@ sealed interface Link {
 @Serializable
 data class WgLink(
     override val server: Server, val peer: WgPeer, val ports: List<Int> = emptyList(), val entries: List<String> = emptyList(),
-    val portEntry: Map<Int, Int> = emptyMap(),
+    val portEntry: Map<Int, Int> = emptyMap(), val disguise: Disguise? = null,
 ) : Link
+
+/** How this server takes a disguised tunnel ([DISGUISE_OPT]): its V2Ray server, and the WireGuard port behind it. */
+@Serializable
+data class Disguise(val vmess: Vmess, val wgPort: Int)
 
 @Serializable
 data class OvpnLink(override val server: Server, val profile: OvpnProfile) : Link

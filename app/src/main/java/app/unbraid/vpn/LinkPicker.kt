@@ -69,9 +69,12 @@ object LinkPicker {
                 r.tsExit != null -> TsLink(Server(r.name, r.tsExit, "", "", 0))
                 else -> keep[r.id]?.takeIf {
                     applied?.route(r.id)?.let { a -> !a.imported && a.loc == r.loc } == true && appliedAccounts[r.loc.provider] == accounts[r.loc.provider] &&
-                        trusted(it, r, accounts, providers) && Addr.usable(it) && app.unbraid.data.AutoProtocol.matches(r, it)
+                        trusted(it, r, accounts, providers) && Addr.usable(it) && app.unbraid.data.AutoProtocol.matches(r, it) && disguised(setup, r, it)
                 } ?: if (offline) throw if (accounts[r.loc.provider] == null) AuthException("Sign in to ${providers(r.loc.provider)?.name ?: r.loc.provider} for ${r.name}") else Waiting()
-                    else fresh(r, accounts, last, used, providers).also { if (!Addr.usable(it)) throw Addr.refused(it.server.name) }
+                    else fresh(r, accounts, last, used, providers).also {
+                        if (!Addr.usable(it)) throw Addr.refused(it.server.name)
+                        if (!disguised(setup, r, it)) throw Fail("${r.name}: ${it.server.name} can't be reached through V2Ray right now. Pick another server, or turn Disguise off on the ${providers(r.loc.provider)?.name} page")
+                    }
             } } catch (e: Exception) { blocked[r.id] = e; continue }
             if (!r.imported) used += "${r.loc.provider}|${serverId(link.server)}"
             out[r.id] = link
@@ -106,6 +109,10 @@ object LinkPicker {
     private fun portedOne(setup: Setup, p: String?, l: Link, lists: Map<String?, List<Int>>, only: Map<String?, Map<Int, Int>>, step: Map<String, Int>): Link {
         if (l !is WgLink) return l
         if (p == null) return l.copy(peer = l.peer.copy(mtu = minOf(l.peer.mtu, app.unbraid.data.MTU_MIN)))
+        // Disguised: the tunnel goes inside V2Ray to the server's own WireGuard port behind it; the port setting doesn't apply.
+        l.disguise?.takeIf { setup.opt(p, app.unbraid.data.DISGUISE_OPT) == "v2ray" }?.let { d ->
+            return l.copy(peer = l.peer.copy(endpoint = "${l.peer.endpoint.substringBeforeLast(':')}:${d.wgPort}", vmess = d.vmess, mtu = app.unbraid.data.MTU_MIN))
+        }
         val picked = setup.opt(p, app.unbraid.data.PORT_OPT)?.toIntOrNull()?.takeIf { it in 1..65535 }
             ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[(step[p] ?: 0) % it.size] }
         val one = only[p].orEmpty()
@@ -130,6 +137,10 @@ object LinkPicker {
         (old.apps.keys + new.apps.keys).any { new.routeOf(it) == id && old.routeOf(it) == DIRECT } || (new.defaultRoute == id && old.defaultRoute == DIRECT) ||
             old.sites != new.sites || Sites.applied(old, reported = oldSuffix) != Sites.applied(new, reported = newSuffix) || new.apps.any { (pkg, to) -> to == BLOCK && old.apps[pkg] != BLOCK } // newly blocked: not a moment longer on what it had
     }
+
+    /** With Disguise on for its provider, a WireGuard tunnel must come with its V2Ray hop: never a plain one instead. */
+    private fun disguised(setup: Setup, r: Route, l: Link) =
+        setup.opt(r.loc.provider, app.unbraid.data.DISGUISE_OPT) != "v2ray" || l !is WgLink || l.disguise != null
 
     /** A kept or cached tunnel is reused only if its provider still vouches for its server key ([Provider.trusts]). */
     private fun trusted(l: Link, r: Route, accounts: Map<String, String>, providers: (String) -> Provider?): Boolean {

@@ -692,6 +692,30 @@ class CompilerTest {
         assertEquals("r-a", dns["detour"]!!.jsonPrimitive.content)
     }
 
+    /** A disguised tunnel goes through its own V2Ray hop; the engine accepts the result. */
+    @Test fun disguisedTunnelGoesThroughV2Ray() {
+        val v = app.unbraid.data.Vmess("149.22.83.102", 80, "27de860d-5601-412d-8b71-baa048a94b98")
+        val peer = Nord.peer(sv("b"), "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=").copy(vmess = v)
+        val (c, _) = two(WgLink(sv("b"), peer))
+        val ep = c["endpoints"]!!.jsonArray.map { it.jsonObject }.single { it["tag"]!!.jsonPrimitive.content == "r-b" }
+        assertEquals("v2-r-b", ep["detour"]!!.jsonPrimitive.content)
+        assertNull(c["endpoints"]!!.jsonArray.map { it.jsonObject }.single { it["tag"]!!.jsonPrimitive.content == "r-a" }["detour"])
+        val o = c["outbounds"]!!.jsonArray.map { it.jsonObject }.single { it["tag"]!!.jsonPrimitive.content == "v2-r-b" }
+        assertEquals(listOf("vmess", "149.22.83.102", "80", v.uuid, "http"), listOf(o["type"], o["server"], o["server_port"], o["uuid"], o["transport"]!!.jsonObject["type"]).map { it!!.jsonPrimitive.content })
+        // A bad id or a local address never reaches the engine.
+        for (bad in listOf(v.copy(uuid = "x"), v.copy(server = "10.0.0.1"))) try { two(WgLink(sv("b"), peer.copy(vmess = bad))); fail() } catch (e: IllegalArgumentException) { }
+        val bin = java.io.File(System.getenv("SING_BOX_CLI") ?: "${System.getenv("WORK") ?: "${System.getProperty("user.home")}/.cache/unbraid-libbox"}/sing-box-cli")
+        org.junit.Assume.assumeTrue("sing-box-cli not found", bin.canExecute())
+        val f = java.io.File.createTempFile("v2ray", ".json")
+        try {
+            f.writeText(c.toString())
+            val p = ProcessBuilder(bin.path, "check", "-c", f.path).redirectErrorStream(true).start()
+            val out = p.inputStream.bufferedReader().readText()
+            assertTrue("sing-box check timed out", p.waitFor(60, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals("sing-box check: $out", 0, p.exitValue())
+        } finally { f.delete() }
+    }
+
     @Test fun differentKeyOrServerIsNotShared() {
         val other = "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30="
         assertEquals(listOf("r-a", "r-b"), two(WgLink(sv("a"), Nord.peer(sv("a"), other))).first.endpointTags())

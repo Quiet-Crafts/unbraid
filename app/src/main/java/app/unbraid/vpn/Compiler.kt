@@ -312,6 +312,7 @@ object Compiler {
             }
             putJsonArray("outbounds") {
                 add(obj("type" to "direct", "tag" to "direct"))
+                active.filter { shared[it.id] == "r-${it.id}" }.forEach { r -> (i.links[r.id] as? WgLink)?.peer?.vmess?.let { add(vmess(tag(r.id), it)) } }
                 active.filter { shared[it.id] == "r-${it.id}" }.forEach { r -> (i.links[r.id] as? SsLink)?.let {
                     add(Manual.ssOutbound(tag(r.id), it.profile).let { o -> if (tcpOnly(r.id)) JsonObject(o + ("network" to JsonPrimitive("tcp"))) else o })
                 } }
@@ -502,7 +503,28 @@ object Compiler {
                 put("persistent_keepalive_interval", keepalive(p))
             })
         }
+        if (p.vmess != null) put("detour", "v2-$tag")
     }
+
+    /**
+     * The V2Ray hop a disguised tunnel ([WgPeer.vmess]) goes through: VMess over plain TCP with an HTTP request header,
+     * as IVPN's own apps send it.
+     */
+    private fun vmess(tag: String, v: app.unbraid.data.Vmess) = buildJsonObject {
+        require(app.unbraid.data.Addr.server(v.server) && v.port in 1..65535 && VMESS_ID.matches(v.uuid)) { "Invalid V2Ray server" }
+        put("type", "vmess"); put("tag", "v2-$tag")
+        put("server", v.server); put("server_port", v.port); put("uuid", v.uuid)
+        put("security", "none"); put("alter_id", 0)
+        putJsonObject("transport") {
+            put("type", "http"); put("method", "GET"); put("path", "/"); put("host", arr("www.inet-telecom.com"))
+            putJsonObject("headers") {
+                put("Accept-Encoding", "gzip, deflate"); put("Connection", "keep-alive"); put("Pragma", "no-cache")
+                put("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36")
+            }
+        }
+    }
+
+    private val VMESS_ID = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
     private val OPENVPN_ROUTING = listOf("route ", "route-ipv6 ", "route-metric", "redirect-gateway", "redirect-private", "block-ipv6", "block-outside-dns")
 

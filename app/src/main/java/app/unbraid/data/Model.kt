@@ -57,7 +57,13 @@ data class WgPeer(
     val mtu: Int = 1420,
     /** Seconds between keepalives as an imported config asks (0 = none); null = unbraid's 25. */
     val keepalive: Int? = null,
+    /** Carried inside V2Ray (VMess over TCP, dressed as web traffic) to this server, for networks that block VPNs. */
+    val vmess: Vmess? = null,
 )
+
+/** A provider's V2Ray server for a disguised WireGuard tunnel: address, TCP port and the account-wide user id. */
+@Serializable
+data class Vmess(val server: String, val port: Int, val uuid: String)
 
 /** An imported OpenVPN profile (ExpressVPN, CyberGhost…): the raw .ovpn plus its login. */
 @Serializable
