@@ -12,6 +12,10 @@ import app.unbraid.data.WgLink
 import app.unbraid.data.WgPeer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -332,7 +336,7 @@ class KeyProvidersTest {
     private val nodes = AirVpn.parse(res("airvpn_status.json"), serverKey)
     private val airConf = conf("10.164.20.6/32, fd7d:76ee:e68f:a993:1:2:3:4/128", "10.128.0.1", "at.vpn.airdns.org:1637", preshared = true)
 
-    @Test fun airvpnLiveListUsesHealthyIpv4Entries() {
+    @Test fun airvpnLiveListUsesWorkingIpv4Entries() {
         assertTrue(nodes.isNotEmpty())
         assertTrue(nodes.all { it.vpn == "wireguard" && it.ips.size == 2 && it.ips.all { ip -> '.' in ip } && it.wgpubkey == serverKey && it.hostname.endsWith(".vpn.airdns.org") })
         val cs = Catalog.countries(nodes)
@@ -340,8 +344,12 @@ class KeyProvidersTest {
         assertTrue(cs.all { iso.matches(it.code) })
         assertTrue(nodes.mapNotNull { it.city }.none { ',' in it })
         val body = """{"servers":[{"public_name":"A","country_name":"Austria","country_code":"at","location":"Vienna","continent":"Europe","ip_v4_in1":"1.2.3.4","health":"warning"},
-            {"public_name":"B","country_name":"Austria","country_code":"at","location":"Vienna","continent":"Europe","ip_v4_in1":"1.2.3.5","health":"ok"}]}"""
-        assertEquals(listOf("1.2.3.5"), AirVpn.parse(body, serverKey).map { it.ips.single() })
+            {"public_name":"B","country_name":"Austria","country_code":"at","location":"Vienna","continent":"Europe","ip_v4_in1":"1.2.3.5","health":"ok"},
+            {"public_name":"C","country_name":"Austria","country_code":"at","location":"Vienna","continent":"Europe","ip_v4_in1":"1.2.3.6","health":"error"}]}"""
+        // A warning without a reason still counts as one; a server in error refuses connections and is left out.
+        assertEquals(listOf("1.2.3.4" to "Warning", "1.2.3.5" to null), AirVpn.parse(body, serverKey).map { it.ips.single() to it.warning })
+        // The server list shows the reason and flags it.
+        assertEquals(listOf("Warning" to true, "" to false), AirVpn.parse(body, serverKey).map { Catalog.server(it).let { s -> s.note to s.flagged } })
     }
 
     @Test fun airvpnNeedsTheWholeConf() {
@@ -372,6 +380,32 @@ class KeyProvidersTest {
 
         val city = cityLoc("airvpn", entries)
         assertEquals(city.region, AirVpn.link(city, a) { entries }.server.city)
+    }
+
+    /** AirVPN servers with a warning stay, picked after healthy ones; a pinned one still connects. Servers in error are left out. */
+    @Test fun airvpnWarningServersStay() {
+        val a = AirVpn.signed(airConf)
+        val raw = res("airvpn_status.json")
+        val names = Json.parseToJsonElement(raw).jsonObject["servers"]!!.jsonArray.map { it.jsonObject }.filter { it["country_name"]!!.jsonPrimitive.content == "Netherlands" }.map { it["public_name"]!!.jsonPrimitive.content }
+        assertTrue(names.size >= 3)
+        val (warn, err) = names[0] to names[1]
+        val body = Json.encodeToString(JsonElement.serializer(), buildJsonObject {
+            putJsonArray("servers") {
+                Json.parseToJsonElement(raw).jsonObject["servers"]!!.jsonArray.forEach { s ->
+                    val o = s.jsonObject; val n = o["public_name"]!!.jsonPrimitive.content
+                    add(JsonObject(o + when (n) { warn -> mapOf("health" to JsonPrimitive("warning"), "warning" to JsonPrimitive("Low packet loss"), "currentload" to JsonPrimitive(0)); err -> mapOf("health" to JsonPrimitive("error")); else -> emptyMap() }))
+                }
+            }
+        })
+        val entries = AirVpn.parse(body, a.publicKey!!)
+        assertTrue(entries.none { it.serverName == err })
+        val w = entries.single { it.serverName == warn }
+        assertEquals("Low packet loss", w.warning)
+        assertTrue(entries.filter { it.serverName != warn }.all { it.warning == null })
+        // Least loaded, but it has a warning: an automatic pick takes a healthy one first.
+        repeat(5) { assertTrue(AirVpn.link(Location("airvpn", country = "Netherlands"), a) { entries }.server.name != warn) }
+        val pinned = AirVpn.link(Location("airvpn", country = "Netherlands"), a) { entries.filter { it.serverName == warn } }.server
+        assertEquals(warn, AirVpn.link(Location("airvpn", country = "Netherlands", pinned = pinned), a) { entries }.server.name)
     }
 
     @Test fun airvpnCatalogueFallbackUsesTheAccountKey() {

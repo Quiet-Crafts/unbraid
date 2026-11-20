@@ -473,9 +473,12 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         val country = countries.firstOrNull { "c:${it.id}" == s }
         val all = country?.let { c -> Location(pick.provider, c.id, c.code, c.name, group = group, protocol = protocol) }
         var serversOpen by rememberSaveable(country?.id) { mutableStateOf(false) }
-        val servers by produceState<Result<List<Server>>?>(null, serversOpen, all) {
-            if (serversOpen && all != null) value = serverList(ui, all).map { l -> l.sortedBy { if (it.load < 0) Int.MAX_VALUE else it.load } }
+        // Paired with its notes: servers compare equal without them, and a changed note must still show.
+        val listed by produceState<Pair<Result<List<Server>>, List<String>>?>(null, serversOpen, all) {
+            if (serversOpen && all != null) value = serverList(ui, all).map { l -> l.sortedWith(compareBy({ it.flagged }, { if (it.load < 0) Int.MAX_VALUE else it.load })) }
+                .let { r -> r to r.getOrNull().orEmpty().map { it.note } }
         }
+        val servers = listed?.first
         LazyColumn(Modifier.padding(bottom = 16.dp)) {
             when {
                 s == "options" -> {
@@ -533,7 +536,7 @@ private fun LazyListScope.countrySheet(ui: Ui, c: Country, all: Location, favs: 
         servers.getOrThrow().isEmpty() -> item { Caption("No servers found") }
         else -> items(servers.getOrThrow()) { s ->
             val l = all.copy(pinned = s)
-            FavoriteLocationRow(ui, l, p, favs, s.name, listOfNotNull(s.city.ifBlank { null }, "${s.load}% load".takeIf { p.hasLoad && s.load >= 0 }).joinToString(" · ").ifEmpty { null }, 16.dp)
+            FavoriteLocationRow(ui, l, p, favs, s.name, listOfNotNull(s.city.ifBlank { null }, "${s.load}% load".takeIf { p.hasLoad && s.load >= 0 }, s.note.ifBlank { null }).joinToString(" · ").ifEmpty { null }, 16.dp)
         }
     }
 }

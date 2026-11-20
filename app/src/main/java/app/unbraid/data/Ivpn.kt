@@ -93,6 +93,8 @@ object Ivpn : Provider {
         @SerialName("public_key") val publicKey: String,
         @SerialName("local_ip") val localIp: String,
         val load: Double = 0.0,
+        /** The hosting company, shown in the server list. */
+        val isp: String = "",
     )
 
     @Serializable
@@ -120,10 +122,28 @@ object Ivpn : Provider {
     internal data class Config(val ports: Ports = Ports(), @SerialName("antitracker_plus") val antitracker: AntiTracker = AntiTracker())
 
     @Serializable
-    internal data class ServerList(val wireguard: List<Gateway> = emptyList(), val config: Config = Config()) {
+    internal data class ServerList(
+        val wireguard: List<Gateway> = emptyList(), val config: Config = Config(),
+        /** Hostnames IVPN's status list marks inactive or in maintenance ([down]); picked only when nothing else is left. */
+        @kotlinx.serialization.Transient val down: Set<String> = emptySet(),
+    ) {
         /** The single UDP ports IVPN's WireGuard servers take (its list also has ranges, left out here). */
         val ports get() = config.ports.wireguard.filter { it.type.equals("UDP", true) }.mapNotNull { it.port }.distinct()
+        /** Hosts best first: up before down, then by load. */
+        val best get() = compareBy<Pair<Gateway, Host>>({ it.second.hostname in down }, { it.second.load })
     }
+
+    @Serializable
+    internal class StatHost(val hostname: String = "")
+
+    @Serializable
+    internal class StatHosts(val wireguard: StatHost? = null)
+
+    @Serializable
+    internal class StatServer(@SerialName("is_active") val active: Boolean = true, @SerialName("in_maintenance") val maintenance: Boolean = false, val hosts: StatHosts = StatHosts())
+
+    @Serializable
+    internal class Stats(val servers: List<StatServer> = emptyList())
 
     private const val API = "https://api.ivpn.net"
     private const val PORT = 2049
@@ -306,12 +326,24 @@ object Ivpn : Provider {
     override fun countries(account: String) = countries(fetch())
 
     // A pinned server is looked up in the current list (its address and key may have changed); the saved one only offline.
-    override fun connect(loc: Location, account: String): Link = link(if (loc.pinned == null) fetch() else runCatching { fetch() }.getOrNull(), loc, account(account))
+    override fun connect(loc: Location, account: String): Link = link(if (loc.pinned == null) fetch(true) else runCatching { fetch() }.getOrNull(), loc, account(account))
 
     override fun servers(loc: Location, account: String, limit: Int): List<Server> =
-        fetch().match(loc).sortedBy { it.second.load }.take(limit).map { (g, h) -> server(g, h) }
+        listed(fetch(true), loc, limit)
 
-    private fun fetch() = parse(Http.get("$API/v5/servers.json"))
+    /** [loc]'s servers best first, each with its note: out of service (inactive or in maintenance), and the hosting company. */
+    internal fun listed(l: ServerList, loc: Location, limit: Int) = l.match(loc).sortedWith(l.best).take(limit).map { (g, h) -> server(g, h).apply {
+            val down = h.hostname in l.down
+            note = listOfNotNull("Out of service".takeIf { down }, h.isp.trim().take(40).ifEmpty { null }).joinToString(" · "); flagged = down
+        } }
+
+    /** The server list; with [status], also which hosts are down, from IVPN's status list (left out if that fails). */
+    private fun fetch(status: Boolean = false) = parse(Http.get("$API/v5/servers.json"))
+        .let { l -> if (!status) l else l.copy(down = runCatching { down(Http.get("$API/v5/servers/stats")) }.getOrDefault(emptySet())) }
+
+    /** WireGuard hostnames IVPN's status list marks inactive or in maintenance. */
+    internal fun down(body: String): Set<String> = Http.parsed("IVPN") { NordApi.json.decodeFromString(Stats.serializer(), body) }.servers
+        .filter { !it.active || it.maintenance }.mapNotNullTo(HashSet()) { it.hosts.wireguard?.hostname?.takeIf(String::isNotBlank) }
 
     /** The list, without hosts at an address no server can have. */
     internal fun parse(body: String) = Http.parsed("IVPN") { NordApi.json.decodeFromString(ServerList.serializer(), body) }
@@ -337,7 +369,7 @@ object Ivpn : Provider {
         val pinned = loc.pinned
         val (sv, dns) = if (l == null) pinned!! to DNS else {
             val (g, h) = if (pinned != null) l.wireguard.flatMap { g -> g.hosts.map { g to it } }.firstOrNull { it.second.hostname == pinned.host } ?: throw NoLongerOffered(pinned)
-                else l.match(loc).minByOrNull { it.second.load } ?: throw IOException("No IVPN server for ${loc.label}")
+                else l.match(loc).minWithOrNull(l.best) ?: throw IOException("No IVPN server for ${loc.label}")
             server(g, h) to h.localIp.substringBefore('/')
         }
         Addr.usable(sv)
