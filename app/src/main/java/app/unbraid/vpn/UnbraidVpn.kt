@@ -405,7 +405,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     return
                 }
                 // Android's own start (after it killed the app, or Always-on) during a pause the user set: paused on until its end.
-                if ((intent == null || intent.action == VpnService.SERVICE_INTERFACE) && state.value.phase == VpnState.Phase.Off) PauseNote.left(this)?.let { pause(it, again = true); return }
+                if ((intent == null || intent.action == VpnService.SERVICE_INTERFACE) && state.value.phase == VpnState.Phase.Off) PauseNote.wake(this)?.let { pause(0, again = true, wakeAt = it); return }
+                // Android's own start reaching a live pause (Always-on settings changed) keeps the pause: only its notice again.
+                if (intent?.action == VpnService.SERVICE_INTERFACE && state.value.phase == VpnState.Phase.Paused) { state.value.let { p ->
+                    val at = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(p.pausedUntil))
+                    getSystemService(NotificationManager::class.java).notify(1, notification(if (p.pausedUntil <= 0) "Paused" else if (!p.pausedAbout) "Paused until $at" else "Paused until about $at", paused = true))
+                }; return }
                 connect(intent?.getBooleanExtra(EXTRA_UPDATED, false) == true)
             }
         }
@@ -755,7 +760,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val picked = LinkPicker.pick(ask.setup, ask.ready.links, ask.applied, ask.appliedAccounts, ask.accounts, ask.last, avoid + failing, ask.refused, false, Providers::get)
         lock.withLock {
             // Stopped, reloaded or edited during the provider calls: the newer state wins (the watcher reloads an edit).
-            if (destroyed || state.value.phase != VpnState.Phase.On || generation != ask.generation || store.setup.value != ask.setup || store.accounts.value != ask.accounts) return
+            // A try cancelled while it waited (a newer one took over) applies nothing either.
+            if (destroyed || state.value.phase != VpnState.Phase.On || generation != ask.generation || store.setup.value != ask.setup || store.accounts.value != ask.accounts ||
+                kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == false) return
             noteRefusals(ask.setup, ask.accounts, picked)
             runCatching { store.rememberLinks(picked.remember) }.onFailure { Log.w(TAG, "last servers not saved") }
             install(ask.srv, ask.setup, picked, ask.accounts, ask.seen)
@@ -1130,23 +1137,24 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     /** Traffic leaves without the VPN until resumed, by hand or after [minutes]. Caller holds [lock]. */
-    private fun pause(minutes: Int) = pause(if (minutes > 0) minutes * 60_000L else 0L, again = false)
+    private fun pause(minutes: Int) = pause(if (minutes > 0) minutes * 60_000L else 0L, again = false, wakeAt = null)
 
     /**
      * Pauses for [ms] (0: until resumed by hand). [again]: a pause Android's own start found noted ([PauseNote]), in a
      * new process with no engine running. Its end is noted and its alarm set before the engine stops, so a kill at any
      * point after leaves a restart that pauses on, or reconnects.
      */
-    private fun pause(ms: Long, again: Boolean) {
+    private fun pause(ms: Long, again: Boolean, wakeAt: Long?) {
         if (state.value.phase != (if (again) VpnState.Phase.Off else VpnState.Phase.On)) return
         AfterUpdate.off(this) // paused by the user: an update never turns it back on
         // Read now: what the pause notice promises (apps offline or not) depends on them.
         val lockdown = isLockdownEnabled
         val alwaysOn = isAlwaysOn
         val pause = ++pauses
-        val until = if (ms > 0) System.currentTimeMillis() + ms else 0L
-        // One deadline on the clock that counts sleep and ignores clock changes, for the coroutine and the alarm alike.
-        val wake = if (ms > 0) SystemClock.elapsedRealtime() + ms else 0L
+        // One deadline on the clock that counts sleep and ignores clock changes, for the coroutine and the alarm alike; a
+        // noted one ([wakeAt]) kept as it was, so a pause restored after a kill never ends later.
+        val wake = wakeAt ?: if (ms > 0) SystemClock.elapsedRealtime() + ms else 0L
+        val until = if (wake > 0) System.currentTimeMillis() + (wake - SystemClock.elapsedRealtime()) else 0L
         // Only a pause with an end is noted: one until resumed by hand, kept by a note that couldn't be cleared, would never end.
         if (wake > 0) PauseNote.note(this, wake) else PauseNote.clear(this)
         // Short steps against the elapsed clock: a single delay doesn't count while the phone sleeps.

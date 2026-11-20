@@ -22,14 +22,14 @@ object PauseNote {
         runCatching { prefs(c).edit().clear().commit() }
     }
 
-    /** How long the noted pause has left in ms, or null when there is none to keep. */
-    fun left(c: Context): Long? = runCatching {
+    /** The noted pause's end on the elapsed clock, or null when there is none to keep. */
+    fun wake(c: Context): Long? = runCatching {
         val p = prefs(c)
         if (!p.getBoolean("on", false)) return null
         val b = boot(c)
         if (b < 0 || p.getInt("boot", -2) != b) return null
         val wake = p.getLong("wake", -1)
-        (wake - SystemClock.elapsedRealtime()).takeIf { wake > 0 && it in 1..MAX }
+        wake.takeIf { it > 0 && (it - SystemClock.elapsedRealtime()) in 1..MAX }
     }.getOrNull()
 
     private fun prefs(c: Context) = c.getSharedPreferences(FILE, Context.MODE_PRIVATE)

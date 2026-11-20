@@ -416,11 +416,11 @@ object SpeedTest {
         val want = restoreTo((UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit, Unbraid.store.tsTestFrom, UnbraidVpn.state.value.tsExitNodes)
         // A node Tailscale won't take back (gone, no longer an exit) is no reason to stay on the tested one: no exit then.
         val set = { id: String -> runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, id) }.isSuccess }
-        val back = set(want.orEmpty()) && want != null
+        var back = set(want.orEmpty()) && want != null
         // An engine started meanwhile (a reload) may have taken that node though it runs another: set from what runs now.
         if (UnbraidVpn.state.value.engine != engine) {
             val now = restoreTo((UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit, null, UnbraidVpn.state.value.tsExitNodes)
-            if (now != null) set(now)
+            if (now != null) back = set(now) && now.isNotEmpty() || back
         }
         if (back) Unbraid.store.tsTestFrom = null else if (want != "") set("")
     }
