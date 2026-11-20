@@ -35,11 +35,24 @@ object LinkPicker {
     /** Fallback-cache key: a pinned route is its own entry, so it can never inherit another server's tunnel. */
     fun serverKey(r: Route, l: Link) = "${r.loc.provider}|${serverId(l.server)}"
 
-    /** Route [r]'s own count of Automatic's port steps, carried when a dead route moves to another server ([stepOf]). */
-    fun routeStepKey(r: Route) = "route|${r.id}"
+    /**
+     * Route [r]'s own count of Automatic's port steps, carried when a dead route moves to another server ([stepOf]). Tied to
+     * where it goes: a route the user moves to another provider or place starts over.
+     */
+    fun routeStepKey(r: Route) = r.loc.run { "route|${r.id}|$provider|$countryCode|$countryId|$cityId|$region|$group" }
 
-    /** The port step tunnel [l] of route [r] takes: its server's, or more if the route brought steps from a dead server. */
-    fun stepOf(step: Map<String, Int>, r: Route, l: Link) = maxOf(step[serverKey(r, l)] ?: 0, step[routeStepKey(r)] ?: 0)
+    /**
+     * The port step tunnel [l] of route [r] takes: its server's, or the step the route brought from a dead server when it
+     * is [alone] on this one. Routes sharing a server always take the server's step, so they never get two ports.
+     */
+    fun stepOf(step: Map<String, Int>, r: Route, l: Link, alone: Boolean) = (step[serverKey(r, l)] ?: 0).let { s -> if (alone) maxOf(s, step[routeStepKey(r)] ?: 0) else s }
+
+    /** Whether route [id]'s tunnel is the only one of [links] on its server ([serverKey]). */
+    fun alone(setup: Setup, links: Map<String, Link>, id: String): Boolean {
+        val r = setup.route(id) ?: return true
+        val key = links[id]?.let { serverKey(r, it) } ?: return true
+        return links.count { (o, l) -> setup.route(o)?.let { serverKey(it, l) } == key } <= 1
+    }
 
     fun cacheKey(r: Route) = "${r.loc.provider}|${r.loc.copy(pinned = null)}|${r.loc.pinned?.let(::pinId).orEmpty()}"
 
@@ -195,7 +208,7 @@ object LinkPicker {
         // same port as its provider's others, and no route's order hides a port another tunnel knows.
         val lists = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.ports.orEmpty() }).mapValues { (_, l) -> l.flatten().distinct() }
         val only = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.portEntry.orEmpty() }).mapValues { (_, l) -> l.fold(emptyMap<Int, Int>()) { a, m -> m + a } }
-        return links.mapValues { (id, l) -> portedOne(setup, provider(id), l, lists, only, setup.route(id)?.let { stepOf(step, it, l) } ?: 0) }
+        return links.mapValues { (id, l) -> portedOne(setup, provider(id), l, lists, only, setup.route(id)?.let { stepOf(step, it, l, alone(setup, links, id)) } ?: 0) }
     }
 
     private fun portedOne(setup: Setup, p: String?, l: Link, lists: Map<String?, List<Int>>, only: Map<String?, Map<Int, Int>>, step: Int): Link {

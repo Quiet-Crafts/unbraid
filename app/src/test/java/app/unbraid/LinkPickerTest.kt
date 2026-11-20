@@ -385,11 +385,18 @@ class LinkPickerTest {
         // A dead route moved to another server carries its step there, and the step is never undone by a lower server count.
         val carried = LinkPicker.ported(s, links, mapOf(LinkPicker.routeStepKey(s.routes[2]) to 1)).mapValues { (it.value as WgLink).peer.endpoint }
         assertEquals(mapOf("1" to "203.0.113.1:2049", "2" to "203.0.113.1:2049", "3" to "203.0.113.9:443"), carried)
-        assertEquals(1, LinkPicker.stepOf(mapOf(LinkPicker.routeStepKey(s.routes[2]) to 1, "fake|203.0.113.9" to 0), s.routes[2], links.getValue("3")))
+        assertEquals(1, LinkPicker.stepOf(mapOf(LinkPicker.routeStepKey(s.routes[2]) to 1, "fake|203.0.113.9" to 0), s.routes[2], links.getValue("3"), alone = true))
+        // On a server another route uses, the server's step wins: two routes on one server never get two ports.
+        val shared = LinkPicker.ported(s, links, mapOf(LinkPicker.routeStepKey(s.routes[0]) to 1)).mapValues { (it.value as WgLink).peer.endpoint }
+        assertEquals(shared.getValue("1"), shared.getValue("2"))
+        assertEquals("203.0.113.1:2049", shared.getValue("1"))
+        // A route moved elsewhere by the user starts over.
+        assertTrue(LinkPicker.routeStepKey(s.routes[2]) != LinkPicker.routeStepKey(s.routes[2].copy(loc = s.routes[2].loc.copy(countryCode = "DE"))))
         // The reload picks with the same steps the install uses, and a moved route takes its step along.
         val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
         assertEquals(2, Regex("""offline, portStep, Providers::get|false, portStep, Providers::get""").findAll(vpn).count())
-        assertTrue(vpn.contains("r.id in movable }.associate { (r, n) -> LinkPicker.routeStepKey(r) to n }"))
+        assertTrue(vpn.contains("LinkPicker.serverKey(r, l).let { k -> k to (portStep[k] ?: 0) + 1 }"))
+        assertTrue(vpn.contains("r.id in movable }.associate { (r, l) -> LinkPicker.routeStepKey(r) to LinkPicker.stepOf(portStep, r, l, LinkPicker.alone(s, links, r.id)) + 1 }"))
     }
 
     /** Two tunnels that meet only on a stepped port clash there: the later one is blocked, the VPN still starts. */
