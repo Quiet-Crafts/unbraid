@@ -91,6 +91,11 @@ data class Route(
      * route's server only the entry's. Two hops at most; null = straight to its server.
      */
     val via: String? = null,
+    /**
+     * With [via]: one tunnel the provider forwards from the entry's server to this one (its own multi-hop, IVPN), instead
+     * of two tunnels. The entry route then needs no tunnel of its own.
+     */
+    val viaNative: Boolean = false,
 ) {
     val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: tsName ?: tsExit ?: loc.country ?: "Fastest"
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OV"; ss != null -> "SS"; tsExit != null -> "TS"; else -> loc.code }
@@ -440,7 +445,7 @@ data class Setup(
      * answers a name; a route used only by a website that is "Not applied" keeps its tunnel open.
      */
     val activeRoutes get() = routes.filter { r -> r.id == defaultRoute || r.id in testing || apps.containsValue(r.id) || sites.containsValue(r.id) }
-        .let { used -> val entries = used.mapNotNullTo(HashSet()) { it.via }; if (entries.isEmpty()) used else routes.filter { it in used || it.id in entries } }
+        .let { used -> val entries = used.filter { !it.viaNative }.mapNotNullTo(HashSet()) { it.via }; if (entries.isEmpty()) used else routes.filter { it in used || it.id in entries } }
 
     /**
      * Why [r]'s Via can't be used, or null when it can (or it has none): the entry must be another route that goes
@@ -452,6 +457,8 @@ data class Setup(
         return when {
             e.id == r.id || e.via != null -> "${r.name} can go through a route that goes straight to its server only"
             e.tsExit != null -> "${r.name} can't go through a Tailscale exit node"
+            r.viaNative && (r.imported || e.imported || e.loc.provider != r.loc.provider || Providers.get(r.loc.provider)?.nativeHop != true) -> "One-tunnel multi-hop needs two routes of the same provider that offers it"
+            r.viaNative && e.loc.countryCode != null && e.loc.countryCode == r.loc.countryCode -> "${r.name} and its entry must be in different countries for ${Providers.get(r.loc.provider)?.name}'s multi-hop"
             e.ss?.plugin != null -> "${r.name} can't go through a Shadowsocks server with a plugin"
             r.ovpn != null || r.ss != null || r.tsExit != null || r.loc.protocol?.startsWith("openvpn") == true -> "Via works for WireGuard routes only"
             // Its sign-up talks to the exit server itself, which would see the phone's address.

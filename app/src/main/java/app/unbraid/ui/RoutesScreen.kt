@@ -194,7 +194,7 @@ internal fun serverId(r: Route, s: Server): String? = if (r.imported) null else 
 
 /** [r]'s line, with the route it goes through first when it has a Via. */
 private fun place(r: Route, live: Map<String, Server>, routes: List<Route> = emptyList()) =
-    listOfNotNull(where(r, live), r.via?.let { v -> "via ${routes.firstOrNull { it.id == v }?.name ?: "a removed route"}" }).joinToString(" · ")
+    listOfNotNull(where(r, live), r.via?.let { v -> "via ${routes.firstOrNull { it.id == v }?.name ?: "a removed route"}${if (r.viaNative) ", one tunnel" else ""}" }).joinToString(" · ")
 
 private fun where(r: Route, live: Map<String, Server>) = when {
     r.wg != null -> "WireGuard"

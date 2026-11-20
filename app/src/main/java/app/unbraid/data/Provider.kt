@@ -64,7 +64,13 @@ sealed interface Link {
  * server's entry addresses in the order its provider page numbers them ([ENTRY_OPT]); empty = only the endpoint's.
  */
 @Serializable
-data class WgLink(override val server: Server, val peer: WgPeer, val ports: List<Int> = emptyList(), val entries: List<String> = emptyList()) : Link
+data class WgLink(
+    override val server: Server, val peer: WgPeer, val ports: List<Int> = emptyList(), val entries: List<String> = emptyList(),
+    /** The port this server takes forwarded tunnels on from the provider's other servers (its multi-hop), if it does. */
+    val hopPort: Int? = null,
+    /** Set once this tunnel goes to [hopPort] through this entry server's address (the provider's multi-hop). */
+    val hopEntry: String? = null,
+) : Link
 
 @Serializable
 data class OvpnLink(override val server: Server, val profile: OvpnProfile) : Link
@@ -126,6 +132,12 @@ interface Provider {
      * reached) may be reused. Providers whose server keys must come from a trusted source check the saved key here.
      */
     fun trusts(link: Link, account: String): Boolean = true
+
+    /** Offers its own multi-hop ([WgLink.hopPort]), used for a Via between two of its routes when the user picks it. */
+    val nativeHop: Boolean get() = false
+
+    /** The ad-blocking resolver to use on its multi-hop instead of [dns] (from [blockingDns]); null = none known, so blocked. */
+    fun hopDns(dns: String): String? = null
 
     /** Setting up a tunnel contacts the server itself (not the provider's API), so it can't go through another route (Via). */
     val viaUnsafe: Boolean get() = false

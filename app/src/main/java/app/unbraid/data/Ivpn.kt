@@ -58,6 +58,8 @@ object Ivpn : Provider {
         val host: String,
         @SerialName("public_key") val publicKey: String,
         @SerialName("local_ip") val localIp: String,
+        /** The port this host takes multi-hop tunnels on, from IVPN's other hosts. */
+        @SerialName("multihop_port") val multihopPort: Int = 0,
         val load: Double = 0.0,
     )
 
@@ -107,6 +109,11 @@ object Ivpn : Provider {
     private const val LIST = "list"
     private const val HARDCORE = "hardcore"
     private const val CLIENT_AREA = "https://www.ivpn.net/account/"
+    override val nativeHop = true
+
+    /** AntiTracker on multi-hop answers at its own addresses, known only for the OISD list (IVPN's newer lists have none). */
+    override fun hopDns(dns: String) = mapOf("10.0.254.2" to "10.0.254.102", "10.0.254.3" to "10.0.254.103")[dns]
+
     override val defaults = mapOf(PROTECT to "off", LIST to OISD, HARDCORE to "off", PORT_OPT to AUTO)
 
     /** One session serves every IVPN route, so this phone is always one device. */
@@ -233,9 +240,11 @@ object Ivpn : Provider {
 
     internal fun link(l: ServerList?, loc: Location, a: Account): WgLink {
         val pinned = loc.pinned
+        var hop: Int? = null
         val (sv, dns) = if (l == null) pinned!! to DNS else {
             val (g, h) = if (pinned != null) l.wireguard.flatMap { g -> g.hosts.map { g to it } }.firstOrNull { it.second.hostname == pinned.host } ?: throw NoLongerOffered(pinned)
                 else l.match(loc).minByOrNull { it.second.load } ?: throw IOException("No IVPN server for ${loc.label}")
+            hop = h.multihopPort.takeIf { it in 1..65535 }
             server(g, h) to h.localIp.substringBefore('/')
         }
         Addr.usable(sv)
@@ -247,8 +256,9 @@ object Ivpn : Provider {
                 publicKey = sv.publicKey, endpoint = "${sv.ip}:$PORT", allowedIps = listOf("0.0.0.0/0"), dns = listOf(dns),
             ),
             ports,
+            hopPort = hop,
         )
     }
 
-    private fun server(g: Gateway, h: Host) = Server(h.hostname, h.hostname, h.host, h.publicKey, h.load.roundToInt(), g.city)
+    private fun server(g: Gateway, h: Host) = Server(h.hostname, h.hostname, h.host, h.publicKey, h.load.roundToInt(), g.city, g.countryCode)
 }

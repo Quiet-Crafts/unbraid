@@ -71,7 +71,7 @@ object LinkPicker {
                 r.tsExit != null -> TsLink(Server(r.name, r.tsExit, "", "", 0))
                 else -> keep[r.id]?.takeIf {
                     applied?.route(r.id)?.let { a -> !a.imported && a.loc == r.loc } == true && appliedAccounts[r.loc.provider] == accounts[r.loc.provider] &&
-                        trusted(it, r, accounts, providers) && Addr.usable(it)
+                        trusted(it, r, accounts, providers) && Addr.usable(it) && (it as? WgLink)?.hopEntry == null
                 } ?: if (offline) throw if (accounts[r.loc.provider] == null) AuthException("Sign in to ${providers(r.loc.provider)?.name ?: r.loc.provider} for ${r.name}") else Waiting()
                     else fresh(r, accounts, last, used, providers).also { if (!Addr.usable(it)) throw Addr.refused(it.server.name) }
             } } catch (e: Exception) { blocked[r.id] = e; continue }
@@ -84,16 +84,37 @@ object LinkPicker {
         // A provider that refused its account refuses it for every route: none of them keeps a tunnel on it.
         val refusedBy = blocked.entries.filter { it.value is AuthException }.mapNotNull { (id, e) -> setup.route(id)?.takeIf { !it.imported }?.let { it.loc.provider to e } }.toMap()
         setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> refusedBy[r.loc.provider]?.let { blocked[r.id] = it; out.remove(r.id) } }
+        // The provider's own multi-hop: the exit's tunnel goes to its forwarding port at the entry's server. The entry needs
+        // no tunnel of its own: its server is asked for when no app uses it. Anything missing blocks the route.
+        val bases = HashMap<String, Link>() // the exits as picked, for the fallback cache: a multi-hop is never reused
+        setup.activeRoutes.filter { it.viaNative && it.id in out }.forEach { r ->
+            try {
+                val e = setup.route(r.via!!)!!
+                val l = out[r.id] as? WgLink ?: throw Fail("${r.name}: multi-hop works for WireGuard routes only")
+                val port = l.hopPort ?: throw Fail("${r.name}: ${l.server.name} doesn't say how to reach it by multi-hop right now. Try again later, or use two tunnels")
+                if (setup.protects(r) && providers(r.loc.provider)?.let { p -> p.blockingDns { setup.opt(p.id, it) }?.let(p::hopDns) } == null)
+                    throw Fail("${r.name}: ${providers(r.loc.provider)?.name} blocking on multi-hop works with the OISD list only. Choose it, or turn blocking off for this route")
+                // Asked for only online: an offline pass blocks the route until then, never leaves it straight.
+                val entry = (out[e.id] as? WgLink)?.server ?: if (offline) throw Waiting() else try {
+                    providers(e.loc.provider)!!.connect(e.loc, accounts[e.loc.provider]!!).server
+                } catch (x: app.unbraid.data.NoLongerOffered) { throw Fail("${r.name}: its entry ${e.name} is on a server that's no longer offered. Choose another for ${e.name}") }
+                if (entry.ip == l.server.ip) throw Fail("${r.name} and its entry are on the same server")
+                val countries = listOf(entry.country.ifEmpty { e.loc.countryCode.orEmpty() }, l.server.country.ifEmpty { r.loc.countryCode.orEmpty() })
+                if (countries.any { it.isEmpty() } || countries[0].equals(countries[1], true)) throw Fail("${r.name} and its entry must be in two different countries. Pick servers in two countries")
+                bases[r.id] = l
+                out[r.id] = l.copy(peer = l.peer.copy(endpoint = "${entry.ip}:$port"), hopEntry = entry.ip)
+            } catch (x: Exception) { if (x is AuthException) throw x; out.remove(r.id); blocked[r.id] = x }
+        }
         // A tunnel that would clash with another one's identity is blocked, never started beside it.
         Compiler.clashes(setup, out).forEach { id -> out.remove(id); blocked[id] = Fail(Compiler.CLASH) }
         // Via, once every entry is settled: a route whose entry can't be used or isn't connected is blocked, never sent
         // straight to its server instead; only a WireGuard tunnel can go through another.
         setup.activeRoutes.filter { it.via != null && it.id in out }.forEach { r ->
             val why = setup.viaProblem(r) ?: "Via works for WireGuard routes only".takeIf { out[r.id] !is WgLink }
-                ?: setup.route(r.via!!)?.takeIf { it.id !in out }?.let { "${r.name} waits for ${it.name}, the route it goes through" }
+                ?: setup.route(r.via!!)?.takeIf { !r.viaNative && it.id !in out }?.let { "${r.name} waits for ${it.name}, the route it goes through" }
             if (why != null) { out.remove(r.id); blocked[r.id] = Fail(why) }
         }
-        val remember = setup.activeRoutes.filter { !it.imported }.mapNotNull { r -> out[r.id]?.let { cacheKey(r) to it } }.toMap()
+        val remember = setup.activeRoutes.filter { !it.imported }.mapNotNull { r -> (bases[r.id]?.takeIf { r.id in out } ?: out[r.id])?.let { cacheKey(r) to it } }.toMap()
         return Result(out, remember, blocked)
     }
 
@@ -103,12 +124,17 @@ object LinkPicker {
      * Imported configs keep their own MTU, at most [app.unbraid.data.MTU_MIN].
      */
     fun ported(setup: Setup, links: Map<String, Link>, step: Map<String, Int>): Map<String, Link> =
-        portedAll(setup, links, step).mapValues { (id, l) -> if (l is WgLink && setup.route(id)?.via != null) l.copy(peer = l.peer.copy(mtu = minOf(l.peer.mtu, VIA_MTU))) else l }
+        portedAll(setup, links, step).mapValues { (id, l) -> if (l is WgLink && setup.route(id)?.let { it.via != null && !it.viaNative } == true) l.copy(peer = l.peer.copy(mtu = minOf(l.peer.mtu, VIA_MTU))) else l }
 
     /** A tunnel inside another one loses its outer headers' room: 1280 less WireGuard's 80. */
     const val VIA_MTU = 1200
 
     private fun portedAll(setup: Setup, links: Map<String, Link>, step: Map<String, Int>): Map<String, Link> {
+        // The provider's multi-hop has its own forwarding port at the entry: no port or entry setting moves it.
+        val hops = links.filterValues { it is WgLink && it.hopEntry != null }
+        if (hops.isNotEmpty()) return portedAll(setup, links - hops.keys, step) + hops.mapValues { (id, l) ->
+            (l as WgLink).copy(peer = l.peer.copy(mtu = app.unbraid.data.mtu(setup.route(id)?.loc?.provider?.let { setup.opt(it, app.unbraid.data.MTU_OPT) })))
+        }
         val provider = { id: String -> setup.route(id)?.takeIf { !it.imported }?.loc?.provider }
         // One list per provider, so a tunnel saved without one (offline) still takes the same port as its provider's others.
         val lists = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.ports.orEmpty() }).mapValues { (_, l) -> l.firstOrNull { it.isNotEmpty() }.orEmpty() }
@@ -154,7 +180,7 @@ object LinkPicker {
             again(p, r, acc, last, used) ?: p.connect(loc, acc)
         } catch (e: Exception) {
             if (e is AuthException || e is app.unbraid.data.NoLongerOffered || e is Addr.Refused) throw e
-            val cached = last[cacheKey(r)]?.takeIf { pinned == null || it.server.host == pinned.host }?.takeIf { trusted(it, r, accounts, providers) }
+            val cached = last[cacheKey(r)]?.takeIf { pinned == null || it.server.host == pinned.host }?.takeIf { trusted(it, r, accounts, providers) && (it as? WgLink)?.hopEntry == null }
             // A cached tunnel at an address that can't be used is no fallback: the user is told to pick the server again.
             if (cached != null && !Addr.usable(cached)) throw Addr.refused(cached.server.name)
             cached ?: throw if (pinned != null) Fail("${r.name}: ${pinned.name} is unreachable") else e
