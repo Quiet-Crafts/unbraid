@@ -788,6 +788,40 @@ class CompilerTest {
         assertEquals(5, ep(on)["junk"]!!.jsonPrimitive.content.toInt())
     }
 
+    /**
+     * The features together: a Via exit with a quantum-safe key and junk packets, and a disguised tunnel beside it, pass
+     * the patched engine's check. A disguise with a Via is refused instead.
+     */
+    @Test fun featuresTogetherPassTheEngine() {
+        val other = "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30="
+        val psk = "cHJlc2hhcmVkLXByZXNoYXJlZC1wcmVzaGFyZWQtMTI="
+        val v = app.unbraid.data.Vmess("149.22.83.102", 80, "27de860d-5601-412d-8b71-baa048a94b98")
+        val s = Setup(
+            routes = listOf(Route("a", Location("nord", 1, "NL", "Netherlands")), Route("b", Location("nord", 2, "DE", "Germany"), hue = 1, via = "a"),
+                Route("c", Location("nord", 3, "FR", "France"), hue = 2)),
+            defaultRoute = "b", apps = mapOf("x" to "c"), opts = mapOf("nord" to mapOf(app.unbraid.data.JUNK_OPT to "on")),
+        )
+        val links = mapOf("a" to WgLink(sv("a"), Nord.peer(sv("a"), key)), "b" to WgLink(sv("b"), Nord.peer(sv("b"), other).copy(presharedKey = psk)))
+        val picked = app.unbraid.vpn.LinkPicker.ported(s, links, emptyMap()) +
+            ("c" to WgLink(sv("c"), Nord.peer(sv("c"), "aGVsbG8taGVsbG8taGVsbG8taGVsbG8taGVsbG8tMTI=").copy(vmess = v)))
+        val c = compile(s, links = picked)
+        val eps = c["endpoints"]!!.jsonArray.map { it.jsonObject }.associateBy { it["tag"]!!.jsonPrimitive.content }
+        val b = eps.getValue("r-b")
+        assertEquals(listOf("r-a", "5", psk), listOf(b["detour"], b["junk"], b["peers"]!!.jsonArray[0].jsonObject["pre_shared_key"]).map { it!!.jsonPrimitive.content })
+        assertEquals("v2-r-c", eps.getValue("r-c")["detour"]!!.jsonPrimitive.content)
+        try { compile(s, links = picked + ("b" to (picked.getValue("b") as WgLink).let { it.copy(peer = it.peer.copy(vmess = v)) })); fail() } catch (e: IllegalArgumentException) { }
+        val bin = java.io.File(System.getenv("SING_BOX_CLI") ?: "${System.getenv("WORK") ?: "${System.getProperty("user.home")}/.cache/unbraid-libbox"}/sing-box-cli")
+        org.junit.Assume.assumeTrue("sing-box-cli not found", bin.canExecute())
+        val f = java.io.File.createTempFile("together", ".json")
+        try {
+            f.writeText(c.toString())
+            val p = ProcessBuilder(bin.path, "check", "-c", f.path).redirectErrorStream(true).start()
+            val out = p.inputStream.bufferedReader().readText()
+            assertTrue("sing-box check timed out", p.waitFor(60, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals("sing-box check: $out", 0, p.exitValue())
+        } finally { f.delete() }
+    }
+
     @Test fun differentKeyOrServerIsNotShared() {
         val other = "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30="
         assertEquals(listOf("r-a", "r-b"), two(WgLink(sv("a"), Nord.peer(sv("a"), other))).first.endpointTags())
