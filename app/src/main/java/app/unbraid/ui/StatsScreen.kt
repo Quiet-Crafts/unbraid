@@ -1381,7 +1381,7 @@ private fun TestServerCard(s: app.unbraid.stats.Ndt7.Server?, ex: Ex?, vpnServer
         Text("TEST SERVER · M-LAB", style = Type.overline, color = Ink.dim)
         Text(s?.let { listOf(it.city, java.util.Locale("", it.country).displayCountry).filter(String::isNotEmpty).joinToString(", ") } ?: "Finding one in ${ex?.name ?: "the exit's country"}…",
             style = Type.body, color = Ink.text)
-        Text(listOfNotNull(s?.machine?.substringBefore('.'), listOfNotNull(ex?.via?.takeIf(String::isNotEmpty), vpnServer).joinToString(" ").takeIf(String::isNotEmpty)?.let { "via $it" }).joinToString(" · "),
+        Text(listOfNotNull(s?.machine?.substringBefore('.'), listOfNotNull(ex?.via?.takeIf(String::isNotEmpty)?.substringBefore(" · "), vpnServer).joinToString(" ").takeIf(String::isNotEmpty)?.let { "via $it" }, ex?.via?.substringAfter(" · ", "")?.ifEmpty { null }).joinToString(" · "),
             style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
     }
 }
