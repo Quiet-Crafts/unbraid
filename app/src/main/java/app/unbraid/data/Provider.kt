@@ -127,6 +127,9 @@ interface Provider {
      */
     fun trusts(link: Link, account: String): Boolean = true
 
+    /** Setting up a tunnel contacts the server itself (not the provider's API), so it can't go through another route (Via). */
+    val viaUnsafe: Boolean get() = false
+
     /** Its own blocking switch ([PROTECT]), first on its page and per route in the picker. */
     val protection: Opt? get() = null
     /** How the account's key was made, as its config says (Proton's options), for its page; null = nothing to show, "" = not known. */

@@ -723,6 +723,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     }
 
     /** Renames a saved server and every route using it. */
+    /** Route [id] goes through route [via] first (null: straight to its server); the entry may add a tunnel, so the limit is checked. */
+    fun setVia(id: String, via: String?) = guarded { s -> s.copy(routes = s.routes.map { if (it.id == id) it.copy(via = via) else it }) }
+
     fun renameServer(id: String, name: String) = Manual.cleanName(name, 40).takeIf { it.isNotEmpty() }?.let { n ->
         fun OwnServer.named() = copy(wg = wg?.copy(name = n), ovpn = ovpn?.copy(name = n), ss = ss?.copy(name = n))
         store.edit { s ->

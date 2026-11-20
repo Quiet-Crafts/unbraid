@@ -62,6 +62,8 @@ object LinkPicker {
             refused[r.id]?.let { blocked[r.id] = it; continue }
             // Also a route given a server still waiting for its config, however it got there.
             if (r.keyless || setup.servers.any { it.id == r.own && it.keyless }) { blocked[r.id] = KeyLeftOut(r.name); continue }
+            // A Via that can't be used stops the route before its provider is asked anything (PIA's set-up would reach the exit).
+            setup.viaProblem(r)?.let { blocked[r.id] = Fail(it); continue }
             val link = try { when {
                 r.wg != null -> WgLink(Server(r.wg.name, r.wg.endpoint.substringBeforeLast(':'), "", r.wg.publicKey, 0), r.wg)
                 r.ovpn != null -> OvpnLink(Server(r.ovpn.name, r.ovpn.name, "", "", 0), r.ovpn)
@@ -84,6 +86,13 @@ object LinkPicker {
         setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> refusedBy[r.loc.provider]?.let { blocked[r.id] = it; out.remove(r.id) } }
         // A tunnel that would clash with another one's identity is blocked, never started beside it.
         Compiler.clashes(setup, out).forEach { id -> out.remove(id); blocked[id] = Fail(Compiler.CLASH) }
+        // Via, once every entry is settled: a route whose entry can't be used or isn't connected is blocked, never sent
+        // straight to its server instead; only a WireGuard tunnel can go through another.
+        setup.activeRoutes.filter { it.via != null && it.id in out }.forEach { r ->
+            val why = setup.viaProblem(r) ?: "Via works for WireGuard routes only".takeIf { out[r.id] !is WgLink }
+                ?: setup.route(r.via!!)?.takeIf { it.id !in out }?.let { "${r.name} waits for ${it.name}, the route it goes through" }
+            if (why != null) { out.remove(r.id); blocked[r.id] = Fail(why) }
+        }
         val remember = setup.activeRoutes.filter { !it.imported }.mapNotNull { r -> out[r.id]?.let { cacheKey(r) to it } }.toMap()
         return Result(out, remember, blocked)
     }
@@ -93,7 +102,13 @@ object LinkPicker {
      * or with Automatic the [step]-th of the server's ports (a step per provider moves on when its tunnels stop answering).
      * Imported configs keep their own MTU, at most [app.unbraid.data.MTU_MIN].
      */
-    fun ported(setup: Setup, links: Map<String, Link>, step: Map<String, Int>): Map<String, Link> {
+    fun ported(setup: Setup, links: Map<String, Link>, step: Map<String, Int>): Map<String, Link> =
+        portedAll(setup, links, step).mapValues { (id, l) -> if (l is WgLink && setup.route(id)?.via != null) l.copy(peer = l.peer.copy(mtu = minOf(l.peer.mtu, VIA_MTU))) else l }
+
+    /** A tunnel inside another one loses its outer headers' room: 1280 less WireGuard's 80. */
+    const val VIA_MTU = 1200
+
+    private fun portedAll(setup: Setup, links: Map<String, Link>, step: Map<String, Int>): Map<String, Link> {
         val provider = { id: String -> setup.route(id)?.takeIf { !it.imported }?.loc?.provider }
         // One list per provider, so a tunnel saved without one (offline) still takes the same port as its provider's others.
         val lists = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.ports.orEmpty() }).mapValues { (_, l) -> l.firstOrNull { it.isNotEmpty() }.orEmpty() }

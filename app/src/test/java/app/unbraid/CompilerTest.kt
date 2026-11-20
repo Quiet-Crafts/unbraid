@@ -692,6 +692,68 @@ class CompilerTest {
         assertEquals("r-a", dns["detour"]!!.jsonPrimitive.content)
     }
 
+    /** Via: route b's tunnel goes through route a's; a runs even with no app of its own; the engine accepts it. */
+    @Test fun viaGoesThroughTheEntryTunnel() {
+        val s = Setup(
+            routes = listOf(Route("a", Location("nord", 1, "NL", "Netherlands")), Route("b", Location("nord", 2, "DE", "Germany"), hue = 1, via = "a")),
+            defaultRoute = "b",
+        )
+        assertEquals(listOf("a", "b"), s.activeRoutes.map { it.id })
+        val other = "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30="
+        val links = mapOf("a" to WgLink(sv("a"), Nord.peer(sv("a"), key)), "b" to WgLink(sv("b"), Nord.peer(sv("b"), other)))
+        val picked = app.unbraid.vpn.LinkPicker.ported(s, links, emptyMap())
+        assertEquals(1200, (picked["b"] as WgLink).peer.mtu)
+        assertTrue((picked["a"] as WgLink).peer.mtu > 1200)
+        val c = compile(s, links = picked)
+        val eps = c["endpoints"]!!.jsonArray.map { it.jsonObject }.associateBy { it["tag"]!!.jsonPrimitive.content }
+        assertEquals("r-a", eps.getValue("r-b")["detour"]!!.jsonPrimitive.content)
+        assertNull(eps.getValue("r-a")["detour"])
+        // The same server and key straight and through a Via are two paths: a clash, never one shared tunnel.
+        val both = s.copy(routes = s.routes + Route("c", Location("nord", 2, "DE", "Germany"), hue = 2), apps = mapOf("x" to "c"))
+        assertEquals(setOf("c"), Compiler.clashes(both, links + ("c" to links.getValue("b"))))
+        // The checks: no entry, itself, a chain of three, a Tailscale exit, OpenVPN.
+        assertNull(s.viaProblem(s.route("b")!!))
+        // Saved in a format older builds refuse: they would send b straight to its server.
+        assertEquals(4, s.stamped.version)
+        assertEquals(2, s.copy(routes = s.routes.map { it.copy(via = null) }, version = app.unbraid.data.VERSION).stamped.version)
+        // PIA sets its key up with the server itself; a WireGuard config naming its server by host name; a Shadowsocks plugin entry.
+        val pia = s.copy(routes = listOf(s.routes[0], Route("b", Location("pia", country = "Germany"), via = "a")))
+        assertTrue(pia.viaProblem(pia.route("b")!!)!!.contains("contacts its server directly"))
+        // Refused before any provider is asked: PIA's set-up never reaches the exit.
+        val r = app.unbraid.vpn.LinkPicker.pick(pia, emptyMap(), null, emptyMap(), mapOf("pia" to "{}", "nord" to "{}"), emptyMap()) { if (it == "pia") error("PIA was asked") else null }
+        assertTrue(r.blocked.getValue("b").message!!.contains("contacts its server directly"))
+        val named = s.copy(routes = listOf(s.routes[0], Route("b", wg = Nord.peer(sv("b"), key).copy(endpoint = "vpn.example.com:51820"), via = "a")))
+        assertTrue(named.viaProblem(named.route("b")!!) != null)
+        val ssEntry = s.copy(routes = listOf(Route("a", ss = app.unbraid.data.SsProfile("s", "198.51.100.4", 8388, "aes-256-gcm", "p", plugin = "obfs-local")), s.routes[1]))
+        assertTrue(ssEntry.viaProblem(ssEntry.route("b")!!) != null)
+        for (bad in listOf(s.route("b")!!.copy(via = "gone"), s.route("b")!!.copy(via = "b"))) assertTrue(s.copy(routes = listOf(s.routes[0], bad)).viaProblem(bad) != null)
+        val chain = s.copy(routes = listOf(s.routes[0].copy(via = "b"), s.routes[1]))
+        assertTrue(chain.viaProblem(chain.route("b")!!) != null)
+        val ts = s.copy(routes = listOf(Route("a", tsExit = "100.64.0.1"), s.routes[1]))
+        assertTrue(ts.viaProblem(ts.route("b")!!) != null)
+        val bin = java.io.File(System.getenv("SING_BOX_CLI") ?: "${System.getenv("WORK") ?: "${System.getProperty("user.home")}/.cache/unbraid-libbox"}/sing-box-cli")
+        org.junit.Assume.assumeTrue("sing-box-cli not found", bin.canExecute())
+        val f = java.io.File.createTempFile("via", ".json")
+        try {
+            f.writeText(c.toString())
+            val p = ProcessBuilder(bin.path, "check", "-c", f.path).redirectErrorStream(true).start()
+            val out = p.inputStream.bufferedReader().readText()
+            assertTrue("sing-box check timed out", p.waitFor(60, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals("sing-box check: $out", 0, p.exitValue())
+        } finally { f.delete() }
+    }
+
+    /** A route whose Via entry isn't connected (signed out, say) is blocked, never sent straight to its server. */
+    @Test fun viaWaitsForItsEntry() {
+        val peer = Nord.peer(sv("b"), "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30=").copy(name = "Home")
+        val s = Setup(routes = listOf(Route("a", Location("nord", 1, "NL", "Netherlands")), Route("b", wg = peer, via = "a")), defaultRoute = "b")
+        val r = app.unbraid.vpn.LinkPicker.pick(s, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { null }
+        assertTrue(r.links.isEmpty())
+        assertTrue(r.blocked.getValue("b").message!!.contains("waits for"))
+        val gone = s.copy(routes = listOf(s.routes[1].copy(via = "x")))
+        assertTrue(app.unbraid.vpn.LinkPicker.pick(gone, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { null }.blocked.containsKey("b"))
+    }
+
     @Test fun differentKeyOrServerIsNotShared() {
         val other = "5p4RkybdRU5uaDi90eu4KZPTFif0lKCg4Qp6t1c4F30="
         assertEquals(listOf("r-a", "r-b"), two(WgLink(sv("a"), Nord.peer(sv("a"), other))).first.endpointTags())

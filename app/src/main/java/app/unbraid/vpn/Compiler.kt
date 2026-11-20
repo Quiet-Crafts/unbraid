@@ -96,7 +96,8 @@ object Compiler {
         require(clashes(s, links).isEmpty()) { CLASH } // [LinkPicker] blocks them first
         return routes.associate { r ->
             val link = links[r.id] ?: error("No server for ${r.name}")
-            r.id to owners.getOrPut(linkKey(r, link)) { "r-${r.id}" }
+            // A tunnel through another route is a tunnel of its own, never shared with one that goes straight there.
+            r.id to owners.getOrPut(linkKey(r, link) + "|via=" + r.via.orEmpty()) { "r-${r.id}" }
         }
     }
 
@@ -292,7 +293,7 @@ object Compiler {
             putJsonArray("endpoints") {
                 active.filter { shared[it.id] == "r-${it.id}" }.forEach { r ->
                     when (val l = i.links.getValue(r.id)) {
-                        is WgLink -> add(wg(tag(r.id), l.peer, r.name))
+                        is WgLink -> add(wg(tag(r.id), l.peer, r.name, r.via?.let { v -> shared[v] ?: error("${r.name}: its Via isn't connected") }))
                         // Keeps the pushed DNS if any route on this tunnel uses it, not only the route that owns it.
                         is OvpnLink -> Manual.ovpnEndpoint(tag(r.id), l.profile).let { e -> add(if (active.any { tag(it.id) == tag(r.id) && (ovpnDns(it.id) || ovpnBoot(it.id)) }) openVpn(e) else e) }
                         is SsLink, is TsLink -> Unit
@@ -482,7 +483,8 @@ object Compiler {
     }
 
     /** The engine's error for a bad key quotes it, so every key is checked here and never named. */
-    private fun wg(tag: String, p: WgPeer, name: String) = buildJsonObject {
+    /** [detour]: the tunnel this one goes through (Via). */
+    private fun wg(tag: String, p: WgPeer, name: String, detour: String? = null) = buildJsonObject {
         require(validWgKey(p.privateKey) && validWgKey(p.publicKey) && p.presharedKey?.let(::validWgKey) != false) { "Invalid WireGuard key for $name" }
         put("type", "wireguard"); put("tag", tag)
         // 1280 fits every mobile path (cellular, 464XLAT); 1420 makes 1480-byte packets that stall big uploads there.
@@ -502,6 +504,7 @@ object Compiler {
                 put("persistent_keepalive_interval", keepalive(p))
             })
         }
+        detour?.let { put("detour", it) }
     }
 
     private val OPENVPN_ROUTING = listOf("route ", "route-ipv6 ", "route-metric", "redirect-gateway", "redirect-private", "block-ipv6", "block-outside-dns")
@@ -585,7 +588,9 @@ object Compiler {
         val seen = HashMap<String, String>().apply { s.home.wg?.let { put(wgIdentity(it), "home") } }
         return s.activeRoutes.filter { it.tsExit == null }.mapNotNullTo(HashSet()) { r ->
             val p = (links[r.id] as? WgLink)?.peer ?: return@mapNotNullTo null
-            r.id.takeIf { seen.getOrPut(wgIdentity(p)) { wgKey(p) }.let { it == "home" || it != wgKey(p) } }
+            // The same key on the same server by another path (Via or not) clashes too.
+            val key = wgKey(p) + "|via=" + r.via.orEmpty()
+            r.id.takeIf { seen.getOrPut(wgIdentity(p)) { key }.let { it == "home" || it != key } }
         }
     }
 

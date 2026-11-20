@@ -694,7 +694,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // While a provider is asked for a server, apps moving off Direct already leave through their new route, or
             // wait blocked if that is the one still waiting: never on their real address for the time it takes. A tunnel
             // whose account was signed out or refused stops now too, not once the others are found.
-            val stopNow = ready.blocked.any { (id, e) -> e is AuthException && id in links }
+            // So does a running tunnel that now has to go through another route (Via): never straight while the entry is fetched.
+            val stopNow = ready.blocked.any { (id, e) -> (e is AuthException || setup.route(id)?.via != null) && id in links } ||
+                links.keys.any { id -> setup.route(id)?.via != applied?.route(id)?.via }
             if ((stopNow || LinkPicker.leavesDirect(applied, setup, setup.activeRoutes.mapTo(HashSet()) { it.id }, lastInput?.tsSuffix, store.tsSuffix)) && !install(srv, setup, ready, accounts, seen)) return
             Ask(srv, setup, accounts, ready, applied, appliedAccounts, refusedFor(setup, accounts), store.lastLinks, generation, seen)
         }
