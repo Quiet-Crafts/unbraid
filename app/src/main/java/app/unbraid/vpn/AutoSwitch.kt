@@ -76,7 +76,7 @@ object AutoSwitch {
 
     /** Whether a switch from [old] to [new] takes a provider over its connection limit, with [accounts] the keys held per provider. */
     private fun over(accounts: Map<String, String>): (Setup, Setup) -> Boolean = { old, new ->
-        Limits.over(old, new) { p -> accounts[p]?.let { a -> Providers.get(p)?.limit(a) } } != null
+        Limits.over(old, new, { Limits.others(it, accounts[it]) }) { p -> accounts[p]?.let { a -> Providers.get(p)?.limit(a) } } != null
     }
 
     /** For a pick made while nothing watches the network (the VPN off): the phone's own network then. */

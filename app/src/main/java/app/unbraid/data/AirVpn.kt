@@ -59,7 +59,7 @@ object AirVpn : KeyProvider() {
     internal class User(val premium: Boolean = false, @SerialName("expiration_unix") val expires: Long = 0)
 
     @Serializable
-    internal class UserInfo(val user: User? = null)
+    internal class UserInfo(val user: User? = null, val sessions: List<kotlinx.serialization.json.JsonElement>? = null, val error: String? = null)
 
     private const val API = "https://airvpn.org/api/"
     private const val DEVICES = "https://airvpn.org/devices/"
@@ -113,11 +113,19 @@ object AirVpn : KeyProvider() {
         Device("${if (it.ownDevice) "Its own device, ${it.device}, removed when you sign out" else "Uses your device ${it.device}"}. See all your devices in the AirVPN Client Area", DEVICES)
     }
 
+    /** Connections the account has open now, every app's ([UserInfo.sessions]); unknown without an API key, or when AirVPN refuses or fails. */
+    override fun inUse(account: String): Int? {
+        val key = runCatching { account(account).apiKey }.getOrNull() ?: return null
+        return runCatching { userInfo(key) }.getOrNull()?.takeIf { it.error == null }?.sessions?.size
+    }
+
     override fun plan(account: String): String? {
         val key = runCatching { account(account).apiKey }.getOrNull() ?: return null
-        val u = Http.parsed("AirVPN") { NordApi.json.decodeFromString(UserInfo.serializer(), api("userinfo", key, emptyList())) }.user ?: return null
+        val u = userInfo(key).takeIf { it.error == null }?.user ?: return null
         return Plans.line(u.expires.takeIf { u.premium && it > 0 })
     }
+
+    private fun userInfo(key: String) = Http.parsed("AirVPN") { NordApi.json.decodeFromString(UserInfo.serializer(), api("userinfo", key, emptyList())) }
 
     /** With an API key: the device was deleted, or renewed (a new key), in the Client Area; not while $APP renews it. */
     override fun revoked(account: String): Boolean = try {

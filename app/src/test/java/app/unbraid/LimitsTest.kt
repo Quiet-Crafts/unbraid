@@ -23,6 +23,9 @@ class LimitsTest {
         assertEquals("IVPN allows 5 devices. unbraid is using 1. Your other devices aren't counted.", Limits.line("IVPN", 5, "device", 1))
         assertEquals("Mullvad allows 5 devices. 1 is in use, by unbraid.", Limits.line("Mullvad", 5, "device", 1, all = 1))
         assertEquals("Mullvad allows 5 devices. 3 are in use, 1 of them by unbraid.", Limits.line("Mullvad", 5, "device", 1, all = 3))
+        // The provider's count can lag behind a new connection: never fewer than unbraid's own.
+        assertEquals("AirVPN allows 5 connections. 2 are in use, by unbraid.", Limits.line("AirVPN", 5, "connection", 2, all = 1))
+        assertEquals("AirVPN allows 5 connections. 4 are in use, 2 of them by unbraid.", Limits.line("AirVPN", 5, "connection", 2, all = 4))
         assertEquals("unbraid is using 2 PIA connections. Check how many your plan allows: over the limit, routes can stop working without an error.", Limits.line("PIA", null, "connection", 2))
         assertEquals("unbraid is using 1 Proton VPN connection. Check how many your plan allows: over the limit, routes can stop working without an error.", Limits.line("Proton VPN", null, "connection", 1))
         assertEquals("NordVPN allows 10 connections. This would make it 11. Over the limit, routes can stop working without an error.", Limits.warning("NordVPN", 10, "connection", 11))
@@ -77,15 +80,37 @@ class LimitsTest {
     @Test fun asksOnlyWhenGoingOver() {
         val one = Setup(routes = listOf(nord, pf("a", "NO"), pf("b", "NL")), defaultRoute = "nl", apps = mapOf("x" to "a"))
         val two = one.copy(apps = one.apps + ("y" to "b"))
-        assertEquals(Limits.Over("proton-free", 1, 2, "connection"), Limits.over(one, two, limits))
-        assertNull(Limits.over(two, two.copy(apps = two.apps + ("z" to "b")), limits)) // already over: no new tunnel
-        assertNull(Limits.over(two, one, limits)) // fewer
-        assertNull(Limits.over(one, one.copy(apps = one.apps + ("z" to "a")), limits)) // same route
+        assertEquals(Limits.Over("proton-free", 1, 2, "connection"), Limits.over(one, two, limit = limits))
+        assertNull(Limits.over(two, two.copy(apps = two.apps + ("z" to "b")), limit = limits)) // already over: no new tunnel
+        assertNull(Limits.over(two, one, limit = limits)) // fewer
+        assertNull(Limits.over(one, one.copy(apps = one.apps + ("z" to "a")), limit = limits)) // same route
         val shared = one.copy(routes = listOf(nord, pf("a", "NO", no), pf("b", "NO", no)))
-        assertNull(Limits.over(shared, shared.copy(apps = shared.apps + ("y" to "b")), limits)) // same server
+        assertNull(Limits.over(shared, shared.copy(apps = shared.apps + ("y" to "b")), limit = limits)) // same server
         assertNull(Limits.over(one, two) { null }) // not signed in or unknown: never asks
         val own = two.copy(opts = mapOf("proton-free" to mapOf("limit" to "2")))
-        assertNull(Limits.over(one, own, limits)) // the user's own limit counts
+        assertNull(Limits.over(one, own, limit = limits)) // the user's own limit counts
         assertNull(Limits.over(one, two) { Limit("device", false, 1) }) // one session for the account
+        // Other apps' connections, as the provider last counted them, count too; a change that adds none never asks.
+        val nordOnly = Setup(routes = listOf(nord, pf("a", "NO")), defaultRoute = "nl")
+        val nordTwo = nordOnly.copy(routes = nordOnly.routes + Route("nl2", Location("nord", 153, "NL", "Netherlands", city = "Amsterdam")), apps = mapOf("x" to "nl2"))
+        assertNull(Limits.over(nordOnly, nordTwo, { 0 }, limit = limits))
+        assertEquals(Limits.Over("nord", 10, 11, "connection", 9), Limits.over(nordOnly, nordTwo, { if (it == "nord") 9 else 0 }, limit = limits))
+        assertNull(Limits.over(nordTwo, nordTwo.copy(apps = nordTwo.apps + ("y" to "nl2")), { 9 }, limit = limits))
+        assertEquals("NordVPN allows 10 connections. This would make it 11, 9 of them in your other apps. Over the limit, routes can stop working without an error.", Limits.warning("NordVPN", 10, "connection", 11, 9))
+        // Trusted for half an hour, for the account it was counted for; dropped when unknown or when unbraid's own changed meanwhile.
+        Limits.counted("airvpn", "acct", 4, 1, now = 1_000)
+        assertEquals(3, Limits.others("airvpn", "acct", now = 1_000 + Limits.FRESH - 1))
+        assertEquals(0, Limits.others("airvpn", "acct", now = 1_000 + Limits.FRESH))
+        assertEquals(0, Limits.others("airvpn", "another", now = 1_000))
+        Limits.counted("airvpn", "acct", 0, 2, now = 1_000)
+        assertEquals(0, Limits.others("airvpn", "acct", now = 1_000))
+        Limits.counted("airvpn", "acct", 4, 0, now = 1_000)
+        Limits.counted("airvpn", "acct", 4, 0, ownAfter = 1, now = 1_000)
+        assertEquals(0, Limits.others("airvpn", "acct", now = 1_000))
+        Limits.counted("airvpn", "acct", 4, 0, now = 1_000)
+        Limits.forgetExcept(setOf("nord"))
+        assertEquals(0, Limits.others("airvpn", "acct", now = 1_000))
+        Limits.counted("airvpn", "acct", null, 0)
+        assertEquals(0, Limits.others("airvpn", "acct"))
     }
 }
