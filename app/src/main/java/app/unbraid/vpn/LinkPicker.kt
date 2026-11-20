@@ -32,6 +32,12 @@ object LinkPicker {
     /** Fallback-cache key: a pinned route is its own entry, so it can never inherit another server's tunnel. */
     fun serverKey(r: Route, l: Link) = "${r.loc.provider}|${serverId(l.server)}"
 
+    /** Route [r]'s own count of Automatic's port steps, carried when a dead route moves to another server ([stepOf]). */
+    fun routeStepKey(r: Route) = "route|${r.id}"
+
+    /** The port step tunnel [l] of route [r] takes: its server's, or more if the route brought steps from a dead server. */
+    fun stepOf(step: Map<String, Int>, r: Route, l: Link) = maxOf(step[serverKey(r, l)] ?: 0, step[routeStepKey(r)] ?: 0)
+
     fun cacheKey(r: Route) = "${r.loc.provider}|${r.loc.copy(pinned = null)}|${r.loc.pinned?.let(::pinId).orEmpty()}"
 
     private fun serverId(s: Server) = s.ip.ifEmpty { s.host }
@@ -76,6 +82,8 @@ object LinkPicker {
         refused: Map<String, Exception> = emptyMap(),
         /** No provider calls: a route without a tunnel it can keep is blocked, for a policy to install before them. */
         offline: Boolean = false,
+        /** Automatic's port steps the tunnels will be installed with ([ported]). */
+        step: Map<String, Int> = emptyMap(),
         providers: (String) -> Provider?,
     ): Result {
         val used = avoid.toMutableSet()
@@ -133,8 +141,10 @@ object LinkPicker {
                 out[r.id] = l.copy(peer = l.peer.copy(endpoint = "${entry.ip}:$port"), hopEntry = entry.ip)
             } catch (x: Exception) { if (x is AuthException) throw x; out.remove(r.id); blocked[r.id] = x }
         }
-        // A tunnel that would clash with another one's identity is blocked, never started beside it.
-        Compiler.clashes(setup, out).forEach { id -> out.remove(id); blocked[id] = Fail(Compiler.CLASH) }
+        // A tunnel that would clash with another one's identity is blocked, never started beside it. Checked on the ports
+        // and entries it will be installed with, as [Compiler.shared] checks them: two tunnels can meet only there. Each
+        // one blocked can change the provider's port list, so until none is left.
+        while (true) { val c = Compiler.clashes(setup, ported(setup, out, step)); if (c.isEmpty()) break; c.forEach { id -> out.remove(id); blocked[id] = Fail(Compiler.CLASH) } }
         // Via, once every entry is settled: a route whose entry can't be used or isn't connected is blocked, never sent
         // straight to its server instead; only a WireGuard tunnel can go through another.
         setup.activeRoutes.filter { it.via != null && it.id in out }.forEach { r ->
@@ -151,7 +161,8 @@ object LinkPicker {
 
     /**
      * [links] with each provider WireGuard tunnel on the entry address, port and MTU its provider page asks for: a fixed port,
-     * or with Automatic the [step]-th of the server's ports (a step per provider moves on when its tunnels stop answering).
+     * or with Automatic the [step]-th of the server's ports: a step per tunnel ([serverKey]), so routes on one server move
+     * on together when they stop answering, and the provider's other servers keep their ports.
      * A port the server takes on one entry only ([WgLink.portEntry]) goes to that entry; a tunnel without it skips the port.
      * Imported configs keep their own MTU, at most [app.unbraid.data.MTU_MIN].
      */
@@ -173,10 +184,10 @@ object LinkPicker {
         // same port as its provider's others, and no route's order hides a port another tunnel knows.
         val lists = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.ports.orEmpty() }).mapValues { (_, l) -> l.flatten().distinct() }
         val only = links.entries.groupBy({ provider(it.key) }, { (it.value as? WgLink)?.portEntry.orEmpty() }).mapValues { (_, l) -> l.fold(emptyMap<Int, Int>()) { a, m -> m + a } }
-        return links.mapValues { (id, l) -> portedOne(setup, provider(id), l, lists, only, step) }
+        return links.mapValues { (id, l) -> portedOne(setup, provider(id), l, lists, only, setup.route(id)?.let { stepOf(step, it, l) } ?: 0) }
     }
 
-    private fun portedOne(setup: Setup, p: String?, l: Link, lists: Map<String?, List<Int>>, only: Map<String?, Map<Int, Int>>, step: Map<String, Int>): Link {
+    private fun portedOne(setup: Setup, p: String?, l: Link, lists: Map<String?, List<Int>>, only: Map<String?, Map<Int, Int>>, step: Int): Link {
         if (l !is WgLink) return l
         if (p == null) return l.copy(peer = l.peer.copy(mtu = minOf(l.peer.mtu, app.unbraid.data.MTU_MIN)))
         // Disguised: the tunnel goes inside V2Ray to the server's own WireGuard port behind it; the port setting doesn't apply.
@@ -184,7 +195,7 @@ object LinkPicker {
             return l.copy(peer = l.peer.copy(endpoint = "${l.peer.endpoint.substringBeforeLast(':')}:${d.wgPort}", vmess = d.vmess, mtu = app.unbraid.data.MTU_MIN))
         }
         val picked = setup.opt(p, app.unbraid.data.PORT_OPT)?.toIntOrNull()?.takeIf { it in 1..65535 }
-            ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[(step[p] ?: 0) % it.size] }
+            ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[step % it.size] }
         val one = only[p].orEmpty()
         val needs = picked?.let { one[it] }
         // A one-entry port on a tunnel that doesn't know that entry would go nowhere: it takes the first port that works at any entry.

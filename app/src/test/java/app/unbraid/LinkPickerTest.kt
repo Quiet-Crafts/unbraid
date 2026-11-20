@@ -49,6 +49,8 @@ class LinkPickerTest {
 
     private val a = server("a")
     private val b = server("bb", "203.0.113.9")
+    /** Server [a]'s tunnel, as Automatic's port steps count it ([LinkPicker.serverKey]). */
+    private val ka = "fake|${a.ip}"
 
     @Test fun unpinnedCollisionMovesToAnotherServerByIpNotHostname() {
         val p = Fake(listOf(a, b))
@@ -307,7 +309,7 @@ class LinkPickerTest {
         assertEquals(mapOf("1" to "198.51.100.1:1637", "2" to "198.51.100.1:1637"), at(s))
         val alt = s.copy(opts = mapOf("fake" to mapOf("entry" to "2")))
         assertEquals(mapOf("1" to "198.51.100.3:1637", "2" to "198.51.100.1:1637"), at(alt))
-        assertEquals("198.51.100.3:47107", at(alt, mapOf("fake" to 1))["1"])
+        assertEquals("198.51.100.3:47107", at(alt, mapOf(ka to 1))["1"])
         assertEquals("198.51.100.1:1637", at(s.copy(opts = mapOf("fake" to mapOf("entry" to "9"))))["1"])
     }
 
@@ -320,13 +322,13 @@ class LinkPickerTest {
             "2" to WgLink(a, peer),
         )
         fun at(s: Setup, step: Map<String, Int> = emptyMap()) = LinkPicker.ported(s, links, step).mapValues { (it.value as WgLink).peer.endpoint }
-        assertEquals(mapOf("1" to "198.51.100.3:51820", "2" to "198.51.100.1:1637"), at(s, mapOf("fake" to 2)))
-        assertEquals("198.51.100.1:47107", at(s, mapOf("fake" to 1))["1"])
+        assertEquals(mapOf("1" to "198.51.100.3:51820", "2" to "198.51.100.1:1637"), at(s, mapOf(ka to 2)))
+        assertEquals("198.51.100.1:47107", at(s, mapOf(ka to 1))["1"])
         val fixed = s.copy(opts = mapOf("fake" to mapOf("port" to "51820")))
         assertEquals(mapOf("1" to "198.51.100.3:51820", "2" to "198.51.100.1:1637"), at(fixed))
         // The page's entry setting doesn't move it off the only entry that takes it, nor the other ports onto it.
         val alt = s.copy(opts = mapOf("fake" to mapOf("entry" to "2")))
-        assertEquals("198.51.100.3:51820", at(alt, mapOf("fake" to 2))["1"])
+        assertEquals("198.51.100.3:51820", at(alt, mapOf(ka to 2))["1"])
         assertEquals("198.51.100.3:1637", at(alt)["1"])
     }
 
@@ -338,7 +340,7 @@ class LinkPickerTest {
         fun at(s: Setup, step: Map<String, Int> = emptyMap()) = (LinkPicker.ported(s, links, step)["1"] as WgLink).peer.endpoint
         assertEquals("198.51.100.1:1637", at(s))
         assertEquals("198.51.100.1:1637", at(s.copy(opts = mapOf("fake" to mapOf("port" to "51820")))))
-        assertEquals("198.51.100.1:47107", at(s, mapOf("fake" to 2)))
+        assertEquals("198.51.100.1:47107", at(s, mapOf(ka to 2)))
     }
 
     /** A provider's Automatic ports are every tunnel's, in route order: a first route without a port never hides it from the next. */
@@ -349,11 +351,11 @@ class LinkPickerTest {
             "1" to WgLink(a, peer, listOf(1637, 47107)),
             "2" to WgLink(a, peer.copy(endpoint = "198.51.100.9:1637"), listOf(1637, 47107, 51820), listOf("198.51.100.9", "198.51.100.10"), mapOf(51820 to 2)),
         )
-        val at = LinkPicker.ported(s, links, mapOf("fake" to 2)).mapValues { (it.value as WgLink).peer.endpoint }
+        val at = LinkPicker.ported(s, links, mapOf(ka to 2)).mapValues { (it.value as WgLink).peer.endpoint }
         assertEquals(mapOf("1" to "198.51.100.1:1637", "2" to "198.51.100.10:51820"), at)
     }
 
-    /** A fixed port wins; Automatic walks the server's ports one step at a time, per provider; imports keep theirs. */
+    /** A fixed port wins; Automatic walks the server's ports one step at a time, per tunnel; imports keep theirs. */
     @Test fun portsFollowTheProviderPage() {
         val peer = WgPeer("x", "k", listOf("10.0.0.2/32"), "p", endpoint = "198.51.100.1:2049", allowedIps = listOf("0.0.0.0/0"))
         val l = WgLink(a, peer, listOf(2049, 443, 53))
@@ -361,16 +363,46 @@ class LinkPickerTest {
         val links = mapOf("1" to l, "2" to WgLink(a, peer, listOf(1, 2)))
         fun port(s: Setup, step: Map<String, Int> = emptyMap(), id: String = "1") = (LinkPicker.ported(s, links, step)[id] as WgLink).peer.endpoint
         assertEquals("198.51.100.1:2049", port(s))
-        assertEquals("198.51.100.1:443", port(s, mapOf("fake" to 1)))
-        assertEquals("198.51.100.1:2049", port(s, mapOf("fake" to 3)))
-        assertEquals("198.51.100.1:53", port(s, mapOf("other" to 1, "fake" to 2)))
-        assertEquals("198.51.100.1:2049", port(s, mapOf("fake" to 1), "2"))
-        assertEquals("198.51.100.1:80", port(s.copy(opts = mapOf("fake" to mapOf("port" to "80"))), mapOf("fake" to 1)))
+        assertEquals("198.51.100.1:443", port(s, mapOf(ka to 1)))
+        assertEquals("198.51.100.1:2049", port(s, mapOf(ka to 3)))
+        assertEquals("198.51.100.1:53", port(s, mapOf("other" to 1, ka to 2)))
+        assertEquals("198.51.100.1:2049", port(s, mapOf(ka to 1), "2"))
+        assertEquals("198.51.100.1:80", port(s.copy(opts = mapOf("fake" to mapOf("port" to "80"))), mapOf(ka to 1)))
         assertEquals("198.51.100.1:2049", port(s.copy(opts = mapOf("fake" to mapOf("port" to "99999")))))
         // A tunnel saved without a list (offline) still takes its provider's step, so two on one server never differ.
         val offline = mapOf("1" to l, "3" to WgLink(a, peer))
         val s3 = setup(Route("1", Location("fake", countryCode = "NL")), Route("3", Location("fake", countryCode = "DE")))
-        assertEquals(setOf("198.51.100.1:443"), LinkPicker.ported(s3, offline, mapOf("fake" to 1)).values.map { (it as WgLink).peer.endpoint }.toSet())
+        assertEquals(setOf("198.51.100.1:443"), LinkPicker.ported(s3, offline, mapOf(ka to 1)).values.map { (it as WgLink).peer.endpoint }.toSet())
+    }
+
+    /** Automatic steps per tunnel: routes on one server move on together, the provider's other servers keep their port. */
+    @Test fun portStepsArePerTunnel() {
+        val peer = WgPeer("x", "k", listOf("10.0.0.2/32"), "p", endpoint = "203.0.113.1:2049", allowedIps = listOf("0.0.0.0/0"))
+        val s = setup(Route("1", Location("fake", countryCode = "NL")), Route("2", Location("fake", countryCode = "DE")), Route("3", Location("fake", countryCode = "FR")))
+        val links = mapOf("1" to WgLink(a, peer, listOf(2049, 443)), "2" to WgLink(a, peer, listOf(2049, 443)), "3" to WgLink(b, peer.copy(endpoint = "203.0.113.9:2049"), listOf(2049, 443)))
+        val at = LinkPicker.ported(s, links, mapOf(LinkPicker.serverKey(s.routes[0], links.getValue("1")) to 1)).mapValues { (it.value as WgLink).peer.endpoint }
+        assertEquals(mapOf("1" to "203.0.113.1:443", "2" to "203.0.113.1:443", "3" to "203.0.113.9:2049"), at)
+        // A dead route moved to another server carries its step there, and the step is never undone by a lower server count.
+        val carried = LinkPicker.ported(s, links, mapOf(LinkPicker.routeStepKey(s.routes[2]) to 1)).mapValues { (it.value as WgLink).peer.endpoint }
+        assertEquals(mapOf("1" to "203.0.113.1:2049", "2" to "203.0.113.1:2049", "3" to "203.0.113.9:443"), carried)
+        assertEquals(1, LinkPicker.stepOf(mapOf(LinkPicker.routeStepKey(s.routes[2]) to 1, "fake|203.0.113.9" to 0), s.routes[2], links.getValue("3")))
+        // The reload picks with the same steps the install uses, and a moved route takes its step along.
+        val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+        assertEquals(2, Regex("""offline, portStep, Providers::get|false, portStep, Providers::get""").findAll(vpn).count())
+        assertTrue(vpn.contains("r.id in movable }.associate { (r, n) -> LinkPicker.routeStepKey(r) to n }"))
+    }
+
+    /** Two tunnels that meet only on a stepped port clash there: the later one is blocked, the VPN still starts. */
+    @Test fun aClashAfterAPortStepBlocksOnlyThatRoute() {
+        val ported = object : Provider by Fake(listOf(a)) { override fun connect(loc: Location, account: String) = (link(a)).copy(ports = listOf(51820, 443)) }
+        val imp = WgPeer("imp", "priv", listOf("10.9.0.2/32"), a.publicKey, endpoint = "${a.ip}:443", allowedIps = listOf("0.0.0.0/0"))
+        val s = setup(Route("1", Location("fake", countryCode = "NL")), Route("2", wg = imp))
+        fun run(step: Map<String, Int>) = LinkPicker.pick(s, emptyMap(), null, emptyMap(), mapOf("fake" to "acc"), emptyMap(), step = step) { if (it == "fake") ported else null }
+        assertTrue(run(emptyMap()).blocked.isEmpty())
+        val r = run(mapOf(ka to 1))
+        assertEquals(setOf("1"), r.links.keys)
+        assertEquals(app.unbraid.vpn.Compiler.CLASH, r.blocked.getValue("2").message)
+        app.unbraid.vpn.Compiler.shared(s, LinkPicker.ported(s, r.links, mapOf(ka to 1)), r.blocked.keys)
     }
 
     /** Provider tunnels take their page's MTU (1280 by default, 1280 to 1420); imports keep theirs, at most 1280. */

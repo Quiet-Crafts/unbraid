@@ -807,7 +807,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         }
         // A route without a tunnel (signed out, refused, unreachable) is blocked; the others keep running. Tunnels come
         // from the offline pass, which already dropped any a changed location or account can't keep.
-        val picked = LinkPicker.pick(ask.setup, ask.ready.links, ask.applied, ask.appliedAccounts, ask.accounts, ask.last, avoid + failing, ask.refused, false, Providers::get)
+        val picked = LinkPicker.pick(ask.setup, ask.ready.links, ask.applied, ask.appliedAccounts, ask.accounts, ask.last, avoid + failing, ask.refused, false, portStep, Providers::get)
         lock.withLock {
             // Stopped, reloaded or edited during the provider calls: the newer state wins (the watcher reloads an edit).
             if (destroyed || state.value.phase != VpnState.Phase.On || generation != ask.generation || store.setup.value != ask.setup || store.accounts.value != ask.accounts) return
@@ -987,14 +987,19 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 val toTcp = moving.filter { id ->
                     val r = s.route(id)?.takeIf { it.via == null } ?: return@filter false
                     val l = links[id] as? app.unbraid.data.WgLink ?: return@filter false
-                    r.loc.protocol == app.unbraid.data.AUTO_PROTOCOL && (steps(id)?.let { p -> (portStep[p] ?: 0) + 1 >= l.ports.size } ?: true) && app.unbraid.data.AutoProtocol.toTcp(id)
+                    r.loc.protocol == app.unbraid.data.AUTO_PROTOCOL && (steps(id)?.let { LinkPicker.stepOf(portStep, r, l) + 1 >= l.ports.size } ?: true) && app.unbraid.data.AutoProtocol.toTcp(id)
                 }.toSet()
-                val stepped = moving.filter { it !in toTcp }.mapNotNull(::steps).toSet()
-                portStep = portStep + stepped.associateWith { (portStep[it] ?: 0) + 1 }
+                // Per tunnel: one dead server never moves the provider's healthy ones to a port this network may block.
+                val steppedIds = moving.filter { it !in toTcp && steps(it) != null }
+                val stepped = steppedIds.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { r to LinkPicker.stepOf(portStep, r, it) + 1 } } }
                 val movable = moving.filter { id -> id in toTcp || s.route(id)?.let(Health::movable) == true }
+                // A route that also moves to another server takes its step along: a new server at the first port again
+                // would fail the same way on a network that blocks that port.
+                portStep = portStep + stepped.associate { (r, n) -> LinkPicker.serverKey(r, links.getValue(r.id)) to n } +
+                    stepped.filter { (r, _) -> r.id in movable }.associate { (r, n) -> LinkPicker.routeStepKey(r) to n }
                 Log.w(TAG, "health: ${dead.size} route(s) stopped answering, ${movable.size} to move to another server")
                 Move(links - movable.toSet(), movable.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } }.toSet(), generation,
-                    dead.mapNotNull { id -> s.route(id)?.loc?.provider }.toSet(), movable.isNotEmpty() || stepped.isNotEmpty())
+                    dead.mapNotNull { id -> s.route(id)?.loc?.provider }.toSet(), movable.isNotEmpty() || steppedIds.isNotEmpty())
             }
             if (regular) round = now + jitter() * slow
             if (move == null) continue
@@ -1026,7 +1031,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** Caller holds [lock]. */
     private fun pickLinks(setup: Setup, keep: Map<String, Link>, accounts: Map<String, String>, avoid: Set<String> = emptySet(), offline: Boolean = false): LinkPicker.Result {
-        val r = LinkPicker.pick(setup, keep, applied, appliedAccounts, accounts, store.lastLinks, avoid + failing, refusedFor(setup, accounts), offline, Providers::get)
+        val r = LinkPicker.pick(setup, keep, applied, appliedAccounts, accounts, store.lastLinks, avoid + failing, refusedFor(setup, accounts), offline, portStep, Providers::get)
         noteRefusals(setup, accounts, r)
         // Only a fallback cache: failing to write it never stops a connection.
         if (!offline) runCatching { store.rememberLinks(r.remember) }.onFailure { Log.w(TAG, "last servers not saved") }
@@ -1061,7 +1066,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** Providers that refused an account, with that account and why: their routes stay blocked until it changes. */
     private var refusals: Map<String, Pair<String?, Exception>> = emptyMap()
 
-    /** Provider id → how many of its ports Automatic has moved past on this network ([LinkPicker.ported]). */
+    /** Tunnel ([LinkPicker.serverKey]) → how many of its ports Automatic has moved past on this network ([LinkPicker.ported]). */
     @Volatile private var portStep: Map<String, Int> = emptyMap()
     /** The network [portStep] was learned on. */
     private var portNet: android.net.Network? = null
