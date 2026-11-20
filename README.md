@@ -16,6 +16,7 @@ all at the same time. Tailscale runs inside it too, so you can reach your tailne
 
 <p align="center">
   <a href="https://github.com/quiet-crafts/unbraid/releases/latest"><b>Download the APK</b></a>
+  &nbsp;·&nbsp; <a href="https://unbraid.app/download/#obtainium">Add to Obtainium</a>
   &nbsp;·&nbsp; <a href="https://github.com/quiet-crafts/unbraid-mac">unbraid for Mac</a>
   &nbsp;·&nbsp; <a href="https://unbraid.app">Website</a>
   &nbsp;·&nbsp; <a href="https://unbraid.app/privacy">Privacy policy</a>
@@ -75,6 +76,9 @@ Routes can mix providers. One app can use Mullvad in Sweden while another uses N
 
 1. Download the APK from the [releases page](https://github.com/quiet-crafts/unbraid/releases/latest) and open it
    on your phone to install it. Android may ask you to allow installs from your browser or file manager first.
+   If you use [Obtainium](https://obtainium.imranr.dev/), add unbraid from
+   [unbraid.app/download](https://unbraid.app/download/#obtainium) instead: it installs the same APK and tells you
+   when there's an update.
 2. Turn off any other VPN app, including your provider's own app, and its "Always-on VPN" setting. Android only
    lets one VPN app run at a time.
 3. Open unbraid, accept the terms and choose your VPN. You can sign in to a provider, import a WireGuard or
