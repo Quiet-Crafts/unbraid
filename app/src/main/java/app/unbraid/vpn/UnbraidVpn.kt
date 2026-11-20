@@ -795,9 +795,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // wait blocked if that is the one still waiting: never on their real address for the time it takes. A tunnel
             // whose account was signed out or refused, or that a provider setting now rules out, stops now too, not once the others are found.
             // So does a running tunnel that now has to go through another route (Via): never straight while the entry is fetched.
+            // And an app or the default moved onto a Via route still waiting: blocked meanwhile, not left on its old route.
             // And a running tunnel without the disguise its provider now asks for: never plain while a disguised one is fetched.
             val stopNow = ready.blocked.any { (id, e) -> (e is AuthException || e is LinkPicker.Unsuited) && id in links } ||
-                ready.blocked.keys.any { id -> setup.route(id)?.via != null && id in links } ||
+                ready.blocked.keys.any { id -> setup.route(id)?.via != null && (id in links || applied?.let { LinkPicker.movedOnto(it, setup, id) } == true) } ||
                 links.keys.any { id -> setup.route(id)?.via != applied?.route(id)?.via || plain(setup, id) } ||
                 !LinkPicker.stillSuits(setup, links, Providers::get) // also a running tunnel left out of [keep] by a health move
             // So does an app installed into what Android may leave out: applied now, not once the provider answers.

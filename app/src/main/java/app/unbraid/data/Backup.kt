@@ -541,7 +541,9 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val sites = sites.filterValues(ok)
     // Without profiles every route here shows, those no app uses too: all of them are kept, as saving a first profile does.
     val listed = if (profiles.isEmpty()) (added + (routes.map { it.id } - (setOf(defaultRoute) + apps.values + sites.values + added))).distinct() else added
+    // A kept route's Via entry is kept with it, entries first: a Via route then points at the entry's id as kept.
     val used = (setOf(defaultRoute) + apps.values + sites.values + listed).mapNotNull(::route)
+        .let { u -> (u + u.mapNotNull { route(it.via) }).distinct().sortedBy { it.via != null } }
     val serverIds = r.servers.map { it.id }.toMutableSet()
     val sv = HashMap<String, String>()
     // Every own server here stays, one no route uses too: keeping replaces only profiles, favourites and settings.
@@ -554,7 +556,8 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val rt = HashMap<String, String>()
     val pins = HashMap<String, Location>()
     val addRoutes = used.mapNotNull { x ->
-        val c = x.copy(own = x.own?.let { sv[it] ?: it })
+        // An entry gone here gets an id nothing has, so the route stays blocked instead of going through the backup's route of that id.
+        val c = x.copy(own = x.own?.let { sv[it] ?: it }, via = x.via?.let { v -> rt[v] ?: fresh("r", routeIds).also { routeIds += it; rt[v] = it } })
         val there = r.route(x.id)
         // The same route as the file holds it ([Backup.named], [Backup.shown]); one tied here to no own server is the same as the file's tied one.
         val same = there != null && Backup.shown(c.copy(loc = Backup.bare(c.loc))).let { f -> there == f || (f.own == null && there.copy(own = null) == f) }

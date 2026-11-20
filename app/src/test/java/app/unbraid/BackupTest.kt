@@ -240,6 +240,28 @@ class BackupTest {
         assertEquals(newSetup().restoredFrom(b, null, 0), newSetup().restoredFrom(b, PREVIOUS, 0))
     }
 
+    /** A kept Via route keeps its own entry, also one no app uses and whose id the backup has for another route. */
+    @Test fun keepingASetupKeepsEachViaEntry() {
+        val entry = Route("w1", wg = wg.copy(name = "Entry"), own = "s1") // the backup's "w1" is another route
+        val exit = Route("ex", wg = wg.copy(name = "Exit"), own = "s9", via = "w1")
+        val lost = Route("lx", wg = wg.copy(name = "Lost"), own = "s8", via = "gone")
+        val here = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands")), entry, exit, lost), defaultRoute = "nl",
+            apps = mapOf("org.example.z" to "ex", "org.example.y" to "lx"), profiles = listOf(Profile("Mine", "nl")), profile = "Mine",
+            servers = listOf(OwnServer("s1", wg = entry.wg), OwnServer("s9", wg = exit.wg), OwnServer("s8", wg = lost.wg)), version = VERSION)
+        val b = Backup.read(Backup.export(full(), "", 0)).setup
+        val r = here.restoredFrom(b, PREVIOUS, 0)!!
+        Backup.valid(r)
+        val kept = r.profiles.single { it.name == PREVIOUS }
+        val x = r.route(kept.apps["org.example.z"])!!
+        assertEquals("Exit", x.name)
+        assertEquals("Entry", r.route(x.via)!!.name)
+        assertEquals("Home box", r.route("w1")!!.name)
+        assertNull(r.viaProblem(x))
+        // An entry already gone here stays gone: the route stays blocked, never through one of the backup's.
+        val l = r.route(kept.apps["org.example.y"])!!
+        assertNull(r.route(l.via)); assertNotNull(r.viaProblem(l))
+    }
+
     @Test fun keepingASetupWithoutProfilesKeepsEveryRouteItShows() {
         val spare = Route("spare", wg = wg.copy(name = "Spare"), own = "sp")
         val here = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands")), spare), defaultRoute = "nl",

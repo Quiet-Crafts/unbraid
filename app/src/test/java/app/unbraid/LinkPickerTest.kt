@@ -184,6 +184,20 @@ class LinkPickerTest {
         assertFalse(LinkPicker.leavesDirect(null, directDefault, setOf("v")))
     }
 
+    /** An app or the default moved onto a waiting Via route is installed blocked at once, not left on its old route. */
+    @Test fun movingOntoARouteIsSeenExplicitlyAndByDefault() {
+        val s = Setup(routes = listOf(Route("a", Location("fake")), Route("v", Location("fake"), via = "a")), defaultRoute = "a", apps = mapOf("x" to "a"))
+        assertTrue(LinkPicker.movedOnto(s, s.copy(apps = mapOf("x" to "v")), "v"))
+        assertTrue(LinkPicker.movedOnto(s, s.copy(defaultRoute = "v"), "v"))
+        // Following the default, now explicitly elsewhere: the explicit choice counts.
+        assertTrue(LinkPicker.movedOnto(s.copy(apps = emptyMap()), s.copy(apps = mapOf("y" to "v")), "v"))
+        assertFalse(LinkPicker.movedOnto(s, s, "v"))
+        assertFalse(LinkPicker.movedOnto(s.copy(apps = mapOf("x" to "v")), s.copy(apps = mapOf("x" to "v", "y" to "a")), "v"))
+        // The wiring: the reload stops at once for it.
+        val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+        assertTrue(vpn.contains("LinkPicker.movedOnto(it, setup, id)"))
+    }
+
     /** Two imports of one key on one server with other settings: the second is blocked, the first runs. */
     @Test fun aClashingWireGuardRouteIsBlocked() {
         val peer = link(a).peer

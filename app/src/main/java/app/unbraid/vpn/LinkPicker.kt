@@ -208,6 +208,10 @@ object LinkPicker {
             old.sites != new.sites || Sites.applied(old, reported = oldSuffix) != Sites.applied(new, reported = newSuffix) || new.apps.any { (pkg, to) -> to == BLOCK && old.apps[pkg] != BLOCK } // newly blocked: not a moment longer on what it had
     }
 
+    /** True if [new] sends the default or an app to route [id] where [old] sent it elsewhere (explicitly or by default). */
+    fun movedOnto(old: Setup, new: Setup, id: String): Boolean = (new.defaultRoute == id && old.defaultRoute != id) ||
+        (old.apps.keys + new.apps.keys).any { new.routeOf(it) == id && old.routeOf(it) != id }
+
     /** The junk packets [p]'s page asks for before each handshake ([app.unbraid.data.JUNK_OPT]). */
     private fun junk(setup: Setup, p: String) = if (setup.opt(p, app.unbraid.data.JUNK_OPT) == "on") app.unbraid.data.JUNK_COUNT else 0
 
