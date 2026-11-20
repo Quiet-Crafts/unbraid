@@ -1,0 +1,172 @@
+diff --git a/option/wireguard.go b/option/wireguard.go
+index d25d0d2..9095494 100644
+--- a/option/wireguard.go
++++ b/option/wireguard.go
+@@ -19,6 +19,9 @@ type WireGuardEndpointOptions struct {
+ 	UDPFiltering UDPNATBehavior                   `json:"udp_filtering,omitempty"`
+ 	UDPNATMax    uint32                           `json:"udp_nat_max,omitempty"`
+ 	Workers      int                              `json:"workers,omitempty"`
++	// Junk: random packets sent to the peer before each handshake initiation (unbraid; AmneziaWG-style, server side
++	// needs nothing: WireGuard drops what it can't read).
++	Junk int `json:"junk,omitempty"`
+ 	DialerOptions
+ }
+ 
+diff --git a/protocol/wireguard/endpoint.go b/protocol/wireguard/endpoint.go
+index 6d31495..5ec061d 100644
+--- a/protocol/wireguard/endpoint.go
++++ b/protocol/wireguard/endpoint.go
+@@ -102,6 +102,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 			},
+ 		},
+ 		Dialer: outboundDialer,
++		Junk:   options.Junk,
+ 		CreateDialer: func(interfaceName string) N.Dialer {
+ 			return common.Must1(dialer.NewDefault(ctx, option.DialerOptions{
+ 				AbstractDialerOptions: option.AbstractDialerOptions{
+diff --git a/transport/wireguard/client_bind.go b/transport/wireguard/client_bind.go
+index f1a6584..b2f306f 100644
+--- a/transport/wireguard/client_bind.go
++++ b/transport/wireguard/client_bind.go
+@@ -2,6 +2,8 @@ package wireguard
+ 
+ import (
+ 	"context"
++	"crypto/rand"
++	mrand "math/rand/v2"
+ 	"net"
+ 	"net/netip"
+ 	"sync"
+@@ -35,6 +37,7 @@ type ClientBind struct {
+ 	isConnect           bool
+ 	connectAddr         netip.AddrPort
+ 	reserved            [3]uint8
++	junk                int
+ }
+ 
+ func NewClientBind(ctx context.Context, logger logger.Logger, dialer N.Dialer, isConnect bool, connectAddr netip.AddrPort, reserved [3]uint8) *ClientBind {
+@@ -186,6 +189,18 @@ func (c *ClientBind) Send(bufs [][]byte, ep conn.Endpoint, offset int) error {
+ 			}
+ 			copy(buf[1:4], reserved[:])
+ 		}
++		// A handshake initiation (type 1, 148 bytes) goes after a burst of random packets, so it doesn't open the flow.
++		// If the burst can't be sent, neither is the handshake: it is retried as a whole.
++		if c.junk > 0 && len(buf) == 148 && buf[0] == 1 {
++			for i := 0; i < c.junk; i++ {
++				junk := make([]byte, 30+mrand.IntN(71))
++				_, _ = rand.Read(junk)
++				if _, err = udpConn.WriteToUDPAddrPort(junk, destination); err != nil {
++					udpConn.Close()
++					return err
++				}
++			}
++		}
+ 		_, err = udpConn.WriteToUDPAddrPort(buf, destination)
+ 		if err != nil {
+ 			udpConn.Close()
+diff --git a/transport/wireguard/client_bind_junk_test.go b/transport/wireguard/client_bind_junk_test.go
+new file mode 100644
+index 0000000..33742a1
+--- /dev/null
++++ b/transport/wireguard/client_bind_junk_test.go
+@@ -0,0 +1,63 @@
++package wireguard
++
++import (
++	"context"
++	"net"
++	"testing"
++	"time"
++
++	"github.com/sagernet/sing/common/logger"
++	N "github.com/sagernet/sing/common/network"
++)
++
++// The junk burst goes out before a handshake initiation, from the same socket to the same peer; other packets don't get one.
++func TestJunkBeforeHandshake(t *testing.T) {
++	l, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer l.Close()
++	peer := l.LocalAddr().(*net.UDPAddr).AddrPort()
++	b := NewClientBind(context.Background(), logger.NOP(), N.SystemDialer, true, peer, [3]uint8{})
++	b.junk = 5
++	if _, _, err := b.Open(0); err != nil {
++		t.Fatal(err)
++	}
++	defer b.Close()
++	hs := make([]byte, 148)
++	hs[0] = 1
++	data := make([]byte, 64)
++	data[0] = 4
++	if err := b.Send([][]byte{hs}, remoteEndpoint(peer), 0); err != nil {
++		t.Fatal(err)
++	}
++	if err := b.Send([][]byte{data}, remoteEndpoint(peer), 0); err != nil {
++		t.Fatal(err)
++	}
++	var sizes []int
++	var from *net.UDPAddr
++	buf := make([]byte, 2048)
++	for i := 0; i < 7; i++ {
++		_ = l.SetReadDeadline(time.Now().Add(2 * time.Second))
++		n, a, err := l.ReadFromUDP(buf)
++		if err != nil {
++			t.Fatalf("packet %d: %v", i, err)
++		}
++		if from != nil && a.Port != from.Port {
++			t.Fatalf("packet %d from port %d, not %d", i, a.Port, from.Port)
++		}
++		from = a
++		sizes = append(sizes, n)
++		if i == 5 && (n != 148 || buf[0] != 1) {
++			t.Fatalf("handshake not sixth: %v", sizes)
++		}
++	}
++	for _, n := range sizes[:5] {
++		if n < 30 || n > 100 {
++			t.Fatalf("junk sizes %v", sizes)
++		}
++	}
++	if sizes[6] != 64 {
++		t.Fatalf("data packet got junk too: %v", sizes)
++	}
++}
+diff --git a/transport/wireguard/endpoint.go b/transport/wireguard/endpoint.go
+index 407bf0f..1d9a949 100644
+--- a/transport/wireguard/endpoint.go
++++ b/transport/wireguard/endpoint.go
+@@ -143,7 +143,8 @@ func (e *Endpoint) Start(postStart bool) error {
+ 	}
+ 	var bind conn.Bind
+ 	udpListener, isUDPListener := common.Cast[dialer.UDPListener](e.options.Dialer)
+-	if isUDPListener {
++	// Junk packets are sent by the client bind (unbraid): with them on, it is used whatever the dialer (not for a listener).
++	if isUDPListener && (e.options.Junk == 0 || e.options.ListenPort != 0) {
+ 		listenerControl, egressEnabled := udpListener.UDPListenerControl()
+ 		standardBind := conn.NewStdNetBind(listenerControl).(*conn.StdNetBind)
+ 		if e.options.ListenPort == 0 && len(e.peers) == 1 && e.peers[0].endpoint.IsValid() {
+@@ -184,7 +185,9 @@ func (e *Endpoint) Start(postStart bool) error {
+ 				connectAddr = e.peers[0].endpoint
+ 			}
+ 		}
+-		bind = NewClientBind(e.options.Context, e.options.Logger, e.options.Dialer, isConnect, connectAddr, reserved)
++		clientBind := NewClientBind(e.options.Context, e.options.Logger, e.options.Dialer, isConnect, connectAddr, reserved)
++		clientBind.junk = min(max(e.options.Junk, 0), 16)
++		bind = clientBind
+ 	}
+ 	if isUDPListener || len(e.peers) > 1 {
+ 		for _, peer := range e.peers {
+diff --git a/transport/wireguard/endpoint_options.go b/transport/wireguard/endpoint_options.go
+index 006010a..92354ff 100644
+--- a/transport/wireguard/endpoint_options.go
++++ b/transport/wireguard/endpoint_options.go
+@@ -36,6 +36,7 @@ type EndpointOptions struct {
+ 	ResolvePeer       func(domain string) ([]netip.Addr, error)
+ 	Peers             []PeerOptions
+ 	Workers           int
++	Junk              int
+ }
+ 
+ type PeerOptions struct {

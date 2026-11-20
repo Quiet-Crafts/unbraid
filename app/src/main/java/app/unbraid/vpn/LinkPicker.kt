@@ -140,7 +140,8 @@ object LinkPicker {
         // The provider's multi-hop has its own forwarding port at the entry: no port or entry setting moves it.
         val hops = links.filterValues { it is WgLink && it.hopEntry != null }
         if (hops.isNotEmpty()) return portedAll(setup, links - hops.keys, step) + hops.mapValues { (id, l) ->
-            (l as WgLink).copy(peer = l.peer.copy(mtu = app.unbraid.data.mtu(setup.route(id)?.loc?.provider?.let { setup.opt(it, app.unbraid.data.MTU_OPT) })))
+            val p = setup.route(id)?.loc?.provider
+            (l as WgLink).copy(peer = l.peer.copy(mtu = app.unbraid.data.mtu(p?.let { setup.opt(it, app.unbraid.data.MTU_OPT) }), junk = p?.let { junk(setup, it) } ?: 0))
         }
         val provider = { id: String -> setup.route(id)?.takeIf { !it.imported }?.loc?.provider }
         // One list per provider, every tunnel's ports in route order, so a tunnel saved without one (offline) still takes the
@@ -166,7 +167,7 @@ object LinkPicker {
         val port = picked?.takeIf { fits } ?: lists[p].orEmpty().firstOrNull { it !in one } ?: l.peer.endpoint.substringAfterLast(':')
         val entry = needs?.takeIf { fits }
         val host = (entry ?: setup.opt(p, app.unbraid.data.ENTRY_OPT)?.toIntOrNull())?.let { l.entries.getOrNull(it - 1) } ?: l.peer.endpoint.substringBeforeLast(':')
-        return l.copy(peer = l.peer.copy(endpoint = "$host:$port", mtu = app.unbraid.data.mtu(setup.opt(p, app.unbraid.data.MTU_OPT))))
+        return l.copy(peer = l.peer.copy(endpoint = "$host:$port", mtu = app.unbraid.data.mtu(setup.opt(p, app.unbraid.data.MTU_OPT)), junk = junk(setup, p)))
     }
 
     /**
@@ -181,6 +182,9 @@ object LinkPicker {
         (old.apps.keys + new.apps.keys).any { new.routeOf(it) == id && old.routeOf(it) == DIRECT } || (new.defaultRoute == id && old.defaultRoute == DIRECT) ||
             old.sites != new.sites || Sites.applied(old, reported = oldSuffix) != Sites.applied(new, reported = newSuffix) || new.apps.any { (pkg, to) -> to == BLOCK && old.apps[pkg] != BLOCK } // newly blocked: not a moment longer on what it had
     }
+
+    /** The junk packets [p]'s page asks for before each handshake ([app.unbraid.data.JUNK_OPT]). */
+    private fun junk(setup: Setup, p: String) = if (setup.opt(p, app.unbraid.data.JUNK_OPT) == "on") app.unbraid.data.JUNK_COUNT else 0
 
     /** With Disguise on for its provider, a WireGuard tunnel must come with its V2Ray hop: never a plain one instead. */
     private fun disguised(setup: Setup, r: Route, l: Link) =

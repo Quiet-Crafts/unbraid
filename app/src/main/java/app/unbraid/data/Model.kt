@@ -59,6 +59,8 @@ data class WgPeer(
     val keepalive: Int? = null,
     /** Carried inside V2Ray (VMess over TCP, dressed as web traffic) to this server, for networks that block VPNs. */
     val vmess: Vmess? = null,
+    /** Random packets the engine sends before each handshake ([app.unbraid.data.JUNK_OPT]); 0 = none. */
+    val junk: Int = 0,
 )
 
 /** A provider's V2Ray server for a disguised WireGuard tunnel: address, TCP port and the account-wide user id. */

@@ -67,7 +67,12 @@ const val MTU_OPT = "mtu"
 const val MTU_MIN = 1280
 const val MTU_MAX = 1420
 /** Settings every provider page has, with their defaults. */
-val COMMON_DEFAULTS = mapOf(MTU_OPT to AUTO)
+val COMMON_DEFAULTS = mapOf(MTU_OPT to AUTO, JUNK_OPT to "off")
+/** Key of every WireGuard provider's junk-packet switch ([JUNK]). */
+const val JUNK_OPT = "junk"
+/** Random packets before each handshake ([WgPeer.junk]) when [JUNK_OPT] is on: AmneziaWG's compatible mode, five of 30 to 100 bytes. */
+const val JUNK_COUNT = 5
+val JUNK = Opt(JUNK_OPT, "Junk packets", "Sends a few random packets before each connection starts, which gets past some VPN blocking. The servers ignore them", advanced = true)
 val MTU = Opt(MTU_OPT, "MTU", "Default works on every network. Larger can be faster on Wi-Fi but can stall uploads on mobile data",
     listOf(AUTO to "Default ($MTU_MIN)") + listOf(1320, 1360, 1380, 1400, MTU_MAX).map { "$it" to "$it" }, advanced = true)
 
