@@ -709,13 +709,15 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * [lock] itself and lets go of it while providers are asked for servers, so a newer change (one that must block an
      * app at once) never waits for them; what they answer is applied only if nothing changed meanwhile.
      */
-    private suspend fun reload(keep: Map<String, Link>? = null, avoid: Set<String> = emptySet(), keepFrom: Int = generation) {
+    private suspend fun reload(keep: Map<String, Link>? = null, avoid: Set<String> = emptySet(), keepFrom: Int = generation, forInstall: Boolean = false) {
         class Ask(val srv: CommandServer, val setup: Setup, val accounts: Map<String, String>, val ready: LinkPicker.Result, val applied: Setup?,
                   val appliedAccounts: Map<String, String>, val refused: Map<String, Exception>, val last: Map<String, Link>, val generation: Int, val seen: Long)
         val ask = lock.withLock {
             // While the settings won't open, what the store holds are defaults, not the user's setup: nothing to apply.
             // A destroyed instance's phase is the next instance's: never act on that connection.
             if (destroyed || state.value.phase != VpnState.Phase.On || holding) return
+            // An install retry that another reload caught up with, or that the VPN stopping cancelled, does nothing.
+            if (forInstall && (installs.get() == builtInstalls || !kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]!!.isActive)) return
             val srv = server ?: return
             val seen = restores.get()
             val setup = store.setup.value
@@ -767,7 +769,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (restored && restarted) { retry?.cancel(); retry = null }
         // An install that may change what Android leaves out ([installs]) is not left to the next edit: tried once more.
         val pending = installs.get()
-        if (pending != builtInstalls && pending != retriedInstalls) { retriedInstalls = pending; installRetry?.cancel(); installRetry = scope.launch { kotlinx.coroutines.delay(30_000); if (installs.get() != builtInstalls) reload() } }
+        if (pending != builtInstalls && pending != retriedInstalls) { retriedInstalls = pending; installRetry?.cancel(); installRetry = scope.launch { kotlinx.coroutines.delay(30_000); reload(forInstall = true) } }
         else if (restored && setup == applied && accounts == appliedAccounts) retryBlocked(retrying)
         if (restored) retime() // a new engine, numbered afresh
         if (restored && ranRestores != restores.get()) teardown(RESTORE_REFUSED)
