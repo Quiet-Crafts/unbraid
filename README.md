@@ -52,9 +52,10 @@ providers. It needs macOS 26 or later.
 - Use the VPN accounts you already have. One route can go through Mullvad while another uses NordVPN.
 - Send a WireGuard route through one other route first (Via), even one of another provider, or use IVPN's own multi-hop.
 - On networks that block VPNs: IVPN's V2Ray disguise, junk packets before each WireGuard handshake, and OpenVPN TCP
-  for AirVPN and NordVPN (much slower), which AirVPN's *Automatic* switches to by itself.
-- IVPN sign-ins add a Kyber key that protects recorded traffic against future quantum computers, and the key is
-  renewed when it is a week old.
+  for AirVPN and NordVPN (much slower). AirVPN's *Automatic* can switch to it by itself when WireGuard stops
+  answering, with an API-key sign-in and on routes without a Via.
+- IVPN sign-ins add a Kyber key that protects recorded traffic against future quantum computers, and by default
+  unbraid asks for a new key when it connects and the key is a week old.
 - Reach your home network through Tailscale or Headscale, or send chosen apps out through a Tailscale exit node.
 - A low-load server is picked for you when the provider publishes load, or you can pin one server yourself.
 - Ad and tracker blocking per route with the provider's own blocking DNS, where it has one.
@@ -149,8 +150,8 @@ would cover every website that ends in it; add the website itself.
 An app on Block gets no internet connection while unbraid is connected: not through a route, not Direct, and no
 names are looked up for it. A switch decides whether it can still reach devices on your local network. While any
 app is blocked, unbraid refuses pings and connections that Android can't tie to an app; a name lookup Android can't
-tie to an app still gets a stand-in address, and other kinds of such lookups are refused. A blocked website can't be
-looked up in the apps that go through unbraid. Block works only while unbraid is connected; for the time it is
+tie to an app still gets a stand-in address, and other kinds of such lookups get an empty answer. A blocked website can't be
+looked up in the apps that go through unbraid, unless a more specific website under it has a route of its own. Block works only while unbraid is connected; for the time it is
 off, use Android's "Block connections without VPN".
 
 ### Why isn't it on Google Play?
@@ -211,11 +212,12 @@ traffic. Then they go through unbraid and are sent straight out from inside the 
 which a few apps share (such as Google Play services and Google Services Framework): an app set to Direct that shares
 one with an app that uses a VPN route or Block goes as that app does, filtered or not, and its Apps menu says so
 (while connected, unbraid applies your setup again when an app with a saved choice is installed or an install or
-removal changes which apps share a user id). Apps that only follow a Direct default route always go through unbraid. Only the default route, the routes your apps and websites use, and the routes those go *Via* are connected.
+removal changes which apps share a user id). Apps that only follow a Direct default route always go through unbraid. Only the default route, the routes your apps and websites use, and the routes those go *Via* with two tunnels are
+connected.
 
 A website rule matches the name unbraid itself answered with a fake address, never a name read from the connection,
-so an app can't claim another site's route. A name whose answer holds both local and public addresses goes to your local
-network or home with its local addresses only: the public ones never leave outside the app's route. Blocked apps are refused before any other rule, DNS included.
+so an app can't claim another site's route. When a local network or home rule takes a connection, unbraid dials only the addresses that rule covers, even
+if the name's answer also holds public addresses. Blocked apps are refused before any other rule, DNS included.
 
 For NordVPN, unbraid picks a server from the provider's low-load recommendations when it connects, unless you
 pinned one. Server lists
