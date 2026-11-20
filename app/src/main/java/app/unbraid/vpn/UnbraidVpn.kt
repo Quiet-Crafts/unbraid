@@ -437,6 +437,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     @OptIn(FlowPreview::class)
     private fun connect(updated: Boolean = false) {
+        val startList = app.unbraid.data.Mullvad.listVersion // before any server is picked
         if (state.value.phase == VpnState.Phase.On) { // a repeated start (Always-on, tile)
             readFlags()
             if (state.value.phase == VpnState.Phase.On) { // a failed reload may have ended it
@@ -493,6 +494,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             }.launchIn(scope)
             // A Mullvad list read anywhere (a server picker too) that changes which relays it owns: routes checked again.
             app.unbraid.data.Mullvad.listChanged = { if (!destroyed) scope.launch { reload() } }
+            // One that came while this was starting (before the hook was set) is checked now.
+            if (app.unbraid.data.Mullvad.listVersion != startList) scope.launch { reload() }
             // An app installed while this was starting: judged now, with the VPN on.
             if (installs.get() != builtInstalls) scope.launch { reload() }
         } catch (e: Exception) {

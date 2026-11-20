@@ -271,8 +271,14 @@ object Mullvad : Provider {
 
     private fun fetch() = parse(Http.get("$API/public/relays/wireguard/v2")).also { l ->
         val owned = l.usable.filter { it.owned }.mapTo(HashSet()) { Triple(it.hostname, it.ip, it.publicKey) }
-        if (owned != ownedRelays.also { ownedRelays = owned }) listChanged?.invoke()
+        // Compared and published as one, so two reads finishing together can't hide a change from each other.
+        val changed = synchronized(this) { (owned != ownedRelays).also { ownedRelays = owned; if (it) listVersion++ } }
+        if (changed) listChanged?.invoke()
     }
+
+    /** Counts changes of [ownedRelays]: a start that read it before can tell one came meanwhile. */
+    @Volatile var listVersion = 0L
+        private set
 
     /** Told when a list read changes which relays Mullvad owns, wherever it was read: the VPN checks its routes again. */
     @Volatile var listChanged: (() -> Unit)? = null
