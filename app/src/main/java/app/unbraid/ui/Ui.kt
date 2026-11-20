@@ -187,6 +187,16 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun exitTriesLeft() = vpn.value.engine.let { e -> tried.first != e || tried.second < 4 }
 
     // A stop or a restart retires every answer: they were about tunnels that no longer run.
+    // What each provider counts in use, asked when the app opens and at each sign-in, for the warning before a change.
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            accounts.collect { acc ->
+                Limits.forgetExcept(acc.keys)
+                for ((p, a) in acc) Providers.get(p)?.let { pr -> val own = ownTunnels(p); Limits.counted(p, a, runCatching { pr.inUse(a) }.getOrNull(), own, ownTunnels(p)) }
+            }
+        }
+    }
+
     init { viewModelScope.launch { vpn.collect { v -> if (v.phase != VpnState.Phase.On || exits.value.values.any { it.engine != v.engine }) exits.value = emptyMap() } } }
 
     /**
@@ -652,12 +662,12 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     private fun guarded(after: () -> Unit = {}, f: (Setup) -> Setup) {
         val old = setup.value
         val acc = accounts.value
-        val o = Limits.over(old, f(old)) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } ?: run { store.edit(f); after(); return }
+        val o = Limits.over(old, f(old), { Limits.others(it, acc[it]) }) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } ?: run { store.edit(f); after(); return }
         val name = Providers.get(o.provider)?.name ?: o.provider
         // Only a route the engine runs as saved has a server worth sharing; checked again when the user answers.
         val anchor = old.activeRoutes.singleOrNull { !it.imported && it.loc.provider == o.provider }?.takeIf { a -> UnbraidVpn.running?.route(a.id)?.loc == a.loc }
         val server = anchor?.let { vpn.value.servers[it.id] }
-        limitAsk.value = LimitAsk(Limits.warning(name, o.limit, o.unit, o.n), { store.edit(f); after() }, server?.let { sv ->
+        limitAsk.value = LimitAsk(Limits.warning(name, o.limit, o.unit, o.n, o.others), { store.edit(f); after() }, server?.let { sv ->
             sv.name to {
                 if (setup.value.route(anchor.id)?.loc == anchor.loc && vpn.value.servers[anchor.id] == sv) {
                     store.edit { s ->

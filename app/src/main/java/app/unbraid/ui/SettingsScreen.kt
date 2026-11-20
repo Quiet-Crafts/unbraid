@@ -311,7 +311,10 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
     }
     // Asked apart from [device], so a slow provider doesn't hold back the device's own line.
     val inUse by androidx.compose.runtime.produceState<Int?>(null, shown, shownAcc) {
+        val own = shown?.let { ownTunnels(it.id) } ?: 0
         value = shownAcc?.let { a -> withContext(Dispatchers.IO) { runCatching { shown.inUse(a) }.getOrNull() } }
+        // Kept for the warning before a change, which can't wait for the provider.
+        if (shown != null && shownAcc != null) app.unbraid.data.Limits.counted(shown.id, shownAcc, value, own, ownTunnels(shown.id))
     }
     val plan by androidx.compose.runtime.produceState<String?>(null, shown, shownAcc) {
         value = shownAcc?.let { a -> withContext(Dispatchers.IO) { runCatching { shown.plan(a) }.getOrNull() } }
@@ -405,7 +408,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 Page(pr.name, back, over = "Providers & servers") {
                     notice(ui, notice)
                     // Providers that count connections, not devices: each separate tunnel to one of its servers is one.
-                    val tunnels = if (running) UnbraidVpn.tags.filterKeys { id -> UnbraidVpn.running?.route(id)?.let { !it.imported && it.loc.provider == pr.id } == true }.values.toSet().size else 0
+                    val tunnels = if (running) ownTunnels(pr.id) else 0
                     // The same line for every provider: its limit (the user's own first), and what unbraid uses of it.
                     val lim = pr.limit(acc)
                     val counted = Item(if (lim.unit == "device") "Devices" else "Connections at once", app.unbraid.data.Limits.line(pr.name, app.unbraid.data.Limits.effective(lim, setup.opt(pr.id, app.unbraid.data.LIMIT_OPT)), lim.unit, if (lim.perTunnel) tunnels else 1, device?.used ?: inUse),
@@ -826,3 +829,7 @@ private fun HomeSubnetsDialog(current: List<String>, ui: Ui, onDismiss: () -> Un
         dismissButton = { Secondary("Cancel", onDismiss, color = Ink.dim) },
     )
 }
+
+/** Separate tunnels the engine runs now to [provider]. */
+internal fun ownTunnels(provider: String) =
+    UnbraidVpn.tags.filterKeys { id -> UnbraidVpn.running?.route(id)?.let { !it.imported && it.loc.provider == provider } == true }.values.toSet().size

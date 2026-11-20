@@ -312,7 +312,7 @@ object SpeedTest {
                 var up = emptySet<String>()
                 legs.filter { e -> setup.activeRoutes.none { it.id == e } }.forEach { e ->
                     val r = setup.route(e)!!
-                    val over = app.unbraid.data.Limits.over(setup.copy(testing = up), setup.copy(testing = up + e), limit)
+                    val over = app.unbraid.data.Limits.over(setup.copy(testing = up), setup.copy(testing = up + e), { app.unbraid.data.Limits.others(it, acc[it]) }, limit)
                     val ts = setup.copy(testing = up).tsExit
                     when {
                         r.tsExit != null && ts != null && ts != r.tsExit -> leg(e) { it.copy(error = "Tailscale has one exit node at a time, and another route uses it.") }

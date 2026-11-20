@@ -129,7 +129,7 @@ abstract class ProfileTile(private val slot: Int) : LiveTile<Setup>({ combine(Un
         val acc = Unbraid.store.accounts.value
         // A setup in use that no profile holds is first kept as "Previous", so the switch loses nothing.
         val next = old.use(name, PREVIOUS)
-        val ask = Limits.over(old, next) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } != null
+        val ask = Limits.over(old, next, { Limits.others(it, acc[it]) }) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } != null
         when {
             // An empty profile has no default route yet: the app shows it, to be given one. With no room to keep the
             // setup in use (or this tile's profile is "Previous" itself), the app asks instead.
