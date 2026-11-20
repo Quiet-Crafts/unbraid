@@ -358,6 +358,35 @@ object AirVpn : KeyProvider() {
 
     internal var catalogue: () -> List<Catalog.Entry> = { Catalog.fetch("airvpn", "wireguard") }
     internal var status: () -> String = { Http.get(API + "status/") }
+
+    /**
+     * AirVPN's public history of one server (`/api/server/`, no login): delay and packet loss, hourly, over a week.
+     * Kept ten minutes per server.
+     */
+    override val reportsQuality = true
+
+    override fun quality(name: String): Quality? {
+        if (!name.matches(Regex("[A-Za-z][A-Za-z0-9]{1,30}"))) return null
+        qualities[name]?.takeIf { System.currentTimeMillis() - it.first < 600_000 }?.let { return it.second }
+        return runCatching { parseQuality(history(name)) }.getOrNull()?.also { qualities[name] = System.currentTimeMillis() to it }
+    }
+
+    private val qualities = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Quality>>()
+    internal var history: (String) -> String = { name -> Http.get(API + "server/?name=$name&range=week&window=3600&panels=ploss,rtt&format=json") }
+
+    @Serializable private class Series(val rtt: List<List<kotlinx.serialization.json.JsonElement>> = emptyList(), val ploss: List<List<kotlinx.serialization.json.JsonElement>> = emptyList())
+    @Serializable private class Panel(val series: Series = Series())
+    @Serializable private class Panels(val rtt: Panel = Panel(), val ploss: Panel = Panel())
+    @Serializable private class History(val panels: Panels = Panels(), val result: String? = null, val error: String? = null)
+
+    /** The two series as values, oldest first; a missing or non-numeric sample is NaN (a gap, not zero). */
+    internal fun parseQuality(body: String): Quality? {
+        val h = Http.parsed("AirVPN") { NordApi.json.decodeFromString(History.serializer(), body) }
+        if (h.error != null) return null
+        fun List<List<kotlinx.serialization.json.JsonElement>>.values() = map { p -> (p.getOrNull(1) as? kotlinx.serialization.json.JsonPrimitive)?.content?.toFloatOrNull()?.takeIf { it >= 0 } ?: Float.NaN }.toFloatArray()
+        val delay = h.panels.rtt.series.rtt.values(); val loss = h.panels.ploss.series.ploss.values()
+        return if (delay.isEmpty() && loss.isEmpty()) null else Quality(delay, loss, 7)
+    }
     internal var pause: (Long) -> Unit = Thread::sleep
     internal var api: (service: String, key: String, query: List<Pair<String, String>>) -> String = { service, key, query ->
         Http.get(API + service + "/" + query.joinToString("&", "?") { (k, v) -> Http.enc(k) + "=" + Http.enc(v) }.takeIf { query.isNotEmpty() }.orEmpty(), mapOf("API-KEY" to key))

@@ -877,6 +877,18 @@ private fun SpeedPair(label: String, down: Long, up: Long, color: Color) = Text(
 private fun Tunnel(v: View, p: Period, id: String, periodPicker: LazyListScope.() -> Unit, go: (String?) -> Unit) {
     val ex = v.exits[id]
     val servers by produceState(emptyList<Pair<String, Long>>(), v) { value = withContext(Dispatchers.IO) { Stats.read { Stats.servers(id, v.from, v.to) }.orEmpty() } }
+    // What the provider itself measured on the server that carried most of this route's data (AirVPN publishes it).
+    // History ids carry a digest of what carried them: only today's route with that very id has a provider here.
+    val provider = remember(id) {
+        val s = app.unbraid.Unbraid.store.setup.value
+        (s.routes + UnbraidVpn.running?.routes.orEmpty()).firstOrNull { Stats.idOf(it) == id }?.takeIf { !it.imported }?.loc?.provider?.let(app.unbraid.data.Providers::get)
+    }
+    val top = servers.maxByOrNull { it.second }?.first
+    // Asked only when the user taps: it tells the provider the server's name, and Stats otherwise stays on the phone.
+    var asked by rememberSaveable(id, top) { mutableStateOf(false) }
+    val quality by produceState<Pair<String, app.unbraid.data.Quality?>?>(null, provider, top, asked) {
+        value = if (!asked || provider == null || top == null) null else top to withContext(Dispatchers.IO) { runCatching { provider.quality(top) }.getOrNull() }
+    }
     val t = v.tests[id]
     Section("tunnel:$id", "${ex?.via ?: ""} · ${rangeLabel(p, LocalDate.now())}", ex?.name ?: id, back = { go("tunnels") }) {
         periodPicker()
@@ -893,6 +905,27 @@ private fun Tunnel(v: View, p: Period, id: String, periodPicker: LazyListScope.(
                     Meter(b.toFloat() / total, ex?.color ?: Ink.faint, Modifier.weight(1f)); Text("${sharePct(b, total)}%", style = Type.code.copy(fontSize = 14.sp), color = Ink.text)
                 }
             })
+        }
+        if (provider != null && top != null && provider.reportsQuality && !asked) item(key = "quality-ask") {
+            Column(Modifier.padding(start = Gutter, end = Gutter, top = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Caption("${provider.name} publishes how each of its servers did. Asking sends the name $top to ${provider.name}, from this phone's own connection.")
+                LinkButton(Icons.stats, "Ask ${provider.name} about $top") { asked = true }
+            }
+        }
+        quality?.takeIf { it.first == top }?.let { (_, found) ->
+            if (found == null) item(key = "quality-none") { Caption("${provider?.name} didn't say how $top did. Try again later.") }
+        }
+        quality?.takeIf { it.first == top }?.second?.let { q ->
+            item(key = "quality-label") { SectionLabel("$top as ${provider?.name} measured it · last ${q.days} days") }
+            item(key = "quality") {
+                Column(Modifier.padding(horizontal = Gutter).clip(RoundedCornerShape(24.dp)).background(Ink.surface).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Delay · ms", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
+                    Spark(q.delay.filter { !it.isNaN() }.toFloatArray(), ex?.color ?: Ink.accent, Modifier.fillMaxWidth(), q.line())
+                    Text("Packet loss · %", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
+                    Spark(q.loss.filter { !it.isNaN() }.toFloatArray(), Ink.bad, Modifier.fillMaxWidth())
+                    Text(q.line(), style = Type.sub, color = Ink.text)
+                }
+            }
         }
         item(key = "links") { Row(Modifier.padding(start = Gutter, top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { LinkButton(Icons.flows, "Apps on this route") { go("flows") }; LinkButton(Icons.speed, "Speed test") { go("speed") } } }
     }

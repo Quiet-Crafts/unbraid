@@ -352,6 +352,25 @@ class KeyProvidersTest {
         assertEquals(listOf("Warning" to true, "" to false), AirVpn.parse(body, serverKey).map { Catalog.server(it).let { s -> s.note to s.flagged } })
     }
 
+    /** AirVPN's own week of delay and loss for a server, for Stats: gaps stay gaps, errors and odd names give nothing. */
+    @Test fun airvpnServerQuality() {
+        val body = """{"name":"Chara","panels":{"ploss":{"unit":"percent","series":{"ploss":[[1,0],[2,0.4],[3,null]]}},
+            "rtt":{"unit":"ms","series":{"rtt":[[1,2.131],[2,4.0],[3,null],[4,1.8]]}}},"result":"ok"}"""
+        val q = AirVpn.parseQuality(body)!!
+        assertEquals(4, q.delay.size); assertTrue(q.delay[2].isNaN())
+        assertEquals("Delay 2.6 ms on average (1.8 to 4), packet loss 0.2% (at most 0.4%)", q.line())
+        assertNull(AirVpn.parseQuality("""{"error":"Unknown server"}"""))
+        var asked = 0
+        AirVpn.history = { asked++; body }
+        try {
+            assertNull(AirVpn.quality("../x"))
+            assertNull(AirVpn.quality("Chara&x=1"))
+            assertTrue(AirVpn.quality("Chara") != null && AirVpn.quality("Chara") != null)
+            assertEquals(1, asked) // kept a while
+            assertEquals("No measurements in this period", app.unbraid.data.Quality(floatArrayOf(Float.NaN), floatArrayOf(), 7).line())
+        } finally { AirVpn.history = { name -> app.unbraid.data.Http.get("https://airvpn.org/api/server/?name=$name&range=week&window=3600&panels=ploss,rtt&format=json") } }
+    }
+
     @Test fun airvpnNeedsTheWholeConf() {
         assertRejected(AirVpn, priv)
         assertRejected(AirVpn, conf("10.164.20.6/32", "10.128.0.1", "at.vpn.airdns.org:1637", preshared = false))
