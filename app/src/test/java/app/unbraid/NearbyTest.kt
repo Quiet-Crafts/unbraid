@@ -25,7 +25,7 @@ class NearbyTest {
 
     /** The question after a connect says what the setting in Local & home access says. */
     @Test fun sameReasonAsTheSetting() {
-        assertEquals("Printers, casting and NAS need it while Block connections without VPN is on.", nearbyReason(Setup(), lockdownLan = true))
+        assertEquals("Printers, casting and network drives need it while Block connections without VPN is on.", nearbyReason(Setup(), lockdownLan = true))
         assertEquals("Lets Tailscale reach devices on this network directly, not through a slower relay.", nearbyReason(Setup(home = Home(tailscale = true)), lockdownLan = true))
     }
 }

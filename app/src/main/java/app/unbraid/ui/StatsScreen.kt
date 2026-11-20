@@ -419,6 +419,13 @@ private fun LinkButton(icon: ImageVector, text: String, onClick: () -> Unit) = R
     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
 ) { Icon(icon, null, Modifier.size(20.dp), tint = Ink.text); Text(text, style = Type.sub.copy(fontWeight = FontWeight.Medium), color = Ink.text) }
 
+/** What a page that needs the VPN running says while it isn't: paused, connecting, or off. */
+internal fun offText(phase: Phase, then: String) = when (phase) {
+    Phase.Paused -> "Paused. Resume unbraid to $then."
+    Phase.Connecting -> "Connecting…"
+    else -> "Connect to $then."
+}
+
 @Composable
 private fun Empty(text: String) = Text(text, style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp))
 
@@ -596,7 +603,7 @@ private fun Usage(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, go
             }
         })
     }
-    item(key = "note") { Caption("Data that passes through unbraid. Apps you set to Direct skip it and aren't counted, unless connections without VPN are blocked or they pass through for the Protection filter. Apps that follow a Direct default route are counted. By exit and app: Flows.") }
+    item(key = "note") { Caption("Data that passes through unbraid. Apps you set to Direct skip it and aren't counted, unless connections without VPN are blocked or they pass through for the Protection filter. Apps that follow a Direct default route are counted. By route and app: Flows.") }
     item(key = "links") { Row(Modifier.padding(start = Gutter, top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { LinkButton(Icons.flows, "Flows") { go("flows") }; LinkButton(Icons.tunnel, "Routes") { go("tunnels") } } }
 }
 
@@ -619,7 +626,7 @@ private fun Live(v: View, go: (String?) -> Unit) {
     val ids = down.keys.filter { it != DIRECT }.sortedBy { v.exits[it]?.name }
     Section("live", "Now · ${ids.size} ${if (ids.size == 1) "route" else "routes"}", "Live", back = { go(null) }) {
         if (!Unbraid.store.setup.value.prefs.stats) { item { Empty("Live speeds are measured while statistics are on.") }; return@Section }
-        if (vpn.phase != Phase.On) { item { Empty("Connect to see live speeds.") }; return@Section }
+        if (vpn.phase != Phase.On) { item { Empty(offText(vpn.phase, "see live speeds")) }; return@Section }
         item(key = "hero") {
             val maxTotal = (0 until 60).maxOfOrNull { i -> ids.sumOf { (down[it]?.get(i) ?: 0f).toDouble() } } ?: 0.0
             val cap = niceCeil(maxTotal / 1e6).coerceAtLeast(1.0).toFloat()
@@ -638,7 +645,7 @@ private fun Live(v: View, go: (String?) -> Unit) {
             Row(
                 Modifier.padding(Gutter).fillMaxWidth().height(48.dp).clip(RoundedCornerShape(24.dp)).background(Ink.accentContainer).clickable(role = Role.Button) { go("speed") },
                 horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
-            ) { Icon(Icons.speed, null, Modifier.size(20.dp), tint = Ink.accent); Text("  Test an exit's speed", style = Type.body, color = Ink.text) }
+            ) { Icon(Icons.speed, null, Modifier.size(20.dp), tint = Ink.accent); Text("  Test a route's speed", style = Type.body, color = Ink.text) }
         }
     }
 }
@@ -841,10 +848,10 @@ private fun Tunnels(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, 
         item(key = "hero") {
             when {
                 bestTest != null -> Hero("Fastest speed test", mbps(bestTest.down), "Mbps", "↓ download · ↑ ${mbps(bestTest.up)} Mbps upload · ${v.exits[bestTest.exit]?.name ?: bestTest.exit}")
-                else -> Empty("No speed tests yet. Run one to see what each exit can do.")
+                else -> Empty("No speed tests yet. Run one to see what each route can do.")
             }
         }
-        item(key = "label") { SectionLabel("Per exit · Mbps") }
+        item(key = "label") { SectionLabel("Per route · Mbps") }
         items(ids.size) { i ->
             val id = ids[i]
             val t = v.tests[id]
@@ -859,7 +866,7 @@ private fun Tunnels(v: View, p: Period, periodPicker: LazyListScope.() -> Unit, 
                 })
             }
         }
-        item(key = "note") { Caption("Each exit's fastest speed test in this period. Download (↓) and upload (↑) are measured apart.") }
+        item(key = "note") { Caption("Each route's fastest speed test in this period. Download (↓) and upload (↑) are measured apart.") }
         item(key = "speed") { Row(Modifier.padding(start = Gutter, top = 12.dp)) { LinkButton(Icons.speed, "Speed test") { go("speed") } } }
     }
 }
@@ -894,7 +901,7 @@ private fun Tunnel(v: View, p: Period, id: String, periodPicker: LazyListScope.(
     Section("tunnel:$id", "${ex?.via ?: ""} · ${rangeLabel(p, LocalDate.now())}", ex?.name ?: id, back = { go("tunnels") }) {
         periodPicker()
         item(key = "hero") {
-            if (t == null) Empty("No speed test of this exit in this period yet.")
+            if (t == null) Empty("No speed test of this route in this period yet.")
             else Hero("Fastest speed test", mbps(t.down), "Mbps", "↓ download · ↑ ${if (t.up > 0) mbps(t.up) else "—"} Mbps upload")
         }
         item(key = "label") { SectionLabel("Servers · share of this route's data") }
@@ -969,9 +976,9 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit, from: String? = null) 
     LifecycleStartEffect(Unit) { onStopOrDispose { if (leavesPage(activity?.isChangingConfigurations == true)) SpeedTest.cancel() } }
     DisposableEffect(Unit) { onDispose { if (leavesPage(activity?.isChangingConfigurations == true)) SpeedTest.clear() } }
     val server = if (node) null else vpn.servers[exit]?.name
-    val over = if (allMode) "All exits · together" else listOfNotNull(ex?.name, server ?: ex?.via?.takeIf { node }).joinToString(" · ")
+    val over = if (allMode) "All routes · together" else listOfNotNull(ex?.name, server ?: ex?.via?.takeIf { node }).joinToString(" · ")
     Section("speed", over, "Speed test", back = { go(from?.let { "tunnel:$it" } ?: "live") }) {
-        if (vpn.phase != Phase.On || options.isEmpty()) { item { Empty("Connect to test an exit's speed.") }; return@Section }
+        if (vpn.phase != Phase.On || options.isEmpty()) { item { Empty(offText(vpn.phase, "test a route's speed")) }; return@Section }
         item(key = "exits") {
             LazyRow(Modifier.fillMaxWidth().selectableGroup(), contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (routed.size >= 2) item(key = SpeedTest.ALL) {
@@ -984,7 +991,7 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit, from: String? = null) 
                     ) {
                         Row(Modifier.size(22.dp, 8.dp).clip(RoundedCornerShape(4.dp)), horizontalArrangement = Arrangement.spacedBy(1.dp)) { routed.forEach { Box(Modifier.weight(1f).fillMaxHeight().background(it.color)) } }
                         Text("ALL", style = Type.code.copy(fontSize = 12.sp), color = if (allMode) Ink.ground else Ink.text)
-                        Text("${routed.size} exits", style = Type.sub.copy(fontWeight = FontWeight.Medium), color = if (allMode) Ink.ground else if (busy) Ink.dim else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("${routed.size} routes", style = Type.sub.copy(fontWeight = FontWeight.Medium), color = if (allMode) Ink.ground else if (busy) Ink.dim else Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     }
                 }
@@ -1003,7 +1010,7 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit, from: String? = null) 
                 }
             }
         }
-        if (ex == null && !allMode) { item(key = "gone") { Empty("${v.exits[from]?.name ?: "This exit"} isn't running now. Choose an exit to test.") }; return@Section }
+        if (ex == null && !allMode) { item(key = "gone") { Empty("${v.exits[from]?.name ?: "This route"} isn't running now. Choose a route to test.") }; return@Section }
         if (allMode) { item(key = "all") { SpeedAll(v, routed, options.filter { it.id.startsWith(SpeedTest.NODE) }, setup) { go(from?.let { "history:$it" } ?: "history") } }; return@Section }
         item(key = "cards") {
             // Ping, then the two speeds, as Ookla orders them; the card being measured is outlined in the exit's colour.
@@ -1045,7 +1052,7 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit, from: String? = null) 
                     r?.error?.let { Text(it, style = Type.sub, color = Ink.bad, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)) }
                     r?.missing?.let { country ->
                         Column(Modifier.padding(horizontal = 24.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("M-Lab has no test server in $country yet, so this exit can't be tested in its own country.", style = Type.sub, color = Ink.text, textAlign = TextAlign.Center)
+                            Text("M-Lab has no test server in $country yet, so this route can't be tested in its own country.", style = Type.sub, color = Ink.text, textAlign = TextAlign.Center)
                             LinkButton(Icons.speed, "Test with the nearest server") { exit?.let { SpeedTest.start(it, anywhere = true) } }
                         }
                     }
@@ -1077,7 +1084,7 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit, from: String? = null) 
                             done -> if (setup.prefs.stats) "Test complete · saved with your statistics" else "Test complete · not saved: statistics are off"
                             node -> "Tailscale switches to ${ex?.name} for the test, then back." + (if (setup.tsExit != null) " Apps on your Tailscale route use it meanwhile." else "") +
                                 " Tested with M-Lab, about 20 seconds of real data."
-                            else -> "Tested with M-Lab on a server in the exit's country, or a nearby one: ten seconds each way, real data."
+                            else -> "Tested with M-Lab on a server in the route's country, or a nearby one: ten seconds each way, real data."
                         },
                         style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp), textAlign = TextAlign.Center,
                     )
@@ -1142,7 +1149,7 @@ private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbra
             val d = a?.down?.let(::total); val u = a?.up?.let(::total)
             SpeedCard(Icons.down, "Download", d?.first, "${d?.second ?: "Gbps"} total", phase == SpeedTest.Phase.Download, Ink.text)
             SpeedCard(Icons.up, "Upload", u?.first, "${u?.second ?: "Gbps"} total", phase == SpeedTest.Phase.Upload, Ink.text)
-            SpeedCard(Icons.routes, "Exits", "${if (a == null) picked.size else ok}", if (done || phase == SpeedTest.Phase.Failed) "of ${exits.size} ran" else "of ${exits.size}", false, Ink.text)
+            SpeedCard(Icons.routes, "Routes", "${if (a == null) picked.size else ok}", if (done || phase == SpeedTest.Phase.Failed) "of ${exits.size} ran" else "of ${exits.size}", false, Ink.text)
         }
         when {
             measuring -> {
@@ -1166,7 +1173,7 @@ private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbra
                 if (done) {
                     val ran = legs.filter { it.error == null }
                     Column(Modifier.padding(horizontal = 24.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row { Text("Each exit's share of the download", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.weight(1f)); Text("${ran.size} exits, same ${r.windowMs / 1000} s", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim) }
+                        Row { Text("Each route's share of the download", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.weight(1f)); Text("${ran.size} routes, same ${r.windowMs / 1000} s", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim) }
                         Row(Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                             ran.forEach { l -> Box(Modifier.weight((l.down ?: 0L).coerceAtLeast(1L).toFloat()).fillMaxHeight().background(ex(l.exit)?.color ?: Ink.faint)) }
                         }
@@ -1174,9 +1181,9 @@ private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbra
                 }
                 LegRows(legs, ex, setup)
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Go(150, Ink.text, "AGAIN", "Test all exits together again", bloom = done) { if (Unbraid.store.mlabConsent) begin() else asking = true }
+                    Go(150, Ink.text, "AGAIN", "Test all routes together again", bloom = done) { if (Unbraid.store.mlabConsent) begin() else asking = true }
                 }
-                Text(if (done) "Combined throughput on this phone. " + (if (setup.prefs.stats) "Saved: each exit as a test marked \"with ${ran(legs) - 1} others\", and one History row." else "Not saved: statistics are off.") else "",
+                Text(if (done) "Combined throughput on this phone. " + (if (setup.prefs.stats) "Saved: each route as a test marked \"with ${ran(legs) - 1} others\", and one History row." else "Not saved: statistics are off.") else "",
                     style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp), textAlign = TextAlign.Center)
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { LinkButton(Icons.history, "History", history) }
             }
@@ -1223,15 +1230,15 @@ private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbra
                     }
                 }
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Go(150, Ink.text, "GO", "Test ${picked.size} exits together", preparing = working) {
+                    Go(150, Ink.text, "GO", "Test ${picked.size} routes together", preparing = working) {
                         if (picked.size >= 2) { if (Unbraid.store.mlabConsent) begin() else asking = true }
                     }
                 }
                 Text(
                     when {
-                        working -> "No test data is sent yet. Nothing runs until every exit has a server or you decide."
-                        picked.size < 2 -> "Tick at least two exits."
-                        else -> "GO first finds a test server for every exit. Then all download together, then all upload together: ten seconds each." +
+                        working -> "No test data is sent yet. Nothing runs until every route has a server or you decide."
+                        picked.size < 2 -> "Tick at least two routes."
+                        else -> "GO first finds a test server for every route. Then all download together, then all upload together: ten seconds each." +
                             (if (picked.any { p -> setup.activeRoutes.none { it.id == p.id } }) " Routes without apps connect just for the test, so the VPN restarts for a moment before and after." else "")
                     },
                     style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp), textAlign = TextAlign.Center,
@@ -1247,7 +1254,7 @@ private fun SpeedAll(v: View, exits: List<Ex>, nodes: List<Ex>, setup: app.unbra
 private fun TogetherReading(speed: State<Float>, upload: Boolean, exits: Int) {
     val m = speed.value
     Text(if (m >= 1000) String.format(Locale.US, "%.2f", m / 1000) else m.toInt().toString(), style = Type.code.copy(fontSize = 30.sp, lineHeight = 34.sp, fontWeight = FontWeight.Medium), color = Ink.text)
-    Row(verticalAlignment = Alignment.CenterVertically) { Icon(if (upload) Icons.up else Icons.down, null, Modifier.size(16.dp), tint = Ink.text); Text(" ${if (m >= 1000) "Gbps" else "Mbps"} · $exits exits together", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim) }
+    Row(verticalAlignment = Alignment.CenterVertically) { Icon(if (upload) Icons.up else Icons.down, null, Modifier.size(16.dp), tint = Ink.text); Text(" ${if (m >= 1000) "Gbps" else "Mbps"} · $exits routes together", style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim) }
 }
 
 /** One exit's live share of a combined run, its bar gliding between readings. */
@@ -1319,7 +1326,7 @@ private fun BeforeTogether(a: SpeedTest.All, ex: (String) -> Ex?, setup: app.unb
                 val name = ex(l.exit)?.name ?: l.exit
                 Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Chip(ex(l.exit))
-                    Text(when { l.limited -> "M-Lab is limiting this exit"; l.error != null -> "$name can't join"; else -> "No test server in ${country(l.exit)}" },
+                    Text(when { l.limited -> "M-Lab is limiting this route"; l.error != null -> "$name can't join"; else -> "No test server in ${country(l.exit)}" },
                         style = Type.title.copy(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Medium))
                 }
                 Text(
@@ -1344,11 +1351,11 @@ private fun BeforeTogether(a: SpeedTest.All, ex: (String) -> Ex?, setup: app.unb
                 }
             }
             Text(
-                (if (a.metered) "On a metered connection: about ${String.format(Locale.US, "%.1f", gb(going))} GB in 20 seconds, from each exit's best test. " else "") +
+                (if (a.metered) "On a metered connection: about ${String.format(Locale.US, "%.1f", gb(going))} GB in 20 seconds, from each route's best test. " else "") +
                     "Uses ${going.size} of about $left tests left today, as counted on this phone. Leaving the page stops the test.",
                 style = Type.caption.copy(fontSize = 13.sp, lineHeight = 18.sp), color = Ink.dim, modifier = Modifier.padding(horizontal = 8.dp),
             )
-            SheetButtons("Cancel", { SpeedTest.cancel() }, if (going.size < 2) "Needs two exits" else if (going.size > left) "Not enough tests left" else "Start ${going.size} together", { SpeedTest.go(nearest) },
+            SheetButtons("Cancel", { SpeedTest.cancel() }, if (going.size < 2) "Needs two routes" else if (going.size > left) "Not enough tests left" else "Start ${going.size} together", { SpeedTest.go(nearest) },
                 enabled = going.size >= 2 && going.size <= left)
         }
     }
@@ -1379,7 +1386,7 @@ private fun TestServerCard(s: app.unbraid.stats.Ndt7.Server?, ex: Ex?, vpnServer
     Icon(Icons.speed, null, Modifier.size(24.dp), tint = Ink.dim)
     Column(Modifier.weight(1f)) {
         Text("TEST SERVER · M-LAB", style = Type.overline, color = Ink.dim)
-        Text(s?.let { listOf(it.city, java.util.Locale("", it.country).displayCountry).filter(String::isNotEmpty).joinToString(", ") } ?: "Finding one in ${ex?.name ?: "the exit's country"}…",
+        Text(s?.let { listOf(it.city, java.util.Locale("", it.country).displayCountry).filter(String::isNotEmpty).joinToString(", ") } ?: "Finding one in ${ex?.name ?: "the route's country"}…",
             style = Type.body, color = Ink.text)
         Text(listOfNotNull(s?.machine?.substringBefore('.'), listOfNotNull(ex?.via?.takeIf(String::isNotEmpty)?.substringBefore(" · "), vpnServer).joinToString(" ").takeIf(String::isNotEmpty)?.let { "via $it" }, ex?.via?.substringAfter(" · ", "")?.ifEmpty { null }).joinToString(" · "),
             style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim)
@@ -1395,9 +1402,9 @@ private fun MlabConsent(dismiss: () -> Unit, accept: () -> Unit) {
         Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 24.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("Speed tests use M-Lab", style = Type.title.copy(fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.Medium))
             listOf(
-                Icons.speed to "Measurement Lab (M-Lab) is an open platform run by researchers. A test asks for one of its servers in the exit's country; for your own servers and Tailscale nodes M-Lab picks a nearby one. Ten seconds each way.",
-                Icons.history to "M-Lab publishes every test's results openly and keeps them, with the public IP address of the exit you test: a VPN server's, or your home's for a home or Tailscale exit.",
-                Icons.block to "Also sent: the time, the app's name and version, and the exit's country when it's known. Nothing about your phone or accounts. Up to ${SpeedTest.PER_DAY} tests a day.",
+                Icons.speed to "Measurement Lab (M-Lab) is an open platform run by researchers. A test asks for one of its servers in the route's country; for your own servers and Tailscale nodes M-Lab picks a nearby one. Ten seconds each way.",
+                Icons.history to "M-Lab publishes every test's results openly and keeps them, with the public IP address of the route you test: a VPN server's, or your home's for a home or Tailscale route.",
+                Icons.block to "Also sent: the time, the app's name and version, and the route's country when it's known. When routes are tested together, each test server is told how many. Nothing about your phone or accounts. Up to ${SpeedTest.PER_DAY} tests a day.",
             ).forEach { (i, t) -> Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) { Icon(i, null, Modifier.size(24.dp), tint = Ink.dim); Text(t, style = Type.sub, color = Ink.text) } }
             LinkButton(Icons.external, "M-Lab privacy policy") { context.openUrl("https://www.measurementlab.net/privacy/") }
             SheetButtons("Not now", dismiss, "Agree and test", accept, Modifier.padding(top = 8.dp))
@@ -1480,7 +1487,7 @@ private fun History(v: View, go: (String?) -> Unit, from: String? = null) {
                         { Text(if (t.idle > 0) "${t.idle}" else "—", style = Type.code.copy(fontSize = 14.sp), color = Ink.dim) })
                 }
                 if (t.exit == SpeedTest.ALL) {
-                    Text("${t.n} exits together", style = Type.caption.copy(fontSize = 13.sp, lineHeight = 18.sp), color = Ink.dim)
+                    Text("${t.n} routes together", style = Type.caption.copy(fontSize = 13.sp, lineHeight = 18.sp), color = Ink.dim)
                     together.forEach { m ->
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             Chip(v.exits[m.exit])
@@ -1537,8 +1544,8 @@ fun StatsConsent(dismiss: () -> Unit, accept: () -> Unit) = ModalBottomSheet(dis
         Text("Keep statistics?", style = Type.title.copy(fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.Medium))
         listOf(
             Icons.phone to "Statistics stay on this phone. They are never uploaded.",
-            Icons.clock to "Kept as hourly sums for a week and daily sums for about a year, with your last 100 speed tests.",
-            Icons.block to "Only apps, the websites you gave a route of their own, routes, bytes, times, speeds and speed-test exit IPs. Nothing else of where you browse, ever.",
+            Icons.clock to "Kept as hourly sums for today and the 8 days before, and as daily sums and time connected for 400 days (about 13 months). Your last 100 speed tests are kept, none older than 400 days. Apps are kept by their package name, with the name they show.",
+            Icons.block to "Only apps, the websites you gave a route of their own, routes, bytes, times, speeds and the public address each speed test went out from. Nothing else of where you browse, ever.",
             Icons.deleteForever to "Turn off or delete everything in Settings at any time.",
         ).forEach { (i, t) -> Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) { Icon(i, null, Modifier.size(24.dp), tint = Ink.dim); Text(t, style = Type.sub, color = Ink.text) } }
         SheetButtons("Not now", dismiss, "Turn on", accept, Modifier.padding(top = 8.dp))

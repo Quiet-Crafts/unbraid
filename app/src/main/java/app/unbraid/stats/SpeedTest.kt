@@ -28,7 +28,7 @@ object SpeedTest {
     /** M-Lab's limit for interactive users (measurementlab.net/aup). */
     const val PER_DAY = 40
     private const val DAY_LIMIT = "M-Lab allows $PER_DAY tests a day. Try again tomorrow."
-    private const val NO_SERVER = "No test server can be reached through this exit."
+    private const val NO_SERVER = "No test server can be reached through this route."
     private const val NO_SERVER_LEG = "M-Lab's test server can't be reached through it. Not in the totals."
 
     /** The allowance ran out when the first data arrived (never while one test runs alone; a safeguard). */
@@ -40,7 +40,7 @@ object SpeedTest {
     internal fun failText(flowed: Boolean) = if (flowed) "The test couldn't finish. Check the connection and try again." else NO_SERVER
 
     /** What a combined run's leg says when its [phase] (lower case) stopped; [flowed]: data had arrived through it. */
-    internal fun legFailText(phase: String, flowed: Boolean) = if (flowed) "Stopped during the $phase: the exit stopped answering. Not in the totals." else NO_SERVER_LEG
+    internal fun legFailText(phase: String, flowed: Boolean) = if (flowed) "Stopped during the $phase: the route stopped answering. Not in the totals." else NO_SERVER_LEG
 
     /** Whether [n] more tests fit in today's allowance after [used]. */
     internal fun fits(used: Int, n: Int) = used + n <= PER_DAY
@@ -150,7 +150,7 @@ object SpeedTest {
                 val done = _run.value ?: return@Runnable
                 Stats.saveTests(listOf(Stats.Test(System.currentTimeMillis(), recordAs, via, name, ip, down, up, done.ping?.median ?: 0, 0, 0)), epoch)
             } catch (e: Ndt7.Limited) {
-                set { it.copy(phase = Phase.Failed, error = "M-Lab is limiting tests from this exit's address right now (VPN servers share theirs). Try again later.") }
+                set { it.copy(phase = Phase.Failed, error = "M-Lab is limiting tests from this route's address right now (VPN servers share theirs). Try again later.") }
             } catch (e: DayLimit) {
                 set { it.copy(phase = Phase.Failed, error = DAY_LIMIT) }
             } catch (e: Moved) {
@@ -265,8 +265,8 @@ object SpeedTest {
             // The network turned metered after GO: the person hasn't agreed to that yet.
             if (UnbraidVpn.metered && _all.value?.metered == false) { set { it.copy(metered = true, phase = Phase.Deciding) }; armed(start); return }
             val going = _all.value?.legs.orEmpty().filter { it.usable && (!it.missing || it.exit in nearest) }
-            if (going.size < 2) return failed("At least two exits need a test server to run together.")
-            if (!fits(Unbraid.store.testsToday, going.size)) return failed("M-Lab allows $PER_DAY tests a day; this run needs ${going.size} of them. Try fewer exits, or tomorrow.")
+            if (going.size < 2) return failed("At least two routes need a test server to run together.")
+            if (!fits(Unbraid.store.testsToday, going.size)) return failed("M-Lab allows $PER_DAY tests a day; this run needs ${going.size} of them. Try fewer routes, or tomorrow.")
             set { it.copy(legs = going, phase = Phase.Preparing) }
             parallel(going.map { it.exit }) { e -> val p = Ndt7.ping(tag(e), going.first { it.exit == e }.server!!); leg(e) { it.copy(ping = p) } }
             if (stop()) return
@@ -357,7 +357,7 @@ object SpeedTest {
     /** A combined run [mine] ended: routes up only for it go down, unless a newer run took over. */
     private fun done(mine: Int) = synchronized(lock) { if (attempt == mine) release() }
 
-    private fun apart(n: Int) = if (n < 2) "Only one exit kept going, so there's nothing to add up. Try again." else "The exits didn't run together long enough to add them up. Try again."
+    private fun apart(n: Int) = if (n < 2) "Only one route kept going, so there's nothing to add up. Try again." else "The routes didn't run together long enough to add them up. Try again."
 
     /**
      * bits/s through several exits counted only while all of them ran, and that stretch in ms: from the latest first

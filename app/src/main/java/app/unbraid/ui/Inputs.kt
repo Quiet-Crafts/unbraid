@@ -63,7 +63,7 @@ fun Context.needsLocalNetwork(setup: app.unbraid.data.Setup, lockdownLan: Boolea
 fun nearbyReason(setup: app.unbraid.data.Setup, lockdownLan: Boolean) = when {
     setup.tailscale -> "Lets Tailscale reach devices on this network directly, not through a slower relay."
     setup.home.wg != null -> "Needed to reach a home tunnel on this network."
-    lockdownLan -> "Printers, casting and NAS need it while Block connections without VPN is on."
+    lockdownLan -> "Printers, casting and network drives need it while Block connections without VPN is on."
     else -> "Needed to reach your own server on this network."
 }
 

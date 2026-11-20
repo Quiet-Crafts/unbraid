@@ -27,10 +27,10 @@ class StatsFixesTest {
 
     /** A test that never got data says no test server can be reached; one that broke off after data keeps the old wording. */
     @Test fun anUnreachableTestServerHasItsOwnMessage() {
-        assertEquals("No test server can be reached through this exit.", SpeedTest.failText(flowed = false))
+        assertEquals("No test server can be reached through this route.", SpeedTest.failText(flowed = false))
         assertEquals("The test couldn't finish. Check the connection and try again.", SpeedTest.failText(flowed = true))
         assertEquals("M-Lab's test server can't be reached through it. Not in the totals.", SpeedTest.legFailText("download", flowed = false))
-        assertEquals("Stopped during the upload: the exit stopped answering. Not in the totals.", SpeedTest.legFailText("upload", flowed = true))
+        assertEquals("Stopped during the upload: the route stopped answering. Not in the totals.", SpeedTest.legFailText("upload", flowed = true))
     }
 
     @Test fun theAllowanceChecksFitWithoutCounting() {
