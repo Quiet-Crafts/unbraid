@@ -105,7 +105,8 @@ object SpeedTest {
         val name = node?.name ?: vpnServer?.name ?: route?.name.orEmpty()
         val ip = node?.ip ?: vpnServer?.ip.orEmpty()
         // Provider routes know their country; imported servers and Tailscale nodes are located by their address alone.
-        val country = route?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()?.takeIf { !anywhere }
+        val home = route?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()
+        val country = home?.takeIf { !anywhere }
         val epoch = Stats.epoch
         // An engine restart (a reload, or a move to new fake IPs) puts Tailscale back on its configured exit node.
         val engine = UnbraidVpn.state.value.engine
@@ -120,7 +121,7 @@ object SpeedTest {
         val test = Runnable {
             try {
                 if (moved()) throw Moved() // before any of its own traffic, which would go through another engine
-                val located = Ndt7.locate(tag, country)
+                val located = Ndt7.locate(tag, home, strict = !anywhere)
                 if (stop()) return@Runnable
                 if (moved()) throw Moved()
                 if (located == null) {
@@ -334,7 +335,7 @@ object SpeedTest {
                     try {
                         val s = Ndt7.locate(tag(e), country)
                         // Outside the lock: a slow answer mustn't hold up a cancel on the main thread.
-                        val near = if (s == null) runCatching { Ndt7.locate(tag(e), null) }.getOrNull() else null
+                        val near = if (s == null) Ndt7.locate(tag(e), country, strict = false) else null
                         leg(e) { if (s != null) it.copy(server = s) else it.copy(missing = true, server = near) }
                     } catch (x: Ndt7.Limited) { leg(e) { it.copy(limited = true) } }
                     catch (x: Exception) { leg(e) { it.copy(error = "M-Lab couldn't be reached through it.") } }

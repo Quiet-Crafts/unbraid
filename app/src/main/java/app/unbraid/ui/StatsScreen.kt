@@ -249,7 +249,7 @@ private fun load(p: Period, ui: Ui): View {
     val exits = (stored.keys + current.keys + DIRECT).associateWith { id ->
         val r = current[id]; val s = stored[id]
         when {
-            r != null -> Ex(id, r.code, r.name, r.source, Ink.route(r.hue))
+            r != null -> Ex(id, r.code, r.name, Stats.via(r), Ink.route(r.hue))
             id == DIRECT -> Ex(id, "··", "Direct", "outside the VPN", Ink.direct)
             // Older rows of a route sit beside its new history: their name says so, or both would read the same.
             s != null && Stats.legacy(id) -> Ex(id, s.code, "${s.name} (older data)", "Unknown (older data)", if (s.hue < 0) Ink.text else Ink.route(s.hue))
@@ -312,7 +312,8 @@ fun StatsScreen(ui: Ui) {
     LifecycleStartEffect(Unit) { Stats.watching = true; onStopOrDispose { Stats.watching = false } }
     val view by produceState<View?>(null, period, tick, section) { value = withContext(Dispatchers.IO) { Stats.read { load(Period.entries[period], ui) } } }
     BackHandler(section != null) {
-        section = when { section == "history" -> "speed"; section?.startsWith("tunnel:") == true -> "tunnels"; section == "speed" -> "live"; else -> null }
+        section = when { section == "history" -> "speed"; section?.startsWith("history:") == true -> "speed:" + section!!.removePrefix("history:"); section?.startsWith("tunnel:") == true -> "tunnels"; section == "speed" -> "live"
+            section?.startsWith("speed:") == true -> "tunnel:" + section!!.removePrefix("speed:"); else -> null }
     }
     OnReselect(Tab.Stats) { section = null }
     val motion = MaterialTheme.motionScheme
@@ -332,8 +333,8 @@ fun StatsScreen(ui: Ui) {
                 s == "journal" -> Journal(v, go)
                 s == "tunnels" -> Tunnels(v, p, periodPicker, go)
                 s.startsWith("tunnel:") -> Tunnel(v, p, s.removePrefix("tunnel:"), periodPicker, go)
-                s == "speed" -> Speed(ui, v, go)
-                s == "history" -> History(v, go)
+                s == "speed" || s.startsWith("speed:") -> Speed(ui, v, go, s.substringAfter("speed:", "").ifEmpty { null })
+                s == "history" || s.startsWith("history:") -> History(v, go, s.substringAfter("history:", "").ifEmpty { null })
             }
         }
     }
@@ -927,7 +928,7 @@ private fun Tunnel(v: View, p: Period, id: String, periodPicker: LazyListScope.(
                 }
             }
         }
-        item(key = "links") { Row(Modifier.padding(start = Gutter, top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { LinkButton(Icons.flows, "Apps on this route") { go("flows") }; LinkButton(Icons.speed, "Speed test") { go("speed") } } }
+        item(key = "links") { Row(Modifier.padding(start = Gutter, top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { LinkButton(Icons.flows, "Apps on this route") { go("flows") }; LinkButton(Icons.speed, "Speed test") { go("speed:$id") } } }
     }
 }
 
@@ -935,7 +936,8 @@ private fun Tunnel(v: View, p: Period, id: String, periodPicker: LazyListScope.(
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
+/** [from]: the history id of the exit page it was opened from, preselected, and where Back returns. */
+private fun Speed(ui: Ui, v: View, go: (String?) -> Unit, from: String? = null) {
     val run by SpeedTest.run.collectAsStateWithLifecycle()
     val vpn by ui.vpn.collectAsStateWithLifecycle()
     val setup by ui.setup.collectAsStateWithLifecycle()
@@ -951,9 +953,11 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
     // Two routes by the same name ("Fastest") are told apart by their provider.
     val routed = setup.routes.map { r -> Ex(r.id, r.code, if (setup.routes.count { it.name == r.name } > 1) "${r.name} · ${r.source}" else r.name, r.source, Ink.route(r.hue)) }.sortedBy { it.name }
     val together by SpeedTest.all.collectAsStateWithLifecycle()
-    var chosen by rememberSaveable { mutableStateOf(if (together != null) SpeedTest.ALL else options.firstOrNull()?.id) }
+    var chosen by rememberSaveable { mutableStateOf(if (together != null) SpeedTest.ALL else null) }
+    // Opened from an exit's page: that exit, once it runs; never another one in its place until one is picked.
+    val pick = chosen ?: if (from != null) options.firstOrNull { Stats.idOf(it.id, UnbraidVpn.running ?: setup) == from }?.id else options.firstOrNull()?.id
     val allMode = routed.size >= 2 && chosen == SpeedTest.ALL
-    val ex = options.firstOrNull { it.id == (run?.exit ?: chosen) } ?: options.firstOrNull()
+    val ex = options.firstOrNull { it.id == (run?.exit ?: pick) }
     val exit = ex?.id
     val color = ex?.color ?: Ink.accent
     val node = exit?.startsWith(SpeedTest.NODE) == true
@@ -966,7 +970,7 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
     DisposableEffect(Unit) { onDispose { if (leavesPage(activity?.isChangingConfigurations == true)) SpeedTest.clear() } }
     val server = if (node) null else vpn.servers[exit]?.name
     val over = if (allMode) "All exits · together" else listOfNotNull(ex?.name, server ?: ex?.via?.takeIf { node }).joinToString(" · ")
-    Section("speed", over, "Speed test", back = { go("live") }) {
+    Section("speed", over, "Speed test", back = { go(from?.let { "tunnel:$it" } ?: "live") }) {
         if (vpn.phase != Phase.On || options.isEmpty()) { item { Empty("Connect to test an exit's speed.") }; return@Section }
         item(key = "exits") {
             LazyRow(Modifier.fillMaxWidth().selectableGroup(), contentPadding = PaddingValues(horizontal = Gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -999,7 +1003,8 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
                 }
             }
         }
-        if (allMode) { item(key = "all") { SpeedAll(v, routed, options.filter { it.id.startsWith(SpeedTest.NODE) }, setup) { go("history") } }; return@Section }
+        if (ex == null && !allMode) { item(key = "gone") { Empty("${v.exits[from]?.name ?: "This exit"} isn't running now. Choose an exit to test.") }; return@Section }
+        if (allMode) { item(key = "all") { SpeedAll(v, routed, options.filter { it.id.startsWith(SpeedTest.NODE) }, setup) { go(from?.let { "history:$it" } ?: "history") } }; return@Section }
         item(key = "cards") {
             // Ping, then the two speeds, as Ookla orders them; the card being measured is outlined in the exit's colour.
             Row(Modifier.padding(horizontal = Gutter, vertical = 12.dp).height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1076,7 +1081,7 @@ private fun Speed(ui: Ui, v: View, go: (String?) -> Unit) {
                         },
                         style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp), textAlign = TextAlign.Center,
                     )
-                    LinkButton(Icons.history, "History") { go("history") }
+                    LinkButton(Icons.history, "History") { go(from?.let { "history:$it" } ?: "history") }
                 }
             }
           }
@@ -1436,10 +1441,11 @@ private fun Go(size: Int, color: Color, text: String, label: String, preparing: 
 }
 
 @Composable
-private fun History(v: View, go: (String?) -> Unit) {
+/** [from]: the exit page the speed test was opened from, where Back goes on to. */
+private fun History(v: View, go: (String?) -> Unit, from: String? = null) {
     val tests by produceState(emptyList<Stats.Test>()) { value = withContext(Dispatchers.IO) { Stats.read { Stats.tests() }.orEmpty() } }
     val f = DateTimeFormatter.ofPattern("d MMM · HH:mm", locale())
-    Section("history", "${tests.count { it.exit != SpeedTest.ALL }} tests", "History", back = { go("speed") }) {
+    Section("history", "${tests.count { it.exit != SpeedTest.ALL }} tests", "History", back = { go(from?.let { "speed:$it" } ?: "speed") }) {
         val best = tests.filter { it.grp == 0L }.maxByOrNull { it.down }
         // A combined run is one row with its exits listed under it; their own rows aren't repeated.
         val shown = tests.filter { it.grp == 0L || it.exit == SpeedTest.ALL }

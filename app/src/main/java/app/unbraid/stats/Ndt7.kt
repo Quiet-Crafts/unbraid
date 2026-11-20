@@ -40,15 +40,16 @@ object Ndt7 {
 
     /**
      * The M-Lab server nearest the exit's own address, inside [wanted]'s country when given ([code]); null if M-Lab has
-     * none there (it answers HTTP 500 for a country without servers).
+     * none there (it answers HTTP 500 for a country without servers). Not [strict]: the one nearest that country, also
+     * outside it (an exit's address alone can place it far away: an IVPN Vienna address got Doha).
      * Throws [Limited] when M-Lab is rate-limiting the exit's address.
      */
-    fun locate(tag: String, wanted: String?): Server? {
+    fun locate(tag: String, wanted: String?, strict: Boolean = true): Server? {
         val country = code(wanted)
-        val q = CLIENT + (country?.let { "&country=$it&strict=true" } ?: "")
+        val q = CLIENT + (country?.let { "&country=$it" + if (strict) "&strict=true" else "" } ?: "")
         val body = try { Probe.get(tag, LOCATE, "/v2/nearest/ndt/ndt7?$q") }
         catch (e: IllegalStateException) {
-            when (status(e.message)) { 204 -> throw Limited(); 500 -> if (country != null) return null }
+            when (status(e.message)) { 204, 429 -> throw Limited(); 500 -> if (country != null && strict) return null }
             throw e
         }
         val all = NordApi.json.parseToJsonElement(body).jsonObject["results"]?.jsonArray?.map { it.jsonObject }.orEmpty().map { r ->

@@ -26,6 +26,16 @@ class StatsIdentityTest {
         assertNotEquals(id, Stats.idOf(nl.copy(id = "r2")))
     }
 
+    /** One route's histories by protocol read apart: the protocol joins the provider in the label. */
+    @Test fun protocolInTheLabel() {
+        val air = Route("a", Location("airvpn", country = "Netherlands", countryCode = "NL"))
+        assertEquals("AirVPN", Stats.via(air))
+        assertEquals("AirVPN · OpenVPN TCP", Stats.via(air.copy(loc = air.loc.copy(protocol = "openvpn_tcp"))))
+        assertEquals("AirVPN · OpenVPN", Stats.via(air.copy(loc = air.loc.copy(protocol = "openvpn_udp"))))
+        assertEquals("AirVPN · Automatic", Stats.via(air.copy(loc = air.loc.copy(protocol = app.unbraid.data.AUTO_PROTOCOL))))
+        assertNotEquals(Stats.idOf(air), Stats.idOf(air.copy(loc = air.loc.copy(protocol = "openvpn_tcp"))))
+    }
+
     @Test fun cosmeticsKeepTheHistory() {
         assertEquals(Stats.idOf(nl), Stats.idOf(nl.copy(hue = 5, filter = true)))
     }

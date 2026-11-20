@@ -185,13 +185,18 @@ object Stats {
         val r = setup.route(routeId)
         val id = r?.let(::idOf) ?: routeId
         when {
-            r != null -> Exit(id, r.code, r.name, r.hue, r.source)
+            r != null -> Exit(id, r.code, r.name, r.hue, via(r))
             id == HOME -> Exit(id, "HM", "Home network", 3, listOfNotNull("Tailscale".takeIf { setup.tailscale }, "WireGuard".takeIf { setup.home.wg != null }).joinToString(" & ").ifEmpty { "Tailscale" })
             id.startsWith(SpeedTest.NODE) -> Exit(id, "TS", UnbraidVpn.state.value.tsExitNodes.firstOrNull { SpeedTest.NODE + it.ip == id }?.name ?: id.removePrefix(SpeedTest.NODE), -1, "Tailscale")
             else -> null
         }?.let { labels[id] = it }
         return id
     }
+
+    /** What carried route [r], for its history's label: the source, and an OpenVPN or Automatic protocol, whose history is apart. */
+    internal fun via(r: Route) = listOfNotNull(r.source, when (r.loc.protocol.takeIf { !r.imported }) {
+        "openvpn_udp" -> "OpenVPN"; "openvpn_tcp" -> "OpenVPN TCP"; app.unbraid.data.AUTO_PROTOCOL -> "Automatic"; else -> null
+    }).joinToString(" · ")
 
     /** The id route [routeId] of [setup] is recorded under. */
     fun idOf(routeId: String, setup: Setup) = setup.route(routeId)?.let(::idOf) ?: routeId
