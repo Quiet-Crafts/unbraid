@@ -209,9 +209,6 @@ interface Provider {
     /** Offers its own multi-hop ([WgLink.hopPort]), used for a Via between two of its routes when the user picks it. */
     val nativeHop: Boolean get() = false
 
-    /** The ad-blocking resolver to use on its multi-hop instead of [dns] (from [blockingDns]); null = none known, so blocked. */
-    fun hopDns(dns: String): String? = null
-
     /** Setting up a tunnel contacts the server itself (not the provider's API), so it can't go through another route (Via). */
     val viaUnsafe: Boolean get() = false
 

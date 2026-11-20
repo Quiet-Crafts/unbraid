@@ -171,10 +171,8 @@ object Ivpn : Provider {
     private const val LIST = "list"
     private const val HARDCORE = "hardcore"
     private const val CLIENT_AREA = "https://www.ivpn.net/account/"
+    // On multi-hop AntiTracker answers at each list's usual address; the list's "multihop-ip" doesn't answer there.
     override val nativeHop = true
-
-    /** AntiTracker on multi-hop answers at its own addresses, known only for the OISD list (IVPN's newer lists have none). */
-    override fun hopDns(dns: String) = mapOf("10.0.254.2" to "10.0.254.102", "10.0.254.3" to "10.0.254.103")[dns]
 
     override val defaults = mapOf(PROTECT to "off", LIST to OISD, HARDCORE to "off", PORT_OPT to AUTO, ROTATE_OPT to "7", DISGUISE_OPT to "off")
 

@@ -145,15 +145,18 @@ class IvpnTest {
         assertNull(ep["detour"])
         // The entry route isn't needed for it: unused by apps, it has no tunnel of its own.
         assertEquals(listOf("se"), setup.copy(apps = emptyMap()).activeRoutes.map { it.id })
-        // Same country, another provider's entry, or blocking with a list that has no multi-hop resolver: blocked.
+        // Same country or another provider's entry: blocked.
         val same = setup.copy(routes = listOf(setup.routes[0], setup.routes[1].copy(loc = nl)))
         assertTrue(same.viaProblem(same.route("se")!!) != null)
-        val blocking = setup.copy(opts = mapOf("ivpn" to mapOf(app.unbraid.data.PROTECT to "on", "list" to "10.0.254.6|10.0.254.7")))
-        assertTrue("se" in pick(blocking).blocked)
-        val oisd = setup.copy(opts = mapOf("ivpn" to mapOf(app.unbraid.data.PROTECT to "on")))
-        val dns = kotlinx.serialization.json.Json.parseToJsonElement(app.unbraid.vpn.Compiler.compile(app.unbraid.vpn.Compiler.Input(oisd, app.unbraid.vpn.LinkPicker.ported(oisd, pick(oisd).links, emptyMap()), "app.unbraid", false, "/tmp/ts", "/tmp/c.db")))
-            .jsonObject["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }.single { it["tag"]!!.jsonPrimitive.content == "dns-r-se" }
-        assertEquals("10.0.254.102", dns["server"]!!.jsonPrimitive.content)
+        // Blocking on multi-hop uses the chosen list's usual resolver, any list (the published multi-hop one doesn't answer).
+        for ((opts, want) in listOf(emptyMap<String, String>() to "10.0.254.2", mapOf("list" to "10.0.254.4|10.0.254.5") to "10.0.254.4",
+                mapOf("list" to "10.0.254.4|10.0.254.5", "hardcore" to "on") to "10.0.254.5")) {
+            val on = setup.copy(opts = mapOf("ivpn" to opts + (app.unbraid.data.PROTECT to "on")))
+            assertTrue("se" in pick(on).links)
+            val dns = kotlinx.serialization.json.Json.parseToJsonElement(app.unbraid.vpn.Compiler.compile(app.unbraid.vpn.Compiler.Input(on, app.unbraid.vpn.LinkPicker.ported(on, pick(on).links, emptyMap()), "app.unbraid", false, "/tmp/ts", "/tmp/c.db")))
+                .jsonObject["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }.single { it["tag"]!!.jsonPrimitive.content == "dns-r-se" }
+            assertEquals(want to "r-se", dns["server"]!!.jsonPrimitive.content to dns["detour"]!!.jsonPrimitive.content) // inside the exit's own tunnel
+        }
         // The same exit server straight from another route too: one key there by two paths, a clash.
         val twin = setup.copy(routes = setup.routes + app.unbraid.data.Route("se2", se), apps = mapOf("x" to "nl", "y" to "se2"))
         val t = app.unbraid.vpn.LinkPicker.pick(twin, keep + ("se2" to keep.getValue("se")), twin, mapOf("ivpn" to blob), mapOf("ivpn" to blob), emptyMap(), offline = true) { Ivpn }

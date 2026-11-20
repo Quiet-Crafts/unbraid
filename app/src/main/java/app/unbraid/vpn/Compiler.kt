@@ -479,10 +479,7 @@ object Compiler {
     /** Resolver inside a route's tunnel: the provider's blocking resolver if on, else the tunnel's own, else Nord's, else Quad9. */
     private fun dnsServer(s: Setup, r: app.unbraid.data.Route, link: Link?): String {
         val provider = r.takeIf { !it.imported }?.loc?.provider
-        return provider?.takeIf { s.protects(r) }?.let { p -> app.unbraid.data.Providers.get(p)?.let { pr ->
-            // On the provider's multi-hop its blocking answers elsewhere ([LinkPicker] blocks a route with none known).
-            pr.blockingDns { s.opt(p, it) }?.let { d -> if ((link as? WgLink)?.hopEntry != null) pr.hopDns(d) ?: error("No multi-hop blocking resolver") else d }
-        } }
+        return provider?.takeIf { s.protects(r) }?.let { p -> app.unbraid.data.Providers.get(p)?.blockingDns { s.opt(p, it) } }
             ?: (link as? WgLink)?.peer?.dns?.firstOrNull()
             ?: if (provider == "nord") NORD_DNS else "9.9.9.9"
     }

@@ -95,8 +95,6 @@ object LinkPicker {
                 val e = setup.route(r.via!!)!!
                 val l = out[r.id] as? WgLink ?: throw Fail("${r.name}: multi-hop works for WireGuard routes only")
                 val port = l.hopPort ?: throw Fail("${r.name}: ${l.server.name} doesn't say how to reach it by multi-hop right now. Try again later, or use two tunnels")
-                if (setup.protects(r) && providers(r.loc.provider)?.let { p -> p.blockingDns { setup.opt(p.id, it) }?.let(p::hopDns) } == null)
-                    throw Fail("${r.name}: ${providers(r.loc.provider)?.name} blocking on multi-hop works with the OISD list only. Choose it, or turn blocking off for this route")
                 // Asked for only online: an offline pass blocks the route until then, never leaves it straight.
                 val entry = (out[e.id] as? WgLink)?.server ?: if (offline) throw Waiting() else try {
                     providers(e.loc.provider)!!.connect(e.loc, accounts[e.loc.provider]!!).server
