@@ -674,9 +674,13 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             throw Fail(failure)
         }
 
-    /** Whether route [id]'s running tunnel lacks the V2Ray disguise its provider page asks for. */
+    /**
+     * Whether route [id]'s running tunnel lacks the V2Ray disguise its provider page now asks for: its link has none, or
+     * the engine runs a setup without it (the link is the same, the disguise is added when it is installed).
+     */
     private fun plain(setup: Setup, id: String) = setup.route(id)?.takeIf { !it.imported }?.let { r ->
-        setup.opt(r.loc.provider, app.unbraid.data.DISGUISE_OPT) == "v2ray" && (links[id] as? app.unbraid.data.WgLink)?.let { it.disguise == null } == true
+        val p = r.loc.provider
+        setup.opt(p, app.unbraid.data.DISGUISE_OPT) == "v2ray" && (links[id] as? app.unbraid.data.WgLink)?.let { it.disguise == null || applied?.opt(p, app.unbraid.data.DISGUISE_OPT) != "v2ray" } == true
     } == true
 
     /**
@@ -705,8 +709,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // whose account was signed out or refused stops now too, not once the others are found.
             // So does a running tunnel that now has to go through another route (Via): never straight while the entry is fetched.
             // And a running tunnel without the disguise its provider now asks for: never plain while a disguised one is fetched.
-            val stopNow = ready.blocked.any { (id, e) -> (e is AuthException || setup.route(id)?.via != null || plain(setup, id)) && id in links } ||
-                links.keys.any { id -> setup.route(id)?.via != applied?.route(id)?.via }
+            val stopNow = ready.blocked.any { (id, e) -> (e is AuthException || setup.route(id)?.via != null) && id in links } ||
+                links.keys.any { id -> setup.route(id)?.via != applied?.route(id)?.via || plain(setup, id) }
             if ((stopNow || LinkPicker.leavesDirect(applied, setup, setup.activeRoutes.mapTo(HashSet()) { it.id }, lastInput?.tsSuffix, store.tsSuffix)) && !install(srv, setup, ready, accounts, seen)) return
             Ask(srv, setup, accounts, ready, applied, appliedAccounts, refusedFor(setup, accounts), store.lastLinks, generation, seen)
         }

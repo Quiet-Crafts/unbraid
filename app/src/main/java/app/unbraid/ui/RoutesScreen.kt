@@ -208,7 +208,7 @@ private fun where(r: Route, live: Map<String, Server>) = when {
         when (Nord.tech(r.loc).takeIf { r.loc.provider == "nord" } ?: r.loc.protocol) {
             "openvpn_udp" -> "OpenVPN"
             "openvpn_tcp" -> "OpenVPN TCP"
-            app.unbraid.data.AUTO_PROTOCOL -> if (app.unbraid.data.AutoProtocol.onTcp(r.id) && r.id in live) "Using OpenVPN TCP" else null
+            app.unbraid.data.AUTO_PROTOCOL -> if (app.unbraid.data.AutoProtocol.of(r) == "openvpn_tcp" && r.id in live) "Using OpenVPN TCP" else null
             else -> null
         },
     ).joinToString(" · ")

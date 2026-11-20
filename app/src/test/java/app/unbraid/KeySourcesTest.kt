@@ -348,6 +348,10 @@ class KeySourcesTest {
         val over = AirVpn.connect(auto.loc.copy(protocol = app.unbraid.data.AutoProtocol.of(auto)), blob)
         assertTrue(over is app.unbraid.data.OvpnLink && app.unbraid.data.AutoProtocol.matches(auto, over))
         assertEquals("openvpn_3_tcp_443", asked["protocols"])
+        // Given a Via since: WireGuard, the only protocol Via takes; the TCP tunnel isn't kept.
+        assertEquals(null, app.unbraid.data.AutoProtocol.of(auto.copy(via = "e")))
+        assertFalse(app.unbraid.data.AutoProtocol.matches(auto.copy(via = "e"), over))
+        assertTrue(app.unbraid.data.AutoProtocol.matches(auto.copy(via = "e"), wg))
         assertEquals("openvpn_tcp", app.unbraid.data.AutoProtocol.of(auto.copy(loc = auto.loc.copy(pinned = app.unbraid.data.Server("x", "h", "1.2.3.4", "k", 40))))) // same route, whatever its server details
         app.unbraid.data.AutoProtocol.reset()
         assertEquals(null, app.unbraid.data.AutoProtocol.of(auto))

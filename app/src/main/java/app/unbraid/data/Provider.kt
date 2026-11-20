@@ -51,11 +51,11 @@ object AutoProtocol {
     fun toTcp(route: String) = tcp.add(route)
     fun reset() = tcp.clear()
 
-    /** The protocol [r] connects with now: Automatic resolved to WireGuard (null) or OpenVPN TCP. */
-    fun of(r: Route) = if (r.loc.protocol == AUTO_PROTOCOL) "openvpn_tcp".takeIf { onTcp(r.id) } else r.loc.protocol
+    /** The protocol [r] connects with now: Automatic resolved to WireGuard (null) or OpenVPN TCP; always WireGuard with a Via. */
+    fun of(r: Route) = if (r.loc.protocol == AUTO_PROTOCOL) "openvpn_tcp".takeIf { r.via == null && onTcp(r.id) } else r.loc.protocol
 
     /** Whether [l], kept or cached, was made with the protocol [r] uses now. */
-    fun matches(r: Route, l: Link) = r.loc.protocol != AUTO_PROTOCOL || (l is OvpnLink) == onTcp(r.id)
+    fun matches(r: Route, l: Link) = r.loc.protocol != AUTO_PROTOCOL || (l is OvpnLink) == (r.via == null && onTcp(r.id))
 }
 
 /** Provider page setting: "v2ray" carries the provider's WireGuard tunnels inside V2Ray ([WgLink.disguise]); "off". */
