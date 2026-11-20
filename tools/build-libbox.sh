@@ -12,12 +12,12 @@ PIN=c005f35300ce76427dc285481ec5695f5b179cd2
 git checkout -q -f $PIN && git clean -qfd
 [ "$(git rev-parse HEAD)" = $PIN ] || { echo "sing-box checkout is not v1.14.4"; exit 1; }
 git apply "$ROOT"/tools/sing-box-*.patch
-# go1.26.10: the toolchain sing-box builds 1.14.4 with upstream; Go 1.25 no longer gets security fixes.
+# go1.26.11: the latest Go 1.26 patch, with its security fixes (sing-box 1.14.4 is built with Go 1.26 upstream).
 # The pinned gomobile and gobind are installed into a private folder that is first on PATH, so neither a custom
 # GOBIN nor an older copy in GOPATH or elsewhere on PATH can be picked up instead.
 BIN="$WORK/bin"
 rm -rf "$BIN" && mkdir -p "$BIN"
-export GOTOOLCHAIN=go1.26.10 GOBIN="$BIN" PATH="$BIN:$PATH"
+export GOTOOLCHAIN=go1.26.11 GOBIN="$BIN" PATH="$BIN:$PATH"
 export ANDROID_HOME=${ANDROID_HOME:-$HOME/Library/Android/sdk} ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-$HOME/Library/Android/sdk/ndk/28.2.13676358}
 # gomobile needs a JDK; Android Studio ships one.
 export JAVA_HOME=${JAVA_HOME:-"/Applications/Android Studio.app/Contents/jbr/Contents/Home"}
