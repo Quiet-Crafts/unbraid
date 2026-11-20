@@ -316,17 +316,27 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (destroyed || intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return // an update keeps its user id
             val pkg = intent.data?.schemeSpecificPart ?: return
             scope.launch {
+                // First the note, then the phase: [connect] sets the phase, then reads the note, so one of the two sees the other.
+                installedWhileStarting = true
+                if (state.value.phase != VpnState.Phase.On) return@launch
+                installedWhileStarting = false
                 val uid = intent.getIntExtra(Intent.EXTRA_UID, -1)
                 val joins = uid >= 0 && runCatching { packageManager.getPackagesForUid(uid)?.any { it in leftOut } == true }.getOrDefault(true)
-                if (!joins && pkg !in store.setup.value.apps) return@launch
-                installedWhileStarting = true // first, then the phase: [connect] sets the phase, then reads this
-                if (state.value.phase == VpnState.Phase.On) { installedWhileStarting = false; reload() }
+                // Left out by the setup but not installed when the tunnel was built: Android skipped it, and the setup is
+                // unchanged, so only a new tunnel leaves it out.
+                val skipped = pkg in wantedOut && pkg !in leftOut
+                if (!joins && !skipped && pkg !in store.setup.value.apps) return@launch
+                if (skipped) rebuild = true
+                reload()
             }
         }
     }
     @Volatile private var installedWhileStarting = false
-    /** The apps Android was told to leave out of the VPN when the tunnel was last built. */
+    /** The next [apply] builds a new tunnel even if the engine's setup is unchanged: what Android leaves out may differ. */
+    @Volatile private var rebuild = false
+    /** The apps Android left out of the VPN when the tunnel was last built ([leftOut]), of those the setup asked for ([wantedOut]). */
     @Volatile private var leftOut: Set<String> = emptySet()
+    @Volatile private var wantedOut: Set<String> = emptySet()
 
     private fun stopIfIdle() {
         if (pending > 0 || !stopWanted || destroyed) return
@@ -476,7 +486,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 }) scope.launch { reload() }
             }.launchIn(scope)
             // An app installed while this was starting: judged now, with the VPN on.
-            if (installedWhileStarting) { installedWhileStarting = false; scope.launch { reload() } }
+            if (installedWhileStarting) { installedWhileStarting = false; rebuild = true; scope.launch { reload() } }
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${logLine(e)}")
             // After an update the notice offers the reconnect; a tap shows what fails, in the app.
@@ -541,7 +551,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         var input = input(setup, links, blocked)
         var json = Compiler.compile(input)
         // A favourite, a rename or a second sign-in changes the setup but not what the engine runs: keep every tunnel up.
-        val fresh = json != lastGood
+        val fresh = json != lastGood || rebuild
+        rebuild = false
         if (fresh) {
             // Every engine start gets a new loopback port and password: while an old engine lets go of its port, a local
             // app could take it over and see that engine's password, which no later engine accepts. The app's own tests
@@ -1223,7 +1234,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             o.inet4RouteExcludeAddress.forEach { b.excludeRoute(it.ipPrefix()) }
             o.inet6RouteExcludeAddress.forEach { b.excludeRoute(it.ipPrefix()) }
             o.includePackage.forEachString { runCatching { b.addAllowedApplication(it) } }
-            leftOut = buildSet { o.excludePackage.forEachString { p -> if (runCatching { b.addDisallowedApplication(p) }.isSuccess) add(p) } }
+            val wanted = buildSet { o.excludePackage.forEachString { add(it) } }
+            leftOut = wanted.filterTo(HashSet()) { p -> runCatching { b.addDisallowedApplication(p) }.isSuccess }
+            wantedOut = wanted
         }
         val pfd = b.establish() ?: error("VPN permission revoked")
         tun?.close()

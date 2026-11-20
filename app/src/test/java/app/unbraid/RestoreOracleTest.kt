@@ -284,7 +284,7 @@ class RestoreOracleTest {
         val place = { ip: String -> if (homeRanges.any { within(ip, it) }) Who.Home else if (localOn && lan.any { within(ip, it) }) Who.Local else null }
         for (l in listOf(false, true)) {
             val dflt = duo(a, b, l) { it.connect(OTHER, "free.test", "203.0.113.80") }
-            val dfltLookup = listOf("TXT", "HTTPS").associateWith { q -> duo(a, b, l, true) { it.lookup(OTHER, "free.test", q) } }
+            val dfltLookup = listOf("TXT", "HTTPS", "SVCB").associateWith { q -> duo(a, b, l, true) { it.lookup(OTHER, "free.test", q) } }
             for (p in listOf(OTHER, OWNERLESS, PING) + appKeys) {
                 val ownName = if (p == PING) null else "free.test"
                 val own = duo(a, b, l) { it.connect(p, ownName, "203.0.113.80") }
@@ -299,7 +299,7 @@ class RestoreOracleTest {
                         if (net != "udp" && n == ownName && ip == "203.0.113.80") continue
                         each(duo(a, b, l) { it.connect(p, n, ip, net) }, own, pe) { d, o, e, x -> if (x == Loss.ToDirect && Loss.Unblocked in d.losses && d.now.by == By.Address) null else who(n, place(ip), d, o, e, sites, x) }
                     }
-                if (p != PING) for (q in listOf("TXT", "HTTPS")) {
+                if (p != PING) for (q in listOf("TXT", "HTTPS", "SVCB")) {
                     val ownL = duo(a, b, l, true) { it.lookup(p, "free.test", q) }
                     val peL = mine(ownL, dfltLookup.getValue(q))
                     for (n in names - "free.test") each(duo(a, b, l, true) { it.lookup(p, n, q) }, ownL, peL) { d, o, e, x ->
