@@ -161,7 +161,7 @@ object SpeedTest {
             }
         }
         // A test through Tailscale's routed node first switches back from a tested node, so it never measures that one.
-        if (node == null) { if (tag == Compiler.TS_TAG) tsq.execute { if (stop()) return@execute; if (Unbraid.store.tsTestFrom != null) switchBack(); Thread(test, "speedtest").start() } else Thread(test, "speedtest").start() }
+        if (node == null) { if (tag == Compiler.TS_TAG) tsq.execute { if (stop()) return@execute; if (Unbraid.store.tsTestFrom != null && !switchBack()) { set { it.copy(phase = Phase.Failed, error = "Tailscale couldn't go back to its exit node. Try again.") }; return@execute }; Thread(test, "speedtest").start() } else Thread(test, "speedtest").start() }
         else tsq.execute {
             if (stop()) return@execute // cancelled before its turn: switch nothing
             if (moved()) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; return@execute }
@@ -328,7 +328,8 @@ object SpeedTest {
                     up.filter { UnbraidVpn.tags[it] == null }.forEach { e -> leg(e) { it.copy(error = "It didn't connect for the test.") } }
                 }
                 // A cut-off test of another node may have left Tailscale on it: the routed node first, as for a single test.
-                if (Unbraid.store.tsTestFrom != null && legs.any { UnbraidVpn.tags[it] == Compiler.TS_TAG }) runCatching { tsq.submit(::switchBack).get() }
+                if (Unbraid.store.tsTestFrom != null && legs.any { UnbraidVpn.tags[it] == Compiler.TS_TAG } && runCatching { tsq.submit(::switchBack).get() }.getOrDefault(false) != true)
+                    legs.filter { UnbraidVpn.tags[it] == Compiler.TS_TAG }.forEach { e -> leg(e) { it.copy(error = "Tailscale couldn't go back to its exit node.") } }
                 parallel(_all.value?.legs.orEmpty().filter { it.error == null }.map { it.exit }) { e ->
                     val country = setup.route(e)?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()
                     try {
@@ -411,21 +412,19 @@ object SpeedTest {
     }
 
     /** On [tsq] only. */
-    private fun switchBack() {
+    /**
+     * Puts Tailscale back on the node the running engine routes to. Under the VPN's own lock, so no engine starts while it
+     * is chosen and set. True when that node (or no exit, when none is routed) was set; the note stays otherwise, and a
+     * routed test doesn't start on an unknown node. Never on the main thread.
+     */
+    private fun switchBack(): Boolean = UnbraidVpn.underLock {
         // A node Tailscale won't take back (gone, no longer an exit) is no reason to stay on the tested one: no exit then.
         val set = { id: String -> runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, id) }.isSuccess }
-        var from = Unbraid.store.tsTestFrom
-        // For the engine that runs from start to end: one started meanwhile (a reload) may have got a node it doesn't run,
-        // so it is done again for that one. Unsettled after three goes, the note stays and a later status tries again.
-        repeat(3) {
-            val engine = UnbraidVpn.state.value.engine
-            val want = restoreTo((UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit, from, UnbraidVpn.state.value.tsExitNodes)
-            val ok = set(want.orEmpty())
-            if (!(ok && want != null) && want != "") set("")
-            if (UnbraidVpn.state.value.engine == engine) { if (ok && want != null) Unbraid.store.tsTestFrom = null; return }
-            from = null
-        }
-    }
+        val want = restoreTo((UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit, Unbraid.store.tsTestFrom, UnbraidVpn.state.value.tsExitNodes)
+        val ok = set(want.orEmpty()) && want != null
+        if (ok) Unbraid.store.tsTestFrom = null else if (want != "") set("")
+        ok
+    } ?: false
 
     /**
      * The stable ID to switch back to, for the route's setting now ([routed], an address, ID or name): "" for no exit

@@ -126,6 +126,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
          * the VPN instead of keeping it ([install]). Kept by the process, whatever screen is open.
          */
         val restores = java.util.concurrent.atomic.AtomicLong()
+        /** Runs [block] under the running service's lifecycle lock, so no engine starts meanwhile; null when none runs. Blocks: never on the main thread nor under that lock. */
+        fun <T> underLock(block: () -> T): T? = kotlinx.coroutines.runBlocking { lock.withLock { current?.takeIf { !it.destroyed }?.let { block() } } }
         const val RESTORE_REFUSED = "The restored setup couldn't start, so unbraid is off. Check your routes, then connect again."
         /** Route id → engine tunnel tag of the running setup (speed tests dial through it). */
         @Volatile var tags: Map<String, String> = emptyMap()
@@ -627,7 +629,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * Routes blocked for a passing reason (no network, provider unreachable) try again after 5 s, 15 s, 30 s, 1 min,
      * then every 5 min; signed-out or refused ones wait for a sign-in, which reloads by itself.
      */
-    private val netKicks = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
+    private val netKicks = kotlinx.coroutines.channels.Channel<Long>(kotlinx.coroutines.channels.Channel.CONFLATED)
+    private val netWanted = java.util.concurrent.atomic.AtomicBoolean()
+    /** The backoff timer set last; its kick alone counts. Changed under [lock]. */
+    private var retryTicket = 0L
     private var netWorker: Job? = null
 
     private fun retryBlocked(blocked: Map<String, Exception>) {
@@ -638,16 +643,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // Every try, timed or for a new network, runs on one worker, one at a time with the newest asked for last: an older
         // try that fails after a newer one worked can't put its blocked result over it. The timer only asks.
         if (netWorker == null) netWorker = scope.launch {
-            // The backoff timer stays: a kick left from an older timer then only adds a try, never skips the wait.
-            for (k in netKicks) try { reload() }
+            // A new network always tries; a timer only if it is still the one set ([retryTicket]): an older one's kick that
+            // waited in the channel would otherwise try early and move the backoff on.
+            for (k in netKicks) try { if (netWanted.getAndSet(false) || lock.withLock { k == retryTicket }) reload() }
             catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { Log.e(TAG, "retry: ${logLine(e)}") } // one failed try never ends the worker
         }
+        val ticket = ++retryTicket
         retry = scope.launch {
             kotlinx.coroutines.delay(wait)
-            netKicks.trySend(Unit)
+            netKicks.trySend(ticket)
         }
         // A new network is the likeliest fix: try at once, with the backoff kept for what follows.
-        net.onChange = { netKicks.trySend(Unit) }
+        net.onChange = { netWanted.set(true); netKicks.trySend(0L) }
     }
 
     /** Providers of [blocked] routes, and whether one refused its account. */
