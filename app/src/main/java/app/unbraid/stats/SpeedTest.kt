@@ -161,7 +161,7 @@ object SpeedTest {
             }
         }
         // A test through Tailscale's routed node first switches back from a tested node, so it never measures that one.
-        if (node == null) { if (tag == Compiler.TS_TAG) tsq.execute { if (stop()) return@execute; if (Unbraid.store.tsTestFrom != null && !switchBack()) { set { it.copy(phase = Phase.Failed, error = "Tailscale couldn't go back to its exit node. Try again.") }; return@execute }; Thread(test, "speedtest").start() } else Thread(test, "speedtest").start() }
+        if (node == null) { if (tag == Compiler.TS_TAG) tsq.execute { if (stop()) return@execute; if (Unbraid.store.tsTestFrom != null && !switchBack()) { set { it.copy(phase = Phase.Failed, error = "Tailscale couldn't go back to its exit node. Try again.") }; return@execute }; if (stop()) return@execute; Thread(test, "speedtest").start() } else Thread(test, "speedtest").start() }
         else tsq.execute {
             if (stop()) return@execute // cancelled before its turn: switch nothing
             if (moved()) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; return@execute }
@@ -330,6 +330,7 @@ object SpeedTest {
                 // A cut-off test of another node may have left Tailscale on it: the routed node first, as for a single test.
                 if (Unbraid.store.tsTestFrom != null && legs.any { UnbraidVpn.tags[it] == Compiler.TS_TAG } && runCatching { tsq.submit(::switchBack).get() }.getOrDefault(false) != true)
                     legs.filter { UnbraidVpn.tags[it] == Compiler.TS_TAG }.forEach { e -> leg(e) { it.copy(error = "Tailscale couldn't go back to its exit node.") } }
+                if (stop()) return@Thread // cancelled while it waited to switch back: nothing is asked of M-Lab
                 parallel(_all.value?.legs.orEmpty().filter { it.error == null }.map { it.exit }) { e ->
                     val country = setup.route(e)?.takeIf { !it.imported && it.tsExit == null }?.loc?.countryCode?.uppercase()
                     try {
