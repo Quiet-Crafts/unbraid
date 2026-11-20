@@ -394,18 +394,19 @@ class KeySourcesTest {
         Endpoint = at.vpn.airdns.org:$port
     """.trimIndent()
 
-    /** Both ports, the account's first; both entries from AirVPN's list, none from the catalogue's. */
+    /** Every port, the account's first, 51820 tied to entry 3; both entries from AirVPN's list, none from the catalogue's. */
     @Test fun airvpnTunnelsCarryPortsAndEntries() {
         val entries = AirVpn.parse(res("airvpn_status.json"), accountKey)
         val l = AirVpn.link(Location("airvpn", country = "Netherlands"), AirVpn.account(AirVpn.signed(conf("10.164.20.6/32")))) { entries }
-        assertEquals(listOf(1637, 47107), l.ports)
+        assertEquals(listOf(1637, 47107, 51820), l.ports)
         val e = entries.first { it.ipv4 == l.server.ip }
         assertEquals(e.ips, l.entries)
         assertTrue(l.entries.size == 2 && l.entries[0] == l.server.ip && l.entries[1] != l.server.ip)
-        assertEquals(listOf(47107, 1637), AirVpn.link(Location("airvpn", country = "Netherlands"), AirVpn.account(AirVpn.signed(conf("10.164.20.6/32", 47107)))) { entries }.ports)
+        assertEquals(listOf(47107, 1637), AirVpn.link(Location("airvpn", country = "Netherlands"), AirVpn.account(AirVpn.signed(conf("10.164.20.6/32", 47107)))) { entries }.ports.take(2))
         AirVpn.catalogue = { Catalog.parse(res("catalog_airvpn.json"), "wireguard") }
         val offline = AirVpn.connect(Location("airvpn"), AirVpn.signed(conf("10.164.20.6/32"))) as app.unbraid.data.WgLink
         assertTrue(offline.entries.isEmpty())
+        assertEquals(mapOf(51820 to 2), offline.portEntry)
     }
 
     @Test fun surfsharkDropsMalformedKeysBeforeKeepingAList() {

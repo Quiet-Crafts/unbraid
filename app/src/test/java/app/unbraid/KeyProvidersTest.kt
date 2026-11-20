@@ -408,6 +408,20 @@ class KeyProvidersTest {
         assertEquals(warn, AirVpn.link(Location("airvpn", country = "Netherlands", pinned = pinned), a) { entries }.server.name)
     }
 
+    /** 51820 joins AirVPN's ports, tied to entry 3, also when the list doesn't name the entries. */
+    @Test fun providerPortLists() {
+        val a = AirVpn.signed(airConf)
+        val status = AirVpn.parse(res("airvpn_status.json"), a.publicKey!!)
+        val l = AirVpn.link(Location("airvpn", country = "Netherlands"), a) { status }
+        assertEquals(2, l.entries.size)
+        assertEquals(listOf(1637, 47107, 51820), l.ports)
+        assertEquals(mapOf(51820 to 2), l.portEntry)
+        val bare = AirVpn.link(Location("airvpn", country = "Germany"), a) { catalog("airvpn") }
+        assertTrue(bare.entries.isEmpty())
+        assertEquals(listOf(1637, 47107, 51820), bare.ports)
+        assertEquals(mapOf(51820 to 2), bare.portEntry)
+    }
+
     @Test fun airvpnCatalogueFallbackUsesTheAccountKey() {
         val entries = catalog("airvpn")
         assertTrue(entries.isNotEmpty() && entries.all { '.' in it.ipv4!! })
