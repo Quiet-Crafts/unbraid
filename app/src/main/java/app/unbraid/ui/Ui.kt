@@ -334,7 +334,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                 // No release of this provider runs meanwhile, and none of an earlier sign-out runs after: it could remove
                 // the device this sign-in uses ([app.unbraid.data.Store.account] drops them).
                 val (blob, saved) = lock(id).withLock {
-                    val blob = provider.signIn(clean)
+                    val blob = app.unbraid.vpn.Rotation.excluded { provider.signIn(clean) }
                     if (store.pendingReleases.any { it.provider == id } || unkept.removeAll { it.first == id }) unreleased(listOf(provider.name))
                     blob to store.account(id, blob)
                 }
@@ -377,7 +377,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     private fun warn(text: String) = notice.update { listOfNotNull(it, text).joinToString("\n") }
 
     /** True if the provider released this phone's slot (or has nothing to release). */
-    private fun release(id: String, blob: String) = runCatching { Providers.get(id)?.signOut(blob) ?: true }.getOrDefault(false)
+    private fun release(id: String, blob: String) = runCatching { app.unbraid.vpn.Rotation.excluded { Providers.get(id)?.signOut(blob) ?: true } }.getOrDefault(false)
 
     private fun unreleased(names: List<String>) = names.joinToString(", ").let {
         warn("Couldn't release this phone's device slot at $it. Remove it in your $it account${if (names.size > 1) "s" else ""}.")

@@ -25,4 +25,11 @@ internal object Rotation {
             }
         }
     }
+
+    /**
+     * Runs [block] once no key change is under way, and none starts meanwhile: a device release or a sign-in never
+     * meets a renewal that has already been sent, which could renew a device being released, or the one a sign-in takes.
+     * Blocks: never on the main thread.
+     */
+    fun <T> excluded(block: () -> T): T = synchronized(this) { block() }
 }

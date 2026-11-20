@@ -844,6 +844,10 @@ class CompilerTest {
         // The same server and key straight and through a Via are two paths: a clash, never one shared tunnel.
         val both = s.copy(routes = s.routes + Route("c", Location("nord", 2, "DE", "Germany"), hue = 2), apps = mapOf("x" to "c"))
         assertEquals(setOf("c"), Compiler.clashes(both, links + ("c" to links.getValue("b"))))
+        // A disguised tunnel and a plain one on the same key and server are never one tunnel: the later one gives way.
+        val disguised = (links.getValue("a") as WgLink).let { it.copy(peer = it.peer.copy(vmess = app.unbraid.data.Vmess("203.0.113.1", 443, "00000000-0000-0000-0000-000000000000"))) }
+        val twin = s.copy(routes = s.routes.map { it.copy(via = null) } + Route("d", Location("nord", 3, "FR", "France"), hue = 3), defaultRoute = "a", apps = mapOf("x" to "d"))
+        assertEquals(setOf("d"), Compiler.clashes(twin, mapOf("a" to links.getValue("a"), "b" to links.getValue("b"), "d" to disguised)))
         // The checks: no entry, itself, a chain of three, a Tailscale exit, OpenVPN.
         assertNull(s.viaProblem(s.route("b")!!))
         // An imported server on IPv6 can't be reached through the entry, which carries IPv4 only.

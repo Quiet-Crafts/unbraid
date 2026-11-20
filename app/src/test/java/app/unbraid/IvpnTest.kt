@@ -62,6 +62,19 @@ class IvpnTest {
     private val acct = Ivpn.Account("i-ABCD-EFGH-IJKL", "session", "cHJpdmF0ZS1wcml2YXRlLXByaXZhdGUtcHJpdmF0ZTE=", "172.16.34.56")
 
     /** A new key is due by age, to finish a change, or to add the quantum-safe key; IVPN's answer decides what's kept. */
+    /** A device release or a sign-in waits for a key change under way (the lock [app.unbraid.vpn.Rotation.run] holds). */
+    @Test fun releasesAndSignInsWaitForAKeyChange() {
+        val held = java.util.concurrent.CountDownLatch(1)
+        val t = Thread { synchronized(app.unbraid.vpn.Rotation) { held.countDown(); Thread.sleep(300) } }.apply { start() }
+        held.await()
+        val start = System.nanoTime()
+        app.unbraid.vpn.Rotation.excluded { }
+        assertTrue((System.nanoTime() - start) / 1_000_000 >= 250)
+        t.join()
+        val ui = java.io.File("src/main/java/app/unbraid/ui/Ui.kt").readText()
+        assertTrue(ui.contains("Rotation.excluded { Providers.get(id)?.signOut(blob)") && ui.contains("Rotation.excluded { provider.signIn(clean) }"))
+    }
+
     @Test fun keyRotation() {
         val day = 86_400_000L
         val a = acct.copy(psk = PSK, keyAt = 10 * day)

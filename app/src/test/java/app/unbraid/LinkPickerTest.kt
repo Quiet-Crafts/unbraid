@@ -405,6 +405,18 @@ class LinkPickerTest {
         app.unbraid.vpn.Compiler.shared(s, LinkPicker.ported(s, r.links, mapOf(ka to 1)), r.blocked.keys)
     }
 
+    /** Disguise on, a pinned server's list unreadable: its last disguised tunnel stands in; with none, it stays blocked. */
+    @Test fun aPinnedDisguisedRouteTakesItsLastDisguisedTunnel() {
+        val r = Route("1", Location("fake", countryCode = "NL", pinned = a))
+        val s = setup(r).copy(opts = mapOf("fake" to mapOf(app.unbraid.data.DISGUISE_OPT to "v2ray")))
+        val p = Fake(listOf(a)) // a pinned connect answers with the saved server and no V2Ray hop, as a provider whose list is down
+        val hop = app.unbraid.data.Disguise(app.unbraid.data.Vmess("203.0.113.1", 443, "00000000-0000-0000-0000-000000000000"), 2049)
+        val last = mapOf(LinkPicker.cacheKey(r) to link(a).copy(disguise = hop))
+        val got = pick(s, p, last)
+        assertEquals(hop, (got.links.getValue("1") as WgLink).disguise)
+        assertTrue(pick(s, p).blocked.getValue("1").message!!.contains("V2Ray"))
+    }
+
     /** Provider tunnels take their page's MTU (1280 by default, 1280 to 1420); imports keep theirs, at most 1280. */
     @Test fun mtuFollowsTheProviderPage() {
         val peer = WgPeer("x", "k", listOf("10.0.0.2/32"), "p", endpoint = "198.51.100.1:51820", allowedIps = listOf("0.0.0.0/0"))

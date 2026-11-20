@@ -652,7 +652,8 @@ object Compiler {
 
     private fun wgIdentity(p: WgPeer) = listOf(p.endpoint.lowercase(), p.publicKey, sha(p.privateKey)).joinToString("|")
     // Address order too: the engine sends from the last IPv4 address.
-    private fun wgKey(p: WgPeer) = listOf("wg", wgIdentity(p), sha(p.presharedKey.orEmpty()), p.address.joinToString(","), minOf(p.mtu, app.unbraid.data.MTU_MIN), keepalive(p), p.junk).joinToString("|")
+    // With its V2Ray hop too: a disguised tunnel and a plain one to the same server are never one shared tunnel.
+    private fun wgKey(p: WgPeer) = listOf("wg", wgIdentity(p), sha(p.presharedKey.orEmpty()), p.address.joinToString(","), minOf(p.mtu, app.unbraid.data.MTU_MIN), keepalive(p), p.junk, p.vmess?.let { sha(it.toString()) }.orEmpty()).joinToString("|")
     private fun keepalive(p: WgPeer) = p.keepalive ?: 25
 
     const val CLASH = "Another of your WireGuard connections uses this key on the same server with other settings. Use one config for both."

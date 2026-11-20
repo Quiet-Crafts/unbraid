@@ -108,7 +108,12 @@ object LinkPicker {
                         trusted(it, r, accounts, providers) && Addr.usable(it) && app.unbraid.data.AutoProtocol.matches(r, it) && disguised(setup, r, it) && (it as? WgLink)?.hopEntry == null
                 } ?: if (offline) throw if (accounts[r.loc.provider] == null) AuthException("Sign in to ${providers(r.loc.provider)?.name ?: r.loc.provider} for ${r.name}")
                         else if (keep[r.id]?.let { suits(it, r, providers) } == false) Unsuited() else Waiting()
-                    else fresh(r, accounts, last, used, providers).also {
+                    else fresh(r, accounts, last, used, providers).let { l ->
+                        // A pinned server comes without its V2Ray hop while the provider's list can't be read: its last
+                        // disguised tunnel stands in, as a cached one does for a route that isn't pinned.
+                        if (r.loc.pinned == null || disguised(setup, r, l)) l
+                        else saved(r, last)?.takeIf { c -> disguised(setup, r, c) && trusted(c, r, accounts, providers) && app.unbraid.data.AutoProtocol.matches(r, c) && (c as? WgLink)?.hopEntry == null } ?: l
+                    }.also {
                         if (!Addr.usable(it)) throw Addr.refused(it.server.name)
                         if (!disguised(setup, r, it)) throw Fail("${r.name}: ${it.server.name} can't be reached through V2Ray right now. Pick another server, or turn Disguise off on the ${providers(r.loc.provider)?.name} page")
                     }
