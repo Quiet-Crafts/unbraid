@@ -291,9 +291,9 @@ class KeySourcesTest {
         -----END CERTIFICATE-----
         </cert>
         <key>
-        -----BEGIN PRIVATE KEY-----
+        -----BEGIN TEST KEY-----
         MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgAAAAAAAAAAAAAAAA
-        -----END PRIVATE KEY-----
+        -----END TEST KEY-----
         </key>
         ${if (tcp) "<tls-crypt>" else "key-direction 1\n<tls-auth>"}
         -----BEGIN OpenVPN Static key V1-----
