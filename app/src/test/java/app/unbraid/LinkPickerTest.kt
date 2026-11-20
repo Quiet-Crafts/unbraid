@@ -256,18 +256,23 @@ class LinkPickerTest {
         assertTrue(LinkPicker.pinKey("airvpn", pin("Aladfar").pinned!!) != LinkPicker.pinKey("airvpn", pin("Aquila").pinned!!))
         assertEquals(LinkPicker.pinKey("nord", a), LinkPicker.pinKey("nord", a.copy(name = "renamed")))
         val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
-        assertEquals(2, Regex("""gone\[LinkPicker\.pinKey\(|gone \+ \(LinkPicker\.pinKey\(""").findAll(vpn).count())
+        assertEquals(2, Regex("""LinkPicker\.goneKey\(""").findAll(vpn).count())
+        // Gone for its protocol only: a Nord server missing from one protocol's list leaves routes on another running.
+        val nord = Location("nord", pinned = a)
+        assertTrue(LinkPicker.goneKey(nord.copy(protocol = "wireguard_udp")) != LinkPicker.goneKey(nord.copy(protocol = "openvpn_udp")))
     }
 
-    /** After the update, a restored pin's tunnel that 3.1.1 saved under its host name alone is still its fallback, and only its own server's. */
-    @Test fun aRestoredPinsOlderCacheEntryIsReadForThatServerOnly() {
+    /**
+     * After the update, a pin restored without its address doesn't take the tunnel 3.1.1 saved under its host name alone:
+     * that one may be another server of the same host name. With the provider unreachable it waits for its list.
+     */
+    @Test fun aRestoredPinsOlderCacheEntryIsNotTaken() {
         val down = object : Provider by Fake(listOf(a), online = false) { override val id = "airvpn" }
         fun pin(name: String) = Location("airvpn", countryCode = "US", pinned = Server(name, "us.vpn.airdns.org", "", "", -1))
         val older = "airvpn|${pin("x").copy(pinned = null)}|us.vpn.airdns.org"
         val last = mapOf(older to link(Server("Aladfar", "us.vpn.airdns.org", "203.0.113.10", "pub", 0)))
         val out = LinkPicker.pick(setup(Route("1", pin("Aladfar")), Route("2", pin("Aquila"))), emptyMap(), null, emptyMap(), mapOf("airvpn" to "acc"), last) { down }
-        assertEquals("203.0.113.10", out.links.getValue("1").server.ip)
-        assertTrue("2" !in out.links)
+        assertTrue(out.links.isEmpty())
     }
 
     @Test fun aSignedOutProvidersRouteIsBlockedAndTheOthersStillRun() {

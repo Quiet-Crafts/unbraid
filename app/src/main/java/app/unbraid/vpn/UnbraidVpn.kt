@@ -787,6 +787,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         lock.withLock {
             // Stopped, reloaded or edited during the provider calls: the newer state wins (the watcher reloads an edit).
             if (destroyed || state.value.phase != VpnState.Phase.On || generation != ask.generation || store.setup.value != ask.setup || store.accounts.value != ask.accounts) return
+            // A provider list read meanwhile may rule out a server picked from an older one (Mullvad-owned only): picked again.
+            if (!LinkPicker.stillSuits(ask.setup, picked.links, Providers::get)) { scope.launch { reload() }; return }
             noteRefusals(ask.setup, ask.accounts, picked)
             runCatching { store.rememberLinks(picked.remember) }.onFailure { Log.w(TAG, "last servers not saved") }
             install(ask.srv, ask.setup, picked, ask.accounts, ask.seen)
@@ -1006,14 +1008,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun refusedFor(setup: Setup, accounts: Map<String, String>): Map<String, Exception> {
         refusals = refusals.filter { (p, v) -> v.first == accounts[p] }
         return setup.activeRoutes.filter { !it.imported }.mapNotNull { r ->
-            (refusals[r.loc.provider]?.second ?: r.loc.pinned?.let { gone[LinkPicker.pinKey(r.loc.provider, it)] })?.let { r.id to it }
+            (refusals[r.loc.provider]?.second ?: LinkPicker.goneKey(r.loc)?.let { gone[it] })?.let { r.id to it }
         }.toMap()
     }
 
     private fun noteRefusals(setup: Setup, accounts: Map<String, String>, r: LinkPicker.Result) = r.blocked.forEach { (id, e) ->
         setup.route(id)?.takeIf { !it.imported }?.let {
             if (e is AuthException) refusals = refusals + (it.loc.provider to (accounts[it.loc.provider] to e))
-            if (e is app.unbraid.data.NoLongerOffered) it.loc.pinned?.let { p -> gone = gone + (LinkPicker.pinKey(it.loc.provider, p) to e) }
+            if (e is app.unbraid.data.NoLongerOffered) LinkPicker.goneKey(it.loc)?.let { k -> gone = gone + (k to e) }
         }
     }
 

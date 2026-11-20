@@ -42,6 +42,9 @@ object LinkPicker {
     /** A pinned server as its provider finds it again: by host name, and on AirVPN, whose servers share one per country, by name too. */
     fun pinKey(provider: String, s: Server) = "$provider|${s.host}" + if (provider == "airvpn") "|${s.name}" else ""
 
+    /** A pinned server no longer offered, for its protocol: Nord's lists differ by protocol, so one list without it rules out only routes on it. */
+    fun goneKey(l: app.unbraid.data.Location) = l.pinned?.let { pinKey(l.provider, it) + "|" + l.protocol.orEmpty() }
+
     /**
      * The route's saved tunnel. A pin's is its own server's only ([pinKey]), also under the key 3.1.1 saved a pin restored
      * without its address with (its host name alone), until a pick saves it under its own.
@@ -49,7 +52,8 @@ object LinkPicker {
     private fun saved(r: Route, last: Map<String, Link>): Link? {
         val pin = r.loc.pinned ?: return last[cacheKey(r)]
         val older = "${r.loc.provider}|${r.loc.copy(pinned = null)}|${serverId(pin)}"
-        return listOf(cacheKey(r), older).firstNotNullOfOrNull { k -> last[k]?.takeIf { pinKey(r.loc.provider, it.server) == pinKey(r.loc.provider, pin) } }
+        // Not for a pin without its address: under 3.1.1 that key could hold another server of the same host name.
+        return listOfNotNull(cacheKey(r), older.takeIf { pin.ip.isNotEmpty() }).firstNotNullOfOrNull { k -> last[k]?.takeIf { pinKey(r.loc.provider, it.server) == pinKey(r.loc.provider, pin) } }
     }
 
     /**
@@ -97,8 +101,8 @@ object LinkPicker {
             out[r.id] = link
         }
         // A server no longer offered is gone for every route pinned to it, not only the one that asked.
-        val gone = blocked.entries.filter { it.value is app.unbraid.data.NoLongerOffered }.mapNotNull { (id, e) -> setup.route(id)?.loc?.let { l -> l.pinned?.let { pinKey(l.provider, it) to e } } }.toMap()
-        setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> r.loc.pinned?.let { gone[pinKey(r.loc.provider, it)] }?.let { blocked[r.id] = it; out.remove(r.id) } }
+        val gone = blocked.entries.filter { it.value is app.unbraid.data.NoLongerOffered }.mapNotNull { (id, e) -> setup.route(id)?.loc?.let(::goneKey)?.let { it to e } }.toMap()
+        setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> goneKey(r.loc)?.let { gone[it] }?.let { blocked[r.id] = it; out.remove(r.id) } }
         // A provider that refused its account refuses it for every route: none of them keeps a tunnel on it.
         val refusedBy = blocked.entries.filter { it.value is AuthException }.mapNotNull { (id, e) -> setup.route(id)?.takeIf { !it.imported }?.let { it.loc.provider to e } }.toMap()
         setup.activeRoutes.filter { !it.imported && it.id in out }.forEach { r -> refusedBy[r.loc.provider]?.let { blocked[r.id] = it; out.remove(r.id) } }
@@ -155,6 +159,10 @@ object LinkPicker {
     }
 
     /** A pinned server always suits; an unpinned route's must suit its provider's page settings ([Provider.suits]). */
+    /** Whether every provider route's [links] still suits its provider's settings as its latest list says. */
+    fun stillSuits(setup: Setup, links: Map<String, Link>, providers: (String) -> Provider?) =
+        setup.activeRoutes.all { r -> r.imported || links[r.id]?.let { suits(it, r, providers) } != false }
+
     private fun suits(l: Link, r: Route, providers: (String) -> Provider?) = r.loc.pinned != null || providers(r.loc.provider)?.suits(l.server) != false
 
     /** The first of [links] for unpinned route [r] whose server suits [p]'s settings as its last list confirmed; none is refused. */
