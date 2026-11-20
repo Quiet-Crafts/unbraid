@@ -43,7 +43,7 @@ object LinkPicker {
     fun pinKey(provider: String, s: Server) = "$provider|${s.host}" + if (provider == "airvpn") "|${s.name}" else ""
 
     /** A pinned server no longer offered, for its protocol: Nord's lists differ by protocol, so one list without it rules out only routes on it. */
-    fun goneKey(l: app.unbraid.data.Location) = l.pinned?.let { pinKey(l.provider, it) + "|" + l.protocol.orEmpty() }
+    fun goneKey(l: app.unbraid.data.Location) = l.pinned?.let { pinKey(l.provider, it) + "|" + if (l.provider == "nord") app.unbraid.data.Nord.tech(l) else l.protocol.orEmpty() }
 
     /**
      * The route's saved tunnel. A pin's is its own server's only ([pinKey]), also under the key 3.1.1 saved a pin restored

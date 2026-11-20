@@ -269,7 +269,13 @@ object Mullvad : Provider {
         return l.match(loc, ownedOnly()).sortedWith(compareByDescending<Relay> { it.weight }.thenBy { it.hostname }).take(limit).map { server(it, l) }
     }
 
-    private fun fetch() = parse(Http.get("$API/public/relays/wireguard/v2")).also { l -> ownedRelays = l.usable.filter { it.owned }.mapTo(HashSet()) { Triple(it.hostname, it.ip, it.publicKey) } }
+    private fun fetch() = parse(Http.get("$API/public/relays/wireguard/v2")).also { l ->
+        val owned = l.usable.filter { it.owned }.mapTo(HashSet()) { Triple(it.hostname, it.ip, it.publicKey) }
+        if (owned != ownedRelays.also { ownedRelays = owned }) listChanged?.invoke()
+    }
+
+    /** Told when a list read changes which relays Mullvad owns, wherever it was read: the VPN checks its routes again. */
+    @Volatile var listChanged: (() -> Unit)? = null
 
     internal fun parse(body: String) = Http.parsed("Mullvad") { NordApi.json.decodeFromString(RelayList.serializer(), body) }
 

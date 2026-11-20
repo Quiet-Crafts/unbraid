@@ -491,6 +491,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     (s != applied || a != appliedAccounts) && (s to a) != rejected
                 }) scope.launch { reload() }
             }.launchIn(scope)
+            // A Mullvad list read anywhere (a server picker too) that changes which relays it owns: routes checked again.
+            app.unbraid.data.Mullvad.listChanged = { if (!destroyed) scope.launch { reload() } }
             // An app installed while this was starting: judged now, with the VPN on.
             if (installs.get() != builtInstalls) scope.launch { reload() }
         } catch (e: Exception) {
@@ -1124,6 +1126,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         forgetLookups(this)
         net.stop()
         installRetry?.cancel(); installRetry = null
+        app.unbraid.data.Mullvad.listChanged = null
         applied = null; rejected = null; lastGood = null; builtInstalls = -1; lastInput = null; probe = null; links = emptyMap(); appliedAccounts = emptyMap()
         running = null; tags = emptyMap(); tunnelDns = emptyMap(); tcpOnly = emptySet()
     }
