@@ -357,8 +357,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val consent = prepare(this) == null
             val allowed = runCatching {
                 // The systemExempted type exists from Android 14; on 13 a foreground service needs no type.
-                if (android.os.Build.VERSION.SDK_INT >= 34) startForeground(1, notification("Connecting…"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
-                else startForeground(1, notification("Connecting…"))
+                // Android's own start reaching a pause keeps the paused notice: the pause goes on ([handle]).
+                val first = if (state.value.phase == VpnState.Phase.Paused && intent?.action == VpnService.SERVICE_INTERFACE) pausedNotice(state.value) else notification("Connecting…")
+                if (android.os.Build.VERSION.SDK_INT >= 34) startForeground(1, first, ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED)
+                else startForeground(1, first)
             }.isSuccess && consent
             // Refused while off or paused, so no engine runs: the service goes, once no earlier command is still waiting.
             if (!allowed && (state.value.phase == VpnState.Phase.Off || state.value.phase == VpnState.Phase.Paused)) {
@@ -407,10 +409,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 // Android's own start (after it killed the app, or Always-on) during a pause the user set: paused on until its end.
                 if ((intent == null || intent.action == VpnService.SERVICE_INTERFACE) && state.value.phase == VpnState.Phase.Off) PauseNote.wake(this)?.let { pause(0, again = true, wakeAt = it); return }
                 // Android's own start reaching a live pause (Always-on settings changed) keeps the pause: only its notice again.
-                if (intent?.action == VpnService.SERVICE_INTERFACE && state.value.phase == VpnState.Phase.Paused) { state.value.let { p ->
-                    val at = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(p.pausedUntil))
-                    getSystemService(NotificationManager::class.java).notify(1, notification(if (p.pausedUntil <= 0) "Paused" else if (!p.pausedAbout) "Paused until $at" else "Paused until about $at", paused = true))
-                }; return }
+                if (intent?.action == VpnService.SERVICE_INTERFACE && state.value.phase == VpnState.Phase.Paused) {
+                    getSystemService(NotificationManager::class.java).notify(1, pausedNotice(state.value)); return
+                }
                 connect(intent?.getBooleanExtra(EXTRA_UPDATED, false) == true)
             }
         }
@@ -634,13 +635,17 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         retrying = blocked
         if (blocked.values.all { it is AuthException }) { retries = 0; net.onChange = null; return }
         val wait = listOf(5, 15, 30, 60, 300)[minOf(retries++, 4)] * 1000L
+        // Every try, timed or for a new network, runs on one worker, one at a time with the newest asked for last: an older
+        // try that fails after a newer one worked can't put its blocked result over it. The timer only asks.
+        if (netWorker == null) netWorker = scope.launch {
+            for (k in netKicks) try { lock.withLock { retry?.cancel(); retry = null }; reload() }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { Log.e(TAG, "retry: ${logLine(e)}") } // one failed try never ends the worker
+        }
         retry = scope.launch {
             kotlinx.coroutines.delay(wait)
-            reload()
+            netKicks.trySend(Unit)
         }
-        // A new network is the likeliest fix: try at once, with the backoff kept for what follows. One at a time, the newest
-        // change last: an older try that fails after a newer one worked can't put its blocked result over it.
-        if (netWorker == null) netWorker = scope.launch { for (k in netKicks) { lock.withLock { retry?.cancel(); retry = null }; reload() } }
+        // A new network is the likeliest fix: try at once, with the backoff kept for what follows.
         net.onChange = { netKicks.trySend(Unit) }
     }
 
@@ -760,9 +765,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val picked = LinkPicker.pick(ask.setup, ask.ready.links, ask.applied, ask.appliedAccounts, ask.accounts, ask.last, avoid + failing, ask.refused, false, Providers::get)
         lock.withLock {
             // Stopped, reloaded or edited during the provider calls: the newer state wins (the watcher reloads an edit).
-            // A try cancelled while it waited (a newer one took over) applies nothing either.
-            if (destroyed || state.value.phase != VpnState.Phase.On || generation != ask.generation || store.setup.value != ask.setup || store.accounts.value != ask.accounts ||
-                kotlinx.coroutines.currentCoroutineContext()[Job]?.isActive == false) return
+            if (destroyed || state.value.phase != VpnState.Phase.On || generation != ask.generation || store.setup.value != ask.setup || store.accounts.value != ask.accounts) return
             noteRefusals(ask.setup, ask.accounts, picked)
             runCatching { store.rememberLinks(picked.remember) }.onFailure { Log.w(TAG, "last servers not saved") }
             install(ask.srv, ask.setup, picked, ask.accounts, ask.seen)
@@ -1172,10 +1175,16 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             while (SystemClock.elapsedRealtime() < wake) kotlinx.coroutines.delay((wake - SystemClock.elapsedRealtime()).coerceIn(1, 15_000))
             lock.withLock { if (state.value.phase == VpnState.Phase.Paused && pauses == pause) connect() }
         }
-        val at = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(until))
-        getSystemService(NotificationManager::class.java).notify(1, notification(if (until <= 0) "Paused" else if (exact) "Paused until $at" else "Paused until about $at", paused = true))
+        val paused = VpnState(VpnState.Phase.Paused, pausedUntil = until, pausedAt = System.currentTimeMillis(), pausedAbout = !exact, lockdown = lockdown, alwaysOn = alwaysOn)
+        getSystemService(NotificationManager::class.java).notify(1, pausedNotice(paused))
         // Last: whoever sees Paused (a resume refused for lack of consent) finds the alarm and notice to cancel.
-        state.value = VpnState(VpnState.Phase.Paused, pausedUntil = until, pausedAt = System.currentTimeMillis(), pausedAbout = !exact, lockdown = lockdown, alwaysOn = alwaysOn)
+        state.value = paused
+    }
+
+    /** The notice of pause [p]: until when, on time or about. */
+    private fun pausedNotice(p: VpnState): Notification {
+        val at = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(p.pausedUntil))
+        return notification(if (p.pausedUntil <= 0) "Paused" else if (!p.pausedAbout) "Paused until $at" else "Paused until about $at", paused = true)
     }
 
     override fun onRevoke() = stoppedOutside("Android turned off $APP's VPN: another VPN app took over, or it was disconnected in Android's settings.")
