@@ -48,6 +48,26 @@ const val ENTRY_OPT = "entry"
  * A setting on a provider's page, saved in [Setup.opts]. No [choices] = an on/off switch ("on"/"off"). [advanced]: one
  * most people never need, which can stop routes connecting: listed under the page's Advanced settings.
  */
+/**
+ * A server's delay (ms) and packet loss (%) as its provider measured them, oldest first; NaN where it has no sample.
+ * [days] the period they cover.
+ */
+class Quality(val delay: FloatArray, val loss: FloatArray, val days: Int) {
+    private fun FloatArray.known() = filter { !it.isNaN() }
+    val delayAvg get() = delay.known().average().takeIf { !it.isNaN() }
+    val delayRange get() = delay.known().let { if (it.isEmpty()) null else it.min() to it.max() }
+    val lossAvg get() = loss.known().average().takeIf { !it.isNaN() }
+    val lossMax get() = loss.known().maxOrNull()
+
+    /** One plain line: "Delay 2.1 ms on average (1.8 to 4.0), packet loss 0% (at most 0.2%)". */
+    fun line(): String = listOfNotNull(
+        delayAvg?.let { a -> "Delay ${fmt(a)} ms on average" + (delayRange?.let { (lo, hi) -> " (${fmt(lo.toDouble())} to ${fmt(hi.toDouble())})" } ?: "") },
+        lossAvg?.let { a -> "packet loss ${fmt(a)}%" + (lossMax?.takeIf { it > 0 }?.let { " (at most ${fmt(it.toDouble())}%)" } ?: "") },
+    ).joinToString(", ").replaceFirstChar(Char::uppercase).ifEmpty { "No measurements in this period" }
+
+    private fun fmt(v: Double) = if (v >= 10) "%.0f".format(java.util.Locale.US, v) else "%.1f".format(java.util.Locale.US, v).removeSuffix(".0")
+}
+
 data class Opt(val key: String, val label: String, val sub: String, val choices: List<Pair<String, String>> = emptyList(), val advanced: Boolean = false)
 
 /** What a provider says about the device slot this phone holds: one line, where the user sees all their devices, and how many the account has in use, if it says. */
@@ -131,6 +151,11 @@ interface Provider {
     val protection: Opt? get() = null
     /** How the account's key was made, as its config says (Proton's options), for its page; null = nothing to show, "" = not known. */
     fun facts(account: String): String? = null
+
+    /** What the provider itself measured on server [name] over the last days, for Stats; null when it doesn't say. */
+    fun quality(name: String): Quality? = null
+    /** Whether it publishes such measurements ([quality]), so Stats offers to ask. */
+    val reportsQuality: Boolean get() = false
     /** Help about what is managed in the provider's own account (config expiry, forwarded ports) and where, for its page. */
     val configHelp: Pair<String, String>? get() = null
     /** The gluetun catalogue that is its only server list, if any: its page and status show how old it is. */
