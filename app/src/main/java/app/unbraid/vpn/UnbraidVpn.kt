@@ -192,6 +192,27 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             nm.notify(id, Notification.Builder(ctx, "alerts").setSmallIcon(R.drawable.ic_tile).setContentTitle(title)
                 .setContentText(text).setStyle(Notification.BigTextStyle().bigText(text)).setContentIntent(open).setAutoCancel(true).build())
         }
+        /**
+         * Checks for a new release (at most once a day, only with checks on) and shows a notification for one not
+         * announced yet; a tap opens the download page. Runs while connected, so a new version is seen also when the app
+         * isn't opened.
+         */
+        suspend fun announceUpdate(ctx: Context, store: app.unbraid.data.Store) {
+            if (!app.unbraid.BuildConfig.UPDATE_CHECK) return
+            // Nothing is asked before the terms are accepted, as in the app.
+            app.unbraid.ui.Onboarding.init(ctx)
+            if (!app.unbraid.ui.Onboarding.termsOk) return
+            val code = app.unbraid.BuildConfig.VERSION_CODE
+            val r = app.unbraid.data.Updates.toAnnounce(app.unbraid.data.Updates.check(store, code), code) ?: return
+            val nm = ctx.getSystemService(NotificationManager::class.java)
+            nm.createNotificationChannel(NotificationChannel("updates", "Updates", NotificationManager.IMPORTANCE_DEFAULT))
+            // Not marked as told while notifications or this channel are off: a later round tries again.
+            if (!nm.areNotificationsEnabled() || nm.getNotificationChannel("updates")?.importance == NotificationManager.IMPORTANCE_NONE) return
+            val open = PendingIntent.getActivity(ctx, 0, Intent(Intent.ACTION_VIEW, android.net.Uri.parse(app.unbraid.data.Updates.DOWNLOAD)), PendingIntent.FLAG_IMMUTABLE)
+            nm.notify(5, Notification.Builder(ctx, "updates").setSmallIcon(R.drawable.ic_tile).setContentTitle("$APP ${r.versionName} is out")
+                .setContentText("New versions often carry security fixes. Tap to download it.").setContentIntent(open).setAutoCancel(true).build())
+            synchronized(store) { store.updates = app.unbraid.data.Updates.notified(store.updates, r) }
+        }
         /** The start after the app was replaced ([AfterUpdate]): if it fails, the notice says so and offers a reconnect. */
         fun startAfterUpdate(ctx: Context) = ask(true) { ctx.startForegroundService(Intent(ctx, UnbraidVpn::class.java).putExtra(EXTRA_ASK, it).putExtra(EXTRA_UPDATED, true)) }
         private const val EXTRA_UPDATED = "updated"
@@ -920,6 +941,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val regular = now >= round
             // A new key whose reply got lost may already be the only one IVPN takes: finish it as soon as it can be.
             if (regular) Rotation.run(store.setup.value, { store.accounts.value }, store::replaceAccount, finishOnly = true)
+            if (regular) scope.launch { runCatching { announceUpdate(this@UnbraidVpn, store) } }
             // A provider whose new key is still reaching its servers isn't judged yet.
             val settingUp = Providers.settingUp()
             val eligible = byTag.filter { (_, ids) -> ids.none { running?.route(it)?.let { r -> !r.imported && r.loc.provider in settingUp } == true } }.keys.filterNotNull()

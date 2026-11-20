@@ -67,7 +67,7 @@ const val PROVIDERS_URL = "https://unbraid.app/providers/#need-a-vpn"
  * dismissal given meanwhile is newer than anything that started before it, so it is never overwritten.
  */
 internal fun mergeUpdates(read: UpdateState, held: UpdateState) =
-    (if (held.asked) read.copy(enabled = held.enabled, asked = true) else read).copy(dismissedCode = maxOf(read.dismissedCode, held.dismissedCode))
+    (if (held.asked) read.copy(enabled = held.enabled, asked = true, turnedOn = read.turnedOn || held.turnedOn) else read).copy(dismissedCode = maxOf(read.dismissedCode, held.dismissedCode))
 
 /**
  * Whether turning update checks on ([was] off, [now] on) asks unbraid.app at once: only in a build that checks
@@ -255,9 +255,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** Hides the update card until a newer version than [code] comes. */
     fun dismissUpdate(code: Int) = setUpdates { it.copy(dismissedCode = code) }
     /** The answer to the opt-in question (welcome page or the one-time screen): either way it is not asked again. */
-    fun answerUpdates(on: Boolean) = setUpdates { it.copy(enabled = on, asked = true) }
+    fun answerUpdates(on: Boolean) = setUpdates { it.copy(enabled = on, asked = true, turnedOn = true) }
     /** Turning it on is an answer to the question too. Takes effect at once; the write happens off the main thread. */
-    fun setUpdateCheck(on: Boolean) = setUpdates { it.copy(enabled = on, asked = it.asked || on) }
+    fun setUpdateCheck(on: Boolean) = setUpdates { it.copy(enabled = on, asked = true, turnedOn = true) }
     private fun setUpdates(f: (UpdateState) -> UpdateState) {
         val was = updates.value.enabled
         updates.update(f)

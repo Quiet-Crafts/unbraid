@@ -28,4 +28,11 @@ class ScreensWiringTest {
         assertTrue(ui.contains("if (!held) tried.let"))
         assertTrue(src("ui/RoutesScreen.kt").contains("LaunchedEffect(on, vpn.engine, activeIds, testing)"))
     }
+
+    /** The background announcement waits for the terms and for notifications that can be seen. */
+    @Test fun updateNotificationIsGated() {
+        val v = src("vpn/UnbraidVpn.kt")
+        assertTrue(v.contains("if (!app.unbraid.ui.Onboarding.termsOk) return"))
+        assertTrue(v.contains("if (!nm.areNotificationsEnabled() || nm.getNotificationChannel(\"updates\")?.importance == NotificationManager.IMPORTANCE_NONE) return"))
+    }
 }

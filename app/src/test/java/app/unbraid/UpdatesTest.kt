@@ -97,4 +97,22 @@ class UpdatesTest {
             assertTrue(sent!!.headers["User-Agent"]!!.matches(Regex("""unbraid/\d+\.\d+\.\d+""")))
         } finally { app.unbraid.data.Http.open = original }
     }
+
+    /** On by default once per install, an earlier "Don't check" too; turned off afterwards, it stays off. */
+    @Test fun onByDefaultOnce() {
+        assertTrue(Updates.onByDefault(UpdateState()).enabled)
+        assertTrue(Updates.onByDefault(UpdateState(enabled = false, asked = true)).enabled)
+        val off = UpdateState(enabled = false, asked = true, turnedOn = true)
+        assertEquals(off, Updates.onByDefault(off))
+    }
+
+    /** A newer release is announced once; none while checks are off, nor for the version installed. */
+    @Test fun announcedOnce() {
+        val s = UpdateState(enabled = true, latest = Release(72, "3.2.3"), turnedOn = true)
+        val r = Updates.toAnnounce(s, 71)!!
+        assertNull(Updates.toAnnounce(Updates.notified(s, r), 71))
+        assertNull(Updates.toAnnounce(s.copy(enabled = false), 71))
+        assertNull(Updates.toAnnounce(s, 72))
+        assertEquals(r, Updates.toAnnounce(Updates.notified(s, Release(71, "3.2.2")), 71))
+    }
 }

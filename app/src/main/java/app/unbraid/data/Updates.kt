@@ -20,6 +20,13 @@ data class UpdateState(
     val asked: Boolean = false,
     /** Whether the last attempt got no valid answer. */
     val failed: Boolean = false,
+    /**
+     * Whether checks were turned on by default for this install (from 3.2.2, as new versions carry security fixes): once,
+     * for new and older installs alike, an earlier "Don't check" too; the release notes say so. Turning them off later stays off.
+     */
+    val turnedOn: Boolean = false,
+    /** The newest release a phone notification was shown for: each release is announced once. */
+    val notifiedCode: Int = 0,
 )
 
 object Updates {
@@ -64,6 +71,16 @@ object Updates {
             } finally { c.disconnect() }
         }.getOrNull()
     }
+
+    /**
+     * The release [s] knows of that is newer than [installed] and has had no notification yet; the caller shows one and
+     * saves [notified]. Null when there is none, or checks are off.
+     */
+    /** [s] with checks on by default, once per install ([UpdateState.turnedOn]). */
+    fun onByDefault(s: UpdateState) = if (s.turnedOn) s else s.copy(enabled = true, asked = true, turnedOn = true)
+
+    fun toAnnounce(s: UpdateState, installed: Int): Release? = if (!s.enabled) null else newer(s, installed)?.takeIf { it.versionCode > s.notifiedCode }
+    fun notified(s: UpdateState, r: Release) = s.copy(notifiedCode = maxOf(s.notifiedCode, r.versionCode))
 
     suspend fun check(store: Store, installed: Int, now: Long = System.currentTimeMillis(), force: Boolean = false, fetch: suspend () -> String? = { fetchLatest() }): UpdateState = mutex.withLock {
         withContext(Dispatchers.IO) {

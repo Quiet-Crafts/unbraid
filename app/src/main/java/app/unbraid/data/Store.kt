@@ -393,7 +393,9 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
 
 
     var updates: UpdateState
-        get() = synchronized(this) { runCatching { read("updates.json")?.let { explicit.decodeFromString(UpdateState.serializer(), it) } }.getOrNull() ?: UpdateState() }
+        // On by default for a file that is missing or read; one that can't be read is off, as before, never turned on.
+        get() = synchronized(this) { if (!File(dir, "updates.json").exists()) Updates.onByDefault(UpdateState()) else
+            runCatching { Updates.onByDefault(explicit.decodeFromString(UpdateState.serializer(), read("updates.json")!!)) }.getOrDefault(UpdateState(asked = true, turnedOn = true)) }
         set(v) { synchronized(this) { safely { write("updates.json", explicit.encodeToString(UpdateState.serializer(), v)) } } }
 
     var nudges: NudgeState

@@ -73,9 +73,9 @@ import kotlin.math.PI
 import kotlin.math.sin
 
 /**
- * First start: the idea, (in the GitHub build) the update question, the four places, then the terms. [fresh] false =
- * someone updating from before the terms: only the terms page, as "One thing first". Close skips ahead, but never over
- * the update question, which has to be answered (it is asked once; [answer] saves it) and never over the terms.
+ * First start: the idea, (in the GitHub build) the update question, on unless changed, the four places, then the terms.
+ * [fresh] false = someone updating from before the terms: only the terms page, as "One thing first". Close skips to the
+ * terms, saving the update choice as it stands ([answer]); it never skips the terms.
  */
 @Composable
 fun Welcome(fresh: Boolean, answer: (Boolean) -> Unit, accept: () -> Unit) {
@@ -83,14 +83,15 @@ fun Welcome(fresh: Boolean, answer: (Boolean) -> Unit, accept: () -> Unit) {
     val last = pages.lastIndex
     var page by rememberSaveable { mutableIntStateOf(if (fresh) 0 else last) }
     var agreed by rememberSaveable { mutableStateOf(false) }
-    var check by rememberSaveable { mutableStateOf<Boolean?>(null) }
+    // On unless changed: new versions often carry security fixes. Saved when the page is left or a choice tapped.
+    var check by rememberSaveable { mutableStateOf(true) }
     val id = pages[page]
     BackHandler(fresh && page > 0) { page-- }
     val motion = MaterialTheme.motionScheme
     Column(Modifier.fillMaxSize().background(Ink.ground).windowInsetsPadding(WindowInsets.systemBars)) {
         Box(Modifier.height(56.dp).padding(start = 4.dp, top = 4.dp), Alignment.CenterStart) {
             // From the first page, skipping stops at the update question until it is answered, then at the terms.
-            if (fresh && page < last && id != "updates") IconTap(Icons.close, "Skip the introduction", { page = if (check == null && "updates" in pages) pages.indexOf("updates") else last })
+            if (fresh && page < last) IconTap(Icons.close, "Skip the introduction", { if ("updates" in pages) answer(check); page = last })
         }
         AnimatedContent(page, Modifier.weight(1f), transitionSpec = { fadeIn(motion.fastEffectsSpec()) togetherWith fadeOut(motion.fastEffectsSpec()) }, label = "welcome") { p ->
             val now = pages[p]
@@ -106,13 +107,13 @@ fun Welcome(fresh: Boolean, answer: (Boolean) -> Unit, accept: () -> Unit) {
                         Braid()
                     }
                     "updates" -> {
-                        Lead("This GitHub version doesn\u2019t install updates by itself. $APP can check for new releases and tell you when one is out.")
+                        Lead("This GitHub version doesn\u2019t install updates by itself. $APP checks for new releases and tells you when one is out. It\u2019s on, because new versions often carry security fixes.")
                         Gap(32.dp)
                         UpdateFacts()
                         Gap(24.dp)
                         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Choice("Check for updates", "A card on Routes when a new version is out", check == true) { check = true; answer(true) }
-                            Choice("Don\u2019t check", "Nothing is checked. You can turn it on later in Settings", check == false) { check = false; answer(false) }
+                            Choice("Check for updates", "A notification and a card on Routes when a new version is out", check) { check = true; answer(true) }
+                            Choice("Don\u2019t check", "Nothing is checked. You can turn it on later in Settings", !check) { check = false; answer(false) }
                         }
                     }
                     "places" -> {
@@ -128,7 +129,7 @@ fun Welcome(fresh: Boolean, answer: (Boolean) -> Unit, accept: () -> Unit) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (fresh) Progress(pages.size, page, Modifier.weight(1f)) else Spacer(Modifier.weight(1f))
             if (fresh && page > 0) IconTap(Icons.back, "Back", { page-- }, background = Ink.surfaceHigh)
-            if (page < last) NextPill("Next", { page++ }, enabled = id != "updates" || check != null)
+            if (page < last) NextPill("Next", { if (id == "updates") answer(check); page++ })
             else NextPill("Accept and continue", accept, enabled = agreed)
         }
     }
@@ -171,30 +172,6 @@ private fun Choice(title: String, sub: String, selected: Boolean, onClick: () ->
     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(title, style = Type.body.copy(fontWeight = FontWeight.SemiBold), color = Ink.text)
         Text(sub, style = Type.caption, color = Ink.dim)
-    }
-}
-
-/** Shown once, full screen, to someone updating from a version that never asked: [answer] saves the choice and ends it. */
-@Composable
-fun UpdateAsk(answer: (Boolean) -> Unit) {
-    BackHandler {}
-    Column(Modifier.fillMaxSize().background(Ink.ground).windowInsetsPadding(WindowInsets.systemBars).padding(horizontal = 24.dp)) {
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(top = 56.dp)) {
-            Text("NEW IN ${BuildConfig.VERSION_NAME}", style = Type.overline, color = Ink.dim)
-            Gap(6.dp)
-            Headline(UPDATES_TITLE to "?")
-            Gap(20.dp)
-            Lead("$APP can now check for new releases and tell you when one is out. It stays off unless you turn it on.")
-            Gap(32.dp)
-            UpdateFacts()
-        }
-        Column(Modifier.padding(vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Primary("Check for updates", { answer(true) })
-            Box(
-                Modifier.fillMaxWidth().heightIn(min = 56.dp).clip(RoundedCornerShape(28.dp)).border(1.dp, Ink.line, RoundedCornerShape(28.dp)).tap({ answer(false) }, role = Role.Button),
-                Alignment.Center,
-            ) { Text("Don\u2019t check", style = Type.title, color = Ink.text) }
-        }
     }
 }
 

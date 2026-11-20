@@ -368,23 +368,26 @@ class StoreTest {
     @Test fun updateAndNudgeSettingsRoundTripAndDefaultOnCorruption() {
         val dir = tmp.newFolder()
         val s = Store(dir) { key }
-        assertEquals(UpdateState(), s.updates); assertFalse(s.updates.enabled); assertFalse(s.updates.asked); assertEquals(NudgeState(), s.nudges)
-        val updates = UpdateState(true, 123, 4, Release(5, "1.2"), asked = true)
+        // Checks are on by default (3.2.2), for a new install too.
+        assertEquals(UpdateState(enabled = true, asked = true, turnedOn = true), s.updates); assertEquals(NudgeState(), s.nudges)
+        val updates = UpdateState(true, 123, 4, Release(5, "1.2"), asked = true, turnedOn = true)
         val nudges = NudgeState(10, listOf(1, 2), listOf(20), 30, true)
         s.updates = updates; s.nudges = nudges
         val again = Store(dir) { key }
         assertEquals(updates, again.updates); assertEquals(nudges, again.nudges)
         File(dir, "updates.json").writeText("bad"); File(dir, "nudges.json").writeText("bad")
-        assertEquals(UpdateState(), again.updates); assertEquals(NudgeState(), again.nudges)
+        // A file that can't be read is off, as before: never turned on by default.
+        assertEquals(UpdateState(asked = true, turnedOn = true), again.updates); assertEquals(NudgeState(), again.nudges)
     }
     @Test fun updateAndNudgeWritesTolerateIoFailure() {
         val dir = tmp.newFolder()
         val s = Store(dir) { key }
         File(dir, "updates.json.tmp").mkdir()
         File(dir, "nudges.json.tmp").mkdir()
-        s.updates = UpdateState(enabled = true)
+        s.updates = UpdateState(enabled = false, asked = true, turnedOn = true)
         s.nudges = NudgeState(disabled = true)
-        assertFalse(s.updates.enabled)
+        // The write failed: nothing was saved, so it reads back as a new install's default, on.
+        assertTrue(s.updates.enabled)
         assertFalse(s.nudges.disabled)
     }
 
