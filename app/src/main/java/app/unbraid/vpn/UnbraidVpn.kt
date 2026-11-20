@@ -305,38 +305,28 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     /**
-     * An app installed while connected (or connecting) can matter to what Android leaves out of the VPN: one with a choice of
-     * its own saved (a Direct one installed again, an app a restore waits for), or one joining the user id of an app left
-     * out ([leftOut]), which Android would leave out with it whatever its choice. Then the setup is applied again, so the
-     * user id is judged with every app it now has ([blockedKin]). [installedWhileStarting]: one seen before the VPN was on,
-     * taken up once it is ([connect]).
+     * An app installed can change what Android leaves out of the VPN, which Android decides by user id when the tunnel is
+     * built: one with a choice of its own saved (a Direct one installed again, maybe with a new user id; an app a restore
+     * waits for), or one in a user id with other apps (it goes as the user id is left out or not). Each such install is
+     * counted ([installs]); a tunnel built before the latest count ([builtInstalls]) is built again, at once, also when the
+     * install came while connecting. Counted, not flagged, so no install is ever lost to another.
      */
     private val installed = object : android.content.BroadcastReceiver() {
         override fun onReceive(c: Context, intent: Intent) {
             if (destroyed || intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return // an update keeps its user id
             val pkg = intent.data?.schemeSpecificPart ?: return
+            val uid = intent.getIntExtra(Intent.EXTRA_UID, -1)
             scope.launch {
-                // First the note, then the phase: [connect] sets the phase, then reads the note, so one of the two sees the other.
-                installedWhileStarting = true
-                if (state.value.phase != VpnState.Phase.On) return@launch
-                installedWhileStarting = false
-                val uid = intent.getIntExtra(Intent.EXTRA_UID, -1)
-                val joins = uid >= 0 && runCatching { packageManager.getPackagesForUid(uid)?.any { it in leftOut } == true }.getOrDefault(true)
-                // Left out by the setup but not installed when the tunnel was built: Android skipped it, and the setup is
-                // unchanged, so only a new tunnel leaves it out.
-                val skipped = pkg in wantedOut && pkg !in leftOut
-                if (!joins && !skipped && pkg !in store.setup.value.apps) return@launch
-                if (skipped) rebuild = true
-                reload()
+                val shared = uid < 0 || runCatching { (packageManager.getPackagesForUid(uid)?.size ?: 2) > 1 }.getOrDefault(true)
+                if (!shared && pkg !in store.setup.value.apps) return@launch
+                installs.incrementAndGet()
+                if (state.value.phase == VpnState.Phase.On) reload()
             }
         }
     }
-    @Volatile private var installedWhileStarting = false
-    /** The next [apply] builds a new tunnel even if the engine's setup is unchanged: what Android leaves out may differ. */
-    @Volatile private var rebuild = false
-    /** The apps Android left out of the VPN when the tunnel was last built ([leftOut]), of those the setup asked for ([wantedOut]). */
-    @Volatile private var leftOut: Set<String> = emptySet()
-    @Volatile private var wantedOut: Set<String> = emptySet()
+    private val installs = java.util.concurrent.atomic.AtomicLong()
+    /** [installs] as counted when the running tunnel's setup was read; -1 when none runs. */
+    @Volatile private var builtInstalls = -1L
 
     private fun stopIfIdle() {
         if (pending > 0 || !stopWanted || destroyed) return
@@ -486,7 +476,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 }) scope.launch { reload() }
             }.launchIn(scope)
             // An app installed while this was starting: judged now, with the VPN on.
-            if (installedWhileStarting) { installedWhileStarting = false; rebuild = true; scope.launch { reload() } }
+            if (installs.get() != builtInstalls) scope.launch { reload() }
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${logLine(e)}")
             // After an update the notice offers the reconnect; a tap shows what fails, in the app.
@@ -546,13 +536,13 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** [accounts] is the snapshot [links] were picked with: a sign-out after it differs, so the watcher reloads again. */
     private fun apply(srv: CommandServer, setup: Setup, picked: LinkPicker.Result, accounts: Map<String, String>) {
         generation++
+        val counted = installs.get() // before the user ids are read for the setup: one installed after is counted after
         val links = picked.links
         val blocked = picked.blocked.keys
         var input = input(setup, links, blocked)
         var json = Compiler.compile(input)
         // A favourite, a rename or a second sign-in changes the setup but not what the engine runs: keep every tunnel up.
-        val fresh = json != lastGood || rebuild
-        rebuild = false
+        val fresh = json != lastGood || counted != builtInstalls
         if (fresh) {
             // Every engine start gets a new loopback port and password: while an old engine lets go of its port, a local
             // app could take it over and see that engine's password, which no later engine accepts. The app's own tests
@@ -585,6 +575,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             state.update { it.copy(tsSuffix = input.tsSuffix) }
         }
         lastGood = json
+        builtInstalls = counted
         lastInput = input // also when nothing restarted: a move restarts what is applied now
         tunnelDns = runCatching { Compiler.probeDns(json) }.getOrDefault(emptyMap())
         tags = Compiler.shared(setup, LinkPicker.ported(setup, links, portStep), blocked) + setup.activeRoutes.filter { it.tsExit != null }.associate { it.id to Compiler.TS_TAG }
@@ -733,7 +724,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // wait blocked if that is the one still waiting: never on their real address for the time it takes. A tunnel
             // whose account was signed out or refused stops now too, not once the others are found.
             val stopNow = ready.blocked.any { (id, e) -> e is AuthException && id in links }
-            if ((stopNow || LinkPicker.leavesDirect(applied, setup, setup.activeRoutes.mapTo(HashSet()) { it.id }, lastInput?.tsSuffix, store.tsSuffix)) && !install(srv, setup, ready, accounts, seen)) return
+            // So does an app installed into what Android may leave out: applied now, not once the provider answers.
+            if ((stopNow || installs.get() != builtInstalls || LinkPicker.leavesDirect(applied, setup, setup.activeRoutes.mapTo(HashSet()) { it.id }, lastInput?.tsSuffix, store.tsSuffix)) && !install(srv, setup, ready, accounts, seen)) return
             Ask(srv, setup, accounts, ready, applied, appliedAccounts, refusedFor(setup, accounts), store.lastLinks, generation, seen)
         }
         // A route without a tunnel (signed out, refused, unreachable) is blocked; the others keep running. Tunnels come
@@ -1073,7 +1065,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         openTable(false)
         forgetLookups(this)
         net.stop()
-        applied = null; rejected = null; lastGood = null; lastInput = null; probe = null; links = emptyMap(); appliedAccounts = emptyMap()
+        applied = null; rejected = null; lastGood = null; builtInstalls = -1; lastInput = null; probe = null; links = emptyMap(); appliedAccounts = emptyMap()
         running = null; tags = emptyMap(); tunnelDns = emptyMap(); tcpOnly = emptySet()
     }
 
@@ -1221,28 +1213,39 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     override fun openTun(o: TunOptions): Int {
         if (prepare(this) != null) error("VPN permission missing")
-        val b = Builder().setSession("$APP").setMtu(o.mtu).setMetered(false)
-        o.inet4Address.forEach { b.addAddress(it.address(), it.prefix()) }
-        o.inet6Address.forEach { b.addAddress(it.address(), it.prefix()) }
-        if (o.autoRoute) {
-            o.dnsServerAddress.forEachString { b.addDnsServer(it) }
-            // From the input being started, not saved settings: a DNS permission the engine refused stays refused here too.
-            Compiler.searchDomain(tunInput)?.let { b.addSearchDomain(it) }
-            val r4 = o.inet4RouteAddress.toList()
-            if (r4.isEmpty()) b.addRoute("0.0.0.0", 0) else r4.forEach { b.addRoute(it.ipPrefix()) }
-            o.inet6RouteAddress.forEach { b.addRoute(it.ipPrefix()) }
-            o.inet4RouteExcludeAddress.forEach { b.excludeRoute(it.ipPrefix()) }
-            o.inet6RouteExcludeAddress.forEach { b.excludeRoute(it.ipPrefix()) }
-            o.includePackage.forEachString { runCatching { b.addAllowedApplication(it) } }
-            val wanted = buildSet { o.excludePackage.forEachString { add(it) } }
-            leftOut = wanted.filterTo(HashSet()) { p -> runCatching { b.addDisallowedApplication(p) }.isSuccess }
-            wantedOut = wanted
+        val out = buildList { if (o.autoRoute) o.excludePackage.forEachString { add(it) } }
+        fun builder(leaveOut: List<String>) = Builder().setSession("$APP").setMtu(o.mtu).setMetered(false).also { b ->
+            o.inet4Address.forEach { b.addAddress(it.address(), it.prefix()) }
+            o.inet6Address.forEach { b.addAddress(it.address(), it.prefix()) }
+            if (o.autoRoute) {
+                o.dnsServerAddress.forEachString { b.addDnsServer(it) }
+                // From the input being started, not saved settings: a DNS permission the engine refused stays refused here too.
+                Compiler.searchDomain(tunInput)?.let { b.addSearchDomain(it) }
+                val r4 = o.inet4RouteAddress.toList()
+                if (r4.isEmpty()) b.addRoute("0.0.0.0", 0) else r4.forEach { b.addRoute(it.ipPrefix()) }
+                o.inet6RouteAddress.forEach { b.addRoute(it.ipPrefix()) }
+                o.inet4RouteExcludeAddress.forEach { b.excludeRoute(it.ipPrefix()) }
+                o.inet6RouteExcludeAddress.forEach { b.excludeRoute(it.ipPrefix()) }
+                o.includePackage.forEachString { runCatching { b.addAllowedApplication(it) } }
+                leaveOut.forEach { runCatching { b.addDisallowedApplication(it) } }
+            }
         }
-        val pfd = b.establish() ?: error("VPN permission revoked")
+        // Android turns the apps to leave out into user ids only when that list changes: with the same names it keeps the
+        // old ids, so an app installed again (with a new user id) would stay inside. Then the tunnel is first built with
+        // those apps inside (the safe side, for an instant), so the real list is a change and is read afresh.
+        val ids = out.associateWith { runCatching { packageManager.getPackageUid(it, 0) }.getOrDefault(-1) }
+        val moved = tun != null && out == outNames && ids != outIds
+        val interim = if (moved) builder(out.filter { ids[it] == outIds[it] }).establish()?.also { tun?.close(); tun = it } else null
+        val pfd = builder(out).establish() ?: error("VPN permission revoked")
         tun?.close()
         tun = pfd
+        outNames = out; outIds = ids
+        if (interim != null) Log.i(TAG, "tunnel built again: user ids of apps left out changed")
         return pfd.fd
     }
+    /** The apps the tunnel last left out, and their user ids then. */
+    private var outNames: List<String>? = null
+    private var outIds: Map<String, Int> = emptyMap()
 
     override fun autoDetectInterfaceControl(fd: Int) { protect(fd) }
     override fun usePlatformAutoDetectInterfaceControl() = true
