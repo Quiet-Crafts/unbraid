@@ -50,15 +50,18 @@ fun mtu(value: String?) = value?.toIntOrNull()?.takeIf { it in MTU_MIN..MTU_MAX 
 /** Key of a provider's entry address setting: the number of one of a server's [WgLink.entries], from 1. */
 const val ENTRY_OPT = "entry"
 
-/**
- * A setting on a provider's page, saved in [Setup.opts]. No [choices] = an on/off switch ("on"/"off"). [advanced]: one
- * most people never need, which can stop routes connecting: listed under the page's Advanced settings.
- */
 /** The key-rotation setting on a provider page: days between new keys, or "off". */
 const val ROTATE_OPT = "rotate"
 val ROTATE_CHOICES = listOf("1" to "Every day", "3" to "Every 3 days", "7" to "Every week", "14" to "Every 2 weeks", "30" to "Every month", "off" to "Never")
 
-data class Opt(val key: String, val label: String, val sub: String, val choices: List<Pair<String, String>> = emptyList(), val advanced: Boolean = false)
+/**
+ * A setting on a provider's page, saved in [Setup.opts]. No [choices] = an on/off switch ("on"/"off"). [advanced]: one
+ * most people never need, which can stop routes connecting: listed under the page's Advanced settings. [custom]: number
+ * ranges the user may type instead of a choice (a port, say).
+ */
+data class Opt(val key: String, val label: String, val sub: String, val choices: List<Pair<String, String>> = emptyList(), val advanced: Boolean = false, val custom: List<IntRange> = emptyList()) {
+    fun allows(typed: String) = typed.toIntOrNull()?.let { n -> custom.any { n in it } } == true
+}
 
 /** What a provider says about the device slot this phone holds: one line, where the user sees all their devices, and how many the account has in use, if it says. */
 data class Device(val line: String, val url: String? = null, val used: Int? = null)
