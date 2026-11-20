@@ -767,7 +767,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (restored && restarted) { retry?.cancel(); retry = null }
         // An install that may change what Android leaves out ([installs]) is not left to the next edit: tried once more.
         val pending = installs.get()
-        if (pending != builtInstalls && pending != retriedInstalls) { retriedInstalls = pending; installRetry?.cancel(); installRetry = scope.launch { kotlinx.coroutines.delay(30_000); reload() } }
+        if (pending != builtInstalls && pending != retriedInstalls) { retriedInstalls = pending; installRetry?.cancel(); installRetry = scope.launch { kotlinx.coroutines.delay(30_000); if (installs.get() != builtInstalls) reload() } }
         else if (restored && setup == applied && accounts == appliedAccounts) retryBlocked(retrying)
         if (restored) retime() // a new engine, numbered afresh
         if (restored && ranRestores != restores.get()) teardown(RESTORE_REFUSED)
@@ -1073,6 +1073,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         openTable(false)
         forgetLookups(this)
         net.stop()
+        installRetry?.cancel(); installRetry = null
         applied = null; rejected = null; lastGood = null; builtInstalls = -1; lastInput = null; probe = null; links = emptyMap(); appliedAccounts = emptyMap()
         running = null; tags = emptyMap(); tunnelDns = emptyMap(); tcpOnly = emptySet()
     }
@@ -1245,20 +1246,25 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // moved, whatever else changed in the list.
         val uidOf = { n: String -> runCatching { packageManager.getPackageUid(n, 0) }.getOrDefault(-1) }
         val ids = out.associateWith(uidOf).filterValues { it >= 0 }
-        val moved = ids.filter { (n, id) -> knownIds[n]?.let { it != id } == true }.keys
+        val moved = ids.filter { (n, id) -> knownIds[n]?.let { it != id } == true || n in unsure }.keys
         val interim = if (tun != null && moved.isNotEmpty()) builder(out - moved).establish()?.also { tun?.close(); tun = it } else null
         val pfd = builder(out).establish() ?: error("VPN permission revoked")
         tun?.close()
         tun = pfd
         // Looked up again: an app installed or removed while the tunnel was built may have met the builder with another id.
         val after = out.associateWith(uidOf).filterValues { it >= 0 }
-        knownIds.putAll(after)
-        if (after != ids) installs.incrementAndGet().also { scope.launch { reload() } }
+        // One whose id changed in between may have met Android with the old one: not taken as known, built in two steps next.
+        val changed = (after.keys + ids.keys).filterTo(HashSet()) { after[it] != ids[it] }
+        knownIds.putAll(after - changed)
+        unsure = if (changed.isEmpty()) emptySet() else unsure + changed
+        if (changed.isNotEmpty()) installs.incrementAndGet().also { scope.launch { reload() } }
         if (interim != null) Log.i(TAG, "tunnel built again: user ids of apps left out changed")
         return pfd.fd
     }
     /** The user id each app left out had when a tunnel was last built with it installed. */
     private val knownIds = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /** Apps whose user id changed while a tunnel was built: the next one leaves them out in two steps. */
+    @Volatile private var unsure: Set<String> = emptySet()
 
     override fun autoDetectInterfaceControl(fd: Int) { protect(fd) }
     override fun usePlatformAutoDetectInterfaceControl() = true
