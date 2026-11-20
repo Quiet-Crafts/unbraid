@@ -143,6 +143,12 @@ class IvpnTest {
         val l = r.links.getValue("se") as app.unbraid.data.WgLink
         assertEquals("${keep.getValue("nl").server.ip}:${exit.multihopPort}" to keep.getValue("nl").server.ip, l.peer.endpoint to l.hopEntry)
         assertEquals(exit.publicKey, l.peer.publicKey)
+        // An entry server found gone stays gone, also when no app uses the entry and the saved pin would stand in.
+        val alone = setup.copy(apps = emptyMap())
+        val gone = app.unbraid.vpn.LinkPicker.pick(alone, keep, alone, mapOf("ivpn" to blob), mapOf("ivpn" to blob), emptyMap(), refused = mapOf("nl" to app.unbraid.data.NoLongerOffered(keep.getValue("nl").server)), offline = true) { Ivpn }
+        assertTrue(gone.blocked.getValue("se") is app.unbraid.vpn.LinkPicker.EntryGone)
+        val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+        assertTrue(vpn.contains("a.filter { it.viaNative }.mapNotNull { setup.route(it.via) }") && vpn.contains("if (e is LinkPicker.EntryGone)"))
         // The engine gets one ordinary tunnel (no detour), with the page's MTU, not moved by the port setting.
         val ported = app.unbraid.vpn.LinkPicker.ported(setup.copy(opts = mapOf("ivpn" to mapOf(app.unbraid.data.PORT_OPT to "443"))), r.links, emptyMap())["se"] as app.unbraid.data.WgLink
         assertEquals(l.peer.endpoint, ported.peer.endpoint)

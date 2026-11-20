@@ -696,7 +696,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val o = Limits.over(old, f(old), { Limits.others(it, acc[it]) }) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } ?: run { store.edit(f); after(); return }
         val name = Providers.get(o.provider)?.name ?: o.provider
         // Only a route the engine runs as saved has a server worth sharing; checked again when the user answers.
-        val anchor = old.activeRoutes.singleOrNull { !it.imported && it.loc.provider == o.provider }?.takeIf { a -> UnbraidVpn.running?.route(a.id)?.loc == a.loc }
+        // Not with a Via of that provider: a route and its own entry on one server would clash, or be refused as the same server.
+        val paired = f(old).let { n -> n.activeRoutes.any { r -> r.via != null && (r.loc.provider == o.provider || n.route(r.via)?.loc?.provider == o.provider) } }
+        val anchor = old.activeRoutes.singleOrNull { !it.imported && it.loc.provider == o.provider }?.takeIf { a -> !paired && UnbraidVpn.running?.route(a.id)?.loc == a.loc }
         val server = anchor?.let { vpn.value.servers[it.id] }
         limitAsk.value = LimitAsk(Limits.warning(name, o.limit, o.unit, o.n, o.others), { store.edit(f); after() }, server?.let { sv ->
             sv.name to {

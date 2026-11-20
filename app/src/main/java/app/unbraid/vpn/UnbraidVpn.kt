@@ -1045,7 +1045,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      */
     private fun refusedFor(setup: Setup, accounts: Map<String, String>): Map<String, Exception> {
         refusals = refusals.filter { (p, v) -> v.first == accounts[p] }
-        return setup.activeRoutes.filter { !it.imported }.mapNotNull { r ->
+        // The entry of a one-tunnel multi-hop too: it isn't an active route, but its server is used.
+        val routes = setup.activeRoutes.let { a -> (a + a.filter { it.viaNative }.mapNotNull { setup.route(it.via) }).distinct() }
+        return routes.filter { !it.imported }.mapNotNull { r ->
             (refusals[r.loc.provider]?.second ?: LinkPicker.goneKey(r.loc)?.let { gone[it] })?.let { r.id to it }
         }.toMap()
     }
@@ -1054,6 +1056,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         setup.route(id)?.takeIf { !it.imported }?.let {
             if (e is AuthException) refusals = refusals + (it.loc.provider to (accounts[it.loc.provider] to e))
             if (e is app.unbraid.data.NoLongerOffered) LinkPicker.goneKey(it.loc)?.let { k -> gone = gone + (k to e) }
+            if (e is LinkPicker.EntryGone) setup.route(it.via)?.loc?.let(LinkPicker::goneKey)?.let { k -> gone = gone + (k to e.gone) }
         }
     }
 

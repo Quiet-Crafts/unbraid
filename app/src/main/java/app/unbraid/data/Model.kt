@@ -483,6 +483,8 @@ data class Setup(
             !r.imported && Providers.get(r.loc.provider)?.viaUnsafe == true -> "${Providers.get(r.loc.provider)?.name} routes can't use Via: setting one up contacts its server directly"
             // A name would be looked up outside the entry, telling the local network where the tunnel goes.
             r.wg != null && app.unbraid.vpn.Compiler.ipv4(r.wg.endpoint.substringBeforeLast(':').removePrefix("[").removeSuffix("]")) == null && ':' !in r.wg.endpoint.substringBeforeLast(':') -> "${r.name} needs a server address, not a name, to go through another route"
+            // The tunnel through the entry carries IPv4 only: an IPv6 server would never be reached.
+            r.wg != null && ':' in r.wg.endpoint.substringBeforeLast(':') -> "${r.name} needs an IPv4 server address to go through another route"
             else -> null
         }
     }

@@ -23,6 +23,9 @@ object LinkPicker {
     /** A running tunnel a provider setting now rules out (Mullvad-owned only): its apps wait blocked, not on it. */
     class Unsuited : Waiting()
 
+    /** A one-tunnel multi-hop whose entry's pinned server is no longer offered ([gone]): remembered for the entry too. */
+    class EntryGone(message: String, val gone: Exception) : Fail(message)
+
     /** A route restored without its keys: blocked, never retried, until its own server gets its config again. */
     class KeyLeftOut(name: String) : AuthException("Add the config for $name again in Settings, Providers & servers")
 
@@ -130,10 +133,13 @@ object LinkPicker {
                 val e = setup.route(r.via!!)!!
                 val l = out[r.id] as? WgLink ?: throw Fail("${r.name}: multi-hop works for WireGuard routes only")
                 val port = l.hopPort ?: throw Fail("${r.name}: ${l.server.name} doesn't say how to reach it by multi-hop right now. Try again later, or use two tunnels")
+                val goneMsg = "${r.name}: its entry ${e.name} is on a server that's no longer offered. Choose another for ${e.name}"
+                // Found gone once, it stays gone: also while the list can't be read and the saved pin would stand in.
+                refused[e.id]?.takeIf { it is app.unbraid.data.NoLongerOffered }?.let { throw EntryGone(goneMsg, it) }
                 // Asked for only online: an offline pass blocks the route until then, never leaves it straight.
                 val entry = (out[e.id] as? WgLink)?.server ?: if (offline) throw Waiting() else try {
                     providers(e.loc.provider)!!.connect(e.loc, accounts[e.loc.provider]!!).server
-                } catch (x: app.unbraid.data.NoLongerOffered) { throw Fail("${r.name}: its entry ${e.name} is on a server that's no longer offered. Choose another for ${e.name}") }
+                } catch (x: app.unbraid.data.NoLongerOffered) { throw EntryGone(goneMsg, x) }
                 if (entry.ip == l.server.ip) throw Fail("${r.name} and its entry are on the same server")
                 val countries = listOf(entry.country.ifEmpty { e.loc.countryCode.orEmpty() }, l.server.country.ifEmpty { r.loc.countryCode.orEmpty() })
                 if (countries.any { it.isEmpty() } || countries[0].equals(countries[1], true)) throw Fail("${r.name} and its entry must be in two different countries. Pick servers in two countries")

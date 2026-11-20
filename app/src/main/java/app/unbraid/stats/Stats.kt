@@ -203,7 +203,7 @@ object Stats {
 
     /**
      * A route's id plus a digest of what carries it (provider and place, or the imported server), so a route moved to
-     * another provider or server starts a new history instead of relabelling the old one. Name, colour and the filter
+     * another provider or server, or given a Via, starts a new history instead of relabelling the old one. Name, colour and the filter
      * don't count. Only addresses, names and public keys go in, never a private key or password.
      */
     internal fun idOf(r: Route): String {
@@ -215,7 +215,9 @@ object Stats {
             r.tsExit != null -> listOf("ts", r.tsExit)
             else -> listOf(l.provider, l.countryCode, l.countryId, l.cityId, l.city, l.region, l.group, l.protocol, l.pinned?.host).map { "$it" }
         }
-        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(what.joinToString("\u0000").toByteArray())
+        // Through another route its speeds are another tunnel's: a new history. Without a Via the digest stays as it was.
+        val via = r.via?.let { listOf("via", it, if (r.viaNative) "one" else "two") }.orEmpty()
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest((what + via).joinToString("\u0000").toByteArray())
         return r.id + "@" + digest.take(5).joinToString("") { "%02x".format(it) }
     }
 

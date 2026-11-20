@@ -24,6 +24,10 @@ class StatsIdentityTest {
         assertNotEquals(id, Stats.idOf(nl.copy(loc = nl.loc.copy(cityId = 1, city = "Amsterdam"))))
         assertNotEquals(id, Stats.idOf(nl.copy(loc = nl.loc.copy(pinned = Server("nl1", "nl1.example", "1.2.3.4", "k", 0)))))
         assertNotEquals(id, Stats.idOf(nl.copy(id = "r2")))
+        // A Via, or one tunnel instead of two, is another tunnel's speed.
+        val via = Stats.idOf(nl.copy(via = "r9"))
+        assertNotEquals(id, via)
+        assertNotEquals(via, Stats.idOf(nl.copy(via = "r9", viaNative = true)))
     }
 
     /** One route's histories by protocol read apart: the protocol joins the provider in the label. */

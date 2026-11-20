@@ -846,6 +846,11 @@ class CompilerTest {
         assertEquals(setOf("c"), Compiler.clashes(both, links + ("c" to links.getValue("b"))))
         // The checks: no entry, itself, a chain of three, a Tailscale exit, OpenVPN.
         assertNull(s.viaProblem(s.route("b")!!))
+        // An imported server on IPv6 can't be reached through the entry, which carries IPv4 only.
+        val v6 = Route("v6", wg = WgPeer("v6", "k", listOf("10.0.0.2/32"), "p", endpoint = "[2001:db8::1]:51820", allowedIps = listOf("0.0.0.0/0")), via = "a")
+        assertEquals("v6 needs an IPv4 server address to go through another route", s.copy(routes = s.routes + v6).viaProblem(v6))
+        // The limit sheet offers no shared server for a Via of that provider: a route and its entry would meet there.
+        assertTrue(java.io.File("src/main/java/app/unbraid/ui/Ui.kt").readText().contains("takeIf { a -> !paired && UnbraidVpn.running"))
         // Saved in a format older builds refuse: they would send b straight to its server.
         assertEquals(4, s.stamped.version)
         assertEquals(2, s.copy(routes = s.routes.map { it.copy(via = null) }, version = app.unbraid.data.VERSION).stamped.version)
