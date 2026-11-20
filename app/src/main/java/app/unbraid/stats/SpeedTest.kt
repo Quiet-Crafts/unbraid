@@ -412,18 +412,19 @@ object SpeedTest {
 
     /** On [tsq] only. */
     private fun switchBack() {
-        val engine = UnbraidVpn.state.value.engine
-        val want = restoreTo((UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit, Unbraid.store.tsTestFrom, UnbraidVpn.state.value.tsExitNodes)
         // A node Tailscale won't take back (gone, no longer an exit) is no reason to stay on the tested one: no exit then.
         val set = { id: String -> runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, id) }.isSuccess }
-        var target = want
-        var ok = set(want.orEmpty())
-        // An engine started meanwhile (a reload) may have taken that node though it runs another: what runs now decides.
-        if (UnbraidVpn.state.value.engine != engine) {
-            target = restoreTo((UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit, null, UnbraidVpn.state.value.tsExitNodes)
-            ok = set(target.orEmpty())
+        var from = Unbraid.store.tsTestFrom
+        // For the engine that runs from start to end: one started meanwhile (a reload) may have got a node it doesn't run,
+        // so it is done again for that one. Unsettled after three goes, the note stays and a later status tries again.
+        repeat(3) {
+            val engine = UnbraidVpn.state.value.engine
+            val want = restoreTo((UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit, from, UnbraidVpn.state.value.tsExitNodes)
+            val ok = set(want.orEmpty())
+            if (!(ok && want != null) && want != "") set("")
+            if (UnbraidVpn.state.value.engine == engine) { if (ok && want != null) Unbraid.store.tsTestFrom = null; return }
+            from = null
         }
-        if (ok && target != null) Unbraid.store.tsTestFrom = null else if (target != "") set("")
     }
 
     /**

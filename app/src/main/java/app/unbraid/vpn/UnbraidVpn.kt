@@ -638,7 +638,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // Every try, timed or for a new network, runs on one worker, one at a time with the newest asked for last: an older
         // try that fails after a newer one worked can't put its blocked result over it. The timer only asks.
         if (netWorker == null) netWorker = scope.launch {
-            for (k in netKicks) try { lock.withLock { retry?.cancel(); retry = null }; reload() }
+            // The backoff timer stays: a kick left from an older timer then only adds a try, never skips the wait.
+            for (k in netKicks) try { reload() }
             catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { Log.e(TAG, "retry: ${logLine(e)}") } // one failed try never ends the worker
         }
         retry = scope.launch {
