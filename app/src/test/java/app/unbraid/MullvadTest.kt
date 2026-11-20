@@ -296,4 +296,24 @@ class MullvadTest {
         assertFalse(Mullvad.revoked({ 404 to "" }, lookup(404)))
         assertFalse(Mullvad.revoked({ throw IOException("offline") }, lookup(null)))
     }
+
+    /** A sign-out releases the device when it is deleted, already gone, or the account itself is no longer valid. */
+    @Test fun releasedAlsoWhenTheAccountIsGone() {
+        val ok = 200 to """{"access_token":"t"}"""
+        var deleted = 0
+        fun delete(code: Int?): (String) -> Unit = { deleted++; if (code != null) throw app.unbraid.data.Http.Status(code, "HTTP $code") }
+        assertTrue(Mullvad.released({ ok }, delete(null)))
+        assertTrue(Mullvad.released({ ok }, delete(404)))
+        deleted = 0
+        assertTrue(Mullvad.released({ 400 to """{"code":"INVALID_ACCOUNT"}""" }, delete(null)))
+        assertEquals(0, deleted)
+        assertFalse(Mullvad.released({ 401 to "" }, delete(null)))
+        assertFalse(Mullvad.released({ 404 to "" }, delete(null)))
+        assertFalse(Mullvad.released({ ok }, delete(503)))
+        assertFalse(Mullvad.released({ throw IOException("offline") }, delete(null)))
+        // The notice names the device the account was given.
+        val blob = app.unbraid.data.NordApi.json.encodeToString(Mullvad.Account.serializer(), Mullvad.Account("1234567890123456", "k", "10.0.0.2", "d1", "brave fox"))
+        assertEquals("Brave Fox", Mullvad.deviceName(blob))
+        assertNull(Mullvad.deviceName(blob.replace("brave fox", "")))
+    }
 }

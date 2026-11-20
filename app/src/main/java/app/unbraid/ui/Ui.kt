@@ -335,7 +335,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                 // the device this sign-in uses ([app.unbraid.data.Store.account] drops them).
                 val (blob, saved) = lock(id).withLock {
                     val blob = app.unbraid.vpn.Rotation.excluded { provider.signIn(clean) }
-                    if (store.pendingReleases.any { it.provider == id } || unkept.removeAll { it.first == id }) unreleased(listOf(provider.name))
+                    if (store.pendingReleases.any { it.provider == id } || unkept.removeAll { it.first == id }) unreleased(listOf(id to null))
                     blob to store.account(id, blob)
                 }
                 val before = store.accounts.value.keys - id
@@ -379,8 +379,11 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** True if the provider released this phone's slot (or has nothing to release). */
     private fun release(id: String, blob: String) = runCatching { app.unbraid.vpn.Rotation.excluded { Providers.get(id)?.signOut(blob) ?: true } }.getOrDefault(false)
 
-    private fun unreleased(names: List<String>) = names.joinToString(", ").let {
-        warn("Couldn't release this phone's device slot at $it. Remove it in your $it account${if (names.size > 1) "s" else ""}.")
+    /** Releases that failed, as (provider id, the account blob when known): the notice names each device that has a name. */
+    private fun unreleased(items: List<Pair<String, String?>>) {
+        val at = items.map { (p, blob) -> name(p) + (blob?.let { Providers.get(p)?.deviceName(it) }?.let { " ($it)" } ?: "") }.distinct().joinToString(", ")
+        val accounts = items.map { name(it.first) }.distinct()
+        warn("Couldn't release this phone's device slot at $at. Remove it in your ${accounts.joinToString(", ")} account${if (accounts.size > 1) "s" else ""}.")
     }
 
     /** Releases that failed while this screen model lived: the user was told to remove them by hand ([dismissNotice]). */
@@ -412,7 +415,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                 }
             }
         }.awaitAll().filterNotNull()
-        if (failed.isNotEmpty()) unreleased(failed.map { name(it.provider) }.distinct())
+        if (failed.isNotEmpty()) unreleased(failed.map { it.provider to it.blob })
     }
 
     /** A release that couldn't be kept for later ([app.unbraid.data.SignedOut.kept]): tried once, now. */
@@ -421,7 +424,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         // Checked under the lock sign-ins hold: one that finished after this sign-out may use the device this would remove.
         background.launch { lock(provider).withLock {
             if (!unkept.remove(k)) return@withLock // a sign-in took it and told the user
-            if (provider in store.accounts.value) stale(provider, blob) else if (!release(provider, blob)) unreleased(listOf(name(provider)))
+            if (provider in store.accounts.value) stale(provider, blob) else if (!release(provider, blob)) unreleased(listOf(provider to blob))
         } }
     }
 
@@ -434,7 +437,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     private fun stale(provider: String, blob: String) {
         if (staleRelease(Providers.get(provider), blob, store.accounts.value[provider])) {
-            if (!release(provider, blob)) unreleased(listOf(name(provider)))
+            if (!release(provider, blob)) unreleased(listOf(provider to blob))
         } else if (toldStale.add(provider)) name(provider).let { warn(staleNotice(it)) }
     }
 

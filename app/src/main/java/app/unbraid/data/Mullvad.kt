@@ -184,14 +184,25 @@ object Mullvad : Provider {
         return device(reply, n, keys.private)
     }
 
-    override fun signOut(account: String): Boolean = try {
-        val a = account(account)
-        val token = accessToken(a.account)
-        try { Http.delete("$API/accounts/v1/devices/${Http.enc(a.deviceId)}", bearer(token)) } catch (e: Http.Status) { if (e.code != 404) throw e }
-        true
+    override fun signOut(account: String): Boolean = account(account).let { a ->
+        released({ tokenReply(a.account) }) { token -> Http.delete("$API/accounts/v1/devices/${Http.enc(a.deviceId)}", bearer(token)) }
+    }
+
+    /**
+     * Released when the device is deleted, already gone (404), or the account number is no longer valid: its devices went
+     * with it. Any other failure, a refused token among them, is not.
+     */
+    internal fun released(tokenReply: () -> Pair<Int, String>, delete: (token: String) -> Unit): Boolean = try {
+        val reply = tokenReply()
+        if (reply.first == 400 && "INVALID_ACCOUNT" in reply.second) true
+        // Only the device deletion's 404 means gone: the token request's own 404 says nothing about the device.
+        else { val token = token(reply); try { delete(token) } catch (e: Http.Status) { if (e.code != 404) throw e }; true }
     } catch (e: IOException) {
         false
     }
+
+    override fun deviceName(account: String) = runCatching { account(account).device }.getOrNull()?.takeIf { it.isNotBlank() }
+        ?.split(' ')?.joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
 
     override fun otherDevice(old: String, current: String) =
         account(old).deviceId.let { it.isNotBlank() && it != account(current).deviceId }
