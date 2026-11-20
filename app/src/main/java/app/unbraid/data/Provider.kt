@@ -31,6 +31,26 @@ const val PROTECT = "protect"
 
 /** Key of a WireGuard provider's port setting: [AUTO] or a port number. */
 const val PORT_OPT = "port"
+
+/** A route protocol: WireGuard, switching to OpenVPN TCP when WireGuard doesn't get through ([AutoProtocol]). */
+const val AUTO_PROTOCOL = "auto"
+
+/**
+ * Routes on [AUTO_PROTOCOL] whose WireGuard failed on every port on the current network, so they connect over OpenVPN
+ * TCP until the network changes or the VPN starts again. In memory only, by route id.
+ */
+object AutoProtocol {
+    private val tcp = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    fun onTcp(route: String) = route in tcp
+    fun toTcp(route: String) = tcp.add(route)
+    fun reset() = tcp.clear()
+
+    /** The protocol [r] connects with now: Automatic resolved to WireGuard (null) or OpenVPN TCP. */
+    fun of(r: Route) = if (r.loc.protocol == AUTO_PROTOCOL) "openvpn_tcp".takeIf { onTcp(r.id) } else r.loc.protocol
+
+    /** Whether [l], kept or cached, was made with the protocol [r] uses now. */
+    fun matches(r: Route, l: Link) = r.loc.protocol != AUTO_PROTOCOL || (l is OvpnLink) == onTcp(r.id)
+}
 const val AUTO = "auto"
 /** Key of every WireGuard provider's MTU setting: [AUTO] is 1280, as in Mullvad's Android app; else up to 1420. */
 const val MTU_OPT = "mtu"

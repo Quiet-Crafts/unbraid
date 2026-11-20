@@ -406,6 +406,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             return
         }
         cancelResume()
+        // Automatic routes start on WireGuard again with every connection.
+        app.unbraid.data.AutoProtocol.reset()
         state.value = VpnState(VpnState.Phase.Connecting)
         try {
             net.start()
@@ -800,7 +802,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 val newNetwork = !first && basis?.second != network
                 basis = engine to network
                 // What didn't work on the last network may work on this one.
-                if (newNetwork) { moves.clear(); holds.clear(); if (state.value.stalled.isNotEmpty()) state.update { it.copy(stalled = emptySet()) } }
+                if (newNetwork) { moves.clear(); holds.clear(); app.unbraid.data.AutoProtocol.reset(); if (state.value.stalled.isNotEmpty()) state.update { it.copy(stalled = emptySet()) } }
                 // A move's own restart keeps the history: otherwise a route that never works would never be shown failing.
                 if (!first) { slow = 1; restart(now, keep = !newNetwork && engine == moved); continue }
             }
@@ -868,9 +870,15 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 // Given up on: still checked for a removed device (each time its hold ends while dead), but neither moved nor
                 // port-stepped (each restarts every tunnel).
                 val moving = byTag.filterKeys { it in deadTags && it !in given }.values.flatten().filter { it in dead }
-                val stepped = moving.mapNotNull(::steps).toSet()
+                // An Automatic route whose WireGuard failed on every port on this network goes over OpenVPN TCP instead.
+                val toTcp = moving.filter { id ->
+                    val r = s.route(id) ?: return@filter false
+                    val l = links[id] as? app.unbraid.data.WgLink ?: return@filter false
+                    r.loc.protocol == app.unbraid.data.AUTO_PROTOCOL && (steps(id)?.let { p -> (portStep[p] ?: 0) + 1 >= l.ports.size } ?: true) && app.unbraid.data.AutoProtocol.toTcp(id)
+                }.toSet()
+                val stepped = moving.filter { it !in toTcp }.mapNotNull(::steps).toSet()
                 portStep = portStep + stepped.associateWith { (portStep[it] ?: 0) + 1 }
-                val movable = moving.filter { id -> s.route(id)?.let(Health::movable) == true }
+                val movable = moving.filter { id -> id in toTcp || s.route(id)?.let(Health::movable) == true }
                 Log.w(TAG, "health: ${dead.size} route(s) stopped answering, ${movable.size} to move to another server")
                 Move(links - movable.toSet(), movable.mapNotNull { id -> s.route(id)?.let { r -> links[id]?.let { LinkPicker.serverKey(r, it) } } }.toSet(), generation,
                     dead.mapNotNull { id -> s.route(id)?.loc?.provider }.toSet(), movable.isNotEmpty() || stepped.isNotEmpty())

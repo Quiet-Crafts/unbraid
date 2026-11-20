@@ -9,6 +9,7 @@ import app.unbraid.data.Snapshot
 import app.unbraid.data.Surfshark
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -269,6 +270,23 @@ class KeySourcesTest {
         asked = emptyMap()
         assertTrue(AirVpn.connect(nl, blob) is app.unbraid.data.WgLink)
         assertTrue(asked.isEmpty())
+        // Automatic: WireGuard until it failed on this network, then OpenVPN TCP, and WireGuard again after a reset.
+        val auto = app.unbraid.data.Route("a", nl.copy(protocol = app.unbraid.data.AUTO_PROTOCOL))
+        app.unbraid.data.AutoProtocol.reset()
+        assertEquals(null, app.unbraid.data.AutoProtocol.of(auto))
+        assertTrue(AirVpn.connect(auto.loc, blob) is app.unbraid.data.WgLink) // asked directly: WireGuard
+        val wg = AirVpn.connect(nl, blob)
+        assertTrue(app.unbraid.data.AutoProtocol.matches(auto, wg))
+        assertTrue(app.unbraid.data.AutoProtocol.toTcp("a"))
+        assertFalse(app.unbraid.data.AutoProtocol.toTcp("a")) // once
+        assertEquals("openvpn_tcp", app.unbraid.data.AutoProtocol.of(auto))
+        assertFalse(app.unbraid.data.AutoProtocol.matches(auto, wg)) // the dead WireGuard tunnel isn't kept or reused
+        val over = AirVpn.connect(auto.loc.copy(protocol = app.unbraid.data.AutoProtocol.of(auto)), blob)
+        assertTrue(over is app.unbraid.data.OvpnLink && app.unbraid.data.AutoProtocol.matches(auto, over))
+        assertEquals("openvpn_3_tcp_443", asked["protocols"])
+        assertEquals("openvpn_tcp", app.unbraid.data.AutoProtocol.of(auto.copy(loc = auto.loc.copy(pinned = app.unbraid.data.Server("x", "h", "1.2.3.4", "k", 40))))) // same route, whatever its server details
+        app.unbraid.data.AutoProtocol.reset()
+        assertEquals(null, app.unbraid.data.AutoProtocol.of(auto))
         // A profile that would dial anything else is refused: another address, the other entry, another port or transport, a second remote.
         fun refused(r: (Catalog.Entry, Boolean) -> String, proto: String = "openvpn_tcp") { remote = r; assertFailsWith("doesn't match") { AirVpn.connect(nl.copy(protocol = proto), blob) } }
         refused({ _, _ -> "203.0.113.99" })

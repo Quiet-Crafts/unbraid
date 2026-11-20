@@ -100,6 +100,7 @@ object AirVpn : KeyProvider() {
         Triple(null, "WireGuard", "Fastest"),
         Triple("openvpn_udp", "OpenVPN UDP", "Wider compatibility. Needs the API key sign-in"),
         Triple("openvpn_tcp", "OpenVPN TCP", "For networks that block VPNs. Needs the API key sign-in"),
+        Triple(AUTO_PROTOCOL, "Automatic", "WireGuard, then OpenVPN TCP when a network blocks it. TCP needs the API key sign-in"),
     )
     /** Generator protocol per route protocol: entry number (1 standard, 2 alternative in [WgLink.entries] order), transport, wrapper. */
     private class Ovpn(val generator: String, val entry: Int, val transport: String, val wrap: String)
@@ -110,6 +111,8 @@ object AirVpn : KeyProvider() {
 
     /** A WireGuard route as [KeyProvider]; an OpenVPN one takes the same server, with a profile the generator makes for this device. */
     override fun connect(loc: Location, account: String): Link {
+        // Automatic is resolved per route before connecting ([AutoProtocol.of]); anything else asking gets WireGuard.
+        if (loc.protocol == AUTO_PROTOCOL) return connect(loc.copy(protocol = null), account)
         val o = loc.protocol?.let { OPENVPN[it] ?: throw app.unbraid.data.Unsupported("AirVPN doesn't offer that protocol. Choose another in the route") } ?: return super.connect(loc, account)
         val a = account(account)
         val key = a.apiKey ?: throw app.unbraid.data.Unsupported(NO_KEY)
