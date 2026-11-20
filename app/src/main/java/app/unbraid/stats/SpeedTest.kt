@@ -79,7 +79,7 @@ object SpeedTest {
     fun nodes(): List<TsNode> {
         val s = UnbraidVpn.state.value
         if (Compiler.TS_TAG !in UnbraidVpn.tags.values && !Unbraid.store.setup.value.tailscale) return emptyList()
-        val routed = Unbraid.store.setup.value.tsExit
+        val routed = (UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit
         return s.tsExitNodes.filter { it.online && it.id.isNotEmpty() && it.ip != routed }
     }
 
@@ -167,7 +167,7 @@ object SpeedTest {
             if (moved()) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; return@execute }
             // Switching is a blocking call; give Tailscale a moment to reach the new node before measuring.
             // The routed node's stable ID (the switch back needs one), noted with the route's setting it belongs to.
-            if (Unbraid.store.tsTestFrom == null) Unbraid.store.tsTestFrom = Unbraid.store.setup.value.tsExit?.let { r -> restoreTo(r, null, UnbraidVpn.state.value.tsExitNodes)?.let { "$r\n$it" } }.orEmpty()
+            if (Unbraid.store.tsTestFrom == null) Unbraid.store.tsTestFrom = (UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit?.let { r -> restoreTo(r, null, UnbraidVpn.state.value.tsExitNodes)?.let { "$r\n$it" } }.orEmpty()
             val ok = runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, node.id) }.isSuccess
             // A restart during the switch may have switched its new engine: switched back at once, never counted there.
             if (ok && moved()) { set { it.copy(phase = Phase.Failed, error = "The connection changed during the test. Try again.") }; restoreNode(); return@execute }
@@ -412,7 +412,7 @@ object SpeedTest {
 
     /** On [tsq] only. */
     private fun switchBack() {
-        val want = restoreTo(Unbraid.store.setup.value.tsExit, Unbraid.store.tsTestFrom, UnbraidVpn.state.value.tsExitNodes)
+        val want = restoreTo((UnbraidVpn.running ?: Unbraid.store.setup.value).tsExit, Unbraid.store.tsTestFrom, UnbraidVpn.state.value.tsExitNodes)
         // A node Tailscale won't take back (gone, no longer an exit) is no reason to stay on the tested one: no exit then.
         val set = { id: String -> runCatching { client().setTailscaleExitNode(Compiler.TS_TAG, id) }.isSuccess }
         if (set(want.orEmpty()) && want != null) Unbraid.store.tsTestFrom = null else if (want != "") set("")

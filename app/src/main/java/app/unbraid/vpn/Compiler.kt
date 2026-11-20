@@ -19,7 +19,11 @@ import app.unbraid.data.Setup
 import app.unbraid.data.Sites
 import app.unbraid.data.WgPeer
 import java.security.MessageDigest
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -126,10 +130,16 @@ object Compiler {
      * while the saved settings can't be read, so no app falls back to the normal connection. Built as a setup whose only
      * route, the default, has no tunnel: the same config a signed-out default gets.
      */
-    fun blockAll(selfPackage: String, cacheFile: String, fakeBlock: Int): String {
+    fun blockAll(selfPackage: String, cacheFile: String, fakeBlock: Int, lookups: Boolean = true): String {
         val none = Route("unreadable", app.unbraid.data.Location())
         val s = Setup(routes = listOf(none), defaultRoute = none.id, home = Home(), prefs = app.unbraid.data.Prefs(lan = false))
-        return compile(Input(s, emptyMap(), selfPackage, false, "", cacheFile, fakeBlock = fakeBlock, blocked = setOf(none.id)))
+        val json = compile(Input(s, emptyMap(), selfPackage, false, "", cacheFile, fakeBlock = fakeBlock, blocked = setOf(none.id)))
+        if (lookups) return json
+        // [lookups] false: no stand-in address is handed out either, as one from a block not noted down could come again.
+        val o = Json.parseToJsonElement(json).jsonObject
+        val dns = o["dns"]!!.jsonObject
+        val rules = buildJsonArray { add(obj("action" to "reject")); dns["rules"]?.jsonArray?.forEach { add(it) } }
+        return JsonObject(o + ("dns" to JsonObject(dns + ("rules" to rules)))).toString()
     }
 
     fun compile(i: Input): String {

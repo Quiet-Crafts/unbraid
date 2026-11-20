@@ -374,7 +374,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         pending++
         waiting.incrementAndGet()
         inbox.trySend(intent to locked)
-        return if (intent?.action == ACTION_STOP && !locked) START_NOT_STICKY else START_STICKY
+        // While paused (or asked to pause) Android must not start the service again on its own after killing it: that start
+        // would reconnect and end the pause early. The resume alarm survives the kill and reconnects at the pause's end.
+        val pausing = state.value.phase == VpnState.Phase.Paused || intent?.action == ACTION_PAUSE && !locked && state.value.phase != VpnState.Phase.Off
+        return if (intent?.action == ACTION_STOP && !locked || pausing) START_NOT_STICKY else START_STICKY
     }
 
     /** Android's Always-on and Block connections settings, which can change while connected. Caller holds [lock]. */
@@ -505,9 +508,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
         generation++
         val block = fakeBlock()
-        val json = Compiler.blockAll(packageName, File(filesDir, "cache.db").path, block)
+        // A block that couldn't be noted down is no reason to leave apps out: the hold still starts, offline, but answers no
+        // lookup at all, as a stand-in address from that block could be handed out again by the next process.
+        val noted = block == lastBlock || runCatching { store.fakeBlock = block }.onFailure { Log.e(TAG, "hold: ${logLine(it)}") }.isSuccess
+        val json = Compiler.blockAll(packageName, File(filesDir, "cache.db").path, block, lookups = noted)
         engine("The connection engine rejected this setup.") { Libbox.checkConfig(json) }
-        if (block != lastBlock) { engine("$APP couldn't save its state. Try again.") { store.fakeBlock = block }; blockSince = SystemClock.elapsedRealtime() }
+        if (block != lastBlock) blockSince = SystemClock.elapsedRealtime()
         lastBlock = block
         openTable(true)
         tunInput = null

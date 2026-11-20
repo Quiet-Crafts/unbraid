@@ -456,6 +456,15 @@ class CompilerTest {
     }
 
     /** A connection or lookup with no known app could be a VPN app's: with Direct as the default it is refused, never sent direct. */
+    /** The hold for unreadable settings answers no lookup when its block of stand-in addresses couldn't be noted down. */
+    @Test fun aHoldWithAnUnnotedBlockAnswersNoLookup() {
+        val held = Json.parseToJsonElement(Compiler.blockAll("app.unbraid", "/tmp/cache.db", 3, lookups = false)).jsonObject
+        assertEquals("""{"action":"reject"}""", held["dns"]!!.jsonObject["rules"]!!.jsonArray.first().toString())
+        val usual = Json.parseToJsonElement(Compiler.blockAll("app.unbraid", "/tmp/cache.db", 3)).jsonObject
+        assertEquals(usual["route"], held["route"])
+        assertEquals(usual["dns"]!!.jsonObject["rules"]!!.jsonArray.size + 1, held["dns"]!!.jsonObject["rules"]!!.jsonArray.size)
+    }
+
     @Test fun unknownOwnerIsRefusedWhenDirectDefaultAndAnAppUsesAVpn() {
         val unknown = """{"package_name_regex":["."],"invert":true,"action":"reject"}"""
         // A lookup's: from the phone's apps only, as the tailnet's own lookups name no app either. Addresses pass (a
