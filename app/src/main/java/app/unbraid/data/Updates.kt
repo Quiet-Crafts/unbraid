@@ -21,7 +21,7 @@ data class UpdateState(
     /** Whether the last attempt got no valid answer. */
     val failed: Boolean = false,
     /**
-     * Whether checks were turned on by default for this install (from 3.2.2, as new versions carry security fixes): once,
+     * Whether checks were turned on by default for this install (from 3.2.2): once,
      * for new and older installs alike, an earlier "Don't check" too; the release notes say so. Turning them off later stays off.
      */
     val turnedOn: Boolean = false,

@@ -83,7 +83,7 @@ fun Welcome(fresh: Boolean, answer: (Boolean) -> Unit, accept: () -> Unit) {
     val last = pages.lastIndex
     var page by rememberSaveable { mutableIntStateOf(if (fresh) 0 else last) }
     var agreed by rememberSaveable { mutableStateOf(false) }
-    // On unless changed: new versions often carry security fixes. Saved when the page is left or a choice tapped.
+    // On unless changed. Saved when the page is left or a choice tapped.
     var check by rememberSaveable { mutableStateOf(true) }
     val id = pages[page]
     BackHandler(fresh && page > 0) { page-- }
@@ -107,7 +107,7 @@ fun Welcome(fresh: Boolean, answer: (Boolean) -> Unit, accept: () -> Unit) {
                         Braid()
                     }
                     "updates" -> {
-                        Lead("This GitHub version doesn\u2019t install updates by itself. $APP checks for new releases and tells you when one is out. It\u2019s on, because new versions often carry security fixes.")
+                        Lead("This GitHub version doesn\u2019t install updates by itself. $APP checks for new releases and tells you when one is out. It\u2019s on unless you turn it off.")
                         Gap(32.dp)
                         UpdateFacts()
                         Gap(24.dp)

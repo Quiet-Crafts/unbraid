@@ -210,7 +210,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (!nm.areNotificationsEnabled() || nm.getNotificationChannel("updates")?.importance == NotificationManager.IMPORTANCE_NONE) return
             val open = PendingIntent.getActivity(ctx, 0, Intent(Intent.ACTION_VIEW, android.net.Uri.parse(app.unbraid.data.Updates.DOWNLOAD)), PendingIntent.FLAG_IMMUTABLE)
             nm.notify(5, Notification.Builder(ctx, "updates").setSmallIcon(R.drawable.ic_tile).setContentTitle("$APP ${r.versionName} is out")
-                .setContentText("New versions often carry security fixes. Tap to download it.").setContentIntent(open).setAutoCancel(true).build())
+                .setContentText("Tap to download it.").setContentIntent(open).setAutoCancel(true).build())
             synchronized(store) { store.updates = app.unbraid.data.Updates.notified(store.updates, r) }
         }
         /** The start after the app was replaced ([AfterUpdate]): if it fails, the notice says so and offers a reconnect. */
