@@ -118,8 +118,9 @@ connect as soon as an app is assigned to them, even if that app is idle.
 
 The app needs Android 13 or later on a 64-bit ARM phone. To update, download the
 new APK from the releases page and install it over the old one; your settings stay. The GitHub version can also
-check for a newer version about once a day, but only after you switch that on. It asks unbraid.app for a small file
-and identifies itself only as "unbraid" and its version, such as "unbraid/3.2.1".
+check for a newer version about once a day; from 3.2.2 that's on by default, also where it was off before, and it
+shows a notification when one is out. Turn it off in Settings, About & support. It asks unbraid.app for a small file
+and identifies itself only as "unbraid" and its version, such as "unbraid/3.2.2".
 
 ## Questions
 
@@ -274,8 +275,8 @@ release build is signed only if `.secrets/signing.properties` exists, so a plain
 
 We add no advertising or analytics of our own.
 You don't need an unbraid account. Your provider credentials are encrypted with
-an Android Keystore key and are only sent to the service they belong to. The app's own requests (provider sign-ins and key changes, server lists, the optional
-update check, a server's history from AirVPN when you tap to ask, and the direct connectivity check when every tunnel
+an Android Keystore key and are only sent to the service they belong to. The app's own requests (provider sign-ins and key changes, server lists, the update check
+(on by default from 3.2.2, once a day, sending only the app's name and version; off in Settings, About & support), a server's history from AirVPN when you tap to ask, and the direct connectivity check when every tunnel
 checked in a round fails) use your phone's normal connection, not the VPN,
 so those services see your own IP address. The list of installed apps is read on the
 phone so you can assign routes, and it never leaves the phone. "Copy a report" in the app's settings only copies text to the clipboard: the phone
