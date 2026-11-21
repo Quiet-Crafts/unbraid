@@ -579,7 +579,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 notice(ui, notice)
                 group(null, listOfNotNull(
                     Item("Record usage statistics", "Only on this phone, never uploaded. Turning it off keeps what's saved.", { if (prefs.stats) ui.setStats(false) else dialog = "statsConsent" }, checked = prefs.stats, icon = Icons.stats) { Toggle(prefs.stats) },
-                    Item("Saved history", "${"%.1f".format(statsSize / 1e6)} MB · hourly for a week, daily for about a year", null).takeIf { statsSize > 0 },
+                    Item("Saved history", "${"%.1f".format(statsSize / 1e6)} MB · hourly for 9 days, daily for 400 days", null).takeIf { statsSize > 0 },
                     Item("Delete saved history", "Erase everything recorded so far", { dialog = "statsDelete" }, danger = true) { Icon(Icons.deleteForever, null, Modifier.size(24.dp), tint = Ink.bad) }.takeIf { statsSize > 0 },
                 ))
             }
