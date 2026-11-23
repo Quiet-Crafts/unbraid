@@ -326,6 +326,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     /** Files being read into a form, per provider: closing the form or picking another file makes an older read moot. Main thread. */
     private val reads = HashMap<String, Int>()
+    private var qrJob: kotlinx.coroutines.Job? = null
 
     /**
      * Forgets a provider's half-filled sign-in form, on an explicit Back or Close. Leaving the
@@ -663,13 +664,21 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     }
 
     /** A QR code read for a sign-in field, here so a rotation during a slow decode doesn't lose it. */
-    fun readQr(uri: android.net.Uri?, formKey: String, provider: String) = viewModelScope.launch {
+    fun readQr(uri: android.net.Uri?, formKey: String, provider: String, photo: java.io.InputStream?) {
         val mine = reads.merge(provider, 1, Int::plus)!!
-        if (uri == android.net.Uri.EMPTY) { formError[provider] = "No camera app found"; return@launch }
-        val text = uri?.let { withContext(Dispatchers.IO) { decodeQr(getApplication(), it) } }
-        if (reads[provider] != mine || uri == null) return@launch // closed, cancelled, or another read started meanwhile
-        if (text.isNullOrBlank()) formError[provider] = "No QR code found in that picture. Try again closer, or type it in."
-        else { form[formKey] = text.trim().take(200); formError.remove(provider); formLink.remove(provider); challenge.remove(provider); slotsFull.remove(provider) }
+        qrJob?.cancel()
+        if (uri == null) return
+        if (uri == android.net.Uri.EMPTY) { formError[provider] = "No camera app found"; return }
+        val previous = form[formKey]
+        qrJob = viewModelScope.launch {
+            val text = qrReadLock.withLock {
+                if (reads[provider] != mine || form[formKey] != previous) return@launch
+                withContext(Dispatchers.IO) { if (photo != null) decodeQr(getApplication(), photo) else decodeQr(getApplication(), uri) }
+            }
+            if (reads[provider] != mine || form[formKey] != previous) return@launch
+            if (text.isNullOrBlank()) formError[provider] = "No QR code found in that picture. Try again closer, or type it in."
+            else { form[formKey] = text.trim().take(200); formError.remove(provider); formLink.remove(provider); challenge.remove(provider); slotsFull.remove(provider) }
+        }.also { job -> job.invokeOnCompletion { photo?.close() } }
     }
 
     private val icons = LruCache<String, Bitmap>(200)

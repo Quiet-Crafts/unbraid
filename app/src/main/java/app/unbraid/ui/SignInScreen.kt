@@ -132,7 +132,10 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
     val context = androidx.compose.ui.platform.LocalContext.current
     var scanFor by rememberSaveable(provider.id) { mutableStateOf<String?>(null) }
     var scanning by rememberSaveable(provider.id) { mutableStateOf(false) }
-    val scan = rememberQrScan { uri -> provider.fields.firstOrNull { it.key == scanFor }?.let { ui.readQr(uri, key(it), provider.id) } }
+    val scan = rememberQrScan { uri, photo ->
+        val field = provider.fields.firstOrNull { it.key == scanFor }
+        if (field == null) photo?.close() else ui.readQr(uri, key(field), provider.id, photo)
+    }
     // The field's key, saved: the picker may outlive this activity (rotation), and its file must still land.
     var fileFor by rememberSaveable(provider.id) { mutableStateOf<String?>(null) }
     // Config files keep their line breaks only when loaded from a file; a pasted .conf in one line can't be parsed.
