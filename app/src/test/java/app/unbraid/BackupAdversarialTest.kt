@@ -415,9 +415,9 @@ class BackupAdversarialTest {
         }
     }
 
-    @Test fun aRouteWithoutAnOwnServerGetsItsConfigBackOnTheSamePhone() {
+    @Test fun aHistoricalRouteWithoutAnOwnServerGetsItsConfigBackOnTheSamePhone() {
         val here = Setup(routes = listOf(Route("w", wg = wg)), defaultRoute = "w", apps = mapOf("org.example.a" to DIRECT), version = VERSION)
-        val c = Backup.read(Backup.export(here, "3.0.2", 0, keys = false))
+        val c = legacyWgTemplate(here, wg)
         assertTrue(c.setup.servers.single().keyless)
         val r = here.restoredFrom(c.setup, null, 0, c.keys)!!
         assertTrue(r.servers.none { it.keyless } && r.routes.none { it.keyless })
@@ -464,7 +464,7 @@ class BackupAdversarialTest {
         assertEquals("obfs-local", r.servers.single().ss!!.plugin)
         // Nor one with other allowed addresses, for WireGuard.
         val wThen = Setup(routes = listOf(Route("w", wg = wg, own = "y")), defaultRoute = "w", servers = listOf(OwnServer("y", wg = wg)), version = VERSION)
-        val w = Backup.read(Backup.export(wThen, "3.0.2", 0, keys = false))
+        val w = legacyWgTemplate(wThen, wg)
         val narrow = wg.copy(allowedIps = listOf("10.0.0.0/8"))
         assertTrue(wThen.copy(routes = listOf(Route("w", wg = narrow, own = "y")), servers = listOf(OwnServer("y", wg = narrow))).restoredFrom(w.setup, null, 0, w.keys)!!.servers.single().keyless)
         // The same server, plugin and all, still gives it back.

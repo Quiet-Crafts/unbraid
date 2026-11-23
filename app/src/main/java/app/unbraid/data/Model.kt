@@ -1,7 +1,8 @@
-@file:OptIn(SavedSites::class)
+@file:OptIn(SavedSites::class, kotlinx.serialization.ExperimentalSerializationApi::class)
 
 package app.unbraid.data
 
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 
 const val DIRECT = "direct"
@@ -65,6 +66,12 @@ data class WgPeer(
     val junk: Int = 0,
 )
 
+/** A WireGuard server label a backup can share. It contains no client configuration. */
+@Serializable
+data class WgIdentity(val name: String, val endpoint: String, val publicKey: String) {
+    fun waiting() = WgPeer(name, "", emptyList(), publicKey, endpoint = endpoint, allowedIps = emptyList())
+}
+
 /** A provider's V2Ray server for a disguised WireGuard tunnel: address, TCP port and the account-wide user id. */
 @Serializable
 data class Vmess(val server: String, val port: Int, val uuid: String)
@@ -113,6 +120,8 @@ data class Route(
      * of two tunnels. The entry route then needs no tunnel of its own.
      */
     val viaNative: Boolean = false,
+    /** Backup wire form only. [Backup.read] converts it to a blocked peer before restoring. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val wgIdentity: WgIdentity? = null,
 ) {
     val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: tsName ?: tsExit ?: loc.country ?: loc.automaticLabel
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OV"; ss != null -> "SS"; tsExit != null -> "TS"; else -> loc.code }
@@ -163,16 +172,24 @@ data class OwnServer(
     val id: String, val wg: WgPeer? = null, val ovpn: OvpnProfile? = null, val ss: SsProfile? = null,
     /** Restored from a backup saved without keys ([withoutSecrets]): its routes are blocked until the config is added again. */
     val keyless: Boolean = false,
+    /** Backup wire form only, as on [Route.wgIdentity]. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val wgIdentity: WgIdentity? = null,
 ) {
     val name get() = wg?.name ?: ovpn?.name ?: ss?.name.orEmpty()
     val kind get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; else -> "Shadowsocks" }
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OVPN"; else -> "SS" }
-    /** The same server as [o] by everything a file saved without keys keeps of it ([withoutSecrets]): a Shadowsocks plugin and WireGuard's allowed addresses too. */
-    fun sameAs(o: OwnServer) = withoutSecrets() == o.withoutSecrets()
+    /** Only a complete historical WireGuard descriptor can identify a local config for automatic refill. */
+    fun sameAs(o: OwnServer): Boolean {
+        val peer = wg ?: return withoutSecrets() == o.withoutSecrets()
+        val local = o.wg ?: return false
+        return peer.address.isNotEmpty() && peer.allowedIps.isNotEmpty() &&
+            copy(wg = peer.copy(privateKey = "", presharedKey = null), keyless = true) ==
+            o.copy(wg = local.copy(privateKey = "", presharedKey = null), keyless = true)
+    }
 }
 
-/** [wg]'s private and preshared keys left out. */
-fun WgPeer.withoutSecrets() = copy(privateKey = "", presharedKey = null)
+fun WgPeer.identity() = WgIdentity(name, endpoint, publicKey)
+fun WgPeer.withoutSecrets() = identity().waiting()
 /** An OpenVPN profile holds its keys inside the config: only the name stays. */
 fun OvpnProfile.withoutSecrets() = OvpnProfile(name, "")
 fun SsProfile.withoutSecrets() = copy(password = "", pluginOpts = null)

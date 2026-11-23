@@ -27,9 +27,10 @@ you're not sure where a problem belongs, send it here.
 routes, profiles, favourites, settings and own servers. Own servers' keys and passwords (including configs imported
 from a VPN provider with the login inside them) and the home WireGuard peer go in only when the user turns on
 *Include server keys and passwords*, which is off by default and can't be turned on when there is nothing for it to
-include; the passphrase must then get the app's best rating. Without them, an own server keeps only its name
-and kind, plus the server address and public key for WireGuard and Shadowsocks. After such a restore its routes stay blocked until its config is imported again, unless
-the phone already has that server with exactly the same settings, which keeps its config. A file never sets the
+include. With keys included, the passphrase must get the app's best rating. Without keys, a WireGuard server keeps its name,
+endpoint and server public key. An OpenVPN server keeps its name. Shadowsocks keeps its name, address, port, method and plugin name. After restoring a new backup without keys,
+WireGuard routes stay blocked until their config is imported again, even on the same phone. Earlier backups that
+kept the full WireGuard settings can still reuse an exact local match. Other own servers can reuse a matching local config. A file never sets the
 address or key of a provider's server: after a restore, each provider looks its servers up again. The file never holds accounts signed in through unbraid's
 provider sign-in screens (their logins, tokens and device keys), Tailscale state or statistics.
 

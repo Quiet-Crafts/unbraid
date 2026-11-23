@@ -163,10 +163,10 @@ class RestoreGateTest {
         val keyless = Backup.read(Backup.export(withServer, "3.0.2", 0, keys = false))
         val fresh = RestoreGate.check(RestoreGate.Ask(Setup(pristine = true), keyless, true))
         assertEquals(1, fresh.missing)
-        // A new install's placeholder isn't kept; this phone's setup is, and has the server's config.
+        // Keeping the phone’s setup gives that profile its local server. The incoming WireGuard route still needs its config.
         assertFalse(fresh.keepable)
         val same = RestoreGate.check(RestoreGate.Ask(withServer, keyless, true))
         assertTrue(same.keepable)
-        assertEquals(0, same.missing)
+        assertEquals(1, same.missing)
     }
 }

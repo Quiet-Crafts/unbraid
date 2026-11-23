@@ -171,6 +171,51 @@ object Backup {
     /** Passwords everyone tries first: each counts as one character wherever it appears. */
     private val COMMON = listOf("password", "passw0rd", "qwerty", "azerty", "letmein", "welcome", "iloveyou", "admin", "unbraid", "monkey", "dragon", "123456")
 
+    /** Only format 2 carries compact labels. Earlier readers can deserialize it and ask the user to update. */
+    private fun expandWgLabels(c: Contents): Setup {
+        val s = c.setup
+        need(s.routes.size <= MAX_EACH && s.servers.size <= MAX_EACH, "it holds more than unbraid keeps")
+        val labels = s.servers.any { it.wgIdentity != null } || s.routes.any { it.wgIdentity != null }
+        need(labels == (c.format == WG_LABELS), "its WireGuard labels don't match the backup format")
+        if (!labels) return s
+        val waitingWg = s.servers.filter { it.wgIdentity != null }.mapTo(HashSet()) { it.id }
+        need(s.routes.all { (it.wgIdentity != null) == (it.own in waitingWg) }, "a WireGuard label has no matching own server")
+        if (!c.keys) need(s.home.wg == null && s.servers.all { it.keyless }, "a backup without keys holds a server config")
+        fun peer(label: WgIdentity?, wg: WgPeer?, keyless: Boolean, other: Boolean): WgPeer? {
+            if (label == null) {
+                need(wg == null || (!keyless && c.keys), "a saved WireGuard peer needs a label")
+                return wg
+            }
+            need(keyless && wg == null && !other, "a WireGuard label conflicts with its configuration")
+            return label.waiting()
+        }
+        return s.copy(
+            servers = s.servers.map { it.copy(wg = peer(it.wgIdentity, it.wg, it.keyless, it.ovpn != null || it.ss != null), wgIdentity = null) },
+            routes = s.routes.map { it.copy(wg = peer(it.wgIdentity, it.wg, it.keyless, it.ovpn != null || it.ss != null || it.tsExit != null), wgIdentity = null) },
+        )
+    }
+
+    // The first keyless writer emitted all four of these defaults, even empty DNS and null keys.
+    // A sparse historical input still restores its routes, but deserializer defaults cannot prove an exact match.
+    @Serializable private class OldWgFields(val dns: List<String>? = null, val mtu: Int? = null,
+        val keepalive: Int? = -1, val presharedKey: String? = "missing") {
+        val complete get() = dns != null && mtu != null && keepalive != -1 && presharedKey == null
+    }
+    @Serializable private class OldRecord(val id: String, val wg: OldWgFields? = null)
+    @Serializable private class OldRecords(val servers: List<OldRecord> = emptyList(), val routes: List<OldRecord> = emptyList())
+    @Serializable private class OldContents(val setup: OldRecords)
+
+    private fun checkLegacyWgFields(s: Setup, text: String): Setup {
+        if (s.servers.none { it.keyless && it.wg != null } && s.routes.none { it.keyless && it.wg != null }) return s
+        // The typed reader skips unrelated configuration, including large app maps. Validation already bounded the records and DNS lists.
+        val records = json.decodeFromString(OldContents.serializer(), text).setup
+        fun incomplete(items: List<OldRecord>) = items.filter { it.wg?.complete == false }.mapTo(HashSet()) { it.id }
+        val servers = incomplete(records.servers)
+        val routes = incomplete(records.routes)
+        return s.copy(servers = s.servers.map { if (it.keyless && it.id in servers) it.withoutSecrets() else it },
+            routes = s.routes.map { if (it.keyless && it.id in routes) it.withoutSecrets() else it })
+    }
+
     /** The characters people see in [s]. */
     private fun clusters(s: String): List<String> = java.text.BreakIterator.getCharacterInstance().run {
         setText(s); var a = first(); generateSequence { next().takeIf { it != java.text.BreakIterator.DONE }?.let { b -> s.substring(a, b).also { a = b } } }.toList()
@@ -274,6 +319,7 @@ object Backup {
     )
 
     const val CONTENTS = 1
+    private const val WG_LABELS = 2
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     /**
@@ -308,19 +354,31 @@ object Backup {
     /** Whether [s] holds anything [contents] leaves out without keys: own servers, imported routes or a home peer. */
     fun hasSecrets(s: Setup) = s.servers.isNotEmpty() || s.home.wg != null || s.routes.any { it.imported && it.tsExit == null }
 
-    fun export(s: Setup, app: String, now: Long, keys: Boolean = true) =
-        json.encodeToString(Contents.serializer(), Contents(CONTENTS, app, now, contents(s, keys).stamped, keys)).toByteArray()
+    fun export(s: Setup, app: String, now: Long, keys: Boolean = true): ByteArray {
+        val setup = contents(s, keys).stamped
+        val compact = setup.servers.any { it.keyless && it.wg != null } || setup.routes.any { it.keyless && it.wg != null }
+        val saved = if (!compact) setup else setup.copy(
+            servers = setup.servers.map { if (it.keyless && it.wg != null) it.copy(wg = null, wgIdentity = it.wg.identity()) else it },
+            routes = setup.routes.map { if (it.keyless && it.wg != null) it.copy(wg = null, wgIdentity = it.wg.identity()) else it },
+        )
+        return json.encodeToString(Contents.serializer(), Contents(if (compact) WG_LABELS else CONTENTS, app, now, saved, keys)).toByteArray()
+    }
 
     /** [plain] read and checked whole ([valid]); throws [Failed] (Newer, Invalid, OtherPlatform) and changes nothing. */
     fun read(plain: ByteArray): Contents {
+        if (plain.size > MAX) fail(Reason.TooLarge)
         val text = String(plain, Charsets.UTF_8)
         val c = runCatching { json.decodeFromString(Contents.serializer(), text) }.getOrElse {
             // The Mac's backups hold their setup under "mac": the same container, another app's settings.
             if (runCatching { json.parseToJsonElement(text).let { it is JsonObject && "mac" in it && "setup" !in it } }.getOrDefault(false)) fail(Reason.OtherPlatform)
             fail(Reason.Invalid, "its contents can't be read")
         }
-        if (c.format > CONTENTS || c.setup.version > VERSION) fail(Reason.Newer)
-        return c.copy(app = c.app.takeIf { APP_VERSION.matches(it) }.orEmpty(), setup = valid(shown(named(c.setup.migrated()))))
+        if (c.format > WG_LABELS || c.setup.version > VERSION) fail(Reason.Newer)
+        need(c.format >= CONTENTS, "its backup format is invalid")
+        val setup = expandWgLabels(c)
+        val checked = valid(shown(named(setup.migrated())))
+        return c.copy(app = c.app.takeIf { APP_VERSION.matches(it) }.orEmpty(), setup =
+            if (c.format == CONTENTS) checkLegacyWgFields(checked, text) else checked)
     }
 
     /** The characters people see that a text from a file that is only shown keeps: no place or server a provider lists comes near it. */
@@ -411,12 +469,12 @@ object Backup {
         need(s.routes.all { ID.matches(it.id) && !builtIn(it.id) } && s.routes.map { it.id }.toSet().size == s.routes.size, "a route has a missing or repeated name")
         need(s.servers.all { ID.matches(it.id) } && s.servers.map { it.id }.toSet().size == s.servers.size, "an own server has a missing or repeated name")
         s.servers.forEach { sv ->
-            need(listOfNotNull(sv.wg, sv.ovpn, sv.ss).size == 1, "an own server has no configuration")
+            need(sv.wgIdentity == null && listOfNotNull(sv.wg, sv.ovpn, sv.ss).size == 1, "an own server has no configuration")
             if (sv.keyless) keyless(sv.name, sv.wg, sv.ovpn, sv.ss) else server(sv.name, sv.wg, sv.ovpn, sv.ss)
         }
         s.routes.forEach { r ->
             val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.tsExit).size
-            need(n <= 1, "a route has more than one exit")
+            need(r.wgIdentity == null && n <= 1, "a route has more than one exit")
             if (n == 0) need(Providers.get(r.loc.provider) != null, "a route uses a provider this unbraid doesn't know")
             // Its node's name and its place are never refused, as older versions kept them unchecked; what is only shown is cleaned ([shown]).
             r.tsExit?.let { need(tsAddress(it), "a Tailscale route is damaged") }
@@ -643,15 +701,19 @@ internal fun Setup.restoredWithInstalls(backup: Setup, keepAs: String?, now: Lon
 }
 
 private fun Setup.mergeBackup(backup: Setup, keepAs: String?, now: Long, keys: Boolean): Setup? {
-    // Saved without keys: an own server this phone still has, the same in everything the file keeps, gets its config back here, and the home peer stays as it is.
-    // A route that had no own server here got one made up in the file: this phone's route of that id gives it back, only
-    // only where everything the file keeps of that server is the same here (plugin and allowed addresses too); an OpenVPN
-    // one holds just a name, so its route waits for its config.
+    // A compact WireGuard label cannot establish which tunnel settings to use. Older files carry the
+    // settings on both the server and its route copies. Only a consistent, exact local match can refill them.
     val byOwn = backup.routes.groupBy { it.own }
     val full = backup.servers.filter { it.keyless }.mapNotNull { k ->
-        (servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) } ?: byOwn[k.id].orEmpty().firstNotNullOfOrNull { x ->
-            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf { k.ovpn == null && it.withoutSecrets() == k }
-        })?.let { k.id to it }
+        if (k.wg?.let { it.address.isEmpty() || it.allowedIps.isEmpty() } == true) return@mapNotNull null
+        val copies = byOwn[k.id].orEmpty()
+        if (copies.any { it.wg != k.wg }) return@mapNotNull null
+        val saved = servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) }
+        val match = saved ?: copies.asSequence().mapNotNull { x ->
+            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }
+                ?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf { k.ovpn == null && k.sameAs(it) }
+        }.let { candidates -> if (k.wg == null) candidates.firstOrNull() else candidates.distinct().singleOrNull() }
+        match?.let { k.id to it }
     }.toMap()
     val b = if (full.isEmpty()) backup else backup.copy(
         servers = backup.servers.map { full[it.id] ?: it },

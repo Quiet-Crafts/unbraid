@@ -61,7 +61,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private const val KEYS_OFF = "Off: own servers are saved without keys or passwords, and home WireGuard is left out. On another phone, add each server's config again; until then its apps stay offline."
+private const val KEYS_OFF = "Off: own servers are saved without keys or passwords, and home WireGuard is left out. After restoring, add each WireGuard server’s config again, even on this phone. Other own servers need their config on a new phone. Their apps stay offline until then."
 private const val KEYS_ON = "The file holds your own servers' keys and passwords, so it needs a strong passphrase."
 private const val KEYS_NONE = "You have no own servers or home WireGuard, so there are no keys or passwords to include."
 private const val KEEP_TOO_MUCH = "Your current setup can't be kept beside this backup: together they hold more profiles, routes or own servers than unbraid keeps, or more than one backup file can hold."
