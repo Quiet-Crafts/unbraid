@@ -254,7 +254,11 @@ the tunnel being checked, release every network part a tunnel built when it stop
 that the local network or home rules take to only the addresses those rules cover, and never
 hand a stand-in (fake) address to a second name while its table lives: a used-up block of them answers new names
 with a failure, and the app moves to the next of eight blocks, with a new table, when less than a quarter of the block
-is left, at most once every 10 minutes (a block that runs low sooner moves at the first check after those 10 minutes). That promise holds across crashes and across any error the engine's cache reports (a
+is left, at most once every 10 minutes (a block that runs low sooner moves at the first check after those 10 minutes).
+While a block is low, each app Android can identify has a limited share of new addresses. Lookups from shared or
+unidentified callers draw from one larger share. A caller that uses its share can still look up names already in the
+table. While the table has free addresses, other callers can resolve new names up to their own limits.
+The no-reuse guarantee holds across crashes and across any error the engine's cache reports (a
 failed read or write, a damaged file): the table then hands out no more addresses, as if used up. After such an error
 within 10 minutes of the last block change, new names fail until those 10 minutes are up; then the app moves to a new
 block. A fresh connect is not affected: it always starts on the next block. A cache file changed without any error is

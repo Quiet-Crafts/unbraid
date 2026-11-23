@@ -1,0 +1,865 @@
+diff --git a/adapter/dns.go b/adapter/dns.go
+index 8119097..b8e1e41 100644
+--- a/adapter/dns.go
++++ b/adapter/dns.go
+@@ -32,6 +32,7 @@ type DNSClient interface {
+ }
+ 
+ type DNSQueryOptions struct {
++	fakeIPCaller           uint32
+ 	Transport              DNSTransport
+ 	Strategy               C.DomainStrategy
+ 	LookupStrategy         C.DomainStrategy
+@@ -43,6 +44,37 @@ type DNSQueryOptions struct {
+ 	RemoveClientSubnet     bool
+ }
+ 
++// DNS options for a question read from an inbound connection. Only Android's
++// socket owner lookup can mark a TUN owner as an individual application.
++func InboundDNSQueryOptions(metadata *InboundContext) DNSQueryOptions {
++	owner := metadata.ProcessInfo
++	if metadata.InboundType == C.TypeTun && owner != nil && owner.IndividualApp && owner.UserId > 0 {
++		return DNSQueryOptions{fakeIPCaller: uint32(owner.UserId)}
++	}
++	return DNSQueryOptions{}
++}
++
++type fakeIPCallerKey struct{}
++
++// FakeIPCallerBucket returns the app's accounting bucket, or zero for shared callers.
++func FakeIPCallerBucket(ctx context.Context) uint32 {
++	bucket, _ := ctx.Value(fakeIPCallerKey{}).(uint32)
++	return bucket
++}
++
++// Bind the caller only to this exchange's fake-IP transport. A bootstrap
++// lookup inheriting a context but using its own options cannot inherit its charge.
++func (o DNSQueryOptions) ContextForTransport(ctx context.Context, transport DNSTransport) context.Context {
++	bucket := o.fakeIPCaller
++	if bucket != 0 && transport.Type() != C.DNSTypeFakeIP {
++		bucket = 0
++	}
++	if FakeIPCallerBucket(ctx) == bucket {
++		return ctx
++	}
++	return context.WithValue(ctx, fakeIPCallerKey{}, bucket)
++}
++
+ type RDRCStore interface {
+ 	LoadRDRC(transportName string, qName string, qType uint16) (rejected bool)
+ 	SaveRDRC(transportName string, qName string, qType uint16) error
+diff --git a/adapter/fakeip.go b/adapter/fakeip.go
+index 0787c14..d7db603 100644
+--- a/adapter/fakeip.go
++++ b/adapter/fakeip.go
+@@ -1,6 +1,7 @@
+ package adapter
+ 
+ import (
++	"errors"
+ 	"net/netip"
+ 
+ 	"github.com/sagernet/sing/common/logger"
+@@ -14,11 +15,28 @@ type FakeIPStore interface {
+ 	Reset() error
+ }
+ 
++// FakeIPReserve charges only fresh mappings from the low-water reserve.
++// Zero groups all callers without an individual Android application identity.
++type FakeIPReserve struct {
++	Caller    uint32
++	Remaining uint32
++}
++
++func (r FakeIPReserve) Allowance(initial uint32) uint32 {
++	if r.Caller == 0 {
++		return max(1, initial/4)
++	}
++	return max(1, initial/8)
++}
++
++var ErrFakeIPAllowance = errors.New("fakeip caller reserve allowance reached")
++
+ type FakeIPStorage interface {
+ 	FakeIPMetadata() *FakeIPMetadata
+ 	FakeIPSaveMetadata(metadata *FakeIPMetadata) error
+ 	FakeIPSaveMetadataAsync(metadata *FakeIPMetadata)
+ 	FakeIPStore(address netip.Addr, domain string) error
++	FakeIPStoreReserved(address netip.Addr, domain string, reserve FakeIPReserve) error
+ 	FakeIPStoreAsync(address netip.Addr, domain string, logger logger.Logger)
+ 	FakeIPLoad(address netip.Addr) (string, bool)
+ 	FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr, bool)
+diff --git a/adapter/platform.go b/adapter/platform.go
+index 44af9b6..6ff25e8 100644
+--- a/adapter/platform.go
++++ b/adapter/platform.go
+@@ -95,6 +95,7 @@ type FindConnectionOwnerRequest struct {
+ }
+ 
+ type ConnectionOwner struct {
++	IndividualApp       bool
+ 	ProcessID           uint32
+ 	UserId              int32
+ 	UserName            string
+diff --git a/dns/client.go b/dns/client.go
+index 09fe14f..ebdc429 100644
+--- a/dns/client.go
++++ b/dns/client.go
+@@ -297,6 +297,7 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
+ 			common.All(message.Extra[0].(*dns.OPT).Option, func(it dns.EDNS0) bool {
+ 				return it.Option() == dns.EDNS0SUBNET
+ 			}))
++	ctx = options.ContextForTransport(ctx, transport)
+ 	message = c.prepareExchangeMessage(message, options)
+ 	disableCache := !isSimpleRequest || c.disableCache || options.DisableCache
+ 	operation := &exchangeOperation{
+diff --git a/dns/transport/fakeip/fakeip.go b/dns/transport/fakeip/fakeip.go
+index 4d21e23..1649c9c 100644
+--- a/dns/transport/fakeip/fakeip.go
++++ b/dns/transport/fakeip/fakeip.go
+@@ -25,7 +25,7 @@ var _ adapter.FakeIPTransport = (*Transport)(nil)
+ type Transport struct {
+ 	dns.TransportAdapter
+ 	logger       logger.ContextLogger
+-	store        adapter.FakeIPStore
++	store        *Store
+ 	inet4Enabled bool
+ 	inet6Enabled bool
+ }
+@@ -77,8 +77,8 @@ func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg,
+ 		// The root zone has no address. Its empty name can't be saved, and a failed save stops the whole table.
+ 		return dns.FixedResponseStatus(message, mDNS.RcodeSuccess), nil
+ 	}
+-	address, err := t.store.Create(domain, question.Qtype == mDNS.TypeAAAA)
+-	if errors.Is(err, ErrExhausted) {
++	address, err := t.store.create(domain, question.Qtype == mDNS.TypeAAAA, adapter.FakeIPCallerBucket(ctx), true)
++	if errors.Is(err, ErrExhausted) || errors.Is(err, adapter.ErrFakeIPAllowance) {
+ 		// Answered at once (and never cached): with an error instead, a hijacked lookup would get no answer and the
+ 		// program would wait out its resolver's timeout.
+ 		return dns.FixedResponseStatus(message, mDNS.RcodeServerFailure), nil
+diff --git a/dns/transport/fakeip/memory.go b/dns/transport/fakeip/memory.go
+index 0cf8ecc..56b80ef 100644
+--- a/dns/transport/fakeip/memory.go
++++ b/dns/transport/fakeip/memory.go
+@@ -10,7 +10,13 @@ import (
+ 
+ var _ adapter.FakeIPStorage = (*MemoryStorage)(nil)
+ 
++type reserveCounts struct {
++	initial uint32
++	used    map[uint32]uint32
++}
++
+ type MemoryStorage struct {
++	reserve       [2]reserveCounts
+ 	addressAccess sync.RWMutex
+ 	domainAccess  sync.RWMutex
+ 	addressCache  map[netip.Addr]string
+@@ -38,7 +44,31 @@ func (s *MemoryStorage) FakeIPSaveMetadataAsync(metadata *adapter.FakeIPMetadata
+ }
+ 
+ func (s *MemoryStorage) FakeIPStore(address netip.Addr, domain string) error {
++	return s.store(address, domain, adapter.FakeIPReserve{})
++}
++
++func (s *MemoryStorage) FakeIPStoreReserved(address netip.Addr, domain string, reserve adapter.FakeIPReserve) error {
++	return s.store(address, domain, reserve)
++}
++
++func (s *MemoryStorage) store(address netip.Addr, domain string, reserve adapter.FakeIPReserve) error {
+ 	s.addressAccess.Lock()
++	defer s.addressAccess.Unlock()
++	if reserve.Remaining > 0 {
++		family := 0
++		if address.Is6() {
++			family = 1
++		}
++		counts := &s.reserve[family]
++		if counts.used == nil {
++			counts.initial = reserve.Remaining
++			counts.used = make(map[uint32]uint32)
++		}
++		if counts.used[reserve.Caller] >= reserve.Allowance(counts.initial) {
++			return adapter.ErrFakeIPAllowance
++		}
++		counts.used[reserve.Caller]++
++	}
+ 	s.domainAccess.Lock()
+ 	if oldDomain, loaded := s.addressCache[address]; loaded {
+ 		if address.Is4() {
+@@ -54,7 +84,6 @@ func (s *MemoryStorage) FakeIPStore(address netip.Addr, domain string) error {
+ 		s.domainCache6[domain] = address
+ 	}
+ 	s.domainAccess.Unlock()
+-	s.addressAccess.Unlock()
+ 	return nil
+ }
+ 
+@@ -84,6 +113,7 @@ func (s *MemoryStorage) FakeIPLoadDomain(domain string, isIPv6 bool) (netip.Addr
+ func (s *MemoryStorage) FakeIPReset() error {
+ 	s.addressAccess.Lock()
+ 	s.domainAccess.Lock()
++	s.reserve = [2]reserveCounts{}
+ 	s.addressCache = make(map[netip.Addr]string)
+ 	s.domainCache4 = make(map[string]netip.Addr)
+ 	s.domainCache6 = make(map[string]netip.Addr)
+diff --git a/dns/transport/fakeip/reserve_test.go b/dns/transport/fakeip/reserve_test.go
+new file mode 100644
+index 0000000..347c959
+--- /dev/null
++++ b/dns/transport/fakeip/reserve_test.go
+@@ -0,0 +1,167 @@
++package fakeip
++
++import (
++	"context"
++	"fmt"
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing/common/logger"
++	"net/netip"
++	"sync"
++	"testing"
++
++	"github.com/miekg/dns"
++)
++
++func TestFakeIPReserveAcrossReload(t *testing.T) {
++	path := t.TempDir() + "/dns.db"
++	query := func(store *Store, name string, rcode int) {
++		t.Helper()
++		transport := Transport{store: store, inet4Enabled: true}
++		q := new(dns.Msg).SetQuestion(name+".test.", dns.TypeA)
++		answer, err := transport.Exchange(context.Background(), q)
++		if err != nil || answer == nil || answer.Rcode != rcode {
++			t.Fatalf("%s: got %v, %v; want rcode %d", name, answer, err, rcode)
++		}
++	}
++	s, c, stop := mustStart(t, path, rangeA)
++	for i := 0; i < 11; i++ {
++		query(s, fmt.Sprint(i), dns.RcodeSuccess)
++	}
++	query(s, "new", dns.RcodeServerFailure)
++	query(s, "1", dns.RcodeSuccess)
++	if Remaining() != 2 || c.FakeIPTrouble() {
++		t.Fatalf("denial left %d, trouble %t", Remaining(), c.FakeIPTrouble())
++	}
++	stop()
++	s, c, stop = mustStart(t, path, rangeA)
++	query(s, "new", dns.RcodeServerFailure)
++	query(s, "1", dns.RcodeSuccess)
++	if Remaining() != 2 || c.FakeIPTrouble() {
++		t.Fatal("reload changed reserve")
++	}
++	stop()
++	s, _, stop = mustStart(t, path, rangeB)
++	defer stop()
++	query(s, "new", dns.RcodeSuccess)
++}
++
++func TestFakeIPReserveSharedNamesAndFamilies(t *testing.T) {
++	s := NewStore(context.Background(), logger.NOP(), rangeA, netip.MustParsePrefix("fd00::/124"))
++	if err := s.Start(); err != nil {
++		t.Fatal(err)
++	}
++	defer s.Close()
++	for _, v6 := range []bool{false, true} {
++		for i := 0; i < 10; i++ {
++			if _, err := s.create(fmt.Sprintf("common%d.test", i), v6, 7, true); err != nil {
++				t.Fatal(err)
++			}
++		}
++		first, err := s.create("reserved.test", v6, 7, true)
++		if err != nil {
++			t.Fatal(err)
++		}
++		for _, uid := range []uint32{0, 7, 42} {
++			if again, err := s.create("reserved.test", v6, uid, true); err != nil || again != first {
++				t.Fatalf("shared hit: %s, %v", again, err)
++			}
++		}
++		if _, err := s.create("second.test", v6, 7, true); err != adapter.ErrFakeIPAllowance {
++			t.Fatalf("quota: %v", err)
++		}
++		if _, err := s.create("second.test", v6, 42, true); err != nil {
++			t.Fatal(err)
++		}
++		if owner, ok := s.Lookup(first); !ok || owner != "reserved.test" {
++			t.Fatalf("old mapping: %s", owner)
++		}
++	}
++}
++
++func TestFakeIPReserveConcurrentSharedName(t *testing.T) {
++	s := NewStore(context.Background(), logger.NOP(), rangeA, netip.Prefix{})
++	if err := s.Start(); err != nil {
++		t.Fatal(err)
++	}
++	defer s.Close()
++	for i := 0; i < 10; i++ {
++		if _, err := s.Create(fmt.Sprint(i), false); err != nil {
++			t.Fatal(err)
++		}
++	}
++	var wg sync.WaitGroup
++	var answers [4]netip.Addr
++	start := make(chan struct{})
++	for i := range answers {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			<-start
++			addr, err := s.create("shared.test", false, uint32(i+1), true)
++			if err != nil {
++				t.Error(err)
++			}
++			answers[i] = addr
++		}()
++	}
++	close(start)
++	wg.Wait()
++	for _, addr := range answers {
++		if addr != answers[0] {
++			t.Fatalf("multiple mappings: %v", answers)
++		}
++	}
++	counts := s.storage.(*MemoryStorage).reserve[0]
++	if Remaining() != 2 || len(counts.used) != 1 {
++		t.Fatalf("left %d, charged identities %d", Remaining(), len(counts.used))
++	}
++}
++
++func TestFakeIPReserveStartsOnOldDatabaseRemainder(t *testing.T) {
++	path := t.TempDir() + "/cache.db"
++	// Simulate the old format. Keep 3 of 29 addresses free: much less than
++	// the normal 7-position reserve on this range.
++	prefix := netip.MustParsePrefix("198.18.0.0/27")
++	s, c, stop := mustStart(t, path, prefix)
++	for i := 0; i < 26; i++ {
++		if _, err := s.Create(fmt.Sprint(i), false); err != nil {
++			t.Fatal(err)
++		}
++	}
++	stop()
++	s, c, stop = mustStart(t, path, prefix)
++	defer stop()
++	if _, err := s.create("a", false, 0, true); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := s.create("b", false, 0, true); err != adapter.ErrFakeIPAllowance {
++		t.Fatalf("shared limit: %v", err)
++	}
++	for _, uid := range []uint32{32, 33} {
++		if _, err := s.create(fmt.Sprint("healthy", uid), false, uid, true); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if Remaining() != 0 || c.FakeIPTrouble() {
++		t.Fatal("unexpected capacity or store failure")
++	}
++}
++
++func TestFakeIPReserveSizes(t *testing.T) {
++	for _, tc := range []struct {
++		prefix string
++		wanted int64
++	}{
++		{"198.18.0.0/18", 4095}, {"198.18.0.0/27", 7}, {"198.18.0.0/30", 0}, {"fd00::/64", 4095},
++	} {
++		prefix := netip.MustParsePrefix(tc.prefix)
++		last := broadcastAddress(prefix)
++		got := addressesBetween(reserveStart(prefix, last).Prev(), last)
++		if got != tc.wanted {
++			t.Fatalf("%s: reserve %d", tc.prefix, got)
++		}
++	}
++	if (adapter.FakeIPReserve{}).Allowance(4095) != 1023 || (adapter.FakeIPReserve{Caller: 1}).Allowance(4095) != 511 {
++		t.Fatal("unexpected /18 budget")
++	}
++}
+diff --git a/dns/transport/fakeip/store.go b/dns/transport/fakeip/store.go
+index 066e6af..4c349e2 100644
+--- a/dns/transport/fakeip/store.go
++++ b/dns/transport/fakeip/store.go
+@@ -70,13 +70,15 @@ func addressesBetween(current netip.Addr, last netip.Addr) int64 {
+ // is handed out, and commits are atomic) and every error the database reports; a cache file changed without a reported
+ // error is out of scope (the app's own private file, deleted at every connect and range move).
+ type Store struct {
+-	ctx        context.Context
+-	logger     logger.Logger
+-	inet4Range netip.Prefix
+-	inet6Range netip.Prefix
+-	inet4Last  netip.Addr
+-	inet6Last  netip.Addr
+-	storage    adapter.FakeIPStorage
++	ctx          context.Context
++	logger       logger.Logger
++	inet4Range   netip.Prefix
++	inet6Range   netip.Prefix
++	inet4Last    netip.Addr
++	inet6Last    netip.Addr
++	inet4Reserve netip.Addr
++	inet6Reserve netip.Addr
++	storage      adapter.FakeIPStorage
+ 
+ 	addressAccess sync.Mutex
+ 	inet4Current  netip.Addr
+@@ -95,13 +97,26 @@ func NewStore(ctx context.Context, logger logger.Logger, inet4Range netip.Prefix
+ 	}
+ 	if inet4Range.IsValid() {
+ 		store.inet4Last = broadcastAddress(inet4Range)
++		store.inet4Reserve = reserveStart(inet4Range, store.inet4Last)
+ 	}
+ 	if inet6Range.IsValid() {
+ 		store.inet6Last = broadcastAddress(inet6Range)
++		store.inet6Reserve = reserveStart(inet6Range, store.inet6Last)
+ 	}
+ 	return store
+ }
+ 
++// Admission starts strictly below the app's quarter-full rotation watermark.
++// Cap bookkeeping even when a larger range is configured.
++func reserveStart(prefix netip.Prefix, last netip.Addr) netip.Addr {
++	capacity := addressesBetween(prefix.Addr().Next(), last)
++	count := min(int64(4095), max(int64(0), (capacity-1)/4))
++	raw := last.As16()
++	n := new(big.Int).SetBytes(raw[:])
++	n.Sub(n, big.NewInt(count)).FillBytes(raw[:])
++	return netip.AddrFrom16(raw).Unmap()
++}
++
+ func broadcastAddress(prefix netip.Prefix) netip.Addr {
+ 	addr := prefix.Addr()
+ 	raw := addr.As16()
+@@ -236,6 +251,12 @@ func (s *Store) load(domain string, isIPv6 bool) (netip.Addr, bool) {
+ }
+ 
+ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
++	return s.create(domain, isIPv6, 0, false)
++}
++
++// Internal storage clients retain the allocator API. DNS admission charges
++// the caller only after both lookups of the shared name have missed.
++func (s *Store) create(domain string, isIPv6 bool, caller uint32, limit bool) (netip.Addr, error) {
+ 	if address, loaded := s.load(domain, isIPv6); loaded {
+ 		return address, nil
+ 	}
+@@ -248,9 +269,9 @@ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
+ 		return address, nil
+ 	}
+ 
+-	current, last, prefix := &s.inet4Current, s.inet4Last, s.inet4Range
++	current, last, prefix, reserve := &s.inet4Current, s.inet4Last, s.inet4Range, s.inet4Reserve
+ 	if isIPv6 {
+-		current, last, prefix = &s.inet6Current, s.inet6Last, s.inet6Range
++		current, last, prefix, reserve = &s.inet6Current, s.inet6Last, s.inet6Range, s.inet6Reserve
+ 	}
+ 	if !current.IsValid() {
+ 		if isIPv6 {
+@@ -278,7 +299,17 @@ func (s *Store) Create(domain string, isIPv6 bool) (netip.Addr, error) {
+ 	// An address whose name could not be saved is not handed out, and the position stays before it: no gap a later
+ 	// start would stop at (reconcile), with mapped addresses counted as free beyond it. The cache can't be trusted
+ 	// any more either, so the pool counts as used up and the app moves to a fresh range, which resets it.
+-	err := s.storage.FakeIPStore(address, domain)
++	var err error
++	if limit && address.Compare(reserve) >= 0 {
++		remaining := addressesBetween(address.Prev(), last)
++		err = s.storage.FakeIPStoreReserved(address, domain, adapter.FakeIPReserve{Caller: caller, Remaining: uint32(remaining)})
++		if err == adapter.ErrFakeIPAllowance {
++			*current = address.Prev()
++			return netip.Addr{}, err
++		}
++	} else {
++		err = s.storage.FakeIPStore(address, domain)
++	}
+ 	if err != nil {
+ 		*current = address.Prev()
+ 		s.unsure = true
+diff --git a/experimental/cachefile/fakeip.go b/experimental/cachefile/fakeip.go
+index e161bcb..65f73e0 100644
+--- a/experimental/cachefile/fakeip.go
++++ b/experimental/cachefile/fakeip.go
+@@ -1,7 +1,11 @@
+ package cachefile
+ 
+ import (
++	"crypto/aes"
++	"crypto/rand"
++	"encoding/binary"
+ 	"errors"
++	"io"
+ 	"net/netip"
+ 	"os"
+ 	"time"
+@@ -135,30 +139,104 @@ var afterTroubleCheck = func() {}
+ 
+ func (c *CacheFile) FakeIPStore(address netip.Addr, domain string) error {
+ 	return c.fakeIPFailed(c.batch(func(tx *bbolt.Tx) error {
+-		bucket, err := tx.CreateBucketIfNotExists(bucketFakeIP)
++		return storeFakeIP(tx, address, domain)
++	}))
++}
++
++// The counter, forward mapping and reverse mapping share a single commit.
++// Refusals roll back without marking the cache as damaged or writing a page.
++func (c *CacheFile) FakeIPStoreReserved(address netip.Addr, domain string, reserve adapter.FakeIPReserve) error {
++	err := c.update(func(tx *bbolt.Tx) error {
++		root, err := tx.CreateBucketIfNotExists(bucketFakeIP)
+ 		if err != nil {
+ 			return err
+ 		}
+-		oldDomain := bucket.Get(address.AsSlice())
+-		err = bucket.Put(address.AsSlice(), []byte(domain))
++		family := []byte("reserve4")
++		if address.Is6() {
++			family = []byte("reserve6")
++		}
++		b, err := root.CreateBucketIfNotExists(family)
+ 		if err != nil {
+ 			return err
+ 		}
+-		if address.Is4() {
+-			bucket, err = tx.CreateBucketIfNotExists(bucketFakeIPDomain4)
+-		} else {
+-			bucket, err = tx.CreateBucketIfNotExists(bucketFakeIPDomain6)
++		meta := b.Get([]byte("basis"))
++		if meta == nil {
++			meta = make([]byte, 4+aes.BlockSize)
++			binary.BigEndian.PutUint32(meta, reserve.Remaining)
++			if _, err = rand.Read(meta[4:]); err != nil {
++				return err
++			}
++			if err = b.Put([]byte("basis"), meta); err != nil {
++				return err
++			}
++		}
++		if len(meta) != 4+aes.BlockSize {
++			return io.ErrUnexpectedEOF
+ 		}
++		initial := binary.BigEndian.Uint32(meta)
++		if reserve.Remaining == 0 || initial > 4095 || initial < reserve.Remaining {
++			return os.ErrInvalid
++		}
++		// A per-table permutation avoids both UID collisions and stable
++		// identifiers across databases. No package or raw UID is persisted.
++		cipher, err := aes.NewCipher(meta[4:])
+ 		if err != nil {
+ 			return err
+ 		}
+-		if oldDomain != nil {
+-			if err := bucket.Delete(oldDomain); err != nil {
+-				return err
++		var key [aes.BlockSize]byte
++		binary.BigEndian.PutUint32(key[:], reserve.Caller)
++		cipher.Encrypt(key[:], key[:])
++		raw := b.Get(key[:])
++		var used uint32
++		if raw != nil {
++			if len(raw) != 4 {
++				return io.ErrUnexpectedEOF
+ 			}
++			used = binary.BigEndian.Uint32(raw)
+ 		}
+-		return bucket.Put([]byte(domain), address.AsSlice())
+-	}))
++		if used > initial-reserve.Remaining {
++			return os.ErrInvalid
++		}
++		if used >= reserve.Allowance(initial) {
++			return adapter.ErrFakeIPAllowance
++		}
++		var next [4]byte
++		binary.BigEndian.PutUint32(next[:], used+1)
++		if err = b.Put(key[:], next[:]); err != nil {
++			return err
++		}
++		return storeFakeIP(tx, address, domain)
++	})
++	if err == adapter.ErrFakeIPAllowance {
++		return err
++	}
++	return c.fakeIPFailed(err)
++}
++
++func storeFakeIP(tx *bbolt.Tx, address netip.Addr, domain string) error {
++	bucket, err := tx.CreateBucketIfNotExists(bucketFakeIP)
++	if err != nil {
++		return err
++	}
++	oldDomain := bucket.Get(address.AsSlice())
++	err = bucket.Put(address.AsSlice(), []byte(domain))
++	if err != nil {
++		return err
++	}
++	if address.Is4() {
++		bucket, err = tx.CreateBucketIfNotExists(bucketFakeIPDomain4)
++	} else {
++		bucket, err = tx.CreateBucketIfNotExists(bucketFakeIPDomain6)
++	}
++	if err != nil {
++		return err
++	}
++	if oldDomain != nil {
++		if err := bucket.Delete(oldDomain); err != nil {
++			return err
++		}
++	}
++	return bucket.Put([]byte(domain), address.AsSlice())
+ }
+ 
+ func (c *CacheFile) FakeIPStoreAsync(address netip.Addr, domain string, logger logger.Logger) {
+diff --git a/experimental/cachefile/fakeip_test.go b/experimental/cachefile/fakeip_test.go
+index ee7f168..1321793 100644
+--- a/experimental/cachefile/fakeip_test.go
++++ b/experimental/cachefile/fakeip_test.go
+@@ -8,6 +8,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/sagernet/bbolt"
+ 	"github.com/sagernet/sing-box/adapter"
+ 	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing/common/logger"
+@@ -178,3 +179,54 @@ func TestTheFinalCheckpointIsTheLast(t *testing.T) {
+ 		t.Fatalf("a final checkpoint written after trouble (%v)", err)
+ 	}
+ }
++
++func TestFakeIPReserveFailureRollsBackMappingAndCharge(t *testing.T) {
++	c := open(t, t.TempDir()+"/cache.db")
++	defer c.database().Close()
++	addr := netip.MustParseAddr("198.18.0.12")
++	r := adapter.FakeIPReserve{Caller: 7, Remaining: 3}
++	// The reverse index rejects an empty key, after the counters and forward
++	// mapping have been written to the uncommitted transaction.
++	if err := c.FakeIPStoreReserved(addr, "", r); err == nil || !c.FakeIPTrouble() {
++		t.Fatalf("failure: %v, trouble %t", err, c.FakeIPTrouble())
++	}
++	if err := c.view(func(tx *bbolt.Tx) error {
++		if tx.Bucket(bucketFakeIP) != nil || tx.Bucket(bucketFakeIPDomain4) != nil {
++			t.Error("partial mapping or counter committed")
++		}
++		return nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestFakeIPReserveDenialDoesNotWrite(t *testing.T) {
++	c := open(t, t.TempDir()+"/cache.db")
++	defer c.database().Close()
++	a := netip.MustParseAddr("198.18.0.12")
++	r := adapter.FakeIPReserve{Caller: 12, Remaining: 3}
++	if err := c.FakeIPStoreReserved(a, "known.test", r); err != nil {
++		t.Fatal(err)
++	}
++	txID := func() int {
++		id := 0
++		if err := c.view(func(tx *bbolt.Tx) error { id = tx.ID(); return nil }); err != nil {
++			t.Fatal(err)
++		}
++		return id
++	}
++	before := txID()
++	r.Remaining--
++	if err := c.FakeIPStoreReserved(a.Next(), "later.test", r); err != adapter.ErrFakeIPAllowance {
++		t.Fatal(err)
++	}
++	if txID() != before || c.FakeIPTrouble() {
++		t.Fatal("quota refusal committed a transaction or marked trouble")
++	}
++	if _, ok := c.FakeIPLoadDomain("later.test", false); ok {
++		t.Fatal("reverse entry persisted")
++	}
++	if _, ok := c.FakeIPLoad(a.Next()); ok {
++		t.Fatal("forward entry persisted")
++	}
++}
+diff --git a/experimental/libbox/platform.go b/experimental/libbox/platform.go
+index 4d3f828..d21daf2 100644
+--- a/experimental/libbox/platform.go
++++ b/experimental/libbox/platform.go
+@@ -74,6 +74,7 @@ type NeighborUpdateListener interface {
+ }
+ 
+ type ConnectionOwner struct {
++	IndividualApp       bool
+ 	UserId              int32
+ 	UserName            string
+ 	ProcessPath         string
+diff --git a/experimental/libbox/service.go b/experimental/libbox/service.go
+index 153b4ae..ee7f132 100644
+--- a/experimental/libbox/service.go
++++ b/experimental/libbox/service.go
+@@ -194,6 +194,7 @@ func (w *platformInterfaceWrapper) FindConnectionOwner(request *adapter.FindConn
+ 		return nil, err
+ 	}
+ 	return &adapter.ConnectionOwner{
++		IndividualApp:       result.IndividualApp,
+ 		UserId:              result.UserId,
+ 		UserName:            result.UserName,
+ 		ProcessPath:         result.ProcessPath,
+diff --git a/protocol/dns/handle.go b/protocol/dns/handle.go
+index 79e3321..7916a9e 100644
+--- a/protocol/dns/handle.go
++++ b/protocol/dns/handle.go
+@@ -40,7 +40,7 @@ func HandleStreamDNSRequest(ctx context.Context, router adapter.DNSRouter, conn
+ 		return err
+ 	}
+ 	metadataInQuery := metadata
+-	router.ExchangeAsync(adapter.WithContext(ctx, &metadataInQuery), &message, adapter.DNSQueryOptions{}, func(response *mDNS.Msg, err error) {
++	router.ExchangeAsync(adapter.WithContext(ctx, &metadataInQuery), &message, adapter.InboundDNSQueryOptions(&metadataInQuery), func(response *mDNS.Msg, err error) {
+ 		if err != nil {
+ 			conn.Close()
+ 			return
+@@ -129,7 +129,7 @@ func NewDNSPacketConnection(ctx context.Context, router adapter.DNSRouter, conn
+ 				timeout.Update()
+ 			}
+ 			metadataInQuery := metadata
+-			router.ExchangeAsync(adapter.WithContext(ctx, &metadataInQuery), &message, adapter.DNSQueryOptions{}, func(response *mDNS.Msg, err error) {
++			router.ExchangeAsync(adapter.WithContext(ctx, &metadataInQuery), &message, adapter.InboundDNSQueryOptions(&metadataInQuery), func(response *mDNS.Msg, err error) {
+ 				if err != nil {
+ 					cancel(err)
+ 					return
+@@ -199,7 +199,7 @@ func newDNSPacketConnection(ctx context.Context, router adapter.DNSRouter, conn
+ 				timeout.Update()
+ 			}
+ 			metadataInQuery := metadata
+-			router.ExchangeAsync(adapter.WithContext(ctx, &metadataInQuery), &message, adapter.DNSQueryOptions{}, func(response *mDNS.Msg, err error) {
++			router.ExchangeAsync(adapter.WithContext(ctx, &metadataInQuery), &message, adapter.InboundDNSQueryOptions(&metadataInQuery), func(response *mDNS.Msg, err error) {
+ 				if err != nil {
+ 					cancel(err)
+ 					return
+diff --git a/route/dns.go b/route/dns.go
+index d697e78..33a123b 100644
+--- a/route/dns.go
++++ b/route/dns.go
+@@ -63,7 +63,7 @@ func (r *Router) HijackDNSPacket(ctx context.Context, payload []byte, writer N.P
+ 	r.searchProcessInfo(ctx, &metadata)
+ 	destination := metadata.Destination
+ 	metadata.Destination = M.Socksaddr{}
+-	r.dns.ExchangeAsync(adapter.WithContext(ctx, &metadata), &message, adapter.DNSQueryOptions{}, func(response *mDNS.Msg, exchangeErr error) {
++	r.dns.ExchangeAsync(adapter.WithContext(ctx, &metadata), &message, adapter.InboundDNSQueryOptions(&metadata), func(response *mDNS.Msg, exchangeErr error) {
+ 		if exchangeErr == nil {
+ 			exchangeErr = r.writeDNSPacketResponse(&message, response, writer, destination)
+ 		}
+diff --git a/route/dns_caller_test.go b/route/dns_caller_test.go
+new file mode 100644
+index 0000000..4310e14
+--- /dev/null
++++ b/route/dns_caller_test.go
+@@ -0,0 +1,115 @@
++package route
++
++import (
++	"context"
++	"encoding/binary"
++	"io"
++	"net"
++	"testing"
++
++	mDNS "github.com/miekg/dns"
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	D "github.com/sagernet/sing-box/dns"
++	"github.com/sagernet/sing/common/buf"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/stretchr/testify/require"
++)
++
++type callerTransport struct {
++	adapter.DNSTransport
++	kind  string
++	calls chan uint32
++}
++
++func (d *callerTransport) Type() string { return d.kind }
++func (d *callerTransport) Tag() string  { return "test" }
++func (d *callerTransport) Exchange(ctx context.Context, msg *mDNS.Msg) (*mDNS.Msg, error) {
++	d.calls <- adapter.FakeIPCallerBucket(ctx)
++	return new(mDNS.Msg).SetReply(msg), nil
++}
++
++type callerDNS struct {
++	adapter.DNSRouter
++	client    *D.Client
++	transport *callerTransport
++}
++
++func (d callerDNS) ExchangeAsync(ctx context.Context, msg *mDNS.Msg, opts adapter.DNSQueryOptions, _ func(*mDNS.Msg, error)) {
++	// Only record the caller reaching the actual DNS client's transport.
++	_, _ = d.client.Exchange(ctx, d.transport, msg, opts, nil)
++}
++
++type oneQuestionConn struct {
++	N.PacketConn
++	data []byte
++}
++
++func (c *oneQuestionConn) ReadPacket(b *buf.Buffer) (M.Socksaddr, error) {
++	if c.data == nil {
++		return M.Socksaddr{}, io.EOF
++	}
++	_, err := b.Write(c.data)
++	c.data = nil
++	return M.ParseSocksaddr("192.0.2.2:5555"), err
++}
++func (*oneQuestionConn) Close() error { return nil }
++
++func TestFakeIPCallerAcrossDNSHijacks(t *testing.T) {
++	ctx := context.Background()
++	transport := &callerTransport{kind: C.DNSTypeFakeIP, calls: make(chan uint32, 8)}
++	r := flowTestRouter(flowTestDNS{})
++	r.dns = callerDNS{client: D.NewClient(D.ClientOptions{Context: ctx, DisableCache: true}), transport: transport}
++	meta := adapter.InboundContext{InboundType: C.TypeTun, ProcessInfo: &adapter.ConnectionOwner{UserId: 110005, IndividualApp: true}}
++	msg := new(mDNS.Msg).SetQuestion("one.example.", mDNS.TypeA)
++	payload, err := msg.Pack()
++	require.NoError(t, err)
++	r.HijackDNSPacket(ctx, payload, nil, meta)
++	r.hijackDNSPacket(ctx, &oneQuestionConn{data: payload}, nil, meta, nil)
++	client, server := net.Pipe()
++	defer server.Close()
++	go func() {
++		defer client.Close()
++		_ = binary.Write(client, binary.BigEndian, uint16(len(payload)))
++		_, _ = client.Write(payload)
++	}()
++	require.NoError(t, r.hijackDNSStream(ctx, server, meta))
++	require.Len(t, transport.calls, 3)
++	for range 3 {
++		require.EqualValues(t, 110005, <-transport.calls)
++	}
++}
++
++func TestFakeIPCallerIsScopedToTheInboundExchange(t *testing.T) {
++	ctx := context.Background()
++	fake := &callerTransport{kind: C.DNSTypeFakeIP, calls: make(chan uint32, 1)}
++	plain := &callerTransport{kind: C.DNSTypeLocal, calls: make(chan uint32, 1)}
++	individual := &adapter.ConnectionOwner{UserId: 110005, IndividualApp: true}
++	opts := adapter.InboundDNSQueryOptions(&adapter.InboundContext{InboundType: C.TypeTun, ProcessInfo: individual})
++	prior := opts.ContextForTransport(ctx, fake)
++	require.EqualValues(t, 110005, adapter.FakeIPCallerBucket(prior))
++	for _, tc := range []struct {
++		label, inbound string
++		owner          *adapter.ConnectionOwner
++		want           uint32
++	}{
++		{"another user", C.TypeTun, &adapter.ConnectionOwner{UserId: 10005, IndividualApp: true}, 10005},
++		{"shared or system", C.TypeTun, &adapter.ConnectionOwner{UserId: 110005}, 0},
++		{"missing owner", C.TypeTun, nil, 0}, {"missing UID", C.TypeTun, &adapter.ConnectionOwner{UserId: -1, IndividualApp: true}, 0},
++		{"Tailscale", C.TypeTailscale, individual, 0}, {"internal", "", individual, 0},
++	} {
++		t.Run(tc.label, func(t *testing.T) {
++			next := adapter.InboundDNSQueryOptions(&adapter.InboundContext{InboundType: tc.inbound, ProcessInfo: tc.owner})
++			require.Equal(t, tc.want, adapter.FakeIPCallerBucket(next.ContextForTransport(prior, fake)))
++		})
++	}
++	client := D.NewClient(D.ClientOptions{Context: ctx, DisableCache: true})
++	msg := new(mDNS.Msg).SetQuestion("nested.example.", mDNS.TypeA)
++	_, err := client.Exchange(prior, plain, msg.Copy(), opts, nil)
++	require.NoError(t, err)
++	require.Zero(t, <-plain.calls)
++	_, err = client.Exchange(prior, fake, msg.Copy(), adapter.DNSQueryOptions{}, nil)
++	require.NoError(t, err)
++	require.Zero(t, <-fake.calls)
++}

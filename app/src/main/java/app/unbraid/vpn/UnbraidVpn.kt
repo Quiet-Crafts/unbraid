@@ -123,6 +123,10 @@ data class VpnState(
     fun restarted(engine: Int) = copy(engine = engine, passed = null, notAnswering = emptySet())
 }
 
+/** An app gets its own DNS allocation budget only when its OS owner is unambiguous. */
+internal fun individualDnsOwner(isApp: Boolean, uid: Int, serviceUid: Int, names: List<String>, routingNames: List<String>): Boolean =
+    isApp && uid != serviceUid && names.size == 1 && names[0].isNotEmpty() && routingNames == names
+
 class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     companion object {
         val state = MutableStateFlow(VpnState())
@@ -1476,6 +1480,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val pkgs = tunInput?.setup?.let { setup -> Compiler.ownerNames(setup, names) { verifiedIdentity(setup, it) } } ?: names
         return ConnectionOwner().apply {
             userId = uid
+            // Use the kernel UID and the original package list, before routing can substitute a marker.
+            individualApp = individualDnsOwner(Process.isApplicationUid(uid), uid, Process.myUid(), names, pkgs)
             userName = pkgs.firstOrNull().orEmpty()
             setAndroidPackageNames(Strings(pkgs))
         }

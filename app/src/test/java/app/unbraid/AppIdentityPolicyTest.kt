@@ -2,6 +2,7 @@ package app.unbraid
 
 import app.unbraid.data.*
 import app.unbraid.vpn.Compiler
+import app.unbraid.vpn.individualDnsOwner
 import app.unbraid.vpn.FakePool
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
@@ -11,6 +12,20 @@ import org.junit.rules.TemporaryFolder
 import javax.crypto.spec.SecretKeySpec
 
 class AppIdentityPolicyTest {
+    @Test fun dnsAllocationRequiresAnUnambiguousApplicationOwner() {
+        val unique = listOf("org.example.mail")
+        val siblings = unique + "org.example.shared"
+        val marked = listOf(Compiler.UNVERIFIED_OWNER)
+        assertTrue(individualDnsOwner(true, 110005, 10099, unique, unique))
+        assertFalse(individualDnsOwner(false, 1000, 10099, unique, unique))
+        assertFalse(individualDnsOwner(false, 99001, 10099, unique, unique))
+        assertFalse(individualDnsOwner(true, 10099, 10099, unique, unique))
+        assertFalse(individualDnsOwner(true, 10005, 10099, emptyList(), emptyList()))
+        assertFalse(individualDnsOwner(true, 10005, 10099, siblings, siblings))
+        assertFalse(individualDnsOwner(true, 10005, 10099, siblings, marked))
+        assertFalse(individualDnsOwner(true, 10005, 10099, unique, marked))
+    }
+
     @get:Rule val tmp = TemporaryFolder()
     private val pkg = "org.example.mail"
     private val other = "org.example.shared"
