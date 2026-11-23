@@ -17,6 +17,8 @@ import app.unbraid.data.Server
 import app.unbraid.data.Surfshark
 import app.unbraid.data.Windscribe
 import app.unbraid.data.WgLink
+import app.unbraid.data.WgPeer
+import app.unbraid.vpn.LinkPicker
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -92,18 +94,84 @@ class ProviderFixesTest {
         }
     }
 
-    @Test fun keyProviderPinnedServerUsesTheFreshEntry() {
+    @Test fun protonRejectsUnverifiedPinsAndCache() {
+        val pin = Server("DE#1", "node-de-01.protonvpn.net", "1.1.1.1", key2, 0, "Berlin", "DE")
+        for (p in listOf(Proton, ProtonFree)) {
+            val a = account.copy(publicKey = key1)
+            val loc = Location(p.id, pinned = pin)
+            val blob = NordApi.json.encodeToString(KeyProvider.Account.serializer(), a)
+            val prior = WgLink(pin, WgPeer(pin.name, priv, a.address, key2, endpoint = "1.1.1.1:51820", allowedIps = listOf("0.0.0.0/0")))
+            assertFalse(p.trusts(prior, blob))
+            try { p.link(loc, a) { throw IOException("offline") }; fail("unverified pin") } catch (_: IOException) { }
+        }
+    }
+
+    @Test fun protonPickerHonoursTheConfigAfterRestartAndAccountChanges() {
+        for (p in listOf(Proton, ProtonFree)) {
+            val blob = p.signIn(mapOf("key" to "[Interface]\nPrivateKey=$priv\nAddress=10.2.0.2\n[Peer]\n# UK#665\nPublicKey=$key1\nEndpoint=1.1.1.1:443\nAllowedIPs=0.0.0.0/0"))
+            val loc = Location(p.id, countryCode = "GB", country = "United Kingdom")
+            val link = p.connect(loc, blob) as WgLink
+            assertEquals("GB", p.countries(blob).single().code)
+            assertEquals("UK#665", link.server.name)
+            val wrongCity = loc.copy(region = "London", city = "London")
+            val oldMetadata = link.copy(server = link.server.copy(city = "London", country = "US"))
+            val otherPeer = link.copy(peer = link.peer.copy(endpoint = "2.2.2.2:443"))
+            val route = app.unbraid.data.Route("chosen", loc)
+            val setting = app.unbraid.data.Setup(routes = listOf(route), defaultRoute = route.id,
+                opts = mapOf(p.id to mapOf("port" to "9999", "entry" to "2")))
+            fun pick(testLoc: Location, stored: WgLink, account: String?, offline: Boolean): LinkPicker.Result {
+                val r = route.copy(loc = testLoc)
+                val setup = setting.copy(routes = listOf(r))
+                val accounts = account?.let { mapOf(p.id to it) }.orEmpty()
+                return LinkPicker.pick(setup, mapOf(r.id to stored), setup, accounts, accounts,
+                    mapOf(LinkPicker.cacheKey(r) to stored), offline = offline) { p }
+            }
+            val saved = LinkPicker.ported(setting, pick(loc, link, blob, false).links, emptyMap())[route.id] as WgLink
+            assertEquals("1.1.1.1:443", saved.peer.endpoint)
+            for (duringOutage in listOf(false, true)) {
+                assertTrue(route.id in pick(wrongCity, oldMetadata, blob, duringOutage).blocked)
+                assertTrue(route.id in pick(loc.copy(countryCode = "US"), oldMetadata, blob, duringOutage).blocked)
+                assertTrue(route.id in pick(loc, link, null, duringOutage).blocked)
+                val naked = NordApi.json.encodeToString(KeyProvider.Account.serializer(), this.account)
+                assertTrue(route.id in pick(loc, link, naked, duringOutage).blocked)
+            }
+            assertFalse(p.trusts(otherPeer, blob))
+            assertFalse(p.trusts(link.copy(entries = listOf("2.2.2.2")), blob))
+            assertFalse(p.trusts(link.copy(peer = link.peer.copy(presharedKey = psk)), blob))
+            val restored = loc.copy(pinned = link.server.copy(ip = "", publicKey = ""))
+            assertEquals(link, p.connect(restored, blob))
+            val wrongPin = loc.copy(pinned = link.server.copy(name = "UK#666"))
+            assertTrue(route.id in pick(wrongPin, link, blob, false).blocked)
+            val legacy = NordApi.json.encodeToString(KeyProvider.Account.serializer(), account.copy(publicKey = key1, port = 443))
+            assertTrue(route.id in pick(wrongCity, oldMetadata, legacy, true).blocked)
+        }
+    }
+
+    @Test fun unrestrictedProtonLabelsNameTheConfiguredServer() {
+        for (p in listOf(Proton, ProtonFree)) {
+            val unrestricted = Location(p.id)
+            assertEquals("Configured server", unrestricted.label)
+            assertEquals("Configured server", app.unbraid.data.Route("chosen", unrestricted).name)
+            val country = unrestricted.copy(country = "Germany", countryCode = "DE")
+            assertEquals("Germany", country.label)
+            val pin = Server("DE#1", "de.protonvpn.net", "1.1.1.1", key1, -1)
+            assertEquals("DE#1", country.copy(pinned = pin).label)
+        }
+        assertEquals("Fastest", Location("surfshark").label)
+    }
+
+    @Test fun protonLegacyPinKeepsItsConfigKeyAndEndpoint() {
         val old = Catalog.Entry("wireguard", "Germany", city = "Berlin", serverName = "DE#1", hostname = "node-de-01.protonvpn.net", wgpubkey = key1, ips = listOf("1.1.1.1"))
         val fresh = old.copy(wgpubkey = key2, ips = listOf("2.2.2.2"))
         val pinned = Catalog.server(old)
-        val l = Proton.link(Location("proton", pinned = pinned), account) { listOf(fresh) }
-        assertEquals("2.2.2.2:51820", l.peer.endpoint)
-        assertEquals(key2, l.peer.publicKey)
+        val anchored = account.copy(publicKey = key1)
+        val l = Proton.link(Location("proton", pinned = pinned), anchored) { listOf(fresh) }
+        assertEquals("1.1.1.1:51820", l.peer.endpoint)
+        assertEquals(key1, l.peer.publicKey)
         assertEquals("DE#1", l.server.name)
-        // Moved to a new host name but the same IP: still found.
-        assertEquals(key2, Proton.link(Location("proton", pinned = pinned.copy(host = "old-name")), account) { listOf(fresh.copy(ips = listOf("1.1.1.1"))) }.peer.publicKey)
-        assertEquals("1.1.1.1:51820", Proton.link(Location("proton", pinned = pinned), account) { throw IOException("offline") }.peer.endpoint)
-        try { Proton.link(Location("proton", pinned = pinned.copy(name = "DE#9", host = "x")), account) { listOf(fresh) }; fail() } catch (e: IOException) { }
+        // A bare-key 3.2.2 account has no authoritative key, even offline with a previously saved pin.
+        try { Proton.link(Location("proton", pinned = pinned), account) { listOf(fresh) }; fail() }
+        catch (e: IOException) { assertTrue(e.message.orEmpty().contains(".conf")) }
     }
 
     @Test fun airvpnPinnedServerIsFoundByNameBecauseHostNamesAreShared() {

@@ -192,7 +192,13 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     val draft = viewing?.takeIf { n -> n != setup.profile && setup.profiles.any { it.name == n } }
     var chosen by rememberSaveable { mutableStateOf<String?>(null) }
     val provider = chosen?.takeIf { c -> signed.any { it.id == c } } ?: current?.provider?.takeIf { c -> signed.any { it.id == c } } ?: signed.firstOrNull()?.id
-    val catalog = provider?.let { catalogs[it] }.orEmpty()
+    // Older installations may have a full Proton directory cached. Only the current config can name its location.
+    val proton = signed.firstOrNull { it.id == provider } as? app.unbraid.data.ProtonVpn
+    val protonAccount = proton?.let { accounts[it.id] }
+    val protonCountries = remember(proton, protonAccount) {
+        if (proton != null && protonAccount != null) runCatching { proton.countries(protonAccount) } else null
+    }
+    val catalog = if (protonCountries != null) protonCountries.getOrNull().orEmpty() else provider?.let { catalogs[it] }.orEmpty()
     var q by rememberSaveable { mutableStateOf("") }
     val opening = nordOpening(current)
     var groupChoice by rememberSaveable { mutableStateOf(opening.first) }
@@ -218,7 +224,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     }
     val countries = remember(catalog, allowed) { allowed?.let { a -> catalog.filter { it.code in a } } ?: catalog }
     val tint = Ink.route(route?.hue ?: 0)
-    LaunchedEffect(provider, countries.isEmpty(), catalogsRead) { if (catalogsRead && provider != null && countries.isEmpty()) ui.refreshCountries(provider) }
+    LaunchedEffect(provider, countries.isEmpty(), catalogsRead) { if (proton == null && catalogsRead && provider != null && countries.isEmpty()) ui.refreshCountries(provider) }
     val hasLoad = Providers.get(provider.orEmpty())?.hasLoad == true
     var closed by remember { mutableStateOf(false) } // a second tap while the picker closes must not run the action again
     fun once(f: () -> Unit) { if (!closed) { closed = true; f() } }
@@ -308,7 +314,11 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
 
     fun LazyListScope.locations() {
         if (provider == null) return
-        if (countries.isEmpty()) {
+        if (protonCountries?.isFailure == true) {
+            item(key = "configRequired") { Caption(proton!!.reimport, Modifier.padding(horizontal = 24.dp)) }
+            return
+        }
+        if (countries.isEmpty() && protonCountries == null) {
             if (!catalogsRead) return // the saved list is still being read: nothing to say yet
             item(key = "empty") {
                 val (text, retry) = noLocations(catalog.isNotEmpty(), fetches[provider], groupLabel)
@@ -325,11 +335,13 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
                 Box(Modifier.size(36.dp).clip(RoundedCornerShape(12.dp)).background(Ink.surfaceTop), Alignment.Center) {
                     Icon(Icons.bolt, null, tint = Ink.accent, modifier = Modifier.size(20.dp))
                 }
-                Title(if (hasLoad) "Fastest anywhere" else "Automatic", "Any country, picked on connect")
+                if (proton != null) Title("Configured server", "The peer in your Proton WireGuard file")
+                else Title(if (hasLoad) "Fastest anywhere" else "Automatic", "Any country, picked on connect")
                 Trailing(pick.on(any), tint)
             }
         }
         favorites(ownFavs)
+        if (countries.isEmpty()) return
         item(key = "all") {
             PickRow({ allOpen = !allOpen }, false, tint, Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
                 Box(Modifier.width(36.dp), Alignment.Center) { Text("${countries.size}", style = Type.code, color = Ink.dim) }

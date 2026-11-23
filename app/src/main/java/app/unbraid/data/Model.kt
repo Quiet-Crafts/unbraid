@@ -29,7 +29,9 @@ data class Location(
     val protocol: String? = null,
     val pinned: Server? = null,
 ) {
-    val label get() = pinned?.name ?: city?.let { "$country · $it" } ?: country ?: "Fastest"
+    internal val automaticLabel get() = if ((provider == "proton" || provider == "proton-free") && pinned == null &&
+        country == null && countryCode == null && countryId == null && city == null && cityId == null && region == null) "Configured server" else "Fastest"
+    val label get() = pinned?.name ?: city?.let { "$country · $it" } ?: country ?: automaticLabel
     val code get() = countryCode ?: "··"
 }
 
@@ -112,7 +114,7 @@ data class Route(
      */
     val viaNative: Boolean = false,
 ) {
-    val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: tsName ?: tsExit ?: loc.country ?: "Fastest"
+    val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: tsName ?: tsExit ?: loc.country ?: loc.automaticLabel
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OV"; ss != null -> "SS"; tsExit != null -> "TS"; else -> loc.code }
     /** Not tied to a provider account. */
     val imported get() = wg != null || ovpn != null || ss != null || tsExit != null

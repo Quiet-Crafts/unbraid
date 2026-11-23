@@ -204,7 +204,7 @@ private fun where(r: Route, live: Map<String, Server>) = when {
     else -> listOfNotNull(
         r.source,
         NordGroups.firstOrNull { it.first != null && it.first == r.loc.group }?.second.takeIf { r.loc.provider == "nord" },
-        r.loc.pinned?.name ?: r.loc.city ?: live[r.id]?.city?.ifBlank { null } ?: "Fastest",
+        r.loc.pinned?.name ?: r.loc.city ?: live[r.id]?.city?.ifBlank { null } ?: r.loc.automaticLabel,
         when (Nord.tech(r.loc).takeIf { r.loc.provider == "nord" } ?: r.loc.protocol) {
             "openvpn_udp" -> "OpenVPN"
             "openvpn_tcp" -> "OpenVPN TCP"

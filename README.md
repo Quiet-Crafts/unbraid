@@ -72,9 +72,9 @@ providers. It needs macOS 26 or later.
 You bring the VPN. unbraid has no servers of its own and works with the accounts and servers you already have.
 
 You can sign in with NordVPN (NordLynx, OpenVPN, Double VPN and Onion over VPN), Mullvad, Private Internet Access,
-IVPN, AirVPN (with an API key) or ExpressVPN. For Proton VPN (Free included) and Surfshark you add your WireGuard key
-once, and for Windscribe (or AirVPN without an API key) you paste one WireGuard config from their website. After that you choose from the servers
-your plan includes. You can also import your own WireGuard or OpenVPN config, paste a Shadowsocks
+IVPN, AirVPN (with an API key) or ExpressVPN. For Surfshark you add your WireGuard key once, and for Windscribe (or AirVPN without an API key) you paste one WireGuard config from their website. After that you choose from the servers
+your plan includes. For Proton VPN (Free included), use the whole WireGuard config for the server you want.
+Unbraid checks its peer key and endpoint against the config. For additional Proton servers, import their configs under Your own servers. You can also import your own WireGuard or OpenVPN config, paste a Shadowsocks
 key, or join a Tailscale tailnet (a self-hosted Headscale works as well).
 
 Routes can mix providers. One app can use Mullvad in Sweden while another uses NordVPN in Japan.

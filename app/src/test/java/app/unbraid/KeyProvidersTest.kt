@@ -106,7 +106,7 @@ class KeyProvidersTest {
         val a = ProtonFree.signIn(mapOf("key" to conf))
         assertEquals("VPN Accelerator on · NetShield off · Moderate NAT off · Port forwarding off", ProtonFree.facts(a))
         assertEquals(false, "Bouncing" in a || "Secret" in a)
-        assertEquals("", ProtonFree.facts(ProtonFree.signIn(mapOf("key" to priv)))) // a bare key: not known
+        assertEquals("", ProtonFree.facts("""{"privateKey":"$priv","address":[],"dns":[],"port":51820,"mtu":1420}""")) // legacy bare key
         assertEquals(null, app.unbraid.data.Surfshark.facts(a))
     }
 
@@ -121,30 +121,26 @@ class KeyProvidersTest {
         assertTrue(cs.all { iso.matches(it.code) && it.serverCount > 0 })
     }
 
-    @Test fun protonBareKeyConnectsToACountryAndACity() {
-        val a = Proton.signed(priv)
-        val entries = Proton.filtered(catalog("protonvpn"))
-        val country = Location("proton", country = "Germany", countryCode = "DE")
-        val l = Proton.link(country, a) { entries }
-        val ips = entries.filter { it.place == "Germany" }.map { it.ipv4 }
-        assertTrue(l.peer.endpoint.substringBefore(':') in ips)
-        assertEquals("Germany", entries.first { it.ipv4 == l.server.ip }.place)
-        assertEquals(l.server.publicKey, l.peer.publicKey)
-        assertEquals(listOf("10.2.0.2/32"), l.peer.address)
-        assertEquals(listOf("10.2.0.1"), l.peer.dns)
-        assertTrue(l.peer.endpoint.endsWith(":51820"))
-        assertEquals(listOf("0.0.0.0/0"), l.peer.allowedIps)
-        assertNull(l.peer.presharedKey)
-        assertEquals(priv, l.peer.privateKey)
-
-        val byCode = Proton.link(Location("proton", countryCode = "DE"), a) { entries }
-        assertEquals("Germany", entries.first { it.ipv4 == byCode.server.ip }.place)
-        assertEquals("DE", byCode.server.country)
-
-        val city = cityLoc("proton", entries)
-        val lc = Proton.link(city, a) { entries }
-        assertEquals(city.region, lc.server.city)
-        assertEquals(city.country, entries.first { it.ipv4 == lc.server.ip }.place)
+    @Test fun protonConfigAuthenticatesItsCountryAndRejectsOtherLocations() {
+        for (p in listOf(Proton, ProtonFree)) {
+            assertRejected(p, priv)
+            val imported = conf("10.2.0.2", "10.2.0.1", "1.1.1.1:51820").replace("[Peer]", "[Peer]\n# DE-FREE#1")
+            val blob = p.signIn(mapOf("key" to imported))
+            val country = p.countries(blob).single()
+            assertEquals("DE", country.code)
+            val l = p.connect(Location(p.id, countryId = country.id, countryCode = "DE", country = "Germany"), blob) as WgLink
+            assertEquals("DE-FREE#1", l.server.name)
+            assertEquals(serverKey, l.peer.publicKey)
+            assertEquals(listOf("10.2.0.2/32"), l.peer.address)
+            assertEquals(listOf("10.2.0.1"), l.peer.dns)
+            assertEquals(listOf("0.0.0.0/0"), l.peer.allowedIps)
+            assertNull(l.peer.presharedKey)
+            assertEquals(priv, l.peer.privateKey)
+            for (loc in listOf(Location(p.id, countryCode = "AT"), Location(p.id, countryCode = "DE", region = "Berlin"))) {
+                assertTrue(p.servers(loc, blob, 10).isEmpty())
+                try { p.connect(loc, blob); fail("wrong location") } catch (_: IOException) { }
+            }
+        }
     }
 
     @Test fun protonFreeOffersOnlyFreeServers() {
@@ -157,16 +153,17 @@ class KeyProvidersTest {
         assertEquals("proton-free", ProtonFree.id)
         assertEquals("Proton VPN Free", ProtonFree.name)
         assertEquals("proton", Proton.id)
-        assertTrue(ProtonFree.help.contains("free-vpn/server"))
+        val a = ProtonFree.signed(conf("10.2.0.2", "10.2.0.1", "1.1.1.1:51820")).copy(configIp = null)
+        val l = ProtonFree.link(Location("proton-free"), a) { free.map { it.copy(wgpubkey = serverKey) } }
+        assertTrue(free.any { it.ipv4 == l.server.ip })
+    }
 
-        val a = ProtonFree.signed(priv)
-        val l = ProtonFree.link(Location("proton-free", countryCode = "AT"), a) { free }
-        assertEquals("Austria", free.first { it.ipv4 == l.server.ip }.place)
-        try {
-            ProtonFree.link(Location("proton-free", country = "Germany"), a) { free }
-            fail("Germany has no free server")
-        } catch (e: IOException) {
-            assertTrue(e.message!!.contains("Germany"))
+    @Test fun protonImportUsesItsOfflineEndpoint() {
+        for (p in listOf(Proton, ProtonFree)) {
+            val a = p.signed(conf("10.2.0.2/32", "10.2.0.1", "9.9.9.9:443"))
+            val l = p.link(Location(p.id), a) { throw IOException("offline") }
+            assertEquals("9.9.9.9:443", l.peer.endpoint)
+            assertEquals(serverKey, l.peer.publicKey)
         }
     }
 
@@ -183,8 +180,8 @@ class KeyProvidersTest {
     }
 
     @Test fun protonPinnedServerNeedsNoList() {
-        val a = Proton.signed(priv)
-        val sv = Proton.link(Location("proton", country = "Germany"), a) { Proton.filtered(catalog("protonvpn")) }.server
+        val a = Proton.signed(conf("10.2.0.2", "10.2.0.1", "1.1.1.1:51820"))
+        val sv = Proton.link(Location("proton"), a) { error("offline") }.server
         val l = Proton.link(Location("proton", pinned = sv), a) { throw IOException("offline") }
         assertEquals(sv, l.server)
         assertEquals("${sv.ip}:51820", l.peer.endpoint)
@@ -502,14 +499,13 @@ class KeyProvidersTest {
 
     @Test fun singBoxAcceptsEveryLink() {
         surfsharkAt(clusters)
-        val pe = Proton.filtered(catalog("protonvpn"))
-        val pa = Proton.signed(priv)
+        val pa = Proton.signed(conf("10.2.0.2", "10.2.0.1", "1.1.1.1:51820").replace("[Peer]", "[Peer]\n# DE#1"))
         val sa = Surfshark.signed(priv)
         val aa = AirVpn.signed(airConf)
         val ae = AirVpn.parse(res("airvpn_status.json"), aa.publicKey!!)
         val links = listOf(
-            "proton-country" to Proton.link(Location("proton", country = "Germany"), pa) { pe },
-            "proton-city" to Proton.link(cityLoc("proton", pe), pa) { pe },
+            "proton-country" to Proton.link(Location("proton", country = "Germany"), pa) { error("offline") },
+            "proton-config" to Proton.link(Location("proton"), pa) { error("offline") },
             "surfshark-country" to Surfshark.link(Location("surfshark", country = "Netherlands"), sa) { clusters },
             "surfshark-city" to Surfshark.link(cityLoc("surfshark", clusters), sa) { clusters },
             "airvpn-country" to AirVpn.link(Location("airvpn", country = "Germany"), aa) { ae },
