@@ -283,7 +283,9 @@ object Backup {
      * servers and the routes through them keep only what isn't secret ([withoutSecrets]), and the home peer is left out.
      */
     fun contents(s: Setup, keys: Boolean = true): Setup {
-        val c = s.tidyAppSigners().copy(home = Home(wg = s.home.wg), prefs = s.prefs.copy(stats = false), pristine = false,
+        val clean = s.tidyAppSigners()
+        val c = clean.copy(home = Home(wg = s.home.wg), prefs = s.prefs.copy(stats = false), pristine = false,
+            waitOverrides = emptyMap(), profiles = clean.profiles.map { it.copy(waitOverrides = emptyMap()) },
             waiting = emptySet(), waitingUntil = 0, waitingEach = emptyMap(), version = VERSION, testing = emptySet())
         if (keys) return c
         val linked = linked(c)
@@ -507,6 +509,121 @@ fun Setup.refilled(id: String, server: OwnServer): Setup? {
 /** Apps restored but not on this phone keep their route this long, to be installed meanwhile. */
 const val WAIT_MS = 30 * 86_400_000L
 
+/** An already active choice when another profile is still waiting for the same package. */
+private const val ACTIVE_CHOICE = Long.MIN_VALUE
+
+internal fun Setup.deadline(p: Profile, pkg: String): Long? {
+    if (pkg !in waiting) return null
+    val route = p.apps[pkg] ?: return null
+    return (p.waitOverrides[pkg] ?: waitingEach[pkg]?.get(route) ?: waitingUntil).takeUnless { it == ACTIVE_CHOICE }
+}
+
+private data class PendingProfile(val profile: Profile, val due: Map<String, Long>)
+
+private fun Setup.pending(p: Profile) = PendingProfile(p, p.apps.keys.mapNotNull { pkg -> deadline(p, pkg)?.let { pkg to it } }.toMap())
+
+/** Prefer the original global and per-route encoding. Only differing choices in separate profiles need an override. */
+private fun Setup.withWaits(active: PendingProfile, saved: List<PendingProfile>): Setup {
+    val byPackage = mutableMapOf<String, MutableMap<String, Long>>()
+    for ((profile, due) in listOf(active) + saved) for ((pkg, date) in due) {
+        val route = profile.apps[pkg] ?: continue
+        byPackage.getOrPut(pkg) { mutableMapOf() }.merge(route, date, ::minOf)
+    }
+    val until = (listOf(active) + saved).maxOf { it.due.values.maxOrNull() ?: 0 }
+    val each = byPackage.mapValues { (_, dates) -> dates.filterValues { it != until } }.filterValues { it.isNotEmpty() }
+    fun encoded(row: PendingProfile): Profile {
+        val overrides = row.profile.apps.mapNotNull { (pkg, route) ->
+            val fallback = byPackage[pkg]?.get(route) ?: until.takeIf { pkg in byPackage }
+            val date = row.due[pkg]
+            if (date == fallback) null else pkg to (date ?: ACTIVE_CHOICE)
+        }.toMap()
+        return row.profile.copy(waitOverrides = overrides)
+    }
+    val live = encoded(active)
+    return copy(apps = live.apps, appSigners = live.appSigners, waitOverrides = live.waitOverrides, profiles = saved.map(::encoded),
+        waiting = byPackage.keys.toSet(), waitingUntil = until, waitingEach = each)
+}
+
+private enum class WaitDecision { Active, Pending, Expired }
+
+private fun InstallState.decision(due: Long, now: Long, expected: String?): WaitDecision {
+    if (this == InstallState.Absent) return if (now >= due) WaitDecision.Expired else WaitDecision.Pending
+    val present = this as? InstallState.Present ?: return WaitDecision.Pending
+    val observed = maxOf(now, present.observedAt ?: now)
+    val first = present.firstInstallTime?.takeIf { it in 1..observed }
+    if (first != null && first >= due) return WaitDecision.Expired
+    val authorized = expected == null || present.identity?.accepts(expected) == true
+    return if (authorized && (first != null || observed < due)) WaitDecision.Active else WaitDecision.Pending
+}
+
+/** Recheck a single grant right at Android's owner or TUN boundary when a saved restore is still pending. */
+internal fun Setup.waitAdmits(p: Profile, pkg: String, now: Long, state: InstallState): Boolean =
+    deadline(p, pkg)?.let { state.decision(it, now, p.appSigners[pkg]) == WaitDecision.Active } ?: true
+
+/** Consume a proven timely installation, forget a proven late choice, retain unresolved provenance for a later retry. */
+internal fun Setup.resolveWaiting(now: Long, installed: (String) -> InstallState, effective: Boolean = false): Setup {
+    if (waiting.isEmpty()) return this
+    val observations = HashMap<String, InstallState>()
+    val expiredDirect = mutableSetOf<String>()
+    val remainingDirect = mutableSetOf<String>()
+    fun resolve(p: Profile): PendingProfile {
+        val remaining = mutableMapOf<String, Long>()
+        val apps = p.apps.toMutableMap()
+        val pins = p.appSigners.toMutableMap()
+        for (pkg in p.apps.keys) {
+            val due = deadline(p, pkg)
+            if (due == null) {
+                if (p.apps[pkg] == DIRECT) remainingDirect += pkg
+                continue
+            }
+            val state = observations.getOrPut(pkg) { installed(pkg) }
+            val decision = state.decision(due, now, p.appSigners[pkg].takeUnless { p.apps[pkg] == BLOCK })
+            if (decision == WaitDecision.Expired) {
+                if (apps.remove(pkg) == DIRECT) expiredDirect += pkg
+                continue
+            }
+            if (p.apps[pkg] == DIRECT) remainingDirect += pkg
+            if (decision == WaitDecision.Active) {
+                if (pkg in pins && p.apps[pkg] != BLOCK) (state as? InstallState.Present)?.identity?.let { pins[pkg] = it.current }
+                continue
+            }
+            remaining[pkg] = due
+            if (effective) apps[pkg] = BLOCK
+        }
+        return PendingProfile(p.copy(apps = apps, appSigners = pins.filterKeys(apps::containsKey)), remaining)
+    }
+    val result = withWaits(resolve(live), profiles.map(::resolve))
+    val clear = expiredDirect - remainingDirect
+    return if (clear.none(prefs.filter.apps::containsKey)) result
+        else result.copy(prefs = prefs.copy(filter = prefs.filter.copy(apps = prefs.filter.apps - clear)))
+}
+
+/** A rejected profile switch must not resurrect a settled or expired wait from an earlier running snapshot. */
+internal fun Setup.rollbackWaits(savedSetup: Setup, ran: Setup): Setup {
+    if (savedSetup.waiting.isEmpty() && ran.waiting.isEmpty()) return this
+    val previous = if (savedSetup.profile == ran.profile) savedSetup.live else savedSetup.saved.firstOrNull { it.name == ran.profile }
+    val apps = apps.toMutableMap()
+    val due = mutableMapOf<String, Long>()
+    for ((pkg, route) in apps.toMap()) {
+        val old = ran.deadline(ran.live, pkg)
+        if (old != null && previous != null && pkg !in previous.apps) apps.remove(pkg)
+        else {
+            val whenDue = if (previous?.apps?.get(pkg) == route) savedSetup.deadline(previous, pkg) else old
+            if (whenDue != null) due[pkg] = whenDue
+        }
+    }
+    val active = PendingProfile(live.copy(apps = apps, appSigners = appSigners.filterKeys(apps::containsKey)), due)
+    return withWaits(active, profiles.map { p -> if (p.name == profile) active.copy(profile = active.profile.copy(name = p.name)) else savedSetup.pending(p) })
+}
+
+/** Rechoosing an installed app cancels its restore wait only in the profile the user edited. */
+internal fun Setup.clearAppWait(name: String?, pkg: String): Setup {
+    if (pkg !in waiting) return this
+    val target = name ?: profile
+    fun row(p: Profile, selected: Boolean): PendingProfile = pending(p).let { if (selected) it.copy(due = it.due - pkg) else it }
+    return withWaits(row(live, target == profile), profiles.map { row(it, it.name == target) })
+}
+
 /**
  * This phone's setup replaced by backup [b] ([Backup.valid]). Tailscale and the statistics consent stay as they are
  * here. Apps in it wait for [WAIT_MS] to be installed. With [keepAs] (and something set up here), the setup in use is
@@ -514,10 +631,18 @@ const val WAIT_MS = 30 * 86_400_000L
  * whose name the backup uses for something else gets a new one. Null when there is no room for that profile, or the two
  * together hold more routes or own servers than a setup may ([Backup.MAX_EACH]).
  */
-fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true, installedAt: (String) -> Long? = { null }): Setup? {
-    // Read once an app: an install during the restore can't count one way here and another below.
-    val seenAt = HashMap<String, Long?>()
-    val installedAt = { p: String -> seenAt.getOrPut(p) { installedAt(p) } }
+fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true, installedAt: (String) -> Long? = { null }): Setup? =
+    restoredWithInstalls(backup, keepAs, now, keys) { pkg -> installedAt(pkg)?.let { InstallState.Present(it) } ?: InstallState.Absent }
+
+internal fun Setup.restoredWithInstalls(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true,
+                                        installed: (String) -> InstallState): Setup? {
+    val snapshot = HashMap<String, InstallState>()
+    val read = { pkg: String -> snapshot.getOrPut(pkg) { installed(pkg) } }
+    val kept = resolveWaiting(now, read)
+    return kept.mergeBackup(backup, keepAs, now, keys)?.resolveWaiting(now, read)
+}
+
+private fun Setup.mergeBackup(backup: Setup, keepAs: String?, now: Long, keys: Boolean): Setup? {
     // Saved without keys: an own server this phone still has, the same in everything the file keeps, gets its config back here, and the home peer stays as it is.
     // A route that had no own server here got one made up in the file: this phone's route of that id gives it back, only
     // only where everything the file keeps of that server is the same here (plugin and allowed addresses too); an OpenVPN
@@ -534,17 +659,15 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     )
     val pkgs = b.apps.keys + b.profiles.flatMap { it.apps.keys }
     var r = b.copy(home = home.copy(wg = if (keys) b.home.wg else home.wg), prefs = b.prefs.copy(stats = prefs.stats), pristine = false, version = VERSION,
-        waiting = pkgs, waitingUntil = if (pkgs.isEmpty()) 0 else now + WAIT_MS, waitingEach = emptyMap(), testing = emptySet())
+        waiting = pkgs, waitingUntil = if (pkgs.isEmpty()) 0 else now + WAIT_MS, waitingEach = emptyMap(),
+        waitOverrides = emptyMap(), profiles = b.profiles.map { it.copy(waitOverrides = emptyMap()) }, testing = emptySet())
     if (keepAs == null || untouched) return r
     if (r.profiles.size >= MAX_PROFILES) return null
     val name = (listOf(keepAs) + (2..MAX_PROFILES + 1).map { "$keepAs $it" }).firstNotNullOfOrNull { r.profileName(it) } ?: return null
     val fresh = { prefix: String, taken: Set<String> -> generateSequence { prefix + java.util.UUID.randomUUID().toString().take(8) }.first { it !in taken } }
     val here = routes.mapTo(HashSet()) { it.id }
     val ok = { id: String -> builtIn(id) || id in here }
-    val due = { p: String, x: String -> waitingEach[p]?.get(x) ?: waitingUntil }
-    // A choice whose wait is over is not kept: the backup's wait for the same app must not bring it back.
-    // One installed before it ([installedAt]) keeps its choice, also when nothing has looked at the installed apps since.
-    val apps = apps.filter { (p, x) -> ok(x) && (p !in waiting || now < due(p, x) || installedAt(p)?.let { it < due(p, x) } == true) }
+    val apps = apps.filterValues(ok)
     val sites = sites.filterValues(ok)
     // Without profiles every route here shows, those no app uses too: all of them are kept, as saving a first profile does.
     val listed = if (profiles.isEmpty()) (added + (routes.map { it.id } - (setOf(defaultRoute) + apps.values + sites.values + added))).distinct() else added
@@ -581,14 +704,10 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     // The first profile: every route shown until now stays listed, as when the first profile is saved ([Setup.saveAs]).
     if (r.profiles.isEmpty()) r = r.copy(added = (r.added + (r.routes.map { it.id } - (setOf(r.defaultRoute) + r.apps.values + r.sites.values + r.added))).distinct())
     val kept = Profile(name, if (ok(defaultRoute) && defaultRoute.isNotEmpty()) m(defaultRoute) else "", apps.mapValues { m(it.value) }, listed.filter(ok).map(m), sites.mapValues { m(it.value) }, appSigners.filterKeys { it in apps })
-    // Choices of the kept setup's apps still waiting to be installed wait on, each until the deadline it had: otherwise the
-    // next look at the installed apps drops them, Block too. One the backup has as well waits as the backup's do.
-    val still = apps.filterKeys { it in waiting && installedAt(it) == null }.mapNotNull { (p, x) ->
-        due(p, x).takeIf { b.apps[p] != m(x) && b.profiles.none { f -> f.apps[p] == m(x) } }?.let { p to mapOf(m(x) to it) }
-    }.toMap()
-    // The older fields hold them too (until the latest deadline), so a version before per-app deadlines keeps them as well.
-    val merged = r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers, profiles = r.profiles + kept, waiting = r.waiting + still.keys,
-        waitingUntil = maxOf(r.waitingUntil, still.values.flatMap { it.values }.maxOrNull() ?: 0), waitingEach = still)
+    // The old profile keeps its own cutoff even when the new backup names the same package, route and signer.
+    val prior = PendingProfile(kept, pending(live).due.filterKeys { it in apps })
+    val merged = r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers)
+        .withWaits(r.pending(r.live), r.profiles.map(r::pending) + prior)
     // Kept, it must still fit a backup with keys: large OpenVPN configs of both setups together could pass the counts but not the size.
     if (runCatching { Backup.export(merged, "", now, true).size + 1024 > Backup.MAX }.getOrDefault(false)) return null
     return merged

@@ -2,6 +2,8 @@
 package app.unbraid.ui
 
 import android.net.Uri
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -38,6 +40,9 @@ import androidx.lifecycle.viewModelScope
 import app.unbraid.BuildConfig
 import app.unbraid.Unbraid
 import app.unbraid.data.AppIdentity
+import app.unbraid.data.InstallState
+import app.unbraid.data.resolveWaiting
+import app.unbraid.data.deadline
 import app.unbraid.data.Backup
 import app.unbraid.data.BEFORE_RESTORE
 import app.unbraid.data.DIRECT
@@ -45,7 +50,7 @@ import app.unbraid.data.checkedApps
 import app.unbraid.data.Providers
 import app.unbraid.data.RestoreTraffic
 import app.unbraid.data.Setup
-import app.unbraid.data.restoredFrom
+import app.unbraid.data.restoredWithInstalls
 import app.unbraid.vpn.AutoSwitch
 import app.unbraid.vpn.Profiles
 import app.unbraid.vpn.UnbraidVpn
@@ -104,7 +109,21 @@ fun keysSwitch(secrets: Boolean, on: Boolean): Pair<Boolean, String> = secrets t
 class RestoreGate {
     /** What the confirm sheet says of a backup: its sentences, its weak servers, whether the setup here can be kept, and own servers left without config. */
     /** [keptAs]: the name the setup here would be kept under, when it can be kept. */
-    class Result(val notes: List<String>, val weak: List<String>, val keepable: Boolean, val missing: Int, val keptAs: String? = null)
+    class Result internal constructor(val notes: List<String>, val weak: List<String>, val keepable: Boolean, val missing: Int, val keptAs: String?,
+                                      private val observed: Map<String, InstallState>, private val peers: Map<String, Set<String>>, private val checkedAt: Long, private val nextDeadline: Long?) {
+        internal fun timeValid(now: Long) = now >= checkedAt && (nextDeadline == null || now < nextDeadline)
+
+        internal fun stillApplies(now: Long, fresh: Map<String, InstallState>, kin: (String) -> Set<String> = { emptySet() }): Boolean {
+            if (!timeValid(now)) return false
+            if (peers.any { (pkg, old) -> kin(pkg) != old }) return false
+            return observed.all { (pkg, old) ->
+                val current = fresh[pkg]
+                if (old is InstallState.Present && current is InstallState.Present)
+                    old.firstInstallTime == current.firstInstallTime && old.identity == current.identity
+                else old == current
+            }
+        }
+    }
     /** One check asked: of [backup] over [here], keeping the setup here as a profile or not. */
     class Ask(val here: Setup, val backup: Backup.Contents, val keep: Boolean)
 
@@ -135,34 +154,55 @@ class RestoreGate {
     }
 
     companion object {
+        /** Only package names the reviewed setups use. Both the review and the final restore take a fresh observation. */
+        internal fun inventory(here: Setup, backup: Setup, read: (String) -> InstallState): Map<String, InstallState> {
+            val names = (here.profiles + here.live + backup.profiles + backup.live).flatMapTo(HashSet()) { it.apps.keys }
+            return names.associateWith(read)
+        }
+
         /** Works [a] out: slow for a large setup, never on the main thread. [kin]: the apps sharing a user id with an app; [tick] may throw to stop it. */
         internal fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }, tick: () -> Unit = {},
-                           installedAt: (String) -> Long? = { null }, identity: ((String) -> AppIdentity?)? = null): Result {
+                           installedAt: (String) -> Long? = { null }, identity: ((String) -> AppIdentity?)? = null,
+                           installed: ((String) -> InstallState)? = null, now: Long = System.currentTimeMillis()): Result {
             val c = a.backup
             // As of now, as Restore works it out: a wait over by then only keeps less, so what can be kept here still can be.
-            val now = System.currentTimeMillis()
-            val plain = a.here.restoredFrom(c.setup, null, now, c.keys)!!
-            val kept = if (a.here.untouched) null else a.here.restoredFrom(c.setup, BEFORE_RESTORE, now, c.keys, installedAt)
-            val next = if (a.keep && kept != null) kept else plain
-            // Check what could run here, including saved profiles selected by a network change or a tile.
-            // Both sides see the same package identities. The backup and the choices stored on restore stay intact.
-            val signers = mutableMapOf<String, AppIdentity?>()
-            fun signer(pkg: String): AppIdentity? {
-                if (pkg !in signers) { tick(); signers[pkg] = identity?.invoke(pkg) }
-                return signers[pkg]
+            val observations = mutableMapOf<String, InstallState>()
+            fun seen(pkg: String) = observations.getOrPut(pkg) {
+                tick()
+                installed?.invoke(pkg) ?: run {
+                    val signer = identity?.invoke(pkg)
+                    val time = installedAt(pkg)
+                    if (signer == null && time == null) InstallState.Unknown else InstallState.Present(time, signer)
+                }
             }
-            fun checked(s: Setup) = s.checkedApps(::signer).copy(profiles = s.profiles.map { it.checkedApps(::signer) })
-            val notes = RestoreTraffic.notes(checked(a.here), checked(next), kin, tick)
-            // Missing packages and an unreadable signer are indistinguishable here. Either can match later.
-            val unresolved = (next.profiles + next.live).flatMap { profile ->
-                profile.appSigners.keys.filter { signers[it] == null }.mapNotNull(profile.apps::get)
+            val plain = a.here.restoredWithInstalls(c.setup, null, now, c.keys, ::seen)!!
+            val kept = if (a.here.untouched) null else a.here.restoredWithInstalls(c.setup, BEFORE_RESTORE, now, c.keys, ::seen)
+            val next = if (a.keep && kept != null) kept else plain
+            // Compare both setups and all profiles with one installation and signer observation per package.
+            fun signer(pkg: String) = (seen(pkg) as? InstallState.Present)?.identity
+            fun checked(s: Setup): Setup {
+                val eligible = s.resolveWaiting(now, ::seen, effective = true)
+                return eligible.checkedApps(::signer).copy(profiles = eligible.profiles.map { it.checkedApps(::signer) })
+            }
+            val peers = mutableMapOf<String, Set<String>>()
+            val notes = RestoreTraffic.notes(checked(a.here), checked(next), { pkg -> peers.getOrPut(pkg) { kin(pkg) } }, tick)
+            val pending = next.resolveWaiting(now, ::seen)
+            val unresolved = (pending.profiles + pending.live).flatMap { profile ->
+                profile.appSigners.filter { (pkg, pin) ->
+                    val current = signer(pkg)
+                    current == null || pending.deadline(profile, pkg) != null && current.accepts(pin)
+                }.keys.mapNotNull(profile.apps::get)
             }
             val limit = when {
-                DIRECT in unresolved -> "An app identity could not be checked. If the installed app matches, its restored Direct route can use the phone's own connection."
-                unresolved.isNotEmpty() -> "An app identity could not be checked. If the installed app matches, it can use its restored route."
+                DIRECT in unresolved -> "An app's signing identity or installation date could not be verified. If the matching app was installed before its restore deadline, its Direct assignment can use the phone's own connection."
+                unresolved.isNotEmpty() -> "An app's signing identity or installation date could not be verified. The matching app can use its restored route if it was installed before its restore deadline."
                 else -> null
             }
-            return Result(notes + listOfNotNull(limit), Backup.weak(plain, a.here), kept != null, plain.servers.count { it.keyless }, kept?.profiles?.lastOrNull()?.name)
+            val nextDeadline = (a.here.profiles + a.here.live).minOfOrNull { profile ->
+                profile.apps.keys.mapNotNull { a.here.deadline(profile, it) }.filter { it > now }.minOrNull() ?: Long.MAX_VALUE
+            }?.takeUnless { it == Long.MAX_VALUE }
+            return Result(notes + listOfNotNull(limit), Backup.weak(plain, a.here), kept != null, plain.servers.count { it.keyless },
+                kept?.profiles?.lastOrNull()?.name, observations, peers, now, nextDeadline)
         }
     }
 }
@@ -241,20 +281,38 @@ class BackupFlow(private val ui: Ui) {
         val ask = gate.ask(here, keep) ?: return
         seen++
         judging?.cancel()
-        val pm = app.packageManager
-        val installedAt = ui.installedAt()
         judging = ui.viewModelScope.launch {
-            val r = withContext(Dispatchers.Default) {
-                // The installed apps by user id, read once.
-                val all = if (disclosed) runCatching { pm.getInstalledApplications(0) }.getOrNull() else null
-                val uid = all.orEmpty().associate { it.packageName to it.uid }
-                val byUid = all.orEmpty().groupBy({ it.uid }, { it.packageName })
-                // Stopped as soon as the sheet is closed or the check asked again.
-                RestoreGate.check(ask, { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }, { ensureActive() }, installedAt,
-                    identity = if (all == null) null else { pkg -> if (pkg in uid) AppIdentity.read(pm, pkg) else null })
+            val r = withContext(Dispatchers.IO) {
+                val inventory = restoreInventory(here, ask.backup.setup, disclosed)
+                RestoreGate.check(ask, inventory::peers, { ensureActive() }, installed = inventory.observed::getValue, now = inventory.at)
             }
             gate.answer(ask, r); seen++
         }
+    }
+
+    private class Inventory(val at: Long, val observed: Map<String, InstallState>, val uid: Map<String, Int>) {
+        private val packages = uid.entries.groupBy({ it.value }, { it.key }).mapValues { it.value.toSet() }
+        fun peers(pkg: String) = uid[pkg]?.let(packages::get).orEmpty()
+    }
+
+    /** One list read establishes absence, even for large backups. Only installed or archived names in the setups need signing data. */
+    private suspend fun restoreInventory(here: Setup, backup: Setup, disclosed: Boolean): Inventory {
+        val scope = kotlinx.coroutines.currentCoroutineContext()
+        val at = System.currentTimeMillis()
+        val all = if (!disclosed) null else runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= 35) app.packageManager.getInstalledApplications(
+                PackageManager.ApplicationInfoFlags.of(PackageManager.MATCH_ARCHIVED_PACKAGES))
+            else app.packageManager.getInstalledApplications(0)
+        }.getOrNull()
+        val installed = all.orEmpty().filter { it.flags and ApplicationInfo.FLAG_INSTALLED != 0 &&
+            !(android.os.Build.VERSION.SDK_INT >= 35 && it.isArchived) }.associate { it.packageName to it.uid }
+        val known = installed.keys + all.orEmpty().filter { android.os.Build.VERSION.SDK_INT >= 35 && it.isArchived }.map { it.packageName }
+        val read = ui.installation()
+        val observed = RestoreGate.inventory(here, backup) { pkg ->
+            scope.ensureActive()
+            when { all == null -> InstallState.Unknown; pkg in known -> read(pkg); else -> InstallState.Absent }
+        }
+        return Inventory(at, observed, installed)
     }
 
     /** Restore may go: the check is in for this backup, this setup and this keep choice, and weak servers are accepted. */
@@ -268,11 +326,13 @@ class BackupFlow(private val ui: Ui) {
         val p = pass
         val setup = Unbraid.store.setup.value
         val withKeys = keys
+        val installed = ui.installation()
         busy = true
         ui.viewModelScope.launch {
             val r = withContext(Dispatchers.Default) {
                 runCatching {
-                    val plain = Backup.export(setup, BuildConfig.VERSION_NAME, System.currentTimeMillis(), withKeys)
+                    val now = System.currentTimeMillis()
+                    val plain = Backup.export(setup.resolveWaiting(now, installed), BuildConfig.VERSION_NAME, now, withKeys)
                     // Read back first: a backup that couldn't be restored is said now, while the setup can still be mended.
                     try { Backup.readBack(plain); Backup.seal(plain, p) } finally { plain.fill(0) }
                 }
@@ -339,25 +399,44 @@ class BackupFlow(private val ui: Ui) {
         val c = opened ?: return
         val here = Unbraid.store.setup.value
         // Only over the setup and keep choice the sheet's check was made for, and with weak servers accepted.
-        if (!ready(here)) return
-        var target: Setup? = null
-        val keepAs = BEFORE_RESTORE.takeIf { keep && keepable == true }
-        var moved = false
-        var counted = false
-        // Counted before the store changes, and only when the restore changes the setup: the running engine's setup is then
-        // gone, so a refused reload must stop the VPN. A restore that leaves the setup as it is (the same backup again)
-        // leaves the engine on a setup that still exists, and a later refused edit keeps it running as any refused edit does.
+        if (busy || !ready(here)) return
+        val reviewed = gate.result ?: return
+        val keepChoice = keep
+        val keepAs = BEFORE_RESTORE.takeIf { keep && reviewed.keepable }
+        val disclosed = judgedDisclosure
+        busy = true
+        ui.viewModelScope.launch {
+            try {
+                val (matches, target) = withContext(Dispatchers.IO) {
+                    val inventory = restoreInventory(here, c.setup, disclosed)
+                    val matches = reviewed.stillApplies(System.currentTimeMillis(), inventory.observed, inventory::peers)
+                    matches to if (matches) here.restoredWithInstalls(c.setup, keepAs, inventory.at, c.keys, inventory.observed::getValue) else null
+                }
+                if (opened !== c || gate.result !== reviewed || keep != keepChoice || !ready(here) || Unbraid.store.setup.value !== here) return@launch
+                if (!matches || !reviewed.timeValid(System.currentTimeMillis())) {
+                    gate.open(c)
+                    judge(here)
+                } else if (target == null) finish(false, KEEP_NO_ROOM)
+                else commit(here, target, c)
+            } finally { busy = false }
+        }
+    }
+
+    private fun commit(here: Setup, t: Setup, c: Backup.Contents) {
+        var current = false
         var taken = false
-        val installedAt = ui.installedAt()
-        var changes = false
-        // Counted once the store takes it, before it holds it: a restore the store refuses (a sign-out under way holds the
-        // default) is never counted.
-        val saved = Unbraid.store.update({ ok -> taken = ok; if (ok && changes && !counted) { UnbraidVpn.restores.incrementAndGet(); counted = true } }) { s ->
-            if (s !== here) s.also { moved = true } else s.restoredFrom(c.setup, keepAs, System.currentTimeMillis(), c.keys, installedAt)
-                ?.also { target = it; changes = it != s } ?: s }
-        val t = target
-        if (t == null || moved || !taken) {
-            finish(false, if (t == null && !moved) KEEP_NO_ROOM else "Couldn't restore: your settings are busy. Try again.")
+        var counted = false
+        val changes = t != here
+        // An edit while the restore was prepared wins. Count only a changed setup the store actually accepts.
+        val saved = Unbraid.store.update({ ok ->
+            taken = current && ok
+            if (taken && changes && !counted) { UnbraidVpn.restores.incrementAndGet(); counted = true }
+        }) { s ->
+            current = s === here
+            if (current) t else s
+        }
+        if (!taken) {
+            finish(false, "Couldn't restore: your settings are busy. Try again.")
             return
         }
         ui.restored()

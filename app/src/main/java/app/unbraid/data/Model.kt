@@ -193,6 +193,8 @@ data class Profile(
     @SavedSites val sites: Map<String, String> = emptyMap(),
     /** SHA-256 of the Android signing certificate(s) when each app route was chosen. */
     val appSigners: Map<String, String> = emptyMap(),
+    /** Local wait overrides only when profiles disagree about the same package and route. */
+    val waitOverrides: Map<String, Long> = emptyMap(),
 ) {
     val ready get() = defaultRoute.isNotEmpty()
     /** App [pkg] on route [routeId], its default included: a choice that stays when the default changes. Null = it follows the default. */
@@ -232,7 +234,7 @@ fun String.takeGraphemes(n: Int): String = chars(this).let { b -> var end = 0; r
  * The newest [Setup.version]. 2: every value is written, defaults too (older files left out those equal to a default).
  * 3: website routes, which an older build would drop without a word; only a setup that has one is saved as 3 ([Setup.stamped]).
  */
-const val VERSION = 5
+const val VERSION = 6
 
 @Serializable
 data class Setup(
@@ -273,6 +275,7 @@ data class Setup(
     val waitingUntil: Long = 0,
     /** Choices of waiting apps a later restore kept ([restoredFrom]), app → route → deadline: each until its own instead of [waitingUntil]. */
     val waitingEach: Map<String, Map<String, Long>> = emptyMap(),
+    val waitOverrides: Map<String, Long> = emptyMap(),
     /** Routes without apps connected only for a combined speed test; never saved. */
     @kotlinx.serialization.Transient val testing: Set<String> = emptySet(),
 ) {
@@ -282,7 +285,7 @@ data class Setup(
     val saved get() = profiles.map { if (it.name == profile) live else it }
 
     /** This setup routing as [p] does. */
-    private fun routedAs(p: Profile) = copy(defaultRoute = p.defaultRoute, apps = p.apps, added = p.added, sites = p.sites, appSigners = p.appSigners)
+    private fun routedAs(p: Profile) = copy(defaultRoute = p.defaultRoute, apps = p.apps, added = p.added, sites = p.sites, appSigners = p.appSigners, waitOverrides = p.waitOverrides)
 
     /** Discard identities whose app rule was removed, on every store change and before exporting. */
     internal fun tidyAppSigners(): Setup {
@@ -292,7 +295,7 @@ data class Setup(
     }
 
     /** The live setup as a profile: what is in use. */
-    internal val live get() = Profile(profile.orEmpty(), defaultRoute, apps, added, sites, appSigners)
+    internal val live get() = Profile(profile.orEmpty(), defaultRoute, apps, added, sites, appSigners, waitOverrides)
 
     /** No profile is in use and none holds the setup in use: switching to another would lose it, unless [use] keeps it. */
     val loose get() = profile == null && profiles.none { it.copy(name = "") == live.copy(name = "") }
@@ -391,7 +394,7 @@ data class Setup(
         }.toMap()
         return copy(profiles = saved, profile = same?.name,
             defaultRoute = ran.defaultRoute.takeIf(ok) ?: defaultRoute, apps = ran.apps.filterValues(ok),
-            appSigners = pins, added = ran.added.filter(ok), sites = ran.sites.filterValues(ok))
+            appSigners = pins, added = ran.added.filter(ok), sites = ran.sites.filterValues(ok)).rollbackWaits(this, ran)
     }
 
     /** Moves profile [name] [by] places (negative = earlier). */
@@ -534,6 +537,7 @@ data class Setup(
      * server, drop the websites, and take a blocked app for one on a route that is gone.
      */
     val stamped get() = copy(version = when {
+        waiting.isNotEmpty() -> 6 // earlier readers cannot enforce restoration deadlines
         (profiles + live).any { p -> p.apps.values.any { it != BLOCK } } -> 5
         routes.any { it.via != null } -> 4
         (profiles + live).all { it.sites.isEmpty() && BLOCK !in it.apps.values } -> minOf(version, 2)

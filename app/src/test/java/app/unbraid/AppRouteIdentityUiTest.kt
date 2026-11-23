@@ -3,6 +3,7 @@ package app.unbraid
 import app.unbraid.data.AppIdentity
 import app.unbraid.data.BLOCK
 import app.unbraid.data.DIRECT
+import app.unbraid.data.InstallState
 import app.unbraid.data.Filter
 import app.unbraid.data.Prefs
 import app.unbraid.data.Profile
@@ -79,6 +80,32 @@ class AppRouteIdentityUiTest {
         assertNull(verifiedAppChoice(true, signer.current) { AppIdentity("replacement", emptySet()) })
     }
 
+    @Test fun choosingARouteAgainDoesNotRenewTheOtherProfilesExpiredGrant() {
+        val trip = Profile("Trip", DIRECT, apps = mapOf(pkg to DIRECT), appSigners = mapOf(pkg to signer.current))
+        val raw = direct.copy(appSigners = mapOf(pkg to signer.current), profiles = listOf(trip),
+            waiting = setOf(pkg), waitingUntil = 50)
+        val late = { _: String -> InstallState.Present(51, signer) }
+        val refreshed = raw.chooseAppRoute("Trip", pkg, DIRECT, signer)
+        val live = AppRoutes(refreshed, installed = late, now = 60) { signer }
+        val picked = AppRoutes(refreshed, "Trip", installed = late, now = 60) { signer }
+        assertTrue(live.effective.follows(pkg))
+        assertFalse(live.effective.outside(pkg))
+        assertEquals(DIRECT, picked.effective.apps[pkg])
+        assertFalse(picked.effective.follows(pkg))
+    }
+
+    @Test fun pendingGrantStaysHeldWhenTheInstallationTimeCannotBeVerified() {
+        val raw = direct.copy(appSigners = mapOf(pkg to signer.current), waiting = setOf(pkg), waitingUntil = 50)
+        val unclear = { _: String -> InstallState.Present(null, signer) }
+        val pending = keepKnown(raw, setOf(pkg), now = 51, observed = unclear)
+        assertEquals(raw.apps, pending.apps)
+        assertEquals(raw.waiting, pending.waiting)
+        assertTrue(AppRoutes(pending, installed = unclear, now = 51) { signer }.held(pkg))
+        val timely = keepKnown(pending, setOf(pkg), now = 52, observed = { InstallState.Present(49, signer) })
+        assertTrue(timely.waiting.isEmpty())
+        assertEquals(DIRECT, AppRoutes(timely) { signer }.effective.apps[pkg])
+    }
+
     @Test fun removingMissingAppsAlsoRemovesOnlyTheirPinsAfterWaiting() {
         val raw = direct.copy(appSigners = mapOf(pkg to signer.current),
             profiles = listOf(Profile("Trip", DIRECT, apps = direct.apps, appSigners = mapOf(pkg to "other"))),
@@ -87,8 +114,9 @@ class AppRouteIdentityUiTest {
         val gone = keepKnown(raw, emptySet(), now = 10)
         assertTrue(gone.apps.isEmpty() && gone.appSigners.isEmpty())
         assertTrue(gone.profiles.single().apps.isEmpty() && gone.profiles.single().appSigners.isEmpty())
-        val kept = keepKnown(raw, setOf(pkg), now = 5)
-        assertTrue(kept.waiting.isEmpty())
+        val kept = keepKnown(raw, setOf(pkg), now = 5, observed = { InstallState.Present(3, signer) })
+        // The other profile names another signer, so observing this package cannot settle its choice.
+        assertTrue(pkg in kept.waiting)
         assertEquals(raw.appSigners, kept.appSigners)
         assertEquals(raw.profiles, kept.profiles)
     }

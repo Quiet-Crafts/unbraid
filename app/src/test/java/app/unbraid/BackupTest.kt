@@ -3,6 +3,7 @@ package app.unbraid
 import app.unbraid.data.BLOCK
 import app.unbraid.data.Backup
 import app.unbraid.data.Backup.Reason
+import app.unbraid.data.InstallState
 import app.unbraid.data.DIRECT
 import app.unbraid.data.Filter
 import app.unbraid.data.Home
@@ -310,6 +311,24 @@ class BackupTest {
         Backup.valid(two.copy(profiles = f.profiles + Profile("Fine", "t1", mapOf("org.example.a" to "t1"))))
     }
 
+    @Test fun olderReadersMustRefuseLocalGrantsWhileTheirInstallWindowIsPending() {
+        val pkg = "org.example.pending"
+        val pending = Setup(defaultRoute = DIRECT, apps = mapOf(pkg to DIRECT), waiting = setOf(pkg), waitingUntil = 100)
+        assertTrue(pending.stamped.version > 5)
+        assertEquals(5, Backup.contents(pending).stamped.version)
+    }
+
+    @Test fun theGlobalInstallDeadlineUsesTheOriginalInstallTime() {
+        val pkg = "org.example.restored"
+        val restored = Setup(defaultRoute = DIRECT, apps = mapOf(pkg to DIRECT), waiting = setOf(pkg), waitingUntil = 100)
+        assertEquals(DIRECT, keepKnown(restored, setOf(pkg), 200, installedAt = { 99 }).apps[pkg])
+        for (first in listOf(100L, 101L)) {
+            val settled = keepKnown(restored, setOf(pkg), 200, installedAt = { first })
+            assertFalse("expired app still has an explicit grant", pkg in settled.apps)
+            assertEquals(DIRECT, settled.routeOf(pkg))
+        }
+    }
+
     @Test fun restoredAppsWaitToBeInstalled() {
         val s = full().copy(waiting = setOf("org.example.a", "org.example.c"), waitingUntil = 5000)
         val known = setOf("org.example.b")
@@ -357,7 +376,7 @@ class BackupTest {
         assertFalse(pkg in day30.profiles.single { it.name == PREVIOUS }.apps)
         assertFalse(pkg in keepKnown(both, emptySet(), now = 2000 + WAIT_MS).apps)
         // Found installed only past the kept choice's deadline: that one goes, the backup's stays. Installed in time, both do.
-        val installed = keepKnown(both, setOf(pkg), now = 1000 + WAIT_MS)
+        val installed = keepKnown(both, setOf(pkg), now = 1000 + WAIT_MS, installedAt = { 1000 + WAIT_MS })
         assertEquals(BLOCK, installed.apps[pkg])
         assertFalse(pkg in installed.profiles.single { it.name == PREVIOUS }.apps)
         assertTrue(installed.waiting.isEmpty())
@@ -387,7 +406,9 @@ class BackupTest {
             defaultRoute = "nl", apps = mapOf(pkg to "us"), profiles = listOf(Profile("Trip", "nl")), waiting = setOf(pkg), waitingUntil = 1, version = VERSION)
         val big = Setup(routes = (1 until Backup.MAX_EACH).map { Route("b$it", Location("nord", 153, "NL", "Netherlands")) }, defaultRoute = "b1", version = VERSION)
         assertNull(here.restoredFrom(big, PREVIOUS, 0))
-        assertTrue(RestoreGate.check(RestoreGate.Ask(here, Backup.Contents(setup = big), true)).keepable)
+        val ask = RestoreGate.Ask(here, Backup.Contents(setup = big), true)
+        assertTrue(RestoreGate.check(ask, installed = { InstallState.Absent }).keepable)
+        assertFalse(RestoreGate.check(ask, installed = { InstallState.Unknown }).keepable)
     }
 
     @Test fun strengthIsAHintOnly() {

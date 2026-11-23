@@ -44,6 +44,28 @@ internal data class AppIdentity(val current: String, val ancestors: Set<String>)
     }
 }
 
+/** Evidence for a restored app. Missing, unreadable, and an installed app of unknown age are different. */
+internal sealed interface InstallState {
+    data class Present(val firstInstallTime: Long?, val identity: AppIdentity? = null, val observedAt: Long? = null) : InstallState
+    data object Absent : InstallState
+    data object Unknown : InstallState
+
+    companion object {
+        fun read(pm: android.content.pm.PackageManager, pkg: String, includeArchived: Boolean = false): InstallState {
+            val flags = android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES.toLong() or
+                if (includeArchived && android.os.Build.VERSION.SDK_INT >= 35) android.content.pm.PackageManager.MATCH_ARCHIVED_PACKAGES else 0L
+            return try {
+                val info = pm.getPackageInfo(pkg, android.content.pm.PackageManager.PackageInfoFlags.of(flags))
+                val app = info.applicationInfo ?: return Unknown
+                if (app.flags and android.content.pm.ApplicationInfo.FLAG_INSTALLED == 0 &&
+                    !(includeArchived && android.os.Build.VERSION.SDK_INT >= 35 && app.isArchived)) Absent
+                else Present(info.firstInstallTime.takeIf { it > 0 }, runCatching { AppIdentity.from(info) }.getOrNull(), System.currentTimeMillis())
+            } catch (_: android.content.pm.PackageManager.NameNotFoundException) { Absent }
+            catch (_: RuntimeException) { Unknown }
+        }
+    }
+}
+
 /** Only app rules in the current profile run. Retain the user's original choice separately for reauthorization. */
 internal fun Setup.checkedApps(identity: (String) -> AppIdentity?): Setup {
     val checked = live.checkedApps(identity)
@@ -161,6 +183,23 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     private fun readSetup(): Setup? {
         newer = false
         return marked(SETUP) { explicit.decodeFromString(Setup.serializer(), it).also { s -> newer = s.version > VERSION; check(!newer) { "newer format" } }.migrated() }
+    }
+
+    /** Settle proven restored choices across all profiles. Re-evaluate if another edit won the race. */
+    internal fun refreshWaiting(now: Long, installed: (String) -> InstallState) {
+        while (!unreadable.value) {
+            val before = setup.value
+            if (before.waiting.isEmpty()) return
+            val after = before.resolveWaiting(now, installed)
+            if (before == after) return
+            // A package query can block. Never do it under the store lock; only apply the snapshot it observed.
+            var unchanged = false
+            update { current ->
+                unchanged = current === before
+                if (unchanged) after else current
+            }
+            if (unchanged) return
+        }
     }
 
     /** Called off the main thread on start, package events and app-list refresh. Persist only a proven rotation. */

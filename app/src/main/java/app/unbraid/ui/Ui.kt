@@ -21,6 +21,10 @@ import app.unbraid.data.UpdateState
 import app.unbraid.data.Updates
 import app.unbraid.support.Report
 import app.unbraid.data.AppIdentity
+import app.unbraid.data.InstallState
+import app.unbraid.data.clearAppWait
+import app.unbraid.data.deadline
+import app.unbraid.data.resolveWaiting
 import app.unbraid.data.BLOCK
 import app.unbraid.data.checkedApps
 import app.unbraid.data.DIRECT
@@ -89,25 +93,26 @@ sealed interface Fetch {
 internal fun startFetch(fetches: Map<String, Fetch>, provider: String) = if (fetches[provider] == Fetch.Loading) null else fetches + (provider to Fetch.Loading)
 
 /** [uid]: its Android user id, which Android and the engine decide by: apps that share one go together. */
-internal data class AppInfo(val pkg: String, val label: String, val system: Boolean, val uid: Int, val identity: AppIdentity? = null)
+internal data class AppInfo(val pkg: String, val label: String, val system: Boolean, val uid: Int, val identity: AppIdentity? = null, val firstInstallTime: Long? = null)
 
 /** Keep the saved choices available to edit, even when the installed app cannot use them. */
-internal class AppRoutes(val saved: Setup, val profileName: String? = saved.profile, identity: (String) -> AppIdentity?) {
-    val effective = saved.checkedApps(identity)
+internal class AppRoutes(raw: Setup, val profileName: String? = raw.profile, installed: (String) -> InstallState = { InstallState.Unknown },
+                         now: Long = System.currentTimeMillis(), identity: (String) -> AppIdentity?) {
+    val saved = raw.viewAs(profileName)
+    val effective = raw.resolveWaiting(now, installed, effective = true).viewAs(profileName).checkedApps(identity)
     fun held(pkg: String) = effective.apps[pkg] == BLOCK && saved.apps[pkg] != BLOCK
 }
 
 /** The user's explicit choice applies to this profile. A different app cannot inherit a per-app DNS exception. */
 internal fun Setup.chooseAppRoute(profileName: String?, pkg: String, routeId: String?, identity: AppIdentity?): Setup {
     if (routeId != BLOCK && identity == null) return this
-    val next = editing(profileName) { it.assigned(pkg, routeId, identity?.current) }
+    val next = editing(profileName) { it.assigned(pkg, routeId, identity?.current) }.clearAppWait(profileName, pkg)
     if (routeId == null || routeId == BLOCK || pkg !in prefs.filter.apps || identity == null) return next
     val prior = viewAs(profileName)
-    if (identity.accepts(prior.appSigners[pkg])) return next
+    if (identity.accepts(prior.appSigners[pkg]) && deadline(prior.live, pkg) == null) return next
     // Adding a choice to a blank profile doesn't replace a verified Direct app's existing filter preference.
     if (prior.apps[pkg] == null || prior.apps[pkg] == BLOCK) {
-        if (apps[pkg] == DIRECT && identity.accepts(appSigners[pkg]) ||
-            profiles.any { it.apps[pkg] == DIRECT && identity.accepts(it.appSigners[pkg]) }) return next
+        if ((profiles + live).any { it.apps[pkg] == DIRECT && deadline(it, pkg) == null && identity.accepts(it.appSigners[pkg]) }) return next
     }
     return next.copy(prefs = prefs.copy(filter = prefs.filter.copy(apps = prefs.filter.apps - pkg)))
 }
@@ -127,19 +132,13 @@ private inline fun Setup.removing(gone: Set<String>, name: String, refused: (app
  * [s] without the choices of apps Android no longer knows ([known]: installed or archived), in the setup and every saved
  * profile: an uninstalled app must not keep a route (and a tunnel) alive, nor bring it back with a profile used later.
  */
-internal fun keepKnown(s: Setup, known: Set<String>, now: Long = System.currentTimeMillis(), installedAt: (String) -> Long? = { null }): Setup {
-    // Restored apps not installed yet keep their choice for a while, one a later restore kept until its own deadline; an
-    // installed one no longer waits. A kept one goes at its own deadline even for an app found installed only after it:
-    // there's no telling when it was, and the app's choice the last restore brought is the one to follow.
-    val each = { p: String, r: String -> s.waitingEach[p]?.get(r) }
-    val waits = { p: String, r: String -> p in s.waiting && p !in known && now < (each(p, r) ?: s.waitingUntil) }
-    // An installed one keeps it when it was installed before its deadline, as far as Android tells ([installedAt]).
-    val keep = { m: Map<String, String> -> m.filter { (p, r) -> if (p in known) each(p, r)?.let { (installedAt(p) ?: now) < it } ?: true else waits(p, r) } }
-    val apps = keep(s.apps)
-    val profiles = s.profiles.map { p -> p.copy(apps = keep(p.apps)) }
-    val wait = (apps.keys + profiles.flatMap { it.apps.keys }).filterTo(HashSet()) { it in s.waiting && it !in known }
-    return s.copy(apps = apps, profiles = profiles,
-        waiting = wait, waitingUntil = if (wait.isEmpty()) 0 else s.waitingUntil, waitingEach = s.waitingEach.filterKeys { it in wait }).tidyAppSigners()
+internal fun keepKnown(s: Setup, known: Set<String>, now: Long = System.currentTimeMillis(), observed: ((String) -> InstallState)? = null,
+                       installedAt: (String) -> Long? = { null }): Setup {
+    val next = s.resolveWaiting(now, { pkg -> if (pkg in known) observed?.invoke(pkg) ?: InstallState.Present(installedAt(pkg)) else InstallState.Absent })
+    fun keep(p: app.unbraid.data.Profile) = p.copy(apps = p.apps.filterKeys { it in known || next.deadline(p, it) != null },
+        waitOverrides = p.waitOverrides.filterKeys { it in known || next.deadline(p, it) != null })
+    val live = keep(next.live)
+    return next.copy(apps = live.apps, waitOverrides = live.waitOverrides, profiles = next.profiles.map(::keep)).tidyAppSigners()
 }
 
 /**
@@ -614,19 +613,13 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun refreshApps() { if (disclosed.value) loadApps() }
     @Volatile private var appsAsked = 0
 
-    /**
-     * When Android installed an app, archived ones too; null when it isn't installed or the installed apps may not be
-     * looked at yet (before the installed-apps notice).
-     */
-    fun installedAt(): (String) -> Long? = if (!disclosed.value) { _ -> null } else { p ->
-        // Installed, else archived (Android 15+): only one Android says is archived, not one uninstalled with its data kept.
-        runCatching { pm.getPackageInfo(p, 0).firstInstallTime }.getOrNull() ?: if (android.os.Build.VERSION.SDK_INT >= 35) runCatching {
-            pm.getPackageInfo(p, PackageManager.PackageInfoFlags.of(PackageManager.MATCH_ARCHIVED_PACKAGES)).takeIf { it.applicationInfo?.isArchived == true }?.firstInstallTime
-        }.getOrNull() else null
-    }
+    /** Named observations only, including archives Android still recognizes. Before disclosure no packages are read. */
+    internal fun installation(): (String) -> InstallState = if (!disclosed.value) { _ -> InstallState.Unknown }
+        else { pkg -> InstallState.read(pm, pkg, includeArchived = true) }
 
     private fun loadApps() = (++appsAsked).let { n -> viewModelScope.launch {
         val self = getApplication<Application>().packageName
+        val listedAt = System.currentTimeMillis()
         // A failed read keeps the list as it was.
         val (list, known) = withContext(Dispatchers.IO) {
             runCatching {
@@ -639,7 +632,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                     val a = info.applicationInfo ?: return@mapNotNull null
                     if (a.packageName == self || a.flags and ApplicationInfo.FLAG_INSTALLED == 0) return@mapNotNull null
                     AppInfo(a.packageName, a.loadLabel(pm).toString(), a.flags and ApplicationInfo.FLAG_SYSTEM != 0 && pm.getLaunchIntentForPackage(a.packageName) == null,
-                        a.uid, runCatching { AppIdentity.from(info) }.getOrNull())
+                        a.uid, runCatching { AppIdentity.from(info) }.getOrNull(), info.firstInstallTime.takeIf { it > 0 })
                 }.sortedBy { it.label.lowercase() } to knownApps(all.map { it.packageName }, archived)
             }.getOrNull()
         } ?: run {
@@ -647,13 +640,17 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             return@launch
         }
         if (n != appsAsked) return@launch // a newer read is under way (checked and applied here, on the main thread)
+        val observedAt = System.currentTimeMillis()
+        val online = list.associate { it.pkg to InstallState.Present(it.firstInstallTime, it.identity, observedAt) }
+        val otherWaiting = store.setup.value.waiting.filter { it in known && it !in online }
+        val observed = withContext(Dispatchers.IO) { online + otherWaiting.associateWith(installation()) }
+        if (n != appsAsked) return@launch
+        // An absence in this list cannot prove the app was still absent after a deadline crossed during the read.
+        val read = { pkg: String -> observed[pkg] ?: InstallState.Unknown }
+        if (keepKnown(store.setup.value, known, listedAt, observed = read) != store.setup.value)
+            store.edit { keepKnown(it, known, listedAt, observed = read) }
         _apps.value = list
-        val installedAt = installedAt()
-        if (keepKnown(store.setup.value, known, installedAt = installedAt) != store.setup.value) store.edit { keepKnown(it, known, installedAt = installedAt) }
-        withContext(Dispatchers.IO) {
-            val identities = list.associate { it.pkg to it.identity }
-            store.refreshAppSigners(identities::get)
-        }
+        withContext(Dispatchers.IO) { store.refreshAppSigners { online[it]?.identity } }
     } }
 
     /** A config file picked in a sign-in form, read here so a rotation during a slow read doesn't lose it. */
@@ -943,9 +940,10 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     }
     /** The setup as the viewed profile routes it: what Routes and Apps show. */
     internal val appRoutes = combine(setup, viewing, apps) { s, v, installed ->
-        val byName = installed.associate { it.pkg to it.identity }
-        AppRoutes(s.viewAs(v), v?.takeIf { n -> s.profiles.any { it.name == n } } ?: s.profile, byName::get)
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, AppRoutes(setup.value.viewAs(viewing.value), draft ?: setup.value.profile) { null })
+        val byName = installed.associateBy { it.pkg }
+        AppRoutes(s, v?.takeIf { n -> s.profiles.any { it.name == n } } ?: s.profile,
+            installed = { pkg -> byName[pkg]?.let { InstallState.Present(it.firstInstallTime, it.identity) } ?: InstallState.Unknown }) { pkg -> byName[pkg]?.identity }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, AppRoutes(setup.value, draft ?: setup.value.profile) { null })
     /** The viewed profile, if it exists and isn't the one in use: edits go to it alone. */
     private val draft get() = viewing.value?.takeIf { n -> n != setup.value.profile && setup.value.profiles.any { it.name == n } }
 

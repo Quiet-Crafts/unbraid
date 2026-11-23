@@ -1,6 +1,7 @@
 package app.unbraid
 
 import app.unbraid.data.AppIdentity
+import app.unbraid.data.InstallState
 import app.unbraid.data.BLOCK
 import app.unbraid.data.Profile
 import app.unbraid.data.Backup
@@ -44,6 +45,49 @@ class RestoreGateTest {
         val profileAsk = RestoreGate.Ask(current, open(backup), false)
         assertTrue(RestoreGate.check(profileAsk, identity = { matched }).notes.any { it.contains("Work") })
         assertTrue(RestoreGate.check(profileAsk, identity = { null }).notes.any { it.contains("phone's own connection") })
+    }
+
+    @Test fun theRestorePreviewComparesTheDeadlineThatEachProfileActuallyUses() {
+        val pkg = "org.example.mail"
+        val signer = AppIdentity("ab".repeat(32), emptySet())
+        val pin = mapOf(pkg to signer.current)
+        val block = here.copy(apps = mapOf(pkg to BLOCK))
+        val imported = here.copy(apps = emptyMap(), profiles = listOf(Profile("Work", "nl", mapOf(pkg to DIRECT), appSigners = pin)))
+        val current = block.copy(profiles = listOf(Profile("Work", "nl", block.apps)))
+        val ask = RestoreGate.Ask(current, open(imported), false)
+        fun notes(state: InstallState, at: Long): List<String> {
+            var reads = 0
+            val result = RestoreGate.check(ask, installed = { reads++; state }, now = at)
+            assertEquals(1, reads)
+            return result.notes
+        }
+        assertTrue(notes(InstallState.Present(99, signer), 100).any { "Work" in it })
+        assertTrue(notes(InstallState.Unknown, 100).any { "before its restore deadline" in it })
+        assertEquals(DIRECT, ask.backup.setup.profiles.single().apps[pkg])
+
+        // The old setup's expired assignment is gone before comparison. Importing it anew is a fresh grant.
+        val old = here.copy(apps = mapOf(pkg to DIRECT), appSigners = pin, waiting = setOf(pkg), waitingUntil = 100)
+        val retry = RestoreGate.Ask(old, open(old), false)
+        assertTrue(RestoreGate.check(retry, installed = { InstallState.Present(100, signer) }, now = 200).notes.isNotEmpty())
+        assertTrue(RestoreGate.check(retry, installed = { InstallState.Present(99, signer) }, now = 200).notes.isEmpty())
+    }
+
+    @Test fun restoringWaitsForFreshEvidenceAcrossTheReviewedDeadline() {
+        val pkg = "org.example.mail"
+        val stamp = "ab".repeat(32)
+        val old = here.copy(apps = mapOf(pkg to DIRECT), appSigners = mapOf(pkg to stamp),
+            waiting = setOf(pkg), waitingUntil = 100)
+        val ask = RestoreGate.Ask(old, open(old), false)
+        val installed = InstallState.Present(null, AppIdentity(stamp, emptySet()))
+        val observations = RestoreGate.inventory(old, ask.backup.setup) { installed }
+        val check = RestoreGate.check(ask, installed = observations::getValue, now = 99)
+        assertTrue(check.stillApplies(99, observations))
+        assertTrue(check.stillApplies(99, mapOf(pkg to installed.copy(observedAt = 99))))
+        assertFalse(check.stillApplies(99, observations) { setOf(pkg, "org.example.sibling") })
+        assertFalse(check.stillApplies(100, observations))
+        assertFalse(check.stillApplies(98, observations))
+        assertFalse(check.stillApplies(99, mapOf(pkg to InstallState.Absent)))
+        assertFalse(check.stillApplies(99, mapOf(pkg to installed.copy(firstInstallTime = 98))))
     }
 
     @Test fun restoreWaitsForTheCheckOfThisBackupSetupAndChoice() {

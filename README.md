@@ -220,6 +220,10 @@ one with an app that uses a VPN route or Block goes as that app does, filtered o
 removal changes which apps share a user id). Apps that only follow a Direct default route always go through unbraid. Only the default route, the routes your apps and websites use, and the routes those go *Via* with two tunnels are
 connected.
 
+A restored app assignment waits up to 30 days for the matching signed app to be installed. An app installed later
+follows the default until you choose a route for it in Apps. With a Direct default, its traffic still passes through
+unbraid. An expired Direct assignment cannot put it outside the VPN.
+
 A website rule matches the name unbraid itself answered with a fake address, never a name read from the connection,
 so an app can't claim another site's route. When a local network or home rule takes a connection, unbraid dials only the addresses that rule covers, even
 if the name's answer also holds public addresses. Blocked apps are refused before any other rule, DNS included.

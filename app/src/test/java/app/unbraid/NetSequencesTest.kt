@@ -304,7 +304,9 @@ class NetSequencesTest {
         assertNull(AutoSwitch.notSwitched.value)
         // The restore calls it once the store holds the restored setup.
         val apply = java.io.File("src/main/java/app/unbraid/ui/Backup.kt").readText().substringAfter("fun apply()")
-        assertTrue(Regex("""t == null \|\| moved \|\| !taken\)[\s\S]*?return\s*\}[\s\S]*?AutoSwitch\.replaced\(\)""").containsMatchIn(apply))
+        assertTrue(Regex("""else if \(target == null\) finish\(false, KEEP_NO_ROOM\)\s*else commit\(here, target, c\)""").containsMatchIn(apply.substringBefore("private fun commit")))
+        val commit = apply.substringAfter("private fun commit").substringBefore("fun signIns")
+        assertTrue(Regex("""if \(!taken\)\s*\{[^}]*return\s*\}[\s\S]*?AutoSwitch\.replaced\(\)""").containsMatchIn(commit))
     }
 
     /** The phone's own network under another VPN: the one the monitor would follow, else the pick waits for the first network seen. */

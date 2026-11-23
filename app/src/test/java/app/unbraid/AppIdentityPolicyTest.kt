@@ -23,6 +23,122 @@ class AppIdentityPolicyTest {
     private fun setup(route: String = DIRECT) = Setup(defaultRoute = DIRECT, apps = mapOf(pkg to route), appSigners = mapOf(pkg to a))
     private fun input(s: Setup) = Compiler.Input(s, emptyMap(), "app.unbraid", false, "", "")
 
+    @Test fun onlyTheExpectedTimelyHolderCanConsumeAnInstallationWait() {
+        val waiting = setup().copy(waiting = setOf(pkg), waitingUntil = 100)
+        assertEquals(6, waiting.stamped.version)
+        val missing = listOf(InstallState.Unknown, InstallState.Present(null, current), InstallState.Present(0, current),
+            InstallState.Present(999, current), InstallState.Present(50, null), InstallState.Present(50, replacement))
+        for (state in missing) {
+            val saved = waiting.resolveWaiting(200, { state })
+            assertTrue(pkg in saved.waiting)
+            assertEquals(DIRECT, saved.apps[pkg])
+            assertEquals(BLOCK, saved.resolveWaiting(200, { state }, effective = true).apps[pkg])
+        }
+        assertTrue(waiting.resolveWaiting(200, { InstallState.Absent }).apps.isEmpty())
+        assertTrue(waiting.resolveWaiting(200, { InstallState.Present(100, current) }).appSigners.isEmpty())
+        assertTrue(waiting.resolveWaiting(99, { InstallState.Present(null, current) }).waiting.isEmpty())
+        assertTrue(pkg in waiting.resolveWaiting(99, { InstallState.Present(null, current, observedAt = 100) }).waiting)
+        val timely = waiting.resolveWaiting(200, { InstallState.Present(99, rotated) })
+        assertEquals(DIRECT, timely.apps[pkg])
+        assertEquals(b, timely.appSigners[pkg])
+        assertEquals(5, timely.stamped.version)
+        assertTrue(timely.waiting.isEmpty())
+        assertEquals(BLOCK, timely.checkedApps { current }.apps[pkg])
+        assertEquals(timely, timely.resolveWaiting(500, { error("no pending package") }))
+    }
+
+    @Test fun identicalChoicesInTwoProfilesKeepTheirOwnDeadlineAndIdentity() {
+        val old = setup().copy(waiting = setOf(pkg), waitingUntil = 100)
+        val incoming = setup().copy(appSigners = mapOf(pkg to c))
+        val restored = old.restoredWithInstalls(incoming, BEFORE_RESTORE, 50) { InstallState.Absent }!!
+        val kept = restored.profiles.single()
+        assertEquals(100L, restored.deadline(kept, pkg))
+        assertEquals(50 + WAIT_MS, restored.deadline(restored.live, pkg))
+        var reads = 0
+        val settled = restored.resolveWaiting(201, {
+            reads++
+            InstallState.Present(80, current)
+        })
+        assertEquals(1, reads)
+        assertNull(settled.deadline(settled.profiles.single(), pkg))
+        assertNotNull(settled.deadline(settled.live, pkg))
+        assertEquals(DIRECT, settled.use(kept.name).resolveWaiting(201, { InstallState.Present(80, current) }, true).apps[pkg])
+        assertEquals(BLOCK, settled.resolveWaiting(201, { InstallState.Present(80, current) }, true).apps[pkg])
+        val renamed = settled.rename(kept.name, "Old")
+        assertNull(renamed.deadline(renamed.profiles.single(), pkg))
+        val late = restored.resolveWaiting(201, { InstallState.Present(100, replacement) })
+        assertFalse(pkg in late.profiles.single().apps)
+        assertNull(late.deadline(late.live, pkg))
+        assertEquals(DIRECT, late.apps[pkg])
+        assertTrue(late.waiting.isEmpty())
+    }
+
+    @Test fun importedWaitMarkersCannotExemptTheNewSetupOrAnInactiveProfile() {
+        val donor = setup().copy(waitOverrides = mapOf(pkg to Long.MIN_VALUE),
+            profiles = listOf(Profile("Home", DIRECT).assigned(pkg, DIRECT, a).copy(waitOverrides = mapOf(pkg to Long.MIN_VALUE))))
+        val fresh = Setup().restoredWithInstalls(donor, null, 90) { InstallState.Absent }!!
+        assertEquals(90 + WAIT_MS, fresh.deadline(fresh.live, pkg))
+        assertEquals(90 + WAIT_MS, fresh.deadline(fresh.profiles.single(), pkg))
+        val portable = Backup.contents(fresh)
+        assertTrue(portable.waiting.isEmpty() && portable.waitOverrides.isEmpty() && portable.profiles.single().waitOverrides.isEmpty())
+        val late = fresh.resolveWaiting(100 + WAIT_MS, { InstallState.Present(90 + WAIT_MS, current) })
+        assertTrue(late.apps.isEmpty() && late.profiles.single().apps.isEmpty())
+    }
+
+    @Test fun knownLateInstallClearsTheDirectFilterOnlyAfterItsLastGrantAndRollbackKeepsExpiry() {
+        val local = setup().copy(prefs = Prefs(filter = Filter(apps = mapOf(pkg to false))), waiting = setOf(pkg), waitingUntil = 100).saveAs("Old")
+        val late = local.resolveWaiting(200, { InstallState.Present(150, current) })
+        assertFalse(pkg in late.prefs.filter.apps)
+        assertFalse(pkg in late.back(local).apps)
+        val two = local.copy(profiles = local.profiles + Profile("Later", DIRECT).assigned(pkg, DIRECT, a).copy(waitOverrides = mapOf(pkg to 190)))
+        val kept = two.resolveWaiting(200, { InstallState.Present(150, current) })
+        assertTrue(pkg in kept.prefs.filter.apps)
+        assertTrue(pkg in kept.profiles.last().apps)
+    }
+
+    @Test fun headlessSettlementSurvivesARestartAndAMissingPackageIsReadOnlyOnce() {
+        val dir = tmp.newFolder()
+        val key = SecretKeySpec(ByteArray(32), "AES")
+        val store = Store(dir) { key }
+        val raw = setup().copy(waiting = setOf(pkg), waitingUntil = 100, profiles = listOf(Profile("P", DIRECT).assigned(pkg, DIRECT, b)))
+        assertTrue(store.update { raw })
+        var calls = 0
+        store.refreshWaiting(200) { calls++; InstallState.Present(99, current) }
+        assertEquals(1, calls)
+        val read = Store(dir) { key }.setup.value
+        assertNull(read.deadline(read.live, pkg))
+        assertEquals(100L, read.deadline(read.profiles.single(), pkg))
+        val gone = Store(dir) { key }
+        gone.refreshWaiting(250) { InstallState.Present(120, rotated) }
+        val finished = Store(dir) { key }.setup.value
+        assertTrue(finished.waiting.isEmpty())
+        assertEquals(DIRECT, finished.apps[pkg])
+        assertFalse(pkg in finished.profiles.single().apps)
+        var unknownReads = 0
+        val kept = raw.restoredWithInstalls(raw, BEFORE_RESTORE, 120) { unknownReads++; InstallState.Unknown }!!
+        assertEquals(1, unknownReads)
+        assertTrue(pkg in kept.waiting)
+    }
+
+    @Test fun normalAndRecoveryConfigsExcludeOnlyATimelyVerifiedDirectGrant() {
+        val saved = setup().copy(waiting = setOf(pkg), waitingUntil = 100)
+        fun excluded(s: Setup): Set<String> {
+            val inbounds = Json.parseToJsonElement(Compiler.compile(input(s))).jsonObject.getValue("inbounds").jsonArray
+            return inbounds.map { it.jsonObject }.single { it["type"]?.jsonPrimitive?.content == "tun" }
+                .getValue("exclude_package").jsonArray.mapTo(HashSet()) { it.jsonPrimitive.content }
+        }
+        for ((first, expected) in listOf(99L to true, 100L to false, 101L to false)) {
+            val project = { s: Setup -> s.resolveWaiting(200, { InstallState.Present(first, current) }, true).checkedApps { current } }
+            val checked = project(saved)
+            assertEquals(expected, pkg in excluded(checked))
+            assertEquals(expected, Compiler.mayExclude(checked, pkg, setOf(pkg)) { current })
+            for (move in listOf(true, false)) {
+                val recovery = FakePool.restoreInput(input(saved), null, 2, 3 to "test", null, null, false, false, move, project) { emptySet() }
+                assertEquals(expected, pkg in excluded(recovery.setup))
+            }
+        }
+    }
+
     @Test fun grantsRequireTheBoundSignerEvenWhenDefaultIsDirect() {
         for (route in listOf(DIRECT, "nl")) {
             val saved = setup(route)

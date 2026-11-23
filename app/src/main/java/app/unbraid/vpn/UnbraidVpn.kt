@@ -22,6 +22,10 @@ import app.unbraid.MainActivity
 import app.unbraid.R
 import app.unbraid.Unbraid
 import app.unbraid.data.AppIdentity
+import app.unbraid.data.InstallState
+import app.unbraid.data.deadline
+import app.unbraid.data.waitAdmits
+import app.unbraid.data.resolveWaiting
 import app.unbraid.data.checkedApps
 import app.unbraid.data.AuthException
 import app.unbraid.data.Link
@@ -348,6 +352,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 val others = runCatching { packageManager.getPackagesForUid(uid)?.size ?: 0 }.getOrDefault(-1)
                 val shared = uid < 0 || others < 0 || if (added) others > 1 else others > 0
                 val setup = store.setup.value
+                if (pkg in setup.waiting) store.refreshWaiting(System.currentTimeMillis(), ::installation)
                 if (added && (pkg in setup.appSigners || setup.profiles.any { pkg in it.appSigners })) store.refreshAppSigners(::identity)
                 if (!shared && pkg !in setup.apps && pkg !in tunInput?.setup?.apps.orEmpty() && pkg !in knownIds.keys) return@launch
                 installs.incrementAndGet()
@@ -482,6 +487,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // them. Meanwhile no app goes online at all, rather than on the normal connection.
             if (store.unreadable.value && !store.reopen()) { hold(); return }
             val seen = restores.get() // before the setup: a restore between the two reads errs on the side of stopping
+            store.refreshWaiting(System.currentTimeMillis(), ::installation)
             store.refreshAppSigners(::identity)
             val setup = store.setup.value
             // Refused before any provider is asked for a server: the engine would refuse it anyway.
@@ -714,7 +720,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      */
     private fun restoreLastGood(srv: CommandServer, block: Int? = null, gone: Boolean = true, move: Boolean = false): FakePool.Outcome = FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->
         runCatching {
-            // A move runs what runs: saved settings aren't read for it.
+            // A move keeps the routes that ran. An observed restored app may have settled while this engine was active.
+            store.refreshWaiting(System.currentTimeMillis(), ::installation)
             val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, spent, newProbe(),
                 if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move, ::verifiedSetup) { blockedKin(it) }
             input to Compiler.compile(input).also(Libbox::checkConfig)
@@ -812,6 +819,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (forInstall && (installs.get() == builtInstalls || !kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]!!.isActive)) return
             val srv = server ?: return
             val seen = restores.get()
+            store.refreshWaiting(System.currentTimeMillis(), ::installation)
             val setup = store.setup.value
             val accounts = store.accounts.value
             // [keep] was taken without the lock: only valid if nothing was installed since ([keepFrom]).
@@ -950,9 +958,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (regular) Rotation.run(store.setup.value, { store.accounts.value }, store::replaceAccount, finishOnly = true)
             if (regular) {
                 // An unreadable signing identity can recover without a package broadcast.
+                store.refreshWaiting(System.currentTimeMillis(), ::installation)
                 val saved = store.setup.value
                 val held = lastInput?.setup?.apps.orEmpty()
-                if (saved == applied && saved.appSigners.any { (pkg, pin) -> held[pkg] == app.unbraid.data.BLOCK && identity(pkg)?.accepts(pin) == true }) {
+                if (saved == applied && saved.appSigners.any { (pkg, pin) -> held[pkg] == app.unbraid.data.BLOCK && saved.deadline(saved.live, pkg) == null && identity(pkg)?.accepts(pin) == true }) {
                     store.refreshAppSigners(::identity)
                     reload()
                 }
@@ -1122,14 +1131,27 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private fun identity(pkg: String) = AppIdentity.read(packageManager, pkg)
 
     /** An earlier running profile also respects a newer signer observed for one of its grants. */
-    private fun verifiedIdentity(setup: Setup, pkg: String): AppIdentity? {
-        val installed = identity(pkg) ?: return null
+    private fun verifiedIdentity(setup: Setup, pkg: String, observed: InstallState? = null): AppIdentity? {
         val saved = store.setup.value
-        val pins = if (saved.profile == setup.profile) saved.appSigners else saved.profiles.firstOrNull { it.name == setup.profile }?.appSigners
-        return installed.takeIf { pins?.get(pkg)?.let(installed::accepts) != false }
+        val previous = if (saved.profile == setup.profile) null else saved.profiles.firstOrNull { it.name == setup.profile }
+        val pin = if (saved.profile == setup.profile) saved.appSigners[pkg] else previous?.appSigners?.get(pkg)
+        val installed = if (pkg in saved.waiting || pkg in setup.waiting) {
+            val p = if (setup.profile == saved.profile) saved.live else previous
+            val state = observed ?: installation(pkg)
+            val now = System.currentTimeMillis()
+            if (p != null && !saved.waitAdmits(p, pkg, now, state) || !setup.waitAdmits(setup.live, pkg, now, state)) return null
+            (state as? InstallState.Present)?.identity
+        } else if (observed != null) (observed as? InstallState.Present)?.identity else identity(pkg)
+        return installed?.takeIf { pin == null || it.accepts(pin) }
     }
 
-    private fun verifiedSetup(setup: Setup) = setup.checkedApps { verifiedIdentity(setup, it) }
+    private fun installation(pkg: String) = InstallState.read(packageManager, pkg, includeArchived = true)
+
+    private fun verifiedSetup(setup: Setup): Setup {
+        val observed = HashMap<String, InstallState>()
+        val resolved = setup.resolveWaiting(System.currentTimeMillis(), { pkg -> installation(pkg).also { observed[pkg] = it } }, effective = true)
+        return resolved.checkedApps { pkg -> verifiedIdentity(setup, pkg, observed[pkg]) }
+    }
 
     private fun packagesSharing(pkg: String): Set<String>? =
         runCatching { packageManager.getPackagesForUid(packageManager.getPackageUid(pkg, 0))?.toSet() }.getOrNull()

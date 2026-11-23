@@ -37,6 +37,8 @@ class OlderBackupsTest {
      *    OpenVPN file carries only a name, so the route waits for its config, as in 3.0.2.
      * 3. Then the kept current setup shares that route ([shared]).
      * 4. Display-only texts are cleaned on read ([Backup.shown]; compared cleaned, [plain]).
+     * 5. This fixture's existing apps were already active. When keeping the phone's profile, a new wait for the same
+     *    package in the incoming file does not place that previously active choice on a fresh deadline.
      */
     private fun intended(expected: Setup, file: Setup, phone: Setup): Setup = file.servers.filter { k ->
         k.keyless && phone.servers.none { !it.keyless && it.id == k.id && k.sameAs(it) }
@@ -93,7 +95,19 @@ class OlderBackupsTest {
             val was = json.decodeFromJsonElement(Setup.serializer(), c.getValue("expected"))
             val expected = intended(was, opened.setup, phone).also { if (it != was) refilled++ }
             val known = (opened.setup.routes + phone.routes).map { it.id }.toSet() + (opened.setup.servers + phone.servers).map { it.id }
-            if (plain(shared(expected, was, known), known) != plain(got, known)) failed += "$name: restores to another setup"
+            val compared = shared(expected, was, known)
+            val prior = if (compared.profiles.size == opened.setup.profiles.size + 1) {
+                val kept = compared.profiles.last()
+                assertTrue(phone.waiting.isEmpty())
+                val active = kept.apps.keys.intersect(compared.waiting).associateWith { Long.MIN_VALUE }
+                plain(compared.copy(profiles = compared.profiles.dropLast(1) + kept.copy(waitOverrides = active)), known)
+            } else plain(compared, known)
+            val actual = plain(got, known)
+            if (prior != actual) {
+                val left = json.encodeToJsonElement(Setup.serializer(), prior).jsonObject
+                val right = json.encodeToJsonElement(Setup.serializer(), actual).jsonObject
+                failed += "$name: differs in ${left.keys.filter { left[it] != right[it] }}"
+            }
         }
         assertEquals(failed.joinToString("\n"), 0, failed.size)
         // The file holds what it says: every kind of case, and difference 2 is met (WireGuard and Shadowsocks only).
