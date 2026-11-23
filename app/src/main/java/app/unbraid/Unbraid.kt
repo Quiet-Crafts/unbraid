@@ -4,6 +4,7 @@ import android.app.Application
 import app.unbraid.data.Store
 import app.unbraid.stats.Stats
 import app.unbraid.vpn.VpnState.Phase
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.combine
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.Profiles
@@ -59,6 +60,14 @@ class Unbraid : Application() {
         if (!java.io.File(filesDir, "box/Taildrop").deleteRecursively()) android.util.Log.w("Unbraid", "old received files not deleted")
         app.unbraid.data.Snapshot.dir = filesDir
         val scope = MainScope()
+        scope.launch(Dispatchers.IO) {
+            store.unreadable.first { !it }
+            store.bindLocalAppChoices(updatedAt = {
+                runCatching { packageManager.getPackageInfo(packageName, 0) }.getOrNull()?.let {
+                    it.lastUpdateTime.takeIf { updated -> it.firstInstallTime > 0 && updated > it.firstInstallTime }
+                }
+            }, installed = { pkg -> app.unbraid.data.InstallState.read(packageManager, pkg) })
+        }
         // The home-screen widgets mirror what they show of the connection and the setup, and nothing else redraws them.
         combine(UnbraidVpn.state, store.setup, app.unbraid.vpn.AutoSwitch.net, store.unreadable) { v, s, n, u -> app.unbraid.vpn.glance(v, s, n?.id, u) }.distinctUntilChanged().onEach { Widgets.update(this) }.launchIn(scope)
         Widgets.previews(this)
