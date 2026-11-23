@@ -62,11 +62,15 @@ class Unbraid : Application() {
         val scope = MainScope()
         scope.launch(Dispatchers.IO) {
             store.unreadable.first { !it }
-            store.bindLocalAppChoices(updatedAt = {
-                runCatching { packageManager.getPackageInfo(packageName, 0) }.getOrNull()?.let {
-                    it.lastUpdateTime.takeIf { updated -> it.firstInstallTime > 0 && updated > it.firstInstallTime }
-                }
-            }, installed = { pkg -> app.unbraid.data.InstallState.read(packageManager, pkg) })
+            // Waits out a moment when the disk or the dates are not there; the next start tries again after that.
+            for (wait in listOf(0L, 2_000L, 15_000L, 60_000L)) {
+                kotlinx.coroutines.delay(wait)
+                if (store.bindLocalAppChoices(updatedAt = {
+                    runCatching { packageManager.getPackageInfo(packageName, 0) }.getOrNull()?.let {
+                        it.lastUpdateTime.takeIf { updated -> it.firstInstallTime > 0 && updated > it.firstInstallTime }
+                    }
+                }, installed = { pkg -> app.unbraid.data.InstallState.read(packageManager, pkg) })) break
+            }
         }
         // The home-screen widgets mirror what they show of the connection and the setup, and nothing else redraws them.
         combine(UnbraidVpn.state, store.setup, app.unbraid.vpn.AutoSwitch.net, store.unreadable) { v, s, n, u -> app.unbraid.vpn.glance(v, s, n?.id, u) }.distinctUntilChanged().onEach { Widgets.update(this) }.launchIn(scope)

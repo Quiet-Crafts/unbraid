@@ -97,6 +97,7 @@ internal fun Setup.advancedAppSigners(identity: (String) -> AppIdentity?): Setup
 /** The private setup as written by an older installation, before app choices could carry signer pins. */
 private class LocalAppChoices(val setup: Setup, val savedAt: Long) {
     var started = false
+    var identities: Map<String, AppIdentity>? = null // what the one look at the apps found, for a write to try again
     private val routeIds = setup.routes.mapTo(HashSet()) { it.id }
     private fun eligible(p: Profile, pkg: String, route: String) =
         pkg !in p.appSigners && setup.deadline(p, pkg) == null && (route == DIRECT || route in routeIds)
@@ -221,8 +222,7 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
         val claimed = File(dir, LOCAL_APP_UPGRADE)
         if (local != null && local.version in 0..4 && setup != null && !claimed.exists()) {
             val choices = LocalAppChoices(setup, File(dir, SETUP).lastModified())
-            // The receipt contains no app list. After a crash, any uncommitted assignments stay held.
-            if (choices.packages.isNotEmpty() && safely { durable(LOCAL_APP_UPGRADE, byteArrayOf(1)) }) localChoices = choices
+            if (choices.packages.isNotEmpty()) localChoices = choices
         }
         return setup
     }
@@ -230,37 +230,59 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     /**
      * The old installation recorded package names only. Bind the signer observed now, provided Android's
      * installation date is no later than either the original file's save or the APK update. Run off the main thread.
+     * The apps are looked at once. That date is on disk first, so a start after an interruption can't use a later one.
+     * False while the dates or the disk have to be tried again: the old file is still as it was.
      */
-    internal fun bindLocalAppChoices(updatedAt: () -> Long?, installed: (String) -> InstallState) {
+    internal fun bindLocalAppChoices(updatedAt: () -> Long?, installed: (String) -> InstallState): Boolean {
         val local = synchronized(changing) {
-            localChoices?.takeUnless { it.started || _unreadable.value }?.also { it.started = true }
-        } ?: return
+            if (_unreadable.value) return false
+            (localChoices ?: return true).takeUnless { it.started }?.also { it.started = true }
+        } ?: return false
+        var done = false
         try {
-            val updated = updatedAt() ?: return
-            val now = System.currentTimeMillis()
-            if (updated !in 1..now || local.savedAt !in 1..now) return
-            val cutoff = minOf(local.savedAt, updated)
-            val last = maxOf(local.savedAt, updated)
-            val identities = local.packages.mapNotNull { pkg ->
-                if (localChoices !== local) return
-                val app = installed(pkg) as? InstallState.Present ?: return@mapNotNull null
-                if (app.firstInstallTime !in 1L..cutoff || last > (app.observedAt ?: System.currentTimeMillis())) null
-                else app.identity?.let { pkg to it }
-            }.toMap()
-            if (identities.isNotEmpty()) saveLocalAppBindings(local, identities)
+            val identities = local.identities ?: run {
+                val updated = updatedAt() ?: return false
+                val now = System.currentTimeMillis()
+                if (updated !in 1..now || local.savedAt !in 1..now) return false
+                val begun = File(dir, LOCAL_APP_BEGUN)
+                val first = if (begun.exists()) runCatching { begun.readText().toLong() }.getOrDefault(0) else Long.MAX_VALUE
+                val cutoff = minOf(first, local.savedAt, updated)
+                if (cutoff != first && !safely { durable(LOCAL_APP_BEGUN, "$cutoff".toByteArray()) }) return false
+                val last = maxOf(local.savedAt, updated)
+                local.packages.mapNotNull { pkg ->
+                    if (localChoices !== local) return true
+                    var app = installed(pkg)
+                    repeat(2) { if (app == InstallState.Unknown) { Thread.sleep(250); app = installed(pkg) } }
+                    (app as? InstallState.Present)
+                        ?.takeIf { it.firstInstallTime in 1L..cutoff && last <= (it.observedAt ?: System.currentTimeMillis()) }
+                        ?.identity?.let { pkg to it }
+                }.toMap().also { local.identities = it }
+            }
+            done = saveLocalAppBindings(local, identities)
         } finally {
-            synchronized(changing) { if (localChoices === local) localChoices = null }
+            val settled = synchronized(changing) {
+                local.started = false
+                (done && localChoices === local).also { if (it) localChoices = null }
+            }
+            if (settled) settleLocalAppChoices()
         }
+        return done
     }
 
-    /** Prepare on the worker. Only the rename and publication hold the edit lock; an edit during preparation wins. */
-    private fun saveLocalAppBindings(local: LocalAppChoices, identities: Map<String, AppIdentity>) {
+    /** No later start migrates the old choices again. */
+    private fun settleLocalAppChoices() = safely {
+        val done = File(dir, LOCAL_APP_UPGRADE)
+        File(dir, LOCAL_APP_BEGUN).renameTo(done) || durable(LOCAL_APP_UPGRADE, byteArrayOf(1))
+    }
+
+    /** Prepare on the worker. Only the rename and publication hold the edit lock; an edit during preparation wins. False when not written. */
+    private fun saveLocalAppBindings(local: LocalAppChoices, identities: Map<String, AppIdentity>): Boolean {
         while (localChoices === local && !unreadable.value) {
             val before = setup.value
             val next = local.bind(before, identities)
-            if (next == before) return
+            if (next == before) return true
             var changed = false
-            safely {
+            val saved = safely {
                 val bytes = encrypted(explicit.encodeToString(Setup.serializer(), next.stamped))
                 val tmp = File.createTempFile("setup-upgrade-", ".tmp", dir)
                 try {
@@ -272,8 +294,9 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
                     } }
                 } finally { tmp.delete() }
             }
-            if (!changed) return
+            if (!changed) return saved
         }
+        return false
     }
 
     /** Settle proven restored choices across all profiles. Re-evaluate if another edit won the race. */
@@ -319,6 +342,7 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     /** Replace exactly the reviewed setup. Report acceptance separately from writing it to disk. */
     @Synchronized
     internal fun restore(expected: Setup, target: Setup, taken: (Boolean) -> Unit): Boolean {
+        var migrating = false
         val accepted = synchronized(changing) {
             if (_unreadable.value || _setup.value !== expected) return@synchronized false
             val next = acceptedSetup(expected, target) ?: return@synchronized false
@@ -326,9 +350,11 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
                 _restores.value++
                 _setup.value = next
             }
+            migrating = localChoices != null
             localChoices = null // an accepted backup supplies its own authority, even if its contents are identical
             true
         }
+        if (migrating) settleLocalAppChoices() // also if the save below fails
         taken(accepted)
         return accepted && saveSetup()
     }
@@ -753,6 +779,7 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
         const val ALIAS = "unbraid"
         const val SETUP = "setup.bin"
         const val LOCAL_APP_UPGRADE = "local-app-upgrade.done"
+        const val LOCAL_APP_BEGUN = "local-app-upgrade.begun"
         const val ACCOUNTS = "accounts.bin"
         const val RELEASES = "releases.bin"
         const val RELEASES_BAD = "releases.bin.bad"
