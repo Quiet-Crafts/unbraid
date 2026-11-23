@@ -423,18 +423,8 @@ class BackupFlow(private val ui: Ui) {
     }
 
     private fun commit(here: Setup, t: Setup, c: Backup.Contents) {
-        var current = false
         var taken = false
-        var counted = false
-        val changes = t != here
-        // An edit while the restore was prepared wins. Count only a changed setup the store actually accepts.
-        val saved = Unbraid.store.update({ ok ->
-            taken = current && ok
-            if (taken && changes && !counted) { UnbraidVpn.restores.incrementAndGet(); counted = true }
-        }) { s ->
-            current = s === here
-            if (current) t else s
-        }
+        val saved = Unbraid.store.restore(here, t) { taken = it }
         if (!taken) {
             finish(false, "Couldn't restore: your settings are busy. Try again.")
             return

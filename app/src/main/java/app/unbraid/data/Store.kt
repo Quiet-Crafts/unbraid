@@ -217,9 +217,29 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     @Synchronized
     fun update(f: (Setup) -> Setup): Boolean = change(f) && saveSetup()
 
-    /** As [update]; [taken] hears whether [f]'s setup was taken or the store kept the old one ([reserve]). */
+    private val publishingRestore = Any()
+    private val _restores = MutableStateFlow(0L)
+    internal val restores = _restores.asStateFlow()
+    internal val restoreGeneration get() = restores.value
+
+    /** A service start uses the setup and the restore generation published together. */
+    internal fun policySnapshot(): Pair<Setup, Long> = synchronized(publishingRestore) { _setup.value to restoreGeneration }
+
+    /** Replace exactly the reviewed setup. Report acceptance separately from writing it to disk. */
     @Synchronized
-    fun update(taken: (Boolean) -> Unit, f: (Setup) -> Setup): Boolean = change(f, taken) && saveSetup()
+    internal fun restore(expected: Setup, target: Setup, taken: (Boolean) -> Unit): Boolean {
+        val accepted = synchronized(changing) {
+            if (_unreadable.value || _setup.value !== expected) return@synchronized false
+            val next = acceptedSetup(expected, target) ?: return@synchronized false
+            if (next != expected) synchronized(publishingRestore) {
+                _restores.value++
+                _setup.value = next
+            }
+            true
+        }
+        taken(accepted)
+        return accepted && saveSetup()
+    }
 
     /**
      * Applies [f] at once and writes it on [writer], so a tap never waits for the Keystore and the disk. Each write
@@ -241,15 +261,17 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     // Wherever a route is removed, what used it is mended here: only the routes this change removed, so a setup read with a
     // missing route keeps naming it (the screens say so; the engine refuses or blocks it).
     // False while [unreadable]: nothing changes then. A change that makes a [reserve]d route a default is dropped.
-    private fun change(f: (Setup) -> Setup, taken: (Boolean) -> Unit = {}) = synchronized(changing) {
+    private fun change(f: (Setup) -> Setup) = synchronized(changing) {
         if (_unreadable.value) false else {
-            _setup.update { old ->
-                f(old).let { new -> new.tidy(old.routes.map { it.id }.toSet() - new.routes.map { it.id }.toSet()).after(old).tidyAppSigners() }
-                    .takeIf { new -> reserved.none { g -> new.refusesRemoving(g(new), "") != null } }.also { taken(it != null) } ?: old
-            }
+            _setup.update { old -> acceptedSetup(old, f(old)) ?: old }
             true
         }
     }
+
+    /** Apply the same route cleanup, signer cleanup and reservations to an edit or restore. Caller holds [changing]. */
+    private fun acceptedSetup(old: Setup, new: Setup): Setup? =
+        new.tidy(old.routes.map { it.id }.toSet() - new.routes.map { it.id }.toSet()).after(old).tidyAppSigners()
+            .takeIf { next -> reserved.none { g -> next.refusesRemoving(g(next), "") != null } }
 
     /** Routes about to be removed, each set as [reserve] named it: no change makes one of them a default meanwhile. */
     private val reserved = java.util.concurrent.CopyOnWriteArrayList<(Setup) -> Set<String>>()

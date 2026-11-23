@@ -32,6 +32,24 @@ class StoreTest {
     @get:Rule val tmp = TemporaryFolder()
     private val key: SecretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
 
+    @Test fun onlyAnAcceptedChangedRestorePublishesANewPolicyGeneration() {
+        val store = Store(tmp.newFolder()) { key }
+        val (initial, epoch) = store.policySnapshot()
+        assertTrue(store.update { it.copy(defaultRoute = "first") })
+        val edited = store.setup.value
+        assertEquals(edited to epoch, store.policySnapshot())
+        val other = edited.copy(defaultRoute = "restored")
+        assertFalse(store.restore(initial, other) { assertFalse(it) })
+        assertTrue(store.restore(edited, edited) { assertTrue(it) })
+        assertEquals(edited to epoch, store.policySnapshot())
+        assertTrue(store.restore(edited, other) { assertTrue(it) })
+        assertEquals(store.setup.value to epoch + 1, store.policySnapshot())
+        val back = store.setup.value
+        assertTrue(store.restore(back, edited) { assertTrue(it) })
+        assertEquals(edited to epoch + 2, store.policySnapshot())
+        assertEquals(epoch + 2, store.restores.value)
+    }
+
     @Test fun unreadableLinkCacheIsEmpty() {
         val dir = tmp.newFolder()
         val s = Store(dir) { key }

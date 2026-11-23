@@ -236,9 +236,24 @@ class FakePoolTest {
         val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
         val tun = vpn.substringAfter("override fun openTun(").substringBefore("override fun ")
         assertFalse("openTun reads saved settings", tun.contains("store."))
-        assertTrue(tun.contains("Compiler.searchDomain(tunInput)"))
-        assertEquals(3, Regex("""tunInput = input\b""").findAll(vpn).count()) // both starts plus a signer change with identical engine JSON
+        assertTrue(tun.contains("Compiler.searchDomain(policy.input)"))
+        assertEquals(3, Regex("""tunPolicy = TunPolicy\(input,""").findAll(vpn).count()) // both starts plus a signer change with identical engine JSON
         assertTrue(vpn.contains("if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix"))
+    }
+
+    @Test fun recoveryStopsAtTheLastAcceptedRestore() {
+        var current = true
+        var recoveries = 0
+        fun recover() = FakePool.Outcome.Ran.also { recoveries++ }
+        assertEquals(FakePool.Outcome.Kept, FakePool.afterFailure(false, { current }, ::recover))
+        assertEquals(FakePool.Outcome.Ran, FakePool.afterFailure(true, { current }, ::recover))
+        assertEquals(FakePool.Outcome.Superseded, FakePool.afterFailure(true, { current }) {
+            current = false
+            recover()
+        })
+        assertEquals(FakePool.Outcome.Superseded, FakePool.afterFailure(false, { current }, ::recover))
+        assertEquals(FakePool.Outcome.Superseded, FakePool.afterFailure(true, { current }, ::recover))
+        assertEquals(2, recoveries)
     }
 
     /** A slow count (the engine's lock taken by a database write) is read before the clock: no second wait after the deadline. */
@@ -278,6 +293,44 @@ class FakePoolTest {
         // The open table's own block was saved when it started: nothing to save, and a save failure can't stop it.
         assertEquals(FakePool.Outcome.Ran, run(4, 4, saveFails = true))
         assertEquals(listOf("prepare", "commit 4", "start json"), log)
+    }
+
+    @Test fun aCommitFailureAfterSpendingTheBlockNeverStartsTheHistoricalEngine() {
+        val events = mutableListOf<String>()
+        val outcome = FakePool.restart(false, 3, dir,
+            prepare = { input(4) to "policy" }, note = { events += "spent" },
+            commit = { error("could not open table") }) { _, _ -> events += "start" }
+        assertEquals(listOf("spent"), events)
+        assertEquals(FakePool.Outcome.Failed, outcome)
+    }
+
+    @Test fun poolRecoveryChecksTheRestoreBeforeEveryNativeStartAndRetry() {
+        for (point in listOf("before", "prepare", "spend", "commit", "start", "retry", "same")) {
+            var current = point != "before"
+            val events = mutableListOf<String>()
+            var attempts = 0
+            fun event(s: String) { events += s; if (s == point) current = false }
+            val outcome = FakePool.move { gone ->
+                if (++attempts == 2 && point == "retry") current = false
+                FakePool.restart(gone, 3, dir, prepare = { event("prepare"); input(4) to "policy" },
+                    note = { event("spend") }, commit = { event("commit") }, current = { current }) { _, _ ->
+                    event("start")
+                    if (point == "retry") error("native startup failed")
+                }
+            }
+            val all = listOf("prepare", "spend", "commit", "start")
+            val expected = when (point) {
+                "before" -> emptyList()
+                "retry", "same" -> all
+                else -> all.take(all.indexOf(point) + 1)
+            }
+            assertEquals(point, expected, events)
+            assertEquals(point, when (point) {
+                "before", "prepare" -> FakePool.Outcome.Kept
+                "same" -> FakePool.Outcome.Ran
+                else -> FakePool.Outcome.Superseded
+            }, outcome)
+        }
     }
 
     /** Once the old engine was given up before the call, nothing runs unless this start does: every failure is Failed. */
@@ -406,6 +459,7 @@ class FakePoolTest {
                     if (FakePool.step(remaining, now - since) == Step.Rotate) {
                         val f = { rnd.nextInt(4) == 0 }
                         when (FakePool.move { gone -> restoreLastGood(Compiler.nextBlock(lastBlock!!, false).takeIf { !gone }, gone, f(), f(), f(), true) }) {
+                            FakePool.Outcome.Superseded -> error("the setup was not replaced")
                             FakePool.Outcome.Kept -> assertEquals("a move that wasn't started gave something up", before, Triple(ran, live, since))
                             FakePool.Outcome.Failed -> assertEquals(null, ran)
                             FakePool.Outcome.Ran -> assertTrue(ran != before.first)

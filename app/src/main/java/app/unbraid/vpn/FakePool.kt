@@ -81,7 +81,7 @@ object FakePool {
      * How a [restart] ended: [Ran]; [Kept], nothing given up (the engine runs as before); [Failed], none runs. Once the
      * old engine is gone (`gone`), every failure is [Failed].
      */
-    enum class Outcome { Ran, Kept, Failed }
+    enum class Outcome { Ran, Kept, Failed, Superseded }
 
     /**
      * Every start on [block], before the engine can hand out any of it: unless it is [spent] already, the old table in
@@ -101,11 +101,32 @@ object FakePool {
      * old engine up (from here nothing goes back to the old block) and [start] runs the new one.
      */
     inline fun restart(gone: Boolean, spent: Int?, dir: java.io.File, prepare: (spent: Int?) -> Pair<Compiler.Input, String>, noinline note: (Int) -> Unit,
-                       commit: (Compiler.Input) -> Unit, start: (Compiler.Input, String) -> Unit): Outcome {
-        val (input, json) = try { prepare(spent) } catch (e: Exception) { return if (gone) Outcome.Failed else Outcome.Kept }
-        try { spend(input.fakeBlock, spent, dir, note) } catch (e: Exception) { return if (gone) Outcome.Failed else Outcome.Kept }
-        commit(input)
-        return try { start(input, json); Outcome.Ran } catch (e: Exception) { Outcome.Failed }
+                       commit: (Compiler.Input) -> Unit, current: () -> Boolean = { true }, start: (Compiler.Input, String) -> Unit): Outcome {
+        val stale = if (gone) Outcome.Superseded else Outcome.Kept
+        if (!current()) return stale
+        val (input, json) = try { prepare(spent) } catch (e: Exception) {
+            return if (!current()) stale else if (gone) Outcome.Failed else Outcome.Kept
+        }
+        if (!current()) return stale
+        try { spend(input.fakeBlock, spent, dir, note) } catch (e: Exception) {
+            return if (!current()) stale else if (gone) Outcome.Failed else Outcome.Kept
+        }
+        // A new block's table has been cleared and its number saved. It can no longer be treated as an untouched move.
+        if (!current()) return if (input.fakeBlock != spent) Outcome.Superseded else stale
+        val ran = try {
+            commit(input)
+            if (!current()) return Outcome.Superseded
+            start(input, json)
+            true
+        } catch (e: Exception) { false }
+        return if (!current()) Outcome.Superseded else if (ran) Outcome.Ran else Outcome.Failed
+    }
+
+    /** A refused edit can keep or recover the last working policy only within the same accepted restore. */
+    inline fun afterFailure(restarting: Boolean, current: () -> Boolean, recover: () -> Outcome): Outcome {
+        if (!current()) return Outcome.Superseded
+        val result = if (restarting) recover() else Outcome.Kept
+        return if (current()) result else Outcome.Superseded
     }
 
     /**
