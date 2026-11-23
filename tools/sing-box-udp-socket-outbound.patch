@@ -1,0 +1,417 @@
+diff --git a/adapter/router.go b/adapter/router.go
+index 0bf000a..cf19ca3 100644
+--- a/adapter/router.go
++++ b/adapter/router.go
+@@ -53,6 +53,7 @@ type DeferredPreMatcher interface {
+ }
+ 
+ type PreMatchResult struct {
++	UDPSocketTag     string
+ 	DestinationBound bool
+ 	Transient        bool
+ 	RouteContext     func(context.Context) context.Context
+@@ -120,7 +121,11 @@ func flowMetadata(inbound, inboundType string, network uint8, source, destinatio
+ }
+ 
+ func flowVerdict(result PreMatchResult, networkName string, destination netip.AddrPort) (verdict tun.FlowVerdict) {
+-	defer func() { verdict.RouteContext = result.RouteContext; verdict.DestinationBound = result.DestinationBound }()
++	defer func() {
++		verdict.RouteContext = result.RouteContext
++		verdict.UDPSocketTag = result.UDPSocketTag
++		verdict.DestinationBound = result.DestinationBound || networkName == N.NetworkUDP && result.UDPSocketTag == ""
++	}()
+ 	switch result.Action {
+ 	case PreMatchFlow:
+ 		port, isPort := result.Outbound.(tun.Port)
+diff --git a/route/route.go b/route/route.go
+index a1e66b9..fd4c8a5 100644
+--- a/route/route.go
++++ b/route/route.go
+@@ -247,6 +247,10 @@ func (r *Router) RoutePacketConnectionEx(ctx context.Context, conn N.PacketConn,
+ }
+ 
+ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) error {
++	expectedTag := tun.UDPSocketTag(ctx)
++	if expectedTag != "" && (metadata.InboundDetour != "" || metadata.Protocol == C.ProtocolDNS) {
++		return E.New("UDP socket policy changed before routing")
++	}
+ 	//nolint:staticcheck
+ 	if metadata.InboundDetour != "" {
+ 		if metadata.LastInbound == metadata.InboundDetour {
+@@ -308,6 +312,10 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
+ 			}
+ 			return action.Error(ctx)
+ 		case *R.RuleActionHijackDNS:
++			if expectedTag != "" {
++				N.ReleaseMultiPacketBuffer(packetBuffers)
++				return E.New("UDP socket policy changed before DNS handling")
++			}
+ 			return r.hijackDNSPacket(ctx, conn, packetBuffers, metadata, onClose)
+ 		}
+ 	}
+@@ -319,6 +327,12 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
+ 		N.ReleaseMultiPacketBuffer(packetBuffers)
+ 		return err
+ 	}
++	// Full routing can see different process information from admission. A
++	// writer for a different route must never own this shared association.
++	if expectedTag != "" && (plainUDPSocketTag(chain) != expectedTag || !plainUDPSocketMetadata(&metadata)) {
++		N.ReleaseMultiPacketBuffer(packetBuffers)
++		return E.New("UDP socket policy changed before opening outbound")
++	}
+ 	for _, buffer := range packetBuffers {
+ 		conn = bufio.NewCachedPacketConn(conn, buffer.Buffer, buffer.Destination)
+ 		N.PutPacketBuffer(buffer)
+@@ -345,6 +359,23 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
+ 	return nil
+ }
+ 
++func plainUDPSocketTag(chain []adapter.Outbound) string {
++	if len(chain) == 1 {
++		switch chain[0].Type() {
++		case C.TypeDirect, C.TypeShadowsocks:
++			return chain[0].Tag()
++		}
++	}
++	return ""
++}
++
++func plainUDPSocketMetadata(m *adapter.InboundContext) bool {
++	return m.Destination.IsIP() && !m.FakeIP && m.Domain == "" && m.Protocol == "" &&
++		!m.RouteOriginalDestination.IsValid() && len(m.DestinationAddresses) == 0 &&
++		!m.UDPConnect && !m.UDPDisableDomainUnmapping && m.UDPTimeout == 0 &&
++		m.NetworkStrategy == nil && len(m.NetworkType) == 0 && len(m.FallbackNetworkType) == 0 && m.FallbackDelay == 0
++}
++
+ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) adapter.PreMatchResult {
+ 	return r.startPreMatch(metadata, firstPacket, nil)
+ }
+@@ -366,7 +397,11 @@ func (r *Router) startPreMatch(metadata adapter.InboundContext, firstPacket []by
+ }
+ 
+ func (r *Router) preMatchRules(ctx, lookupCtx context.Context, metadata adapter.InboundContext, packetDestination M.Socksaddr, originalDomain string, firstPacket []byte, start int, pending **adapter.PendingPreMatch, replay *flowResolveReplay) (result adapter.PreMatchResult) {
++	plainUDP := metadata.Network == N.NetworkUDP && metadata.Destination == packetDestination && plainUDPSocketMetadata(&metadata)
+ 	defer func() {
++		if !plainUDP || replay != nil {
++			result.UDPSocketTag = ""
++		}
+ 		if replay != nil {
+ 			result.DestinationBound = true
+ 			if replay.hasResults() && (result.Action == adapter.PreMatchContinue || result.Action == adapter.PreMatchFlow || result.Action == adapter.PreMatchBypass) {
+@@ -389,6 +424,7 @@ func (r *Router) preMatchRules(ctx, lookupCtx context.Context, metadata adapter.
+ 		}
+ 		switch action := currentRule.Action().(type) {
+ 		case *R.RuleActionSniff:
++			plainUDP = false
+ 			if metadata.Network == N.NetworkICMP {
+ 				continue
+ 			}
+@@ -434,12 +470,17 @@ func (r *Router) preMatchRules(ctx, lookupCtx context.Context, metadata adapter.
+ 				r.logger.DebugContext(ctx, "sniffed packet protocol: ", metadata.Protocol)
+ 			}
+ 		case *R.RuleActionRouteOptions:
++			plainUDP = false
+ 			applyRouteOptionsOverride(&metadata, action)
+ 		case *R.RuleActionRoute:
++			if plainUDP {
++				plainUDP = action.HasPlainUDPOptions()
++			}
+ 			applyRouteOptionsOverride(&metadata, &action.RuleActionRouteOptions)
+ 			narrowDestinationAddresses(currentRule, &metadata)
+ 			return r.preMatchFlow(ctx, &metadata, packetDestination, currentRule, action.Outbound)
+ 		case *R.RuleActionBypass:
++			plainUDP = false
+ 			applyRouteOptionsOverride(&metadata, &action.RuleActionRouteOptions)
+ 			if action.Outbound == "" {
+ 				if metadata.Destination.IsDomain() || metadata.Destination != packetDestination {
+@@ -566,13 +607,18 @@ func (r *Router) preMatchFlow(ctx context.Context, metadata *adapter.InboundCont
+ 		return continueResult
+ 	}
+ 	outbound = chain[len(chain)-1]
++	// Only plain single-outbound socket routes have a reusable UDP writer.
++	if metadata.Network == N.NetworkUDP {
++		continueResult.UDPSocketTag = plainUDPSocketTag(chain)
++	}
+ 	flowOutbound, isFlowOutbound := outbound.(adapter.FlowOutbound)
+ 	if !isFlowOutbound {
+ 		return continueResult
+ 	}
+ 	flowAction := flowOutbound.PreMatchFlow(metadata.Network, metadata.Destination.Addr)
+ 	if flowAction != adapter.PreMatchFlow {
+-		return adapter.PreMatchResult{Action: flowAction, Outbound: outbound}
++		continueResult.Action, continueResult.Outbound = flowAction, outbound
++		return continueResult
+ 	}
+ 	result := adapter.PreMatchResult{Action: adapter.PreMatchFlow, Outbound: outbound}
+ 	if metadata.Network == N.NetworkUDP {
+diff --git a/route/rule/rule_action.go b/route/rule/rule_action.go
+index 6fd1707..270ce0f 100644
+--- a/route/rule/rule_action.go
++++ b/route/rule/rule_action.go
+@@ -215,6 +215,13 @@ type RuleActionRouteOptions struct {
+ 	TLSSpoofMethod            tlsspoof.Method
+ }
+ 
++// HasPlainUDPOptions reports whether the rule leaves UDP destinations, dialing and socket lifetime unchanged.
++func (r *RuleActionRouteOptions) HasPlainUDPOptions() bool {
++	return !r.OverrideAddress.IsValid() && r.OverridePort == 0 && !r.UDPConnect &&
++		!r.UDPDisableDomainUnmapping && r.UDPTimeout == 0 && r.NetworkStrategy == nil &&
++		len(r.NetworkType) == 0 && len(r.FallbackNetworkType) == 0 && r.FallbackDelay == 0
++}
++
+ func (r *RuleActionRouteOptions) Type() string {
+ 	return C.RuleActionTypeRouteOptions
+ }
+diff --git a/route/tun_resolve_warm_test.go b/route/tun_resolve_warm_test.go
+index 97d01f8..4583005 100644
+--- a/route/tun_resolve_warm_test.go
++++ b/route/tun_resolve_warm_test.go
+@@ -71,6 +71,7 @@ func (warmTestTransports) FakeIP() adapter.FakeIPTransport { return warmTestFake
+ 
+ type warmTestOutbound struct{ adapter.Outbound }
+ 
++func (warmTestOutbound) Type() string      { return "test" }
+ func (warmTestOutbound) Network() []string { return []string{"udp"} }
+ 
+ type warmTestOutbounds struct{ adapter.OutboundManager }
+diff --git a/route/tun_udp_socket_test.go b/route/tun_udp_socket_test.go
+new file mode 100644
+index 0000000..be7b61a
+--- /dev/null
++++ b/route/tun_udp_socket_test.go
+@@ -0,0 +1,235 @@
++//go:build with_gvisor
++
++package route
++
++import (
++	"context"
++	"net/netip"
++	"testing"
++	"time"
++
++	"github.com/sagernet/gvisor/pkg/buffer"
++	"github.com/sagernet/gvisor/pkg/tcpip/header"
++	"github.com/sagernet/gvisor/pkg/tcpip/link/channel"
++	"github.com/sagernet/gvisor/pkg/tcpip/stack"
++	"github.com/sagernet/sing-box/adapter"
++	O "github.com/sagernet/sing-box/adapter/outbound"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	"github.com/sagernet/sing-box/protocol/direct"
++	"github.com/sagernet/sing-box/protocol/shadowsocks"
++	R "github.com/sagernet/sing-box/route/rule"
++	tun "github.com/sagernet/sing-tun"
++	"github.com/sagernet/sing/common/buf"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/stretchr/testify/require"
++)
++
++type udpTestTun struct {
++	tun.GVisorTun
++	link *channel.Endpoint
++}
++
++func (t udpTestTun) Name() (string, error) { return "test", nil }
++func (t udpTestTun) NewEndpoint() (stack.LinkEndpoint, stack.NICOptions, error) {
++	return t.link, stack.NICOptions{}, nil
++}
++
++type udpTestOutbounds struct {
++	adapter.OutboundManager
++	byTag map[string]adapter.Outbound
++}
++
++func (m udpTestOutbounds) Outbound(tag string) (adapter.Outbound, bool) {
++	o, ok := m.byTag[tag]
++	return o, ok
++}
++func (m udpTestOutbounds) Default() adapter.Outbound { return m.byTag["proxy"] }
++
++type udpTestHandler struct {
++	warmTestHandler
++	changedPeer netip.Addr
++	finished    chan struct{}
++}
++
++func (h udpTestHandler) NewPacketConnectionEx(ctx context.Context, c N.PacketConn, src, dst M.Socksaddr, close N.CloseHandlerFunc) {
++	h.router.RoutePacketConnectionEx(ctx, c, adapter.InboundContext{Inbound: "tun", InboundType: C.TypeTun, Network: N.NetworkUDP, Source: src, Destination: dst}, close)
++	if dst.Addr == h.changedPeer {
++		h.finished <- struct{}{}
++	}
++}
++
++type udpTestDelivery struct {
++	owner string
++	conn  N.PacketConn
++	dest  M.Socksaddr
++}
++type udpTestConnections struct {
++	adapter.ConnectionManager
++	received chan udpTestDelivery
++}
++
++func (p udpTestConnections) NewPacketConnection(ctx context.Context, dialer N.Dialer, c N.PacketConn, meta adapter.InboundContext, _ N.CloseHandlerFunc) {
++	b := buf.New()
++	defer b.Release()
++	for {
++		b.Reset()
++		dest, err := c.ReadPacket(b)
++		if err != nil {
++			return
++		}
++		select {
++		case p.received <- udpTestDelivery{meta.RouteOutbound, c, dest}:
++		case <-ctx.Done():
++			return
++		}
++	}
++}
++
++// Exercise both the real per-destination rule match and the writer actually chosen
++// by the socket router. The in-memory tunnel and connection manager do no I/O.
++func TestUDPWriterFollowsTheSelectedOutbound(t *testing.T) {
++	cfg := func(typ, tag string, networks ...string) O.Adapter { return O.NewAdapter(typ, tag, networks, nil) }
++	out := udpTestOutbounds{byTag: map[string]adapter.Outbound{
++		"direct": &direct.Outbound{Adapter: cfg(C.TypeDirect, "direct", "udp")},
++		"proxy":  &shadowsocks.Outbound{Adapter: cfg(C.TypeShadowsocks, "proxy", "udp")},
++	}}
++	ctx := context.Background()
++	rule, err := R.NewRule(ctx, log.StdLogger(), option.Rule{Type: C.RuleTypeDefault, DefaultOptions: option.DefaultRule{
++		RawDefaultRule: option.RawDefaultRule{IPCIDR: []string{"192.168.0.0/16", "fd00::/8"}},
++		RuleAction:     option.RuleAction{Action: C.RuleActionTypeRoute, RouteOptions: option.RouteActionOptions{Outbound: "direct"}},
++	}}, true)
++	require.NoError(t, err)
++	changedPeer := netip.MustParseAddr("203.0.113.77")
++	r := flowTestRouter(flowTestDNS{}, rule, flowTestRule{match: func(m *adapter.InboundContext) bool {
++		return m.Destination.Addr == changedPeer && !m.PreMatch
++	}, action: &R.RuleActionRoute{Outbound: "direct"}})
++	finished := make(chan struct{}, 1)
++	r.outbound = out
++	received := make(chan udpTestDelivery, 1)
++	r.connection = udpTestConnections{received: received}
++	ep := channel.New(8, 1500, "")
++	defer ep.Close()
++	s, err := tun.NewGVisor(tun.StackOptions{Context: ctx, Tun: udpTestTun{link: ep}, Handler: udpTestHandler{warmTestHandler{router: r}, changedPeer, finished}, UDPTimeout: time.Minute, Logger: log.StdLogger()})
++	require.NoError(t, err)
++	require.NoError(t, s.Start())
++	defer s.Close()
++	inject := func(addr string, port, sourcePort uint16) {
++		dst := netip.MustParseAddr(addr)
++		src := netip.MustParseAddr("192.0.2.10")
++		protocol := header.IPv4ProtocolNumber
++		networkSize := header.IPv4MinimumSize
++		if dst.Is6() {
++			src = netip.MustParseAddr("2001:db8::10")
++			protocol = header.IPv6ProtocolNumber
++			networkSize = header.IPv6MinimumSize
++		}
++		raw := make([]byte, networkSize+header.UDPMinimumSize+2)
++		source, target := tun.AddressFromAddr(src), tun.AddressFromAddr(dst)
++		udp := header.UDP(raw[networkSize:])
++		udp.Encode(&header.UDPFields{SrcPort: sourcePort, DstPort: port, Length: uint16(len(udp))})
++		udp.SetChecksum(^udp.CalculateChecksum(header.PseudoHeaderChecksum(header.UDPProtocolNumber, source, target, uint16(len(udp)))))
++		if dst.Is4() {
++			ip := header.IPv4(raw)
++			ip.Encode(&header.IPv4Fields{TotalLength: uint16(len(raw)), TTL: 64, Protocol: uint8(header.UDPProtocolNumber), SrcAddr: source, DstAddr: target})
++			ip.SetChecksum(^ip.CalculateChecksum())
++		} else {
++			ip := header.IPv6(raw)
++			ip.Encode(&header.IPv6Fields{PayloadLength: uint16(len(udp)), TransportProtocol: header.UDPProtocolNumber, HopLimit: 64, SrcAddr: source, DstAddr: target})
++		}
++		p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(raw)})
++		ep.InjectInbound(protocol, p)
++		p.DecRef()
++	}
++	send := func(addr string, port, sourcePort uint16) udpTestDelivery {
++		t.Helper()
++		inject(addr, port, sourcePort)
++		dst := netip.MustParseAddr(addr)
++		select {
++		case delivered := <-received:
++			require.Equal(t, netip.AddrPortFrom(dst, port), delivered.dest.AddrPort())
++			return delivered
++		case <-time.After(3 * time.Second):
++			t.Fatal("no outgoing datagram")
++			return udpTestDelivery{}
++		}
++	}
++	reply := func(writer udpTestDelivery) {
++		t.Helper()
++		body := []byte("ok")
++		require.NoError(t, writer.conn.WritePacket(buf.As(body), writer.dest))
++		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++		defer cancel()
++		p := ep.ReadContext(ctx)
++		require.NotNil(t, p)
++		defer p.DecRef()
++		v := p.ToView()
++		defer v.Release()
++		var ip header.Network = header.IPv4(v.AsSlice())
++		local := netip.MustParseAddr("192.0.2.10")
++		if writer.dest.IsIPv6() {
++			ip = header.IPv6(v.AsSlice())
++			local = netip.MustParseAddr("2001:db8::10")
++		}
++		require.Equal(t, writer.dest.Addr, tun.AddrFromAddress(ip.SourceAddress()))
++		require.Equal(t, local, tun.AddrFromAddress(ip.DestinationAddress()))
++		udp := header.UDP(ip.Payload())
++		require.Equal(t, writer.dest.Port, udp.SourcePort())
++		require.EqualValues(t, 45000, udp.DestinationPort())
++		require.Equal(t, body, udp.Payload())
++	}
++	for _, peers := range [][4]string{{"203.0.113.4", "192.168.1.4", "203.0.113.8", "192.168.1.8"}, {"2001:db8:1::4", "fd00::4", "2001:db8:1::8", "fd00::8"}} {
++		first := send(peers[0], 9000, 45000)
++		require.Equal(t, "proxy", first.owner)
++		second := send(peers[1], 9001, 45000)
++		require.Equal(t, "direct", second.owner)
++		require.NotSame(t, first.conn, second.conn)
++		proxyPeer := send(peers[2], 9002, 45000)
++		require.Equal(t, "proxy", proxyPeer.owner)
++		require.Same(t, first.conn, proxyPeer.conn)
++		directPeer := send(peers[3], 9003, 45000)
++		require.Equal(t, "direct", directPeer.owner)
++		require.Same(t, second.conn, directPeer.conn)
++		reply(proxyPeer)
++		reply(directPeer)
++	}
++	// Simulate updated owner information between admission and full routing.
++	// A different outbound cannot take the new association. Its source is usable again.
++	inject(changedPeer.String(), 9000, 45001)
++	select {
++	case <-finished:
++	case wrong := <-received:
++		t.Fatalf("changed selection installed writer %q", wrong.owner)
++	case <-time.After(3 * time.Second):
++		t.Fatal("changed selection did not retire")
++	}
++	require.Equal(t, "proxy", send("203.0.113.8", 9001, 45001).owner)
++}
++
++// An early handoff or changed socket options cannot name an interchangeable writer.
++func TestUDPUnprovenWriterIsBoundToItsDestination(t *testing.T) {
++	plain := &direct.Outbound{Adapter: O.NewAdapter(C.TypeDirect, "direct", []string{N.NetworkUDP}, nil)}
++	tcpOnly := &shadowsocks.Outbound{Adapter: O.NewAdapter(C.TypeShadowsocks, "proxy", []string{N.NetworkTCP}, nil)}
++	for _, test := range []struct {
++		name    string
++		actions []adapter.RuleAction
++	}{
++		{"missing outbound", []adapter.RuleAction{&R.RuleActionRoute{Outbound: "missing"}}},
++		{"unsupported UDP", []adapter.RuleAction{&R.RuleActionRoute{Outbound: "proxy"}}},
++		{"connected UDP", []adapter.RuleAction{&R.RuleActionRoute{Outbound: "direct", RuleActionRouteOptions: R.RuleActionRouteOptions{UDPConnect: true}}}},
++		{"previous route options", []adapter.RuleAction{&R.RuleActionRouteOptions{UDPTimeout: time.Minute}, &R.RuleActionRoute{Outbound: "direct"}}},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			r := flowTestRouter(flowTestDNS{})
++			r.outbound = udpTestOutbounds{byTag: map[string]adapter.Outbound{"direct": plain, "proxy": tcpOnly}}
++			for _, action := range test.actions {
++				r.rules = append(r.rules, flowTestRule{action: action})
++			}
++			v, pending := adapter.BeginFlow(r, "tun", C.TypeTun, uint8(header.UDPProtocolNumber), netip.MustParseAddrPort("192.0.2.2:4000"), netip.MustParseAddrPort("203.0.113.9:9000"), nil)
++			require.Nil(t, pending)
++			require.True(t, v.DestinationBound)
++		})
++	}
++}

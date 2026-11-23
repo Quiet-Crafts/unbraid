@@ -21,14 +21,17 @@ export GOTOOLCHAIN=go1.26.11 GOBIN="$BIN" PATH="$BIN:$PATH"
 # Patch dependencies of this checkout only. Apply from the repository root so
 # git cannot silently skip module-relative paths in a nested working directory.
 patch_dependency() {
-  local module="$1" name="$2" staging=".unbraid-src/$2" version source
+  local module="$1" name="$2" staging=".unbraid-src/$2" version source patch
   version=$(go list -m -f '{{.Version}}' "$module")
   source=$(go mod download -json "$module@$version" | python3 -c 'import json, sys; print(json.load(sys.stdin)["Dir"])')
   mkdir -p .unbraid-src
   cp -R "$source" "$staging"
   chmod -R u+w "$staging"
-  git apply --directory="$staging" "$ROOT/tools/$name"-*.patch
-  git apply --reverse --check --directory="$staging" "$ROOT/tools/$name"-*.patch
+  # Verify each postimage before a later patch changes the same file.
+  for patch in "$ROOT/tools/$name"-*.patch; do
+    git apply --directory="$staging" "$patch"
+    git apply --reverse --check --directory="$staging" "$patch"
+  done
   go mod edit -replace "$module=./$staging"
 }
 # Files ignored by an upstream module can survive the ordinary checkout clean.
