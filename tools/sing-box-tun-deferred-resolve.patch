@@ -1,0 +1,2187 @@
+diff --git a/adapter/router.go b/adapter/router.go
+index be62674..0bf000a 100644
+--- a/adapter/router.go
++++ b/adapter/router.go
+@@ -41,15 +41,59 @@ const (
+ 	PreMatchHijackDNS
+ )
+ 
++// PendingPreMatch resumes a TUN policy decision after its first domain lookup.
++type PendingPreMatch struct {
++	Valid    func() bool
++	Resolver string
++	Resolve  func(context.Context) PreMatchResult
++}
++
++type DeferredPreMatcher interface {
++	BeginPreMatch(InboundContext, []byte) (PreMatchResult, *PendingPreMatch)
++}
++
+ type PreMatchResult struct {
+-	Action      PreMatchAction
+-	Outbound    Outbound
+-	Destination netip.AddrPort
+-	UDPTimeout  time.Duration
+-	NewTracker  func() tun.FlowTracker
++	DestinationBound bool
++	Transient        bool
++	RouteContext     func(context.Context) context.Context
++	Action           PreMatchAction
++	Outbound         Outbound
++	Destination      netip.AddrPort
++	UDPTimeout       time.Duration
++	NewTracker       func() tun.FlowTracker
+ }
+ 
+ func JudgeFlow(router Router, inbound string, inboundType string, network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
++	metadata, ok := flowMetadata(inbound, inboundType, network, source, destination)
++	if !ok {
++		return tun.FlowVerdict{Action: tun.ActionAccept}
++	}
++	return flowVerdict(router.PreMatch(metadata, firstPacket), metadata.Network, destination)
++}
++
++func BeginFlow(router Router, inbound, inboundType string, network uint8, source, destination netip.AddrPort, firstPacket []byte) (tun.FlowVerdict, *tun.PendingFlowDecision) {
++	matcher, ok := router.(DeferredPreMatcher)
++	if !ok {
++		return JudgeFlow(router, inbound, inboundType, network, source, destination, firstPacket), nil
++	}
++	metadata, ok := flowMetadata(inbound, inboundType, network, source, destination)
++	if !ok {
++		return tun.FlowVerdict{Action: tun.ActionAccept}, nil
++	}
++	result, pending := matcher.BeginPreMatch(metadata, firstPacket)
++	if pending == nil {
++		return flowVerdict(result, metadata.Network, destination), nil
++	}
++	return tun.FlowVerdict{}, &tun.PendingFlowDecision{
++		Resolver: pending.Resolver,
++		Valid:    pending.Valid,
++		Resolve: func(ctx context.Context) tun.FlowVerdict {
++			return flowVerdict(pending.Resolve(ctx), metadata.Network, destination)
++		},
++	}
++}
++
++func flowMetadata(inbound, inboundType string, network uint8, source, destination netip.AddrPort) (InboundContext, bool) {
+ 	var networkName string
+ 	switch network {
+ 	case uint8(header.TCPProtocolNumber):
+@@ -59,7 +103,7 @@ func JudgeFlow(router Router, inbound string, inboundType string, network uint8,
+ 	case uint8(header.ICMPv4ProtocolNumber), uint8(header.ICMPv6ProtocolNumber):
+ 		networkName = N.NetworkICMP
+ 	default:
+-		return tun.FlowVerdict{Action: tun.ActionAccept}
++		return InboundContext{}, false
+ 	}
+ 	metadata := InboundContext{
+ 		Inbound:     inbound,
+@@ -72,7 +116,11 @@ func JudgeFlow(router Router, inbound string, inboundType string, network uint8,
+ 		metadata.Source.Port = 0
+ 		metadata.Destination.Port = 0
+ 	}
+-	result := router.PreMatch(metadata, firstPacket)
++	return metadata, true
++}
++
++func flowVerdict(result PreMatchResult, networkName string, destination netip.AddrPort) (verdict tun.FlowVerdict) {
++	defer func() { verdict.RouteContext = result.RouteContext; verdict.DestinationBound = result.DestinationBound }()
+ 	switch result.Action {
+ 	case PreMatchFlow:
+ 		port, isPort := result.Outbound.(tun.Port)
+@@ -89,7 +137,7 @@ func JudgeFlow(router Router, inbound string, inboundType string, network uint8,
+ 		}
+ 		return verdict
+ 	case PreMatchReject:
+-		return tun.FlowVerdict{Action: tun.ActionReject}
++		return tun.FlowVerdict{Action: tun.ActionReject, Transient: result.Transient}
+ 	case PreMatchDrop:
+ 		return tun.FlowVerdict{Action: tun.ActionDrop}
+ 	case PreMatchBypass:
+diff --git a/dns/client.go b/dns/client.go
+index 51cedd6..09fe14f 100644
+--- a/dns/client.go
++++ b/dns/client.go
+@@ -8,6 +8,8 @@ import (
+ 	"net"
+ 	"net/netip"
+ 	"strconv"
++	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -49,6 +51,8 @@ type Client struct {
+ 	networkManager    adapter.NetworkManager
+ 	logger            logger.ContextLogger
+ 	cache             *freelru.Cache[dnsCacheKey, *dns.Msg]
++	cacheGeneration   atomic.Uint64
++	cachePublication  sync.RWMutex
+ 	cacheLock         compatible.Map[dnsExchangeKey, chan struct{}]
+ 	backgroundRefresh compatible.Map[dnsCacheKey, struct{}]
+ }
+@@ -94,6 +98,7 @@ type dnsCacheKey struct {
+ 	transportTag string
+ 	clientSubnet netip.Prefix
+ 	environment  uint64
++	generation   uint64
+ }
+ 
+ type dnsExchangeKey struct {
+@@ -112,7 +117,15 @@ func (k dnsCacheKey) persistentName() string {
+ 	return name
+ }
+ 
+-func (c *Client) newCacheKey(transport adapter.DNSTransport, question dns.Question, message *dns.Msg, options adapter.DNSQueryOptions) dnsCacheKey {
++// Bind once for the whole lookup, including family queries, rule retries and async waiters.
++func (c *Client) contextWithCacheGeneration(ctx context.Context) context.Context {
++	if ctx.Value(c) != nil {
++		return ctx
++	}
++	return context.WithValue(ctx, c, c.cacheGeneration.Load())
++}
++
++func (c *Client) newCacheKey(ctx context.Context, transport adapter.DNSTransport, question dns.Question, message *dns.Msg, options adapter.DNSQueryOptions) dnsCacheKey {
+ 	var clientSubnet netip.Prefix
+ 	if !options.RemoveClientSubnet {
+ 		clientSubnet = options.ClientSubnet
+@@ -128,6 +141,7 @@ func (c *Client) newCacheKey(transport adapter.DNSTransport, question dns.Questi
+ 		transportTag: transport.Tag(),
+ 		clientSubnet: clientSubnet,
+ 		environment:  c.environmentHash(transport),
++		generation:   ctx.Value(c).(uint64),
+ 	}
+ }
+ 
+@@ -294,7 +308,7 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
+ 		disableCache:    disableCache,
+ 	}
+ 	if !disableCache {
+-		cacheKey := c.newCacheKey(transport, question, message, options)
++		cacheKey := c.newCacheKey(ctx, transport, question, message, options)
+ 		operation.cacheKey = cacheKey
+ 		exchangeKey := dnsExchangeKey{dnsCacheKey: cacheKey, timeout: options.Timeout}
+ 		cond, loaded := c.cacheLock.LoadOrStore(exchangeKey, make(chan struct{}))
+@@ -309,7 +323,7 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
+ 			if response != nil && (!isStale || !options.DisableOptimisticCache) {
+ 				operation.release()
+ 				if isStale {
+-					c.backgroundRefreshDNS(transport, cacheKey, message.Copy(), options, responseChecker)
++					c.backgroundRefreshDNS(ctx, transport, cacheKey, message.Copy(), options, responseChecker)
+ 				}
+ 				if responseChecker != nil && !responseChecker(response) {
+ 					logRejectedResponse(c.logger, ctx, response)
+@@ -338,7 +352,7 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
+ 			if err != nil {
+ 				return nil, nil, exchangeDone, err
+ 			}
+-			cacheKey = c.newCacheKey(transport, question, message, options)
++			cacheKey = c.newCacheKey(ctx, transport, question, message, options)
+ 			operation.cacheKey = cacheKey
+ 			loaded = false
+ 		}
+@@ -402,6 +416,7 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
+ }
+ 
+ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) (*dns.Msg, error) {
++	ctx = c.contextWithCacheGeneration(ctx)
+ 	if options.Timeout == 0 {
+ 		options.Timeout = c.timeout
+ 	}
+@@ -420,6 +435,7 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
+ }
+ 
+ func (c *Client) ExchangeAsync(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool, callback func(response *dns.Msg, err error)) {
++	ctx = c.contextWithCacheGeneration(ctx)
+ 	if options.Timeout == 0 {
+ 		options.Timeout = c.timeout
+ 	}
+@@ -453,6 +469,7 @@ func (c *Client) ExchangeAsync(ctx context.Context, transport adapter.DNSTranspo
+ }
+ 
+ func (c *Client) Lookup(ctx context.Context, transport adapter.DNSTransport, domain string, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) ([]netip.Addr, error) {
++	ctx = c.contextWithCacheGeneration(ctx)
+ 	domain = FqdnToDomain(domain)
+ 	dnsName := dns.Fqdn(domain)
+ 	var strategy C.DomainStrategy
+@@ -497,10 +514,17 @@ func (c *Client) Lookup(ctx context.Context, transport adapter.DNSTransport, dom
+ 	return sortAddresses(response4, response6, strategy), nil
+ }
+ 
+-func (c *Client) ClearCache() {
++func (c *Client) clearMemoryCache() {
++	c.cachePublication.Lock()
++	defer c.cachePublication.Unlock()
++	c.cacheGeneration.Add(1)
+ 	if c.cache != nil {
+ 		c.cache.Purge()
+ 	}
++}
++
++func (c *Client) ClearCache() {
++	c.clearMemoryCache()
+ 	if c.dnsCache != nil {
+ 		err := c.dnsCache.ClearDNSCache()
+ 		if err != nil && c.logger != nil {
+@@ -532,6 +556,11 @@ func (c *Client) storeCache(key dnsCacheKey, message *dns.Msg, timeToLive uint32
+ 	if c.cache == nil {
+ 		return
+ 	}
++	c.cachePublication.RLock()
++	defer c.cachePublication.RUnlock()
++	if c.cacheGeneration.Load() != key.generation {
++		return
++	}
+ 	if c.disableExpire {
+ 		c.cache.Add(key, message.Copy())
+ 	} else {
+@@ -570,7 +599,7 @@ func (c *Client) lookupToExchange(ctx context.Context, transport adapter.DNSTran
+ 
+ func (c *Client) questionCache(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) ([]netip.Addr, error) {
+ 	question := message.Question[0]
+-	cacheKey := c.newCacheKey(transport, question, message, options)
++	cacheKey := c.newCacheKey(ctx, transport, question, message, options)
+ 	response, _, isStale := c.loadResponse(cacheKey)
+ 	if response == nil {
+ 		return nil, ErrNotCached
+@@ -579,7 +608,7 @@ func (c *Client) questionCache(ctx context.Context, transport adapter.DNSTranspo
+ 		if options.DisableOptimisticCache {
+ 			return nil, ErrNotCached
+ 		}
+-		c.backgroundRefreshDNS(transport, cacheKey, c.prepareExchangeMessage(message.Copy(), options), options, responseChecker)
++		c.backgroundRefreshDNS(ctx, transport, cacheKey, c.prepareExchangeMessage(message.Copy(), options), options, responseChecker)
+ 	}
+ 	if responseChecker != nil && !responseChecker(response) {
+ 		logRejectedResponse(c.logger, ctx, response)
+@@ -679,12 +708,32 @@ func applyResponseOptions(question dns.Question, response *dns.Msg, options adap
+ 	return timeToLive
+ }
+ 
+-func (c *Client) backgroundRefreshDNS(transport adapter.DNSTransport, key dnsCacheKey, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) {
++type refreshAdmissionKey struct{}
++
++// A route using bounded resolver work passes its existing admission function.
++// Other DNS users keep ordinary per-question optimistic refresh coalescing.
++func (r *Router) ContextWithRefreshAdmission(ctx context.Context, acquire func() (func(), bool)) context.Context {
++	return context.WithValue(ctx, refreshAdmissionKey{}, acquire)
++}
++
++func (c *Client) backgroundRefreshDNS(ctx context.Context, transport adapter.DNSTransport, key dnsCacheKey, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) {
+ 	_, loaded := c.backgroundRefresh.LoadOrStore(key, struct{}{})
+ 	if loaded {
+ 		return
+ 	}
++	var release func()
++	if acquire, scoped := ctx.Value(refreshAdmissionKey{}).(func() (func(), bool)); scoped {
++		var allowed bool
++		release, allowed = acquire()
++		if !allowed {
++			c.backgroundRefresh.Delete(key)
++			return
++		}
++	}
+ 	go func() {
++		if release != nil {
++			defer release()
++		}
+ 		defer c.backgroundRefresh.Delete(key)
+ 		timeout := options.Timeout
+ 		if timeout == 0 {
+diff --git a/dns/client_clear_test.go b/dns/client_clear_test.go
+new file mode 100644
+index 0000000..87f6c10
+--- /dev/null
++++ b/dns/client_clear_test.go
+@@ -0,0 +1,286 @@
++package dns
++
++import (
++	"context"
++	"net/netip"
++	"testing"
++	"testing/synctest"
++	"time"
++
++	"github.com/miekg/dns"
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing/contrab/freelru"
++	"github.com/sagernet/sing/contrab/maphash"
++	"github.com/sagernet/sing/service"
++	"github.com/stretchr/testify/require"
++)
++
++type heldDNSAnswer struct {
++	fakeDNSTransport
++	started chan struct{}
++	release chan struct{}
++}
++
++func (h *heldDNSAnswer) Exchange(ctx context.Context, msg *dns.Msg) (*dns.Msg, error) {
++	close(h.started)
++	<-h.release
++	return h.fakeDNSTransport.Exchange(ctx, msg)
++}
++
++func TestDNSClearCacheInFlight(t *testing.T) {
++	for _, path := range []string{"exchange", "optimistic exchange", "optimistic lookup"} {
++		t.Run(path, func(t *testing.T) {
++			synctest.Test(t, func(t *testing.T) {
++				ctx := context.Background()
++				c := NewClient(ClientOptions{Context: ctx, OptimisticTimeout: time.Hour})
++				msg := new(dns.Msg).SetQuestion("clear.example.", dns.TypeA)
++				options := adapter.DNSQueryOptions{Strategy: C.DomainStrategyIPv4Only}
++				oldIP := netip.MustParseAddr("192.0.2.1")
++				newIP := netip.MustParseAddr("192.0.2.2")
++				old := &heldDNSAnswer{fakeDNSTransport{tag: "test", address: oldIP}, make(chan struct{}), make(chan struct{})}
++				fresh := &fakeDNSTransport{tag: "test", address: newIP, immediate: true}
++				if path == "exchange" {
++					go func() {
++						_, _ = c.Exchange(ctx, old, msg.Copy(), options, nil)
++					}()
++				} else {
++					seed := &fakeDNSTransport{tag: "test", address: oldIP}
++					_, err := c.Exchange(ctx, seed, msg.Copy(), options, nil)
++					require.NoError(t, err)
++					time.Sleep(301 * time.Second) // expire the 300-second record in virtual time
++					if path == "optimistic lookup" {
++						ips, err := c.Lookup(ctx, old, "clear.example", options, nil)
++						require.NoError(t, err)
++						require.Equal(t, []netip.Addr{oldIP}, ips)
++					} else {
++						reply, err := c.Exchange(ctx, old, msg.Copy(), options, nil)
++						require.NoError(t, err)
++						require.Equal(t, oldIP, responseAddress(t, reply))
++					}
++				}
++				<-old.started
++				c.ClearCache()
++				var next *dns.Msg
++				c.ExchangeAsync(ctx, fresh, msg.Copy(), options, nil, func(reply *dns.Msg, _ error) { next = reply })
++				synctest.Wait()
++				startedBeforeRelease := fresh.queryCount.Load()
++				close(old.release)
++				synctest.Wait()
++				require.EqualValues(t, 1, startedBeforeRelease)
++				require.Equal(t, newIP, responseAddress(t, next))
++				hit, err := c.Exchange(ctx, fresh, msg.Copy(), options, nil)
++				require.NoError(t, err)
++				require.Equal(t, newIP, responseAddress(t, hit))
++				require.EqualValues(t, 1, fresh.queryCount.Load())
++			})
++		})
++	}
++}
++
++func TestClearCacheKeepsWaitersInTheirAdmissionGeneration(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx := context.Background()
++		c := NewClient(ClientOptions{Context: ctx})
++		opts := adapter.DNSQueryOptions{}
++		msg := new(dns.Msg).SetQuestion("caller.example.", dns.TypeA)
++		addr := netip.MustParseAddr("192.0.2.7")
++		old := &heldDNSAnswer{fakeDNSTransport{tag: "test", address: addr}, make(chan struct{}), make(chan struct{})}
++		waiter := &fakeDNSTransport{tag: "test", address: addr.Next()}
++		current := &fakeDNSTransport{tag: "test", address: addr.Next().Next()}
++		go func() { _, _ = c.Exchange(ctx, old, msg.Copy(), opts, nil) }()
++		<-old.started
++		go func() { _, _ = c.Exchange(ctx, waiter, msg.Copy(), opts, nil) }()
++		synctest.Wait()
++		require.Zero(t, waiter.queryCount.Load())
++		c.ClearCache()
++		close(old.release)
++		synctest.Wait()
++		require.EqualValues(t, 1, waiter.queryCount.Load())
++		response, err := c.Exchange(ctx, current, msg.Copy(), opts, nil)
++		require.NoError(t, err)
++		require.Equal(t, current.address, responseAddress(t, response))
++		require.EqualValues(t, 1, current.queryCount.Load())
++	})
++}
++
++// Admission can precede the first lookup when its worker is scheduled after reset.
++func TestNetworkResetRetiresDeferredLookupContext(t *testing.T) {
++	ctx := context.Background()
++	r := raceTestRouter(t)
++	r.client = NewClient(ClientOptions{Context: ctx, Logger: r.logger})
++	admitted := r.ContextWithCacheGeneration(ctx)
++	r.ResetNetwork()
++	old := &fakeDNSTransport{tag: "route", address: netip.MustParseAddr("192.0.2.1")}
++	current := &fakeDNSTransport{tag: "route", address: netip.MustParseAddr("192.0.2.2")}
++	lookup := func(ctx context.Context, transport *fakeDNSTransport) netip.Addr {
++		result, err := r.Lookup(ctx, "admission.example", adapter.DNSQueryOptions{Strategy: C.DomainStrategyIPv4Only, Transport: transport})
++		require.NoError(t, err)
++		return result[0]
++	}
++	require.Equal(t, old.address, lookup(admitted, old))
++	require.Equal(t, current.address, lookup(ctx, current))
++	require.Equal(t, current.address, lookup(ctx, current))
++	require.EqualValues(t, 1, current.queryCount.Load())
++}
++
++func TestReverseMappingIgnoresRetiredLookupContext(t *testing.T) {
++	ctx := context.Background()
++	ip := netip.MustParseAddr("192.0.2.4")
++	transport := &fakeDNSTransport{tag: "route", address: ip, immediate: true}
++	r := raceTestRouter(t, transport)
++	var err error
++	r.dnsReverseMapping, err = freelru.New[netip.Addr, string](16, maphash.NewHasher[netip.Addr]().Hash32, true)
++	require.NoError(t, err)
++	admitted := r.ContextWithCacheGeneration(ctx)
++	r.ResetNetwork()
++	options := adapter.DNSQueryOptions{Transport: transport}
++	_, err = r.Exchange(ctx, new(dns.Msg).SetQuestion("current.example.", dns.TypeA), options)
++	require.NoError(t, err)
++	done := make(chan error, 1)
++	r.ExchangeAsync(admitted, new(dns.Msg).SetQuestion("earlier.example.", dns.TypeA), options, func(_ *dns.Msg, err error) { done <- err })
++	require.NoError(t, <-done)
++	actual, found := r.LookupReverseMapping(ip)
++	require.True(t, found)
++	require.Equal(t, "current.example", actual)
++}
++
++type dynamicCacheTestTransport struct{ *fakeDNSTransport }
++
++func (dynamicCacheTestTransport) Environment() []string {
++	panic("cache peek consulted transport environment")
++}
++
++func TestLookupFreshCacheUsesOnlyExactLiveMemoryAnswers(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx := context.Background()
++		first := &fakeDNSTransport{tag: "east", address: netip.MustParseAddr("192.0.2.7")}
++		other := &fakeDNSTransport{tag: "west", address: netip.MustParseAddr("192.0.2.8")}
++		r := raceTestRouter(t, first, other)
++		r.defaultDomainStrategy = C.DomainStrategyIPv4Only
++		r.client = NewClient(ClientOptions{Context: ctx, Logger: r.logger, OptimisticTimeout: time.Hour})
++		options := adapter.DNSQueryOptions{Transport: first}
++		name := "warm.example"
++		_, ok := r.LookupFreshCache(ctx, name, options)
++		require.False(t, ok)
++		_, err := r.Lookup(ctx, name, options)
++		require.NoError(t, err)
++		got, ok := r.LookupFreshCache(ctx, name, options)
++		require.True(t, ok)
++		require.Equal(t, []netip.Addr{first.address}, got)
++		for _, restricted := range []adapter.DNSQueryOptions{
++			{}, {Transport: other}, {Transport: dynamicCacheTestTransport{first}}, {Transport: first, DisableCache: true}, {Transport: first, LookupStrategy: C.DomainStrategyPreferIPv6},
++			{Transport: first, ClientSubnet: netip.MustParsePrefix("192.0.2.0/24")},
++		} {
++			_, ok = r.LookupFreshCache(ctx, name, restricted)
++			require.False(t, ok)
++		}
++		time.Sleep(301 * time.Second)
++		_, ok = r.LookupFreshCache(ctx, name, options)
++		require.False(t, ok)
++		synctest.Wait()
++		require.EqualValues(t, 1, first.queryCount.Load())
++		require.Zero(t, other.queryCount.Load())
++		// A stale miss must leave the optimistic entry intact: lookup returns it
++		// while the resolver is still blocked, before refresh can return a new answer.
++		refresh := &heldDNSAnswer{fakeDNSTransport{tag: "east", address: other.address}, make(chan struct{}), make(chan struct{})}
++		done := make(chan []netip.Addr, 1)
++		go func() {
++			stale, _ := r.Lookup(ctx, name, adapter.DNSQueryOptions{Transport: refresh})
++			done <- stale
++		}()
++		<-refresh.started
++		synctest.Wait()
++		select {
++		case stale := <-done:
++			require.Equal(t, got, stale)
++		default:
++			close(refresh.release)
++			t.Fatal("lookup waited on a refresh after the cache probe")
++		}
++		close(refresh.release)
++	})
++}
++
++func TestDeferredRouteRefreshUsesCallerAdmission(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		ctx := context.Background()
++		seed := &fakeDNSTransport{tag: "route", address: netip.MustParseAddr("192.0.2.3")}
++		r := raceTestRouter(t, seed)
++		r.client = NewClient(ClientOptions{Context: ctx, Logger: r.logger, OptimisticTimeout: time.Hour})
++		options := adapter.DNSQueryOptions{Transport: seed, Strategy: C.DomainStrategyIPv4Only}
++		for _, name := range []string{"a.example", "b.example"} {
++			_, err := r.Lookup(ctx, name, options)
++			require.NoError(t, err)
++		}
++		time.Sleep(301 * time.Second)
++		slot := make(chan struct{}, 1)
++		admitted := r.ContextWithRefreshAdmission(ctx, func() (func(), bool) {
++			select {
++			case slot <- struct{}{}:
++				return func() { <-slot }, true
++			default:
++				return nil, false
++			}
++		})
++		first := &heldDNSAnswer{fakeDNSTransport{tag: "route", address: seed.address.Next()}, make(chan struct{}), make(chan struct{})}
++		later := &fakeDNSTransport{tag: "route", address: seed.address.Next()}
++		stale := func(name string, transport adapter.DNSTransport) {
++			opts := options
++			opts.Transport = transport
++			got, err := r.Lookup(admitted, name, opts)
++			require.NoError(t, err)
++			require.Equal(t, []netip.Addr{seed.address}, got)
++		}
++		stale("a.example", first)
++		<-first.started
++		stale("a.example", first)
++		stale("b.example", later)
++		synctest.Wait()
++		require.Zero(t, later.queryCount.Load())
++		close(first.release)
++		synctest.Wait()
++		stale("b.example", later)
++		synctest.Wait()
++		require.EqualValues(t, 1, later.queryCount.Load())
++		require.Empty(t, slot)
++	})
++}
++
++type testDNSClearGate struct {
++	adapter.NetworkManager
++	suspend func() func()
++	flush   func()
++}
++
++func (g testDNSClearGate) SuspendPendingFlows() func() { return g.suspend() }
++func (g testDNSClearGate) FlushSystemDNSCache()        { g.flush() }
++
++func TestExplicitClearHoldsAdmissionsUntilFlush(t *testing.T) {
++	ctx := context.Background()
++	transport := &fakeDNSTransport{tag: "exit", address: netip.MustParseAddr("192.0.2.9")}
++	r := raceTestRouter(t, transport)
++	r.client = NewClient(ClientOptions{Context: ctx, Logger: r.logger})
++	options := adapter.DNSQueryOptions{Transport: transport, Strategy: C.DomainStrategyIPv4Only}
++	_, err := r.Lookup(ctx, "clear.example", options)
++	require.NoError(t, err)
++	var held, flushed bool
++	gate := testDNSClearGate{
++		suspend: func() func() {
++			_, hit := r.LookupFreshCache(ctx, "clear.example", options)
++			require.True(t, hit)
++			held = true
++			return func() { require.True(t, flushed); held = false }
++		},
++		flush: func() {
++			require.True(t, held)
++			_, hit := r.LookupFreshCache(ctx, "clear.example", options)
++			require.False(t, hit)
++			flushed = true
++		},
++	}
++	r.ctx = service.ContextWith[adapter.NetworkManager](ctx, gate)
++	r.ClearCache()
++	require.True(t, flushed)
++	require.False(t, held)
++}
+diff --git a/dns/router.go b/dns/router.go
+index 40107d9..d89c643 100644
+--- a/dns/router.go
++++ b/dns/router.go
+@@ -41,7 +41,7 @@ type Router struct {
+ 	transport             adapter.DNSTransportManager
+ 	outbound              adapter.OutboundManager
+ 	powerManager          *powerreport.Manager
+-	client                adapter.DNSClient
++	client                *Client
+ 	rawRules              []option.DNSRule
+ 	rules                 []adapter.DNSRule
+ 	defaultDomainStrategy C.DomainStrategy
+@@ -1050,7 +1050,51 @@ type dnsExchangeContext struct {
+ 	metadata      *adapter.InboundContext
+ }
+ 
++// ContextWithCacheGeneration binds a deferred routing decision to the DNS cache
++// it was admitted against, even when its first lookup starts after a reset.
++func (r *Router) ContextWithCacheGeneration(ctx context.Context) context.Context {
++	return r.client.contextWithCacheGeneration(ctx)
++}
++
++// LookupFreshCache returns only a live, positive memory answer for a single-family
++// lookup on the selected transport. Everything else uses Lookup on the worker.
++func (r *Router) LookupFreshCache(ctx context.Context, domain string, options adapter.DNSQueryOptions) ([]netip.Addr, bool) {
++	c := r.client
++	if c.cache == nil || options.DisableCache || options.Transport == nil || ctx.Err() != nil {
++		return nil, false
++	}
++	// Computing a dynamic transport environment may itself consult the system.
++	if _, dynamic := options.Transport.(adapter.DNSTransportWithEnvironment); dynamic {
++		return nil, false
++	}
++	r.rulesAccess.RLock()
++	closing := r.closing
++	r.rulesAccess.RUnlock()
++	if closing {
++		return nil, false
++	}
++	var qType uint16
++	switch r.resolveLookupStrategy(options) {
++	case C.DomainStrategyIPv4Only:
++		qType = mDNS.TypeA
++	case C.DomainStrategyIPv6Only:
++		qType = mDNS.TypeAAAA
++	default:
++		return nil, false
++	}
++	question := mDNS.Question{Name: mDNS.Fqdn(FqdnToDomain(domain)), Qtype: qType, Qclass: mDNS.ClassINET}
++	key := c.newCacheKey(r.ContextWithCacheGeneration(ctx), options.Transport, question, &mDNS.Msg{}, options)
++	// PeekWithLifetime evicts expired entries that the worker may still use optimistically.
++	response, expires, found := c.cache.GetWithLifetimeNoExpire(key)
++	if !found || key.generation != c.cacheGeneration.Load() || (!c.disableExpire && !time.Now().Before(expires)) || response.Rcode != mDNS.RcodeSuccess {
++		return nil, false
++	}
++	addresses := MessageToAddresses(response)
++	return addresses, len(addresses) != 0
++}
++
+ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsExchangeContext, *mDNS.Msg, error) {
++	ctx = r.ContextWithCacheGeneration(ctx)
+ 	if r.powerManager != nil {
+ 		recorder := r.powerManager.Recorder()
+ 		if recorder != nil {
+@@ -1118,9 +1162,14 @@ func (r *Router) prepareExchange(ctx context.Context, message *mDNS.Msg) (*dnsEx
+ 	}, nil, nil
+ }
+ 
+-func (r *Router) recordReverseMapping(message *mDNS.Msg, response *mDNS.Msg, transport adapter.DNSTransport) {
++func (r *Router) recordReverseMapping(ctx context.Context, message *mDNS.Msg, response *mDNS.Msg, transport adapter.DNSTransport) {
+ 	if r.dnsReverseMapping != nil && len(message.Question) > 0 && response != nil && len(response.Answer) > 0 {
+ 		if transport == nil || transport.Type() != C.DNSTypeFakeIP {
++			r.client.cachePublication.RLock()
++			defer r.client.cachePublication.RUnlock()
++			if ctx.Value(r.client) != r.client.cacheGeneration.Load() {
++				return
++			}
+ 			for _, answer := range response.Answer {
+ 				switch record := answer.(type) {
+ 				case *mDNS.A:
+@@ -1209,7 +1258,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	r.recordReverseMapping(message, response, transport)
++	r.recordReverseMapping(ctx, message, response, transport)
+ 	return response, nil
+ }
+ 
+@@ -1223,30 +1272,31 @@ func (r *Router) ExchangeAsync(ctx context.Context, message *mDNS.Msg, options a
+ 	if options.Transport != nil {
+ 		transport := options.Transport
+ 		r.client.ExchangeAsync(ctx, transport, message, r.finalizeExchangeOptions(options), nil, func(response *mDNS.Msg, exchangeErr error) {
+-			r.finishExchangeAsync(message, transport, response, exchangeErr, callback)
++			r.finishExchangeAsync(ctx, message, transport, response, exchangeErr, callback)
+ 		})
+ 	} else if !exchangeCtx.legacyDNSMode {
+ 		r.exchangeWithRulesAsync(ctx, exchangeCtx.rules, message, options, true, func(result exchangeWithRulesResult) {
+-			r.finishExchangeAsync(message, result.transport, result.response, result.err, callback)
++			r.finishExchangeAsync(ctx, message, result.transport, result.response, result.err, callback)
+ 		})
+ 	} else {
+ 		go func() {
+ 			response, transport, exchangeErr := r.exchangeLegacy(ctx, exchangeCtx, message, options)
+-			r.finishExchangeAsync(message, transport, response, exchangeErr, callback)
++			r.finishExchangeAsync(ctx, message, transport, response, exchangeErr, callback)
+ 		}()
+ 	}
+ }
+ 
+-func (r *Router) finishExchangeAsync(message *mDNS.Msg, transport adapter.DNSTransport, response *mDNS.Msg, err error, callback func(response *mDNS.Msg, err error)) {
++func (r *Router) finishExchangeAsync(ctx context.Context, message *mDNS.Msg, transport adapter.DNSTransport, response *mDNS.Msg, err error, callback func(response *mDNS.Msg, err error)) {
+ 	if err != nil {
+ 		callback(nil, err)
+ 		return
+ 	}
+-	r.recordReverseMapping(message, response, transport)
++	r.recordReverseMapping(ctx, message, response, transport)
+ 	callback(response, nil)
+ }
+ 
+ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQueryOptions) ([]netip.Addr, error) {
++	ctx = r.ContextWithCacheGeneration(ctx)
+ 	r.rulesAccess.RLock()
+ 	if r.closing {
+ 		r.rulesAccess.RUnlock()
+@@ -1372,14 +1422,20 @@ func addressLimitResponseCheck(rule adapter.DNSRule, metadata *adapter.InboundCo
+ }
+ 
+ func (r *Router) ClearCache() {
++	network := service.FromContext[adapter.NetworkManager](r.ctx)
++	// Stop old pending decisions from committing while the answer cache is cleared.
++	if gate, ok := network.(interface{ SuspendPendingFlows() func() }); ok {
++		resume := gate.SuspendPendingFlows()
++		defer resume()
++	}
+ 	r.client.ClearCache()
+ 	if r.platformInterface != nil {
+ 		r.platformInterface.ClearDNSCache()
+ 	}
+-	service.FromContext[adapter.NetworkManager](r.ctx).FlushSystemDNSCache()
+ 	if r.dnsReverseMapping != nil {
+ 		r.dnsReverseMapping.Purge()
+ 	}
++	network.FlushSystemDNSCache()
+ }
+ 
+ func (r *Router) LookupReverseMapping(ip netip.Addr) (string, bool) {
+@@ -1394,6 +1450,15 @@ func (r *Router) ResetNetwork() {
+ 	for _, transport := range r.transport.Transports() {
+ 		transport.Reset()
+ 	}
++	r.RetireMemoryCache()
++}
++
++// RetireMemoryCache drops answers and reverse mappings before the new network can admit flows.
++func (r *Router) RetireMemoryCache() {
++	r.client.clearMemoryCache()
++	if r.dnsReverseMapping != nil {
++		r.dnsReverseMapping.Purge()
++	}
+ }
+ 
+ func defaultRuleNeedsLegacyDNSModeFromAddressFilter(rule option.DefaultDNSRule) bool {
+diff --git a/protocol/tun/inbound.go b/protocol/tun/inbound.go
+index 231e88f..44791f9 100644
+--- a/protocol/tun/inbound.go
++++ b/protocol/tun/inbound.go
+@@ -527,7 +527,25 @@ func (t *Inbound) InterfaceUpdated(ctx context.Context) {
+ 	}
+ }
+ 
++func (t *Inbound) SuspendFlowDecisions() {
++	if stack, ok := t.tunStack.(interface{ SuspendFlowDecisions() }); ok {
++		stack.SuspendFlowDecisions()
++	}
++}
++
++func (t *Inbound) ResumeFlowDecisions() {
++	if stack, ok := t.tunStack.(interface{ ResumeFlowDecisions() }); ok {
++		stack.ResumeFlowDecisions()
++	}
++}
++
+ func (t *Inbound) FlushSystemDNSCache() {
++	if prepared, ok := t.router.(interface{ InvalidateFlowResolves() }); ok {
++		prepared.InvalidateFlowResolves()
++	}
++	if pending, ok := t.tunStack.(interface{ InvalidatePendingFlows() }); ok {
++		pending.InvalidatePendingFlows()
++	}
+ 	linuxTUN, isLinuxTUN := t.tunIf.(tun.LinuxTUN)
+ 	if !isLinuxTUN {
+ 		return
+@@ -542,15 +560,29 @@ func (t *Inbound) FlushSystemDNSCache() {
+ }
+ 
+ func (t *Inbound) JudgeFlow(network uint8, source netip.AddrPort, destination netip.AddrPort, firstPacket []byte) tun.FlowVerdict {
+-	if slices.Contains(t.dnsHijackAddress, destination.Addr()) {
+-		if network == uint8(header.UDPProtocolNumber) {
+-			return tun.FlowVerdict{Action: tun.ActionHijackDNS}
+-		}
+-		return tun.FlowVerdict{Action: tun.ActionAccept}
++	if verdict, ok := t.dnsFlow(network, destination); ok {
++		return verdict
+ 	}
+ 	return adapter.JudgeFlow(t.router, t.tag, C.TypeTun, network, source, destination, firstPacket)
+ }
+ 
++func (t *Inbound) BeginFlow(network uint8, source, destination netip.AddrPort, firstPacket []byte) (tun.FlowVerdict, *tun.PendingFlowDecision) {
++	if verdict, ok := t.dnsFlow(network, destination); ok {
++		return verdict, nil
++	}
++	return adapter.BeginFlow(t.router, t.tag, C.TypeTun, network, source, destination, firstPacket)
++}
++
++func (t *Inbound) dnsFlow(network uint8, destination netip.AddrPort) (tun.FlowVerdict, bool) {
++	if !slices.Contains(t.dnsHijackAddress, destination.Addr()) {
++		return tun.FlowVerdict{}, false
++	}
++	if network == uint8(header.UDPProtocolNumber) {
++		return tun.FlowVerdict{Action: tun.ActionHijackDNS}, true
++	}
++	return tun.FlowVerdict{Action: tun.ActionAccept}, true
++}
++
+ func (t *Inbound) NewDNSPacket(payload []byte, source M.Socksaddr, destination M.Socksaddr, writer N.PacketWriter) {
+ 	ctx := log.ContextWithNewID(t.ctx)
+ 	var metadata adapter.InboundContext
+diff --git a/route/flow_resolve_replay.go b/route/flow_resolve_replay.go
+new file mode 100644
+index 0000000..6753cda
+--- /dev/null
++++ b/route/flow_resolve_replay.go
+@@ -0,0 +1,174 @@
++package route
++
++import (
++	"context"
++	"net/netip"
++	"reflect"
++	"slices"
++	"sync/atomic"
++
++	"github.com/sagernet/sing-box/adapter"
++	R "github.com/sagernet/sing-box/route/rule"
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++// A receipt belongs to the accepted socket. It is never indexed by a flow tuple or domain.
++// Any unrecorded actions follow the ordinary full matcher, including its DNS lookup.
++const maxFlowResolveReceipts = 8
++const maxFlowResolveAddresses = 64
++
++type flowResolveReplay struct {
++	router             *Router
++	epoch              uint64
++	networkEnvironment uint64
++	sealed             bool // A missing observation ends the replayable prefix.
++	claimed            atomic.Bool
++	answers            []flowResolveAnswer
++}
++
++type flowResolveContextKey struct{}
++
++type flowResolveAnswer struct {
++	action      *R.RuleActionResolve
++	options     R.RuleActionResolve
++	hasTTL      bool
++	ttl         uint32
++	transport   adapter.DNSTransport
++	environment []string
++	flow        flowResolveIdentity
++	owner       *adapter.ConnectionOwner
++	addresses   []netip.Addr
++}
++
++type flowResolveIdentity struct {
++	inbound, inboundType, network, user          string
++	source, destination, original, routeOriginal M.Socksaddr
++	fakeIP                                       bool
++}
++
++func resolveIdentity(metadata *adapter.InboundContext) flowResolveIdentity {
++	return flowResolveIdentity{
++		inbound: metadata.Inbound, inboundType: metadata.InboundType, network: metadata.Network, user: metadata.User,
++		source: metadata.Source, destination: metadata.Destination, original: metadata.OriginDestination,
++		routeOriginal: metadata.RouteOriginalDestination, fakeIP: metadata.FakeIP,
++	}
++}
++
++func newFlowResolveReplay(router *Router) *flowResolveReplay {
++	replay := &flowResolveReplay{router: router, epoch: router.tunResolveEpoch.Load()}
++	if router.network != nil {
++		replay.networkEnvironment = router.network.NetworkEnvironment()
++	}
++	return replay
++}
++
++func (r *flowResolveReplay) current() bool {
++	return r.epoch == r.router.tunResolveEpoch.Load() && (r.router.network == nil || r.networkEnvironment == r.router.network.NetworkEnvironment())
++}
++
++func (r *flowResolveReplay) hasResults() bool {
++	return r != nil && len(r.answers) != 0
++}
++
++func (r *flowResolveReplay) environmentBeforeLookup(transport adapter.DNSTransport) []string {
++	if r == nil {
++		return nil
++	}
++	if t, ok := transport.(adapter.DNSTransportWithEnvironment); ok {
++		return slices.Clone(t.Environment())
++	}
++	return nil
++}
++
++func sameResolveEnvironment(transport adapter.DNSTransport, env []string) bool {
++	if t, ok := transport.(adapter.DNSTransportWithEnvironment); ok {
++		return slices.Equal(t.Environment(), env)
++	}
++	return true
++}
++
++func (r *flowResolveReplay) record(metadata *adapter.InboundContext, action *R.RuleActionResolve, transport adapter.DNSTransport, environment []string) {
++	if r == nil || r.sealed {
++		return
++	}
++	if len(r.answers) >= maxFlowResolveReceipts || action.Server == "" || transport == nil || !metadata.Destination.IsDomain() || !r.current() {
++		r.sealed = true
++		return
++	}
++	// Only an explicitly selected transport with stable object identity can supply a receipt.
++	value := reflect.ValueOf(transport)
++	if value.Kind() != reflect.Pointer || value.IsNil() || !sameResolveEnvironment(transport, environment) || len(metadata.DestinationAddresses) == 0 || len(metadata.DestinationAddresses) > maxFlowResolveAddresses {
++		r.sealed = true
++		return
++	}
++	a := flowResolveAnswer{action: action, options: *action, transport: transport, environment: environment,
++		flow: resolveIdentity(metadata), addresses: slices.Clone(metadata.DestinationAddresses)}
++	if action.RewriteTTL != nil {
++		a.hasTTL, a.ttl, a.options.RewriteTTL = true, *action.RewriteTTL, nil
++	}
++	if metadata.ProcessInfo != nil {
++		owner := *metadata.ProcessInfo
++		owner.AndroidPackageNames = slices.Clone(owner.AndroidPackageNames)
++		a.owner = &owner
++	}
++	r.answers = append(r.answers, a)
++}
++
++func (r *flowResolveReplay) routeContext(ctx context.Context) context.Context {
++	return context.WithValue(ctx, flowResolveContextKey{}, r)
++}
++
++type flowResolveClaim struct {
++	ctx     context.Context
++	replay  *flowResolveReplay
++	answers []flowResolveAnswer
++}
++
++// The first full routing pass takes ownership. Child contexts and subsequent passes cannot replay it.
++func claimFlowResolveReplay(ctx context.Context, router *Router) *flowResolveClaim {
++	r, _ := ctx.Value(flowResolveContextKey{}).(*flowResolveReplay)
++	if r == nil || r.router != router || !r.claimed.CompareAndSwap(false, true) {
++		return nil
++	}
++	answers := r.answers
++	r.answers = nil
++	if ctx.Err() != nil || !r.current() {
++		return nil
++	}
++	return &flowResolveClaim{ctx: ctx, replay: r, answers: answers}
++}
++
++func sameFlowResolveOwner(a, b *adapter.ConnectionOwner) bool {
++	if a == nil || b == nil {
++		return a == b
++	}
++	return a.UserId == b.UserId && a.ProcessID == b.ProcessID && a.UserName == b.UserName &&
++		a.ProcessPath == b.ProcessPath && slices.Equal(a.AndroidPackageNames, b.AndroidPackageNames)
++}
++
++func (a *flowResolveAnswer) matches(metadata *adapter.InboundContext, action *R.RuleActionResolve) bool {
++	options := *action
++	options.RewriteTTL = nil
++	return action == a.action && options == a.options && (action.RewriteTTL != nil) == a.hasTTL &&
++		(!a.hasTTL || *action.RewriteTTL == a.ttl) && a.flow == resolveIdentity(metadata) && sameFlowResolveOwner(a.owner, metadata.ProcessInfo)
++}
++
++func (c *flowResolveClaim) apply(metadata *adapter.InboundContext, action *R.RuleActionResolve) bool {
++	if c == nil || len(c.answers) == 0 {
++		return false
++	}
++	answer := &c.answers[0]
++	if c.ctx.Err() == nil && c.replay.current() && answer.matches(metadata, action) {
++		transport, ok := c.replay.router.dnsTransport.Transport(action.Server)
++		if ok && transport == answer.transport && sameResolveEnvironment(transport, answer.environment) {
++			// Full matching narrows this private list according to the rule it actually selects.
++			metadata.DestinationAddresses = answer.addresses
++			c.answers[0] = flowResolveAnswer{}
++			c.answers = c.answers[1:]
++			return true
++		}
++	}
++	// Full policy took a different path. No later result from the old path is authoritative.
++	c.answers = nil
++	return false
++}
+diff --git a/route/flow_resolve_replay_test.go b/route/flow_resolve_replay_test.go
+new file mode 100644
+index 0000000..eb1c549
+--- /dev/null
++++ b/route/flow_resolve_replay_test.go
+@@ -0,0 +1,159 @@
++package route
++
++import (
++	"context"
++	"net/netip"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	R "github.com/sagernet/sing-box/route/rule"
++	M "github.com/sagernet/sing/common/metadata"
++	"github.com/stretchr/testify/require"
++)
++
++type replayTestTransport struct {
++	adapter.DNSTransport
++	environment []string
++}
++
++func (t *replayTestTransport) Environment() []string { return t.environment }
++
++type replayTestTransports struct {
++	adapter.DNSTransportManager
++	current *replayTestTransport
++}
++
++func (m *replayTestTransports) Transport(tag string) (adapter.DNSTransport, bool) {
++	return m.current, tag == "chosen"
++}
++
++type replayTestDNS struct {
++	adapter.DNSRouter
++	queries int
++}
++
++func (d *replayTestDNS) Lookup(_ context.Context, _ string, _ adapter.DNSQueryOptions) ([]netip.Addr, error) {
++	d.queries++
++	return []netip.Addr{netip.MustParseAddr("203.0.113.1"), netip.MustParseAddr("192.168.1.1")}, nil
++}
++
++type replayTestOutbounds struct{ adapter.OutboundManager }
++type replayTestStream struct{ adapter.Outbound }
++
++func (*replayTestStream) Network() []string { return []string{"tcp"} }
++func (*replayTestOutbounds) Outbound(string) (adapter.Outbound, bool) {
++	return &replayTestStream{}, true
++}
++
++func replayTestMetadata() adapter.InboundContext {
++	return adapter.InboundContext{Inbound: "tun", InboundType: C.TypeTun, Network: "tcp", Source: M.Socksaddr{Addr: netip.MustParseAddr("192.0.2.2"), Port: 9999}, Destination: M.Socksaddr{Fqdn: "printer.example", Port: 443}, Domain: "printer.example", ProcessInfo: &adapter.ConnectionOwner{UserId: 234, AndroidPackageNames: []string{"app.example"}}}
++}
++
++func TestFlowResolveReplayFullMatchUsesOneLookupAndNarrows(t *testing.T) {
++	ctx := context.Background()
++	zero := uint32(0)
++	makeRule := func(cond option.RawDefaultRule, action option.RuleAction) adapter.Rule {
++		rule, err := R.NewRule(ctx, log.StdLogger(), option.Rule{Type: C.RuleTypeDefault, DefaultOptions: option.DefaultRule{RawDefaultRule: cond, RuleAction: action}}, true)
++		require.NoError(t, err)
++		return rule
++	}
++	resolve := makeRule(option.RawDefaultRule{Domain: []string{"printer.example"}}, option.RuleAction{Action: C.RuleActionTypeResolve, ResolveOptions: option.RouteActionResolve{Server: "chosen", DisableCache: true, RewriteTTL: &zero}})
++	home := makeRule(option.RawDefaultRule{IPCIDR: []string{"192.168.0.0/16"}}, option.RuleAction{Action: C.RuleActionTypeRoute, RouteOptions: option.RouteActionOptions{Outbound: "home"}})
++	dns := &replayTestDNS{}
++	router := &Router{ctx: ctx, logger: log.StdLogger(), dns: dns, dnsTransport: &replayTestTransports{current: &replayTestTransport{}}, outbound: &replayTestOutbounds{}, rules: []adapter.Rule{resolve, home}}
++	metadata := replayTestMetadata()
++	_, pending := router.BeginPreMatch(metadata, nil)
++	require.NotNil(t, pending)
++	verdict := pending.Resolve(ctx)
++	require.Equal(t, adapter.PreMatchContinue, verdict.Action)
++	require.NotNil(t, verdict.RouteContext)
++	socketCtx, cancel := context.WithCancel(verdict.RouteContext(ctx))
++	defer cancel()
++	rule, _, _, _, err := router.matchRule(socketCtx, &metadata, nil, nil)
++	require.NoError(t, err)
++	require.Same(t, home, rule)
++	require.Equal(t, []netip.Addr{netip.MustParseAddr("192.168.1.1")}, metadata.DestinationAddresses)
++	require.Equal(t, 1, dns.queries)
++	metadata = replayTestMetadata()
++	_, _, _, _, err = router.matchRule(socketCtx, &metadata, nil, nil)
++	require.NoError(t, err)
++	require.Equal(t, 2, dns.queries)
++}
++
++func TestFlowResolveReplayInvalidation(t *testing.T) {
++	for _, reason := range []string{"cancellation", "reset", "owner", "resolver replacement", "resolver environment", "action options", "different socket", "new action"} {
++		t.Run(reason, func(t *testing.T) {
++			transport := &replayTestTransport{environment: []string{"one"}}
++			manager := &replayTestTransports{current: transport}
++			r := &Router{dnsTransport: manager}
++			receipt := newFlowResolveReplay(r)
++			meta := replayTestMetadata()
++			meta.DestinationAddresses = []netip.Addr{netip.MustParseAddr("192.0.2.30")}
++			ttl := uint32(0)
++			action := &R.RuleActionResolve{Server: "chosen", RewriteTTL: &ttl}
++			receipt.record(&meta, action, transport, receipt.environmentBeforeLookup(transport))
++			ctx, cancel := context.WithCancel(receipt.routeContext(context.Background()))
++			defer cancel()
++			claim := claimFlowResolveReplay(ctx, r)
++			require.NotNil(t, claim)
++			meta.DestinationAddresses = nil
++			switch reason {
++			case "cancellation":
++				cancel()
++			case "reset":
++				r.tunResolveEpoch.Add(1)
++			case "owner":
++				meta.ProcessInfo.AndroidPackageNames[0] = "changed.example"
++			case "resolver replacement":
++				manager.current = &replayTestTransport{}
++			case "resolver environment":
++				transport.environment[0] = "two"
++			case "action options":
++				ttl++
++			case "different socket":
++				meta.Source.Port++
++			case "new action":
++				copyAction := *action
++				action = &copyAction
++			}
++			require.False(t, claim.apply(&meta, action))
++			require.Nil(t, meta.DestinationAddresses)
++		})
++	}
++}
++
++func TestFlowResolveReplayRecordsOnlyAnUnbrokenBoundedPrefix(t *testing.T) {
++	transport := &replayTestTransport{environment: []string{"before"}}
++	r := &Router{dnsTransport: &replayTestTransports{current: transport}}
++	meta := replayTestMetadata()
++	action := &R.RuleActionResolve{Server: "chosen"}
++	meta.DestinationAddresses = []netip.Addr{netip.MustParseAddr("192.0.2.1")}
++	for _, reason := range []string{"selector chooses DNS", "changing environment", "address limit"} {
++		t.Run(reason, func(t *testing.T) {
++			receipt := newFlowResolveReplay(r)
++			receipt.record(&meta, action, transport, receipt.environmentBeforeLookup(transport))
++			other := *action
++			otherMeta := meta
++			env := receipt.environmentBeforeLookup(transport)
++			switch reason {
++			case "selector chooses DNS":
++				other.Server = ""
++			case "changing environment":
++				env[0] = "previous"
++			case "address limit":
++				otherMeta.DestinationAddresses = make([]netip.Addr, maxFlowResolveAddresses+1)
++			}
++			receipt.record(&otherMeta, &other, transport, env)
++			receipt.record(&meta, action, transport, receipt.environmentBeforeLookup(transport))
++			require.Len(t, receipt.answers, 1)
++		})
++	}
++	receipt := newFlowResolveReplay(r)
++	for range maxFlowResolveReceipts + 2 {
++		receipt.record(&meta, action, transport, receipt.environmentBeforeLookup(transport))
++	}
++	require.Len(t, receipt.answers, maxFlowResolveReceipts)
++}
+diff --git a/route/network.go b/route/network.go
+index 1ff6e49..93274b5 100644
+--- a/route/network.go
++++ b/route/network.go
+@@ -452,7 +452,37 @@ func (r *NetworkManager) UpdateWIFIState(ctx context.Context) {
+ 	r.onWIFIStateChanged(state)
+ }
+ 
++type pendingFlowController interface {
++	SuspendFlowDecisions()
++	ResumeFlowDecisions()
++}
++
++func suspendPendingFlows(inbounds []adapter.Inbound) func() {
++	var paused []pendingFlowController
++	for _, inbound := range inbounds {
++		if deferred, ok := inbound.(pendingFlowController); ok {
++			deferred.SuspendFlowDecisions()
++			paused = append(paused, deferred)
++		}
++	}
++	return func() {
++		for _, deferred := range paused {
++			deferred.ResumeFlowDecisions()
++		}
++	}
++}
++
++func (r *NetworkManager) SuspendPendingFlows() func() {
++	return suspendPendingFlows(r.inbound.Inbounds())
++}
++
+ func (r *NetworkManager) ResetNetwork(ctx context.Context) {
++	inbounds := r.inbound.Inbounds()
++	// Pause packet admission before closing existing sockets. Resume only after every
++	// affected transport and the route/DNS generations have finished resetting.
++	resume := suspendPendingFlows(inbounds)
++	defer resume()
++
+ 	if r.connectionManager != nil {
+ 		r.connectionManager.CloseAll()
+ 	}
+@@ -463,14 +493,12 @@ func (r *NetworkManager) ResetNetwork(ctx context.Context) {
+ 			listener.InterfaceUpdated(ctx)
+ 		}
+ 	}
+-
+-	for _, inbound := range r.inbound.Inbounds() {
++	for _, inbound := range inbounds {
+ 		listener, isListener := inbound.(adapter.InterfaceUpdateListener)
+ 		if isListener {
+ 			listener.InterfaceUpdated(ctx)
+ 		}
+ 	}
+-
+ 	for _, outbound := range r.outbound.Outbounds() {
+ 		listener, isListener := outbound.(adapter.InterfaceUpdateListener)
+ 		if isListener {
+diff --git a/route/network_environment.go b/route/network_environment.go
+index ac10b30..e800099 100644
+--- a/route/network_environment.go
++++ b/route/network_environment.go
+@@ -82,16 +82,27 @@ func (r *NetworkManager) updateNetworkEnvironment() {
+ 		}
+ 		environmentHash = digest.Sum64()
+ 	}
++	// This poll is serialized with other environment updates. An unchanged
++	// environment leaves pending flows running. Never hold stateAccess while a
++	// packet owner is suspending: its final validity check reads this same state.
++	if environmentHash == r.NetworkEnvironment() {
++		return
++	}
++	resume := r.SuspendPendingFlows()
++	defer resume()
+ 	r.stateAccess.Lock()
+-	changed := environmentHash != r.networkEnvironment
+-	r.networkEnvironment = environmentHash
+-	r.stateAccess.Unlock()
+-	if !changed {
++	if environmentHash == r.networkEnvironment {
++		r.stateAccess.Unlock()
+ 		return
+ 	}
++	r.networkEnvironment = environmentHash
++	r.stateAccess.Unlock()
+ 	if len(options) > 0 {
+ 		r.logger.Info("updated network environment: ", strings.Join(options, ", "))
+ 	}
++	if retiring, ok := r.router.(interface{ RetireDNSAnswers() }); ok {
++		retiring.RetireDNSAnswers()
++	}
+ 	r.FlushSystemDNSCache()
+ }
+ 
+diff --git a/route/route.go b/route/route.go
+index 292ab8f..a1e66b9 100644
+--- a/route/route.go
++++ b/route/route.go
+@@ -7,6 +7,7 @@ import (
+ 	"net"
+ 	"net/netip"
+ 	"strings"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -345,15 +346,37 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
+ }
+ 
+ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) adapter.PreMatchResult {
++	return r.startPreMatch(metadata, firstPacket, nil)
++}
++
++func (r *Router) BeginPreMatch(metadata adapter.InboundContext, firstPacket []byte) (adapter.PreMatchResult, *adapter.PendingPreMatch) {
++	var pending *adapter.PendingPreMatch
++	result := r.startPreMatch(metadata, firstPacket, &pending)
++	return result, pending
++}
++
++func (r *Router) startPreMatch(metadata adapter.InboundContext, firstPacket []byte, pending **adapter.PendingPreMatch) adapter.PreMatchResult {
+ 	ctx := log.ContextWithNewID(r.ctx)
+ 	metadata.PreMatch = true
+-	continueResult := adapter.PreMatchResult{Action: adapter.PreMatchContinue}
+ 	packetDestination := metadata.Destination
+-	err := r.prepareMatchMetadata(ctx, &metadata)
+-	if err != nil {
+-		return continueResult
++	if err := r.prepareMatchMetadata(ctx, &metadata); err != nil {
++		return adapter.PreMatchResult{Action: adapter.PreMatchContinue}
+ 	}
+-	for currentRuleIndex, currentRule := range r.rules {
++	return r.preMatchRules(ctx, ctx, metadata, packetDestination, metadata.Destination.Fqdn, firstPacket, 0, pending, nil)
++}
++
++func (r *Router) preMatchRules(ctx, lookupCtx context.Context, metadata adapter.InboundContext, packetDestination M.Socksaddr, originalDomain string, firstPacket []byte, start int, pending **adapter.PendingPreMatch, replay *flowResolveReplay) (result adapter.PreMatchResult) {
++	defer func() {
++		if replay != nil {
++			result.DestinationBound = true
++			if replay.hasResults() && (result.Action == adapter.PreMatchContinue || result.Action == adapter.PreMatchFlow || result.Action == adapter.PreMatchBypass) {
++				result.RouteContext = replay.routeContext
++			}
++		}
++	}()
++	continueResult := adapter.PreMatchResult{Action: adapter.PreMatchContinue}
++	for currentRuleIndex := start; currentRuleIndex < len(r.rules); currentRuleIndex++ {
++		currentRule := r.rules[currentRuleIndex]
+ 		metadata.ResetRuleCache()
+ 		if !currentRule.Match(&metadata) {
+ 			continue
+@@ -448,10 +471,47 @@ func (r *Router) PreMatch(metadata adapter.InboundContext, firstPacket []byte) a
+ 			}
+ 			return adapter.PreMatchResult{Action: adapter.PreMatchHijackDNS}
+ 		case *R.RuleActionResolve:
+-			resolveErr := r.actionResolve(adapter.WithContext(ctx, &metadata), &metadata, action)
+-			if resolveErr != nil {
+-				r.logger.DebugContext(ctx, "pre-match[", currentRuleIndex, "] ", currentRule, " => ", action, ": ", resolveErr)
+-				return adapter.PreMatchResult{Action: adapter.PreMatchReject}
++			if pending != nil && metadata.Destination.IsDomain() {
++				if replay == nil {
++					replay = newFlowResolveReplay(r)
++					if generations, ok := r.dns.(interface {
++						ContextWithCacheGeneration(context.Context) context.Context
++					}); ok {
++						lookupCtx = generations.ContextWithCacheGeneration(lookupCtx)
++					}
++				}
++				if r.resolveFromFreshCache(lookupCtx, &metadata, action, replay) {
++					continue
++				}
++				// The ingress packet is borrowed until BeginPreMatch returns. Any later sniff sees its own bytes.
++				next := currentRuleIndex + 1
++				var packet []byte
++				if metadata.Network == N.NetworkUDP && next < r.preMatchSniffEnd {
++					packet = slices.Clone(firstPacket)
++				}
++				valid := r.pendingFlowValid(ctx, metadata, packetDestination, originalDomain, replay)
++				var claimed atomic.Bool
++				*pending = &adapter.PendingPreMatch{Resolver: r.tunResolveGroup(action.Server), Valid: valid, Resolve: func(owner context.Context) adapter.PreMatchResult {
++					if !claimed.CompareAndSwap(false, true) || owner.Err() != nil || !replay.current() {
++						return transientPreMatchReject()
++					}
++					work, cancel := context.WithCancel(lookupCtx)
++					stop := context.AfterFunc(owner, cancel)
++					defer func() { stop(); cancel() }()
++					if err := r.actionResolve(work, &metadata, action, replay); err != nil || work.Err() != nil {
++						return transientPreMatchReject()
++					}
++					result := r.preMatchRules(ctx, work, metadata, packetDestination, originalDomain, packet, next, nil, replay)
++					if owner.Err() != nil || work.Err() != nil || !replay.current() {
++						return transientPreMatchReject()
++					}
++					return result
++				}}
++				return continueResult
++			}
++			if err := r.actionResolve(lookupCtx, &metadata, action, replay); err != nil {
++				r.logger.DebugContext(ctx, "pre-match[", currentRuleIndex, "] ", currentRule, " => ", action, ": ", err)
++				return adapter.PreMatchResult{Action: adapter.PreMatchReject, Transient: metadata.InboundType == C.TypeTun}
+ 			}
+ 		default:
+ 			return continueResult
+@@ -639,6 +699,7 @@ func (r *Router) matchRule(
+ 		return
+ 	}
+ 
++	replay := claimFlowResolveReplay(ctx, r)
+ match:
+ 	for currentRuleIndex, currentRule := range r.rules {
+ 		metadata.ResetRuleCache()
+@@ -718,7 +779,10 @@ match:
+ 				return
+ 			}
+ 		case *R.RuleActionResolve:
+-			fatalErr = r.actionResolve(ctx, metadata, action)
++			if replay.apply(metadata, action) {
++				continue match
++			}
++			fatalErr = r.actionResolve(ctx, metadata, action, nil)
+ 			if fatalErr != nil {
+ 				return
+ 			}
+@@ -932,30 +996,82 @@ func (r *Router) actionSniff(
+ 	return
+ }
+ 
+-func (r *Router) actionResolve(ctx context.Context, metadata *adapter.InboundContext, action *R.RuleActionResolve) error {
++func (r *Router) actionResolve(ctx context.Context, metadata *adapter.InboundContext, action *R.RuleActionResolve, replay *flowResolveReplay) error {
+ 	if metadata.Destination.IsDomain() {
+-		var transport adapter.DNSTransport
+-		if action.Server != "" {
+-			var loaded bool
+-			transport, loaded = r.dnsTransport.Transport(action.Server)
+-			if !loaded {
+-				return E.New("DNS server not found: ", action.Server)
+-			}
+-		}
+-		addresses, err := r.dns.Lookup(adapter.WithContext(ctx, metadata), metadata.Destination.Fqdn, adapter.DNSQueryOptions{
+-			Transport:              transport,
+-			Strategy:               action.Strategy,
+-			DisableCache:           action.DisableCache,
+-			DisableOptimisticCache: action.DisableOptimisticCache,
+-			RewriteTTL:             action.RewriteTTL,
+-			Timeout:                action.Timeout,
+-			ClientSubnet:           action.ClientSubnet,
+-		})
++		options, err := r.routeResolveOptions(action)
++		if err != nil {
++			return err
++		}
++		if metadata.InboundType == C.TypeTun {
++			if err := ctx.Err(); err != nil {
++				return err
++			}
++			group := r.tunResolveGroup(action.Server)
++			if !r.tunResolves.acquire(group) {
++				return errTunResolverBusy
++			}
++			defer r.tunResolves.release(group)
++			if refreshes, ok := r.dns.(interface {
++				ContextWithRefreshAdmission(context.Context, func() (func(), bool)) context.Context
++			}); ok {
++				ctx = refreshes.ContextWithRefreshAdmission(ctx, func() (func(), bool) {
++					if !r.tunResolves.acquire(group) {
++						return nil, false
++					}
++					return func() { r.tunResolves.release(group) }, true
++				})
++			}
++		}
++		environment := replay.environmentBeforeLookup(options.Transport)
++		addresses, err := r.dns.Lookup(adapter.WithContext(ctx, metadata), metadata.Destination.Fqdn, options)
+ 		if err != nil {
+ 			return err
+ 		}
+ 		metadata.DestinationAddresses = addresses
++		if replay != nil {
++			replay.record(metadata, action, options.Transport, environment)
++		}
+ 		r.logger.DebugContext(ctx, "resolved [", strings.Join(F.MapToString(metadata.DestinationAddresses), " "), "]")
+ 	}
+ 	return nil
+ }
++
++func (r *Router) routeResolveOptions(action *R.RuleActionResolve) (adapter.DNSQueryOptions, error) {
++	var transport adapter.DNSTransport
++	if action.Server != "" {
++		var ok bool
++		transport, ok = r.dnsTransport.Transport(action.Server)
++		if !ok {
++			return adapter.DNSQueryOptions{}, E.New("DNS server not found: ", action.Server)
++		}
++	}
++	return adapter.DNSQueryOptions{
++		Transport: transport, Strategy: action.Strategy, DisableCache: action.DisableCache,
++		DisableOptimisticCache: action.DisableOptimisticCache, RewriteTTL: action.RewriteTTL,
++		Timeout: action.Timeout, ClientSubnet: action.ClientSubnet,
++	}, nil
++}
++
++func (r *Router) resolveFromFreshCache(ctx context.Context, m *adapter.InboundContext, action *R.RuleActionResolve, replay *flowResolveReplay) bool {
++	cache, ok := r.dns.(interface {
++		LookupFreshCache(context.Context, string, adapter.DNSQueryOptions) ([]netip.Addr, bool)
++	})
++	if !ok || action.Server == "" || action.DisableCache {
++		return false
++	}
++	options, err := r.routeResolveOptions(action)
++	if err != nil {
++		return false
++	}
++	// A cache-only check runs on the ingress thread. Transports whose environment
++	// needs a dynamic lookup always take the deferred path.
++	if _, dynamic := options.Transport.(adapter.DNSTransportWithEnvironment); dynamic {
++		return false
++	}
++	addresses, hit := cache.LookupFreshCache(adapter.WithContext(ctx, m), m.Destination.Fqdn, options)
++	if hit {
++		m.DestinationAddresses = addresses
++		replay.record(m, action, options.Transport, nil)
++	}
++	return hit
++}
+diff --git a/route/router.go b/route/router.go
+index 0673dde..70f318c 100644
+--- a/route/router.go
++++ b/route/router.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"os"
+ 	"runtime"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/sagernet/sing-box/adapter"
+@@ -25,6 +26,10 @@ import (
+ var _ adapter.Router = (*Router)(nil)
+ 
+ type Router struct {
++	preMatchSniffEnd  int // index immediately after the last rule that can inspect the first datagram
++	tunResolveGroups  map[string]string
++	tunResolveEpoch   atomic.Uint64
++	tunResolves       tunResolveAdmission
+ 	ctx               context.Context
+ 	logger            log.ContextLogger
+ 	inbound           adapter.InboundManager
+@@ -52,6 +57,7 @@ type Router struct {
+ func NewRouter(ctx context.Context, logFactory log.Factory, options option.RouteOptions, dnsOptions option.DNSOptions) *Router {
+ 	return &Router{
+ 		ctx:               ctx,
++		tunResolveGroups:  tunResolveGroups(dnsOptions.Servers),
+ 		logger:            logFactory.NewLogger("router"),
+ 		inbound:           service.FromContext[adapter.InboundManager](ctx),
+ 		outbound:          service.FromContext[adapter.OutboundManager](ctx),
+@@ -82,6 +88,7 @@ func (r *Router) Initialize(rules []option.Rule, ruleSets []option.RuleSet) erro
+ 		}
+ 		r.rules = append(r.rules, rule)
+ 	}
++	r.preMatchSniffEnd = preMatchSniffEnd(r.rules)
+ 	for i, options := range ruleSets {
+ 		for _, tag := range options.Tag {
+ 			if _, exists := r.ruleSetMap[tag]; exists {
+@@ -252,9 +259,20 @@ func (r *Router) NeighborResolver() adapter.NeighborResolver {
+ 	return r.neighborResolver
+ }
+ 
++func (r *Router) RetireDNSAnswers() {
++	if retiring, ok := r.dns.(interface{ RetireMemoryCache() }); ok {
++		retiring.RetireMemoryCache()
++	}
++}
++
++func (r *Router) InvalidateFlowResolves() {
++	r.tunResolveEpoch.Add(1)
++}
++
+ func (r *Router) ResetNetwork() {
+ 	r.httpClientManager.ResetNetwork()
+ 	r.dns.ResetNetwork()
++	r.InvalidateFlowResolves()
+ 	if r.processCache != nil {
+ 		r.processCache.Purge()
+ 	}
+diff --git a/route/tun_resolve.go b/route/tun_resolve.go
+new file mode 100644
+index 0000000..229eeae
+--- /dev/null
++++ b/route/tun_resolve.go
+@@ -0,0 +1,133 @@
++package route
++
++import (
++	"context"
++	"errors"
++	"slices"
++
++	"github.com/sagernet/sing-box/option"
++	R "github.com/sagernet/sing-box/route/rule"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"sync"
++
++	"github.com/sagernet/sing-box/adapter"
++)
++
++var errTunResolverBusy = errors.New("TUN route resolver is busy")
++
++func transientPreMatchReject() adapter.PreMatchResult {
++	return adapter.PreMatchResult{Action: adapter.PreMatchReject, Transient: true}
++}
++
++// A slow resolver cannot consume every lookup slot. No packet or goroutine waits for a slot:
++// secondary resolves and socket fallback use the same budget as the deferred first resolve.
++type tunResolveAdmission struct {
++	mu       sync.Mutex
++	byServer map[string]int
++	total    int
++}
++
++const (
++	tunResolvesPerServer = 16
++	tunResolvesTotal     = 256
++)
++
++func (a *tunResolveAdmission) acquire(server string) bool {
++	a.mu.Lock()
++	defer a.mu.Unlock()
++	if a.total >= tunResolvesTotal || a.byServer[server] >= tunResolvesPerServer {
++		return false
++	}
++	if a.byServer == nil {
++		a.byServer = make(map[string]int)
++	}
++	a.byServer[server]++
++	a.total++
++	return true
++}
++
++func (a *tunResolveAdmission) release(server string) {
++	a.mu.Lock()
++	defer a.mu.Unlock()
++	a.total--
++	a.byServer[server]--
++	if a.byServer[server] == 0 {
++		delete(a.byServer, server)
++	}
++}
++
++// Different resolver tags may go through the same tunnel or endpoint.
++func tunResolveGroups(servers []option.DNSServerOptions) map[string]string {
++	groups := make(map[string]string)
++	for _, server := range servers {
++		var outbound string
++		switch options := server.Options.(type) {
++		case option.DialerOptionsWrapper:
++			outbound = options.TakeDialerOptions().Detour
++		case *option.OpenVPNDNSServerOptions:
++			outbound = options.Endpoint
++		case *option.TailscaleDNSServerOptions:
++			outbound = options.Endpoint
++		}
++		if outbound != "" {
++			groups[server.Tag] = "outbound:" + outbound
++		}
++	}
++	return groups
++}
++
++func (r *Router) tunResolveGroup(server string) string {
++	if group, ok := r.tunResolveGroups[server]; ok {
++		return group
++	}
++	return "resolver:" + server
++}
++
++// Delayed decisions can outlive the application socket that supplied the source port.
++// Use the original wire tuple and an uncached platform owner lookup before installation.
++func (r *Router) pendingFlowValid(ctx context.Context, metadata adapter.InboundContext, destination M.Socksaddr, originalDomain string, replay *flowResolveReplay) func() bool {
++	var owner *adapter.ConnectionOwner
++	if metadata.ProcessInfo != nil {
++		copy := *metadata.ProcessInfo
++		copy.AndroidPackageNames = slices.Clone(copy.AndroidPackageNames)
++		owner = &copy
++	}
++	return func() bool {
++		if ctx.Err() != nil || !replay.current() {
++			return false
++		}
++		if metadata.FakeIP {
++			transport := r.dnsTransport.FakeIP()
++			if transport == nil {
++				return false
++			}
++			domain, ok := transport.Store().Lookup(destination.Addr)
++			if !ok || domain != originalDomain {
++				return false
++			}
++		}
++		searcher, platform := r.processSearcher.(*platformSearcher)
++		if !platform || metadata.Network == N.NetworkICMP {
++			return true
++		}
++		current, err := searcher.FindProcessInfo(ctx, metadata.Network, metadata.Source.AddrPort(), destination.AddrPort())
++		if err != nil {
++			current = nil
++		}
++		if (owner == nil && current == nil) || (owner != nil && current != nil && owner.UserId == current.UserId && slices.Equal(owner.AndroidPackageNames, current.AndroidPackageNames)) {
++			return true
++		}
++		r.processCache.Remove(processCacheKey{Network: metadata.Network, Source: metadata.Source.AddrPort(), Destination: destination.AddrPort()})
++		return false
++	}
++}
++
++func preMatchSniffEnd(rules []adapter.Rule) int {
++	for i := len(rules) - 1; i >= 0; i-- {
++		if _, ok := rules[i].Action().(*R.RuleActionSniff); ok {
++			return i + 1
++		}
++	}
++	return 0
++}
+diff --git a/route/tun_resolve_test.go b/route/tun_resolve_test.go
+new file mode 100644
+index 0000000..9daa2fb
+--- /dev/null
++++ b/route/tun_resolve_test.go
+@@ -0,0 +1,335 @@
++package route
++
++import (
++	"context"
++	"errors"
++	"net/netip"
++	"sync/atomic"
++	"testing"
++
++	"github.com/sagernet/sing-box/adapter"
++	"github.com/sagernet/sing-box/common/sniff"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	R "github.com/sagernet/sing-box/route/rule"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/sagernet/sing/contrab/freelru"
++	"github.com/sagernet/sing/contrab/maphash"
++
++	"github.com/stretchr/testify/require"
++)
++
++type flowTestRule struct {
++	adapter.Rule
++	match  func(*adapter.InboundContext) bool
++	action adapter.RuleAction
++}
++
++func (r flowTestRule) Match(m *adapter.InboundContext) bool { return r.match == nil || r.match(m) }
++func (r flowTestRule) String() string                       { return "" }
++func (r flowTestRule) Action() adapter.RuleAction           { return r.action }
++
++type flowTestDNS struct {
++	adapter.DNSRouter
++	lookup func(context.Context, string, adapter.DNSQueryOptions) ([]netip.Addr, error)
++}
++
++func (d flowTestDNS) Lookup(ctx context.Context, name string, opts adapter.DNSQueryOptions) ([]netip.Addr, error) {
++	return d.lookup(ctx, name, opts)
++}
++func (d flowTestDNS) LookupReverseMapping(netip.Addr) (string, bool) { return "", false }
++
++type flowTestTransport struct {
++	adapter.DNSTransport
++	tag string
++}
++
++func (t *flowTestTransport) Tag() string { return t.tag }
++
++type flowTestTransports struct {
++	adapter.DNSTransportManager
++	byTag map[string]adapter.DNSTransport
++}
++
++func (t flowTestTransports) Transport(tag string) (adapter.DNSTransport, bool) {
++	d, ok := t.byTag[tag]
++	return d, ok
++}
++func (flowTestTransports) FakeIP() adapter.FakeIPTransport { return nil }
++
++func flowTestRouter(dns flowTestDNS, rules ...adapter.Rule) *Router {
++	return &Router{preMatchSniffEnd: preMatchSniffEnd(rules), ctx: context.Background(), logger: log.NewNOPFactory().NewLogger("route"), dns: dns,
++		dnsTransport: flowTestTransports{byTag: map[string]adapter.DNSTransport{"a": &flowTestTransport{tag: "a"}, "b": &flowTestTransport{tag: "b"}}}, rules: rules}
++}
++func flowTestMetadata() adapter.InboundContext {
++	return adapter.InboundContext{Inbound: "tun", InboundType: C.TypeTun, Network: N.NetworkUDP,
++		Source: M.ParseSocksaddr("192.0.2.10:5000"), Destination: M.ParseSocksaddr("host.example:443")}
++}
++func TestDeferredPolicyResumesAfterTheMatchedAction(t *testing.T) {
++	addr := netip.MustParseAddr("198.51.100.7")
++	var seen []string
++	var prefix int
++	always := &R.RuleActionReject{Method: C.RuleActionRejectMethodDrop}
++	first := &R.RuleActionResolve{Server: "a", DisableCache: true}
++	second := &R.RuleActionResolve{Server: "b"}
++	dns := flowTestDNS{lookup: func(ctx context.Context, name string, opts adapter.DNSQueryOptions) ([]netip.Addr, error) {
++		require.NoError(t, ctx.Err())
++		require.Equal(t, "host.example", name)
++		seen = append(seen, opts.Transport.Tag())
++		require.Equal(t, len(seen) == 1, opts.DisableCache)
++		return []netip.Addr{addr}, nil
++	}}
++	r := flowTestRouter(dns,
++		flowTestRule{match: func(m *adapter.InboundContext) bool { prefix++; return true }, action: &R.RuleActionRouteOptions{OverridePort: 8443}},
++		flowTestRule{action: first},
++		flowTestRule{action: &R.RuleActionSniff{PacketSniffers: []sniff.PacketSniffer{func(ctx context.Context, m *adapter.InboundContext, packet []byte) error {
++			require.Equal(t, []byte{1, 2, 3}, packet)
++			m.Protocol = "example"
++			return nil
++		}}}},
++		flowTestRule{action: second},
++		flowTestRule{match: func(m *adapter.InboundContext) bool {
++			return m.Protocol == "example" && m.Destination.Port == 8443 && len(m.DestinationAddresses) == 1 && m.DestinationAddresses[0] == addr
++		}, action: &R.RuleActionHijackDNS{}},
++		flowTestRule{action: always})
++	packet := []byte{1, 2, 3}
++	_, pending := r.BeginPreMatch(flowTestMetadata(), packet)
++	require.NotNil(t, pending)
++	require.Equal(t, "resolver:a", pending.Resolver)
++	require.Empty(t, seen)
++	packet[0] = 9
++	require.True(t, pending.Valid())
++	result := pending.Resolve(context.Background())
++	require.Equal(t, adapter.PreMatchHijackDNS, result.Action)
++	require.Equal(t, []string{"a", "b"}, seen)
++	require.Equal(t, 1, prefix)
++	require.True(t, pending.Resolve(context.Background()).Transient)
++	require.Len(t, seen, 2)
++}
++
++func TestDeferredLookupCancellationAndPermanentPolicyRejection(t *testing.T) {
++	var calls atomic.Int32
++	started := make(chan struct{})
++	dns := flowTestDNS{lookup: func(ctx context.Context, _ string, _ adapter.DNSQueryOptions) ([]netip.Addr, error) {
++		calls.Add(1)
++		close(started)
++		<-ctx.Done()
++		return nil, ctx.Err()
++	}}
++	r := flowTestRouter(dns, flowTestRule{action: &R.RuleActionResolve{Server: "a"}}, flowTestRule{action: &R.RuleActionReject{Method: C.RuleActionRejectMethodDrop}})
++	_, p := r.BeginPreMatch(flowTestMetadata(), nil)
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	require.True(t, p.Resolve(ctx).Transient)
++	require.Zero(t, calls.Load())
++	_, p = r.BeginPreMatch(flowTestMetadata(), nil)
++	ctx, cancel = context.WithCancel(context.Background())
++	result := make(chan adapter.PreMatchResult, 1)
++	go func() { result <- p.Resolve(ctx) }()
++	<-started
++	cancel()
++	require.True(t, (<-result).Transient)
++	require.Zero(t, r.tunResolves.total)
++	_, p = r.BeginPreMatch(flowTestMetadata(), nil)
++	r.InvalidateFlowResolves()
++	require.False(t, p.Valid())
++	direct := flowTestMetadata()
++	direct.Destination = M.ParseSocksaddr("192.0.2.12:443")
++	fast, p := r.BeginPreMatch(direct, nil)
++	require.Nil(t, p)
++	require.Equal(t, adapter.PreMatchDrop, fast.Action)
++	require.False(t, fast.Transient)
++}
++
++func TestTunLookupAdmissionGroupsAndFallback(t *testing.T) {
++	var calls int
++	errDNS := errors.New("test lookup")
++	r := flowTestRouter(flowTestDNS{lookup: func(context.Context, string, adapter.DNSQueryOptions) ([]netip.Addr, error) {
++		calls++
++		return nil, errDNS
++	}})
++	remote := &option.RemoteDNSServerOptions{}
++	remote.Detour = "shared"
++	r.tunResolveGroups = tunResolveGroups([]option.DNSServerOptions{
++		{Tag: "a", Options: remote}, {Tag: "b", Options: &option.OpenVPNDNSServerOptions{Endpoint: "shared"}},
++		{Tag: "home", Options: &option.TailscaleDNSServerOptions{Endpoint: "tailnet"}}})
++	group := r.tunResolveGroup("a")
++	require.Equal(t, group, r.tunResolveGroup("b"))
++	require.NotEqual(t, group, r.tunResolveGroup("home"))
++	for range tunResolvesPerServer {
++		require.True(t, r.tunResolves.acquire(group))
++	}
++	m := flowTestMetadata()
++	r.rules = []adapter.Rule{flowTestRule{action: &R.RuleActionResolve{Server: "b"}}}
++	_, _, _, _, err := r.matchRule(context.Background(), &m, nil, nil)
++	require.ErrorIs(t, err, errTunResolverBusy)
++	require.Zero(t, calls)
++	m.InboundType = "other"
++	_, _, _, _, err = r.matchRule(context.Background(), &m, nil, nil)
++	require.ErrorIs(t, err, errDNS)
++	require.Equal(t, 1, calls)
++	r.tunResolves.release(group)
++	m.InboundType = C.TypeTun
++	_, _, _, _, err = r.matchRule(context.Background(), &m, nil, nil)
++	require.ErrorIs(t, err, errDNS)
++	require.Equal(t, 2, calls)
++}
++
++type flowTestOwner struct {
++	adapter.PlatformInterface
++	owner   *adapter.ConnectionOwner
++	request adapter.FindConnectionOwnerRequest
++}
++
++func (*flowTestOwner) UsePlatformConnectionOwnerFinder() bool { return true }
++func (o *flowTestOwner) FindConnectionOwner(q *adapter.FindConnectionOwnerRequest) (*adapter.ConnectionOwner, error) {
++	o.request = *q
++	return o.owner, nil
++}
++
++type flowTestFakeStore struct {
++	adapter.FakeIPStore
++	domain string
++}
++
++func (f *flowTestFakeStore) Lookup(netip.Addr) (string, bool) { return f.domain, f.domain != "" }
++
++type flowTestFake struct {
++	adapter.FakeIPTransport
++	store *flowTestFakeStore
++}
++
++func (f flowTestFake) Store() adapter.FakeIPStore { return f.store }
++
++type flowTestFakeTransports struct {
++	flowTestTransports
++	fake flowTestFake
++}
++
++func (f flowTestFakeTransports) FakeIP() adapter.FakeIPTransport { return f.fake }
++
++func TestDeferredPolicyValidatesCurrentOwnerAndFakeMapping(t *testing.T) {
++	m := flowTestMetadata()
++	m.ProcessInfo = &adapter.ConnectionOwner{UserId: 1234, AndroidPackageNames: []string{"app.a"}}
++	original := M.ParseSocksaddr("198.18.0.9:443")
++	m.FakeIP = true
++	m.OriginDestination = original
++	now := &flowTestOwner{owner: m.ProcessInfo}
++	fake := &flowTestFakeStore{domain: m.Destination.Fqdn}
++	r := flowTestRouter(flowTestDNS{})
++	r.dnsTransport = flowTestFakeTransports{fake: flowTestFake{store: fake}}
++	r.processSearcher = newPlatformSearcher(now)
++	var err error
++	r.processCache, err = freelru.New[processCacheKey, processCacheEntry](8, maphash.NewHasher[processCacheKey]().Hash32, true)
++	require.NoError(t, err)
++	key := processCacheKey{Network: m.Network, Source: m.Source.AddrPort(), Destination: original.AddrPort()}
++	r.processCache.Add(key, processCacheEntry{result: m.ProcessInfo})
++	valid := r.pendingFlowValid(context.Background(), m, original, m.Destination.Fqdn, newFlowResolveReplay(r))
++	require.True(t, valid())
++	require.Equal(t, "198.18.0.9", now.request.DestinationAddress)
++	now.owner = &adapter.ConnectionOwner{UserId: 4321, AndroidPackageNames: []string{"app.b"}}
++	require.False(t, valid())
++	_, cached := r.processCache.Get(key)
++	require.False(t, cached)
++	now.owner = m.ProcessInfo
++	fake.domain = "another.example"
++	require.False(t, valid())
++	fake.domain = ""
++	require.False(t, valid())
++}
++
++func TestDeferredPolicyDropsLateSuccessAfterCancellation(t *testing.T) {
++	started, release := make(chan struct{}), make(chan struct{})
++	dns := flowTestDNS{lookup: func(context.Context, string, adapter.DNSQueryOptions) ([]netip.Addr, error) {
++		close(started)
++		<-release
++		return []netip.Addr{netip.MustParseAddr("198.51.100.7")}, nil
++	}}
++	r := flowTestRouter(dns, flowTestRule{action: &R.RuleActionResolve{Server: "a"}}, flowTestRule{action: &R.RuleActionHijackDNS{}})
++	_, p := r.BeginPreMatch(flowTestMetadata(), nil)
++	ctx, cancel := context.WithCancel(context.Background())
++	done := make(chan adapter.PreMatchResult, 1)
++	go func() { done <- p.Resolve(ctx) }()
++	<-started
++	cancel()
++	close(release)
++	result := <-done
++	require.Equal(t, adapter.PreMatchReject, result.Action)
++	require.True(t, result.Transient)
++	require.Nil(t, result.RouteContext)
++}
++
++type resetTestInbound struct {
++	adapter.Inbound
++	event func(string)
++}
++
++func (i resetTestInbound) SuspendFlowDecisions()            { i.event("pause") }
++func (i resetTestInbound) ResumeFlowDecisions()             { i.event("resume") }
++func (i resetTestInbound) InterfaceUpdated(context.Context) { i.event("interface") }
++
++type resetTestInbounds struct {
++	adapter.InboundManager
++	in adapter.Inbound
++}
++
++func (m resetTestInbounds) Inbounds() []adapter.Inbound { return []adapter.Inbound{m.in} }
++
++type resetTestConnections struct {
++	adapter.ConnectionManager
++	event func(string)
++}
++
++func (m resetTestConnections) CloseAll() { m.event("close") }
++
++type resetTestEndpoints struct{ adapter.EndpointManager }
++
++func (resetTestEndpoints) Endpoints() []adapter.Endpoint { return nil }
++
++type resetTestOutbounds struct{ adapter.OutboundManager }
++
++func (resetTestOutbounds) Outbounds() []adapter.Outbound { return nil }
++
++type resetTestRouter struct {
++	adapter.Router
++	event func(string)
++}
++
++func (r resetTestRouter) ResetNetwork() { r.event("reset") }
++
++func TestNetworkResetPausesTunBeforeClosingSockets(t *testing.T) {
++	var events []string
++	event := func(s string) { events = append(events, s) }
++	r := NetworkManager{router: resetTestRouter{event: event}, connectionManager: resetTestConnections{event: event},
++		inbound: resetTestInbounds{in: resetTestInbound{event: event}}, endpoint: resetTestEndpoints{}, outbound: resetTestOutbounds{}}
++	r.ResetNetwork(context.Background())
++	require.Equal(t, []string{"pause", "close", "interface", "reset", "resume"}, events)
++}
++
++type environmentTestRouter struct{ resetTestRouter }
++
++func (r environmentTestRouter) RetireDNSAnswers() { r.event("retire") }
++
++type environmentTestInbound struct{ resetTestInbound }
++
++func (i environmentTestInbound) FlushSystemDNSCache() { i.event("flush") }
++
++func TestNetworkEnvironmentGatesPublication(t *testing.T) {
++	r := &NetworkManager{networkEnvironment: 17, startedCtx: context.Background()}
++	var events []string
++	var observed []uint64
++	event := func(label string) {
++		events = append(events, label)
++		// Admissions consult the published environment, including during suspension.
++		observed = append(observed, r.NetworkEnvironment())
++	}
++	r.router = environmentTestRouter{resetTestRouter{event: event}}
++	r.inbound = resetTestInbounds{in: environmentTestInbound{resetTestInbound{event: event}}}
++	// Losing the previous environment publishes zero; polling it again must do nothing.
++	r.updateNetworkEnvironment()
++	r.updateNetworkEnvironment()
++	require.Equal(t, []string{"pause", "retire", "flush", "resume"}, events)
++	require.Equal(t, []uint64{17, 0, 0, 0}, observed)
++}
+diff --git a/route/tun_resolve_warm_test.go b/route/tun_resolve_warm_test.go
+new file mode 100644
+index 0000000..97d01f8
+--- /dev/null
++++ b/route/tun_resolve_warm_test.go
+@@ -0,0 +1,163 @@
++//go:build with_gvisor
++
++package route
++
++import (
++	"context"
++	"fmt"
++	"net/netip"
++	"sync/atomic"
++	"testing"
++	"testing/synctest"
++	"time"
++
++	mDNS "github.com/miekg/dns"
++	"github.com/sagernet/gvisor/pkg/buffer"
++	"github.com/sagernet/gvisor/pkg/tcpip"
++	"github.com/sagernet/gvisor/pkg/tcpip/header"
++	"github.com/sagernet/gvisor/pkg/tcpip/link/channel"
++	"github.com/sagernet/gvisor/pkg/tcpip/stack"
++	"github.com/sagernet/sing-box/adapter"
++	C "github.com/sagernet/sing-box/constant"
++	D "github.com/sagernet/sing-box/dns"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	R "github.com/sagernet/sing-box/route/rule"
++	tun "github.com/sagernet/sing-tun"
++	"github.com/sagernet/sing/service"
++	"github.com/stretchr/testify/require"
++)
++
++type warmTestTransport struct {
++	flowTestTransport
++	warm, cold atomic.Int32
++}
++
++func (s *warmTestTransport) Type() string { return "udp" }
++func (s *warmTestTransport) Exchange(ctx context.Context, q *mDNS.Msg) (*mDNS.Msg, error) {
++	if q.Question[0].Name != "warm.example." {
++		s.cold.Add(1)
++		select {
++		case <-ctx.Done():
++			return nil, ctx.Err()
++		case <-time.After(time.Minute):
++			return nil, fmt.Errorf("cold request exceeded virtual test guard")
++		}
++	}
++	s.warm.Add(1)
++	return D.FixedResponse(q.Id, q.Question[0], []netip.Addr{netip.MustParseAddr("203.0.113.7")}, 120), nil
++}
++func (s *warmTestTransport) ExchangeAsync(ctx context.Context, q *mDNS.Msg, done func(*mDNS.Msg, error)) {
++	go func() { done(s.Exchange(ctx, q)) }()
++}
++
++type warmTestStore struct{ adapter.FakeIPStore }
++
++func (warmTestStore) Contains(ip netip.Addr) bool { return ip.Is4() && ip.As4()[0] == 198 }
++func (warmTestStore) Lookup(ip netip.Addr) (string, bool) {
++	if ip.As4()[3] == 100 {
++		return "warm.example", true
++	}
++	return fmt.Sprintf("cold-%d.example", ip.As4()[3]), true
++}
++
++type warmTestFakeIP struct{ adapter.FakeIPTransport }
++
++func (warmTestFakeIP) Store() adapter.FakeIPStore { return warmTestStore{} }
++
++type warmTestTransports struct{ flowTestTransports }
++
++func (warmTestTransports) FakeIP() adapter.FakeIPTransport { return warmTestFakeIP{} }
++
++type warmTestOutbound struct{ adapter.Outbound }
++
++func (warmTestOutbound) Network() []string { return []string{"udp"} }
++
++type warmTestOutbounds struct{ adapter.OutboundManager }
++
++func (warmTestOutbounds) Outbound(tag string) (adapter.Outbound, bool) {
++	return warmTestOutbound{}, tag == "allowed"
++}
++
++type warmTestHandler struct {
++	tun.Handler
++	router *Router
++}
++
++func (h warmTestHandler) BeginFlow(network uint8, src, dst netip.AddrPort, data []byte) (tun.FlowVerdict, *tun.PendingFlowDecision) {
++	return adapter.BeginFlow(h.router, "tun", C.TypeTun, network, src, dst, data)
++}
++
++type warmTestDelivery struct {
++	stack.NetworkDispatcher
++	lastOctets []byte
++}
++
++func (s *warmTestDelivery) DeliverNetworkPacket(_ tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
++	p, _ := pkt.Data().PullUp(header.IPv4MinimumSize)
++	s.lastOctets = append(s.lastOctets, header.IPv4(p).DestinationAddress().As4()[3])
++}
++
++func TestWarmRouteDeliversWithItsOwnResolverAtCapacity(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		server := &warmTestTransport{flowTestTransport: flowTestTransport{tag: "a"}}
++		manager := warmTestTransports{flowTestTransports{byTag: map[string]adapter.DNSTransport{"a": server}}}
++		ctx := service.ContextWith[adapter.DNSTransportManager](context.Background(), manager)
++		options := option.DNSOptions{RawDNSOptions: option.RawDNSOptions{DNSClientOptions: option.DNSClientOptions{Strategy: option.DomainStrategy(C.DomainStrategyIPv4Only)}}}
++		dnsRouter, err := D.NewRouter(ctx, log.NewNOPFactory(), options)
++		require.NoError(t, err)
++		scope := adapter.NewScope(ctx, log.NewNOPFactory().Logger())
++		defer scope.Close()
++		require.NoError(t, dnsRouter.Start(adapter.StartStateStart, scope))
++		addresses, err := dnsRouter.Lookup(ctx, "warm.example", adapter.DNSQueryOptions{Transport: server})
++		require.NoError(t, err)
++		require.Equal(t, []netip.Addr{netip.MustParseAddr("203.0.113.7")}, addresses)
++		r := flowTestRouter(flowTestDNS{},
++			flowTestRule{action: &R.RuleActionResolve{Server: "a"}},
++			flowTestRule{match: func(m *adapter.InboundContext) bool {
++				return len(m.DestinationAddresses) == 1 && m.DestinationAddresses[0] == addresses[0]
++			}, action: &R.RuleActionRoute{Outbound: "allowed"}},
++			flowTestRule{action: &R.RuleActionReject{Method: C.RuleActionRejectMethodDrop}},
++		)
++		r.dns, r.dnsTransport, r.outbound = dnsRouter, manager, warmTestOutbounds{}
++		warm, found := dnsRouter.LookupFreshCache(ctx, "warm.example", adapter.DNSQueryOptions{Transport: server})
++		require.True(t, found, "seed is eligible for synchronous matching")
++		require.Equal(t, addresses, warm)
++		forward := tun.NewForwardDispatcher(warmTestHandler{router: r}, nil, nil, 0, 0)
++		defer forward.Close()
++		link := channel.New(1, 1500, "")
++		defer link.Close()
++		down := new(warmTestDelivery)
++		(&tun.LinkEndpointFilter{LinkEndpoint: link, Dispatcher: forward}).Attach(down)
++		send := func(last byte) {
++			data := make([]byte, header.IPv4MinimumSize+header.UDPMinimumSize)
++			ip := header.IPv4(data)
++			ip.Encode(&header.IPv4Fields{TotalLength: uint16(len(data)), TTL: 64, Protocol: uint8(header.UDPProtocolNumber), SrcAddr: tcpip.AddrFrom4([4]byte{192, 0, 2, 1}), DstAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, last})})
++			ip.SetChecksum(^ip.CalculateChecksum())
++			header.UDP(ip.Payload()).Encode(&header.UDPFields{SrcPort: 41000, DstPort: 9000, Length: header.UDPMinimumSize})
++			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(data)})
++			defer pkt.DecRef()
++			link.InjectInbound(header.IPv4ProtocolNumber, pkt)
++		}
++		// The public packet path has no capacity inspection API. Observe the actual
++		// admission boundary with independent names, stopping on the first refusal.
++		var active int32
++		for last := byte(1); last <= 32; last++ {
++			send(last)
++			synctest.Wait()
++			observed := server.cold.Load()
++			if observed == active {
++				break
++			}
++			active = observed
++		}
++		require.Positive(t, active)
++		require.Less(t, active, int32(32))
++		require.Empty(t, down.lastOctets)
++		send(100)
++		synctest.Wait()
++		require.Equal(t, []byte{100}, down.lastOctets)
++		require.EqualValues(t, 1, server.warm.Load(), "warming is the only transport exchange for this name")
++		require.Equal(t, active, server.cold.Load())
++	})
++}

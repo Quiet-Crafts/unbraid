@@ -1,0 +1,172 @@
+diff --git a/pkg/tcpip/network/ipv6/ingress_decision_test.go b/pkg/tcpip/network/ipv6/ingress_decision_test.go
+new file mode 100644
+index 0000000..8a7b237
+--- /dev/null
++++ b/pkg/tcpip/network/ipv6/ingress_decision_test.go
+@@ -0,0 +1,56 @@
++package ipv6_test
++
++import (
++	"testing"
++
++	"github.com/sagernet/gvisor/pkg/buffer"
++	"github.com/sagernet/gvisor/pkg/tcpip"
++	"github.com/sagernet/gvisor/pkg/tcpip/header"
++	"github.com/sagernet/gvisor/pkg/tcpip/link/channel"
++	"github.com/sagernet/gvisor/pkg/tcpip/network/ipv6"
++	"github.com/sagernet/gvisor/pkg/tcpip/stack"
++	"github.com/sagernet/gvisor/pkg/tcpip/transport/udp"
++)
++
++func TestLocalIngressDecisionAndReassembly(t *testing.T) {
++	s := stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv6.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{udp.NewProtocol}})
++	defer s.Destroy()
++	link := channel.New(1, 1500, "")
++	if err := s.CreateNIC(1, link); err != nil {
++		t.Fatal(err)
++	}
++	src := tcpip.AddrFrom16([16]byte{0x20, 1, 0xdb, 8, 15: 1})
++	dst := tcpip.AddrFrom16([16]byte{0x20, 1, 0xdb, 8, 15: 2})
++	if err := s.AddProtocolAddress(1, tcpip.ProtocolAddress{Protocol: ipv6.ProtocolNumber, AddressWithPrefix: dst.WithPrefix()}, stack.AddressProperties{}); err != nil {
++		t.Fatal(err)
++	}
++
++	var received []any
++	s.SetTransportProtocolHandler(udp.ProtocolNumber, func(_ stack.TransportEndpointID, p *stack.PacketBuffer) bool {
++		received = append(received, p.IngressDecision)
++		return true
++	})
++	inject := func(data []byte, exts header.IPv6ExtHdrSerializer, decision string) {
++		hdrLen := header.IPv6MinimumSize + exts.Length()
++		b := make([]byte, hdrLen+len(data))
++		header.IPv6(b).Encode(&header.IPv6Fields{HopLimit: 64, SrcAddr: src, DstAddr: dst, TransportProtocol: udp.ProtocolNumber,
++			PayloadLength: uint16(len(b) - header.IPv6MinimumSize), ExtensionHeaders: exts})
++		copy(b[hdrLen:], data)
++		p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(b)})
++		p.IngressDecision = decision
++		p.RXChecksumValidated = true
++		link.InjectInbound(ipv6.ProtocolNumber, p)
++		p.DecRef()
++	}
++	data := make([]byte, 16)
++	header.UDP(data).Encode(&header.UDPFields{SrcPort: 40001, DstPort: 40002, Length: 16, Checksum: 1})
++	inject(data, nil, "whole")
++	if len(received) != 1 || received[0] != "whole" {
++		t.Fatalf("local packet received %v", received)
++	}
++	inject(data[:8], header.IPv6ExtHdrSerializer{&header.IPv6SerializableFragmentExtHdr{Identification: 1, M: true}}, "first")
++	inject(data[8:], header.IPv6ExtHdrSerializer{&header.IPv6SerializableFragmentExtHdr{Identification: 1, FragmentOffset: 1}}, "last")
++	if len(received) != 2 || received[1] != nil {
++		t.Fatalf("reassembled packet received %v", received)
++	}
++}
+diff --git a/pkg/tcpip/network/ipv6/ipv6.go b/pkg/tcpip/network/ipv6/ipv6.go
+index aa5cec7..fad84a8 100644
+--- a/pkg/tcpip/network/ipv6/ipv6.go
++++ b/pkg/tcpip/network/ipv6/ipv6.go
+@@ -1552,6 +1552,11 @@ func (e *endpoint) processExtensionHeaders(h header.IPv6, pkt *stack.PacketBuffe
+ 	// keeps it so this method owns the packet either way so the packet can always
+ 	// be DecRef'd after processing is done.
+ 	processingPkt := pkt.Clone()
++	if !forwarding {
++		// This copy is the same local delivery. Any reassembly below produces a
++		// different packet and drops the link's decision.
++		processingPkt.IngressDecision = pkt.IngressDecision
++	}
+ 	defer func() {
+ 		processingPkt.DecRef()
+ 		it.Release()
+diff --git a/pkg/tcpip/stack/bridge.go b/pkg/tcpip/stack/bridge.go
+index d3cc082..23179a2 100644
+--- a/pkg/tcpip/stack/bridge.go
++++ b/pkg/tcpip/stack/bridge.go
+@@ -100,6 +100,11 @@ func (p *bridgePort) DeliverNetworkPacket(protocol tcpip.NetworkProtocolNumber,
+ 		// The dispatcher may acquire Stack.mu in DeliverNetworkPacket(), which is
+ 		// ordered above bridge.mu. So call DeliverNetworkPacket() without holding
+ 		// bridge.mu to avoid circular locking.
++		if pkt.IngressDecision != nil {
++			// The bridge is another ingress. Its stack must judge the packet itself.
++			pkt = pkt.Clone()
++			defer pkt.DecRef()
++		}
+ 		d.DeliverNetworkPacket(protocol, pkt)
+ 	}
+ }
+diff --git a/pkg/tcpip/stack/ingress_decision_test.go b/pkg/tcpip/stack/ingress_decision_test.go
+new file mode 100644
+index 0000000..9971bfc
+--- /dev/null
++++ b/pkg/tcpip/stack/ingress_decision_test.go
+@@ -0,0 +1,48 @@
++package stack
++
++import (
++	"testing"
++
++	"github.com/sagernet/gvisor/pkg/tcpip"
++	"github.com/sagernet/gvisor/pkg/tcpip/header"
++)
++
++type ingressRecorder struct {
++	packets  int
++	decision any
++}
++
++func (r *ingressRecorder) DeliverNetworkPacket(_ tcpip.NetworkProtocolNumber, p *PacketBuffer) {
++	r.packets++
++	r.decision = p.IngressDecision
++}
++func (*ingressRecorder) DeliverLinkPacket(tcpip.NetworkProtocolNumber, *PacketBuffer) {}
++
++func TestIngressDecisionEndsAtPacketBoundaries(t *testing.T) {
++	p := NewPacketBuffer(PacketBufferOptions{ReserveHeaderBytes: header.EthernetMinimumSize + header.IPv4MinimumSize})
++	defer p.DecRef()
++	p.NetworkHeader().Push(header.IPv4MinimumSize)
++	p.NetworkProtocolNumber = header.IPv4ProtocolNumber
++	p.LinkHeader().Push(header.EthernetMinimumSize)
++	p.IngressDecision = "local"
++	for _, clone := range []*PacketBuffer{p.Clone(), p.CloneToInbound(), p.DeepCopyForForwarding(0)} {
++		if clone.IngressDecision != nil {
++			t.Error("packet copy inherited the link's decision")
++		}
++		clone.DecRef()
++	}
++	r := &ingressRecorder{}
++	b := NewBridgeEndpoint(1500)
++	b.Attach(r)
++	port := bridgePort{bridge: b}
++	port.DeliverNetworkPacket(header.IPv4ProtocolNumber, p)
++	if r.packets != 1 || r.decision != nil || p.IngressDecision != "local" {
++		t.Fatalf("bridge delivered %d packets, decision %v, original %v", r.packets, r.decision, p.IngressDecision)
++	}
++	// Every object taken from the pool is reset before reuse.
++	reused := PacketBuffer{IngressDecision: "previous packet"}
++	reused.reset()
++	if reused.IngressDecision != nil {
++		t.Error("pool reset preserved the old decision")
++	}
++}
+diff --git a/pkg/tcpip/stack/packet_buffer.go b/pkg/tcpip/stack/packet_buffer.go
+index af8b388..ad62c86 100644
+--- a/pkg/tcpip/stack/packet_buffer.go
++++ b/pkg/tcpip/stack/packet_buffer.go
+@@ -169,6 +169,11 @@ type PacketBuffer struct {
+ 	// NetworkPacketInfo holds an incoming packet's network-layer information.
+ 	NetworkPacketInfo NetworkPacketInfo
+ 
++	// IngressDecision is link-supplied context for synchronous local delivery of this
++	// packet. It is never serialized or transferred by copying, forwarding, or
++	// reassembly. A consumer must verify the originating link and flow before use.
++	IngressDecision any `state:"nosave"`
++
+ 	// Mark is the mark value of this packet.
+ 	Mark uint32
+ 
+@@ -214,6 +219,7 @@ func (pk *PacketBuffer) DecRef() {
+ 		}
+ 
+ 		pk.buf.Release()
++		pk.IngressDecision = nil
+ 		pkPool.Put(pk)
+ 	})
+ }

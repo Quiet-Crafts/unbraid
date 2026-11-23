@@ -18,6 +18,23 @@ git apply "$ROOT"/tools/sing-box-*.patch
 BIN="$WORK/bin"
 rm -rf "$BIN" && mkdir -p "$BIN"
 export GOTOOLCHAIN=go1.26.11 GOBIN="$BIN" PATH="$BIN:$PATH"
+# Patch dependencies of this checkout only. Apply from the repository root so
+# git cannot silently skip module-relative paths in a nested working directory.
+patch_dependency() {
+  local module="$1" name="$2" staging=".unbraid-src/$2" version source
+  version=$(go list -m -f '{{.Version}}' "$module")
+  source=$(go mod download -json "$module@$version" | python3 -c 'import json, sys; print(json.load(sys.stdin)["Dir"])')
+  mkdir -p .unbraid-src
+  cp -R "$source" "$staging"
+  chmod -R u+w "$staging"
+  git apply --directory="$staging" "$ROOT/tools/$name"-*.patch
+  git apply --reverse --check --directory="$staging" "$ROOT/tools/$name"-*.patch
+  go mod edit -replace "$module=./$staging"
+}
+# Files ignored by an upstream module can survive the ordinary checkout clean.
+git clean -qfdx -- .unbraid-src
+patch_dependency github.com/sagernet/sing-tun sing-tun
+patch_dependency github.com/sagernet/gvisor gvisor
 export ANDROID_HOME=${ANDROID_HOME:-$HOME/Library/Android/sdk} ANDROID_NDK_HOME=${ANDROID_NDK_HOME:-$HOME/Library/Android/sdk/ndk/28.2.13676358}
 # gomobile needs a JDK; Android Studio ships one.
 export JAVA_HOME=${JAVA_HOME:-"/Applications/Android Studio.app/Contents/jbr/Contents/Home"}

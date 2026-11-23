@@ -1,0 +1,115 @@
+diff --git a/pkg/tcpip/transport/tcp/forwarder.go b/pkg/tcpip/transport/tcp/forwarder.go
+index 646b23f..761b954 100644
+--- a/pkg/tcpip/transport/tcp/forwarder.go
++++ b/pkg/tcpip/transport/tcp/forwarder.go
+@@ -64,6 +64,13 @@ func NewForwarder(s *stack.Stack, rcvWnd, maxInFlight int, handler func(*Forward
+ // This function is expected to be passed as an argument to the
+ // stack.SetTransportProtocolHandler function.
+ func (f *Forwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
++	return f.HandlePacketWithHandler(id, pkt, f.handler)
++}
++
++// HandlePacketWithHandler processes pkt as HandlePacket does, using handler
++// for this request only. The callback runs asynchronously for a newly admitted
++// request. All callers share the forwarder's pending requests and limit.
++func (f *Forwarder) HandlePacketWithHandler(id stack.TransportEndpointID, pkt *stack.PacketBuffer, handler func(*ForwarderRequest)) bool {
+ 	s, err := newIncomingSegment(id, f.stack.Clock(), pkt)
+ 	if err != nil {
+ 		return false
+@@ -94,7 +101,7 @@ func (f *Forwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Packet
+ 	// Launch a new goroutine to handle the request.
+ 	f.inFlight[id] = struct{}{}
+ 	s.IncRef()
+-	go f.handler(&ForwarderRequest{ // S/R-SAFE: not used by Sentry.
++	go handler(&ForwarderRequest{ // S/R-SAFE: not used by Sentry.
+ 		forwarder:  f,
+ 		segment:    s,
+ 		synOptions: opts,
+diff --git a/pkg/tcpip/transport/tcp/forwarder_handler_test.go b/pkg/tcpip/transport/tcp/forwarder_handler_test.go
+new file mode 100644
+index 0000000..788a56d
+--- /dev/null
++++ b/pkg/tcpip/transport/tcp/forwarder_handler_test.go
+@@ -0,0 +1,82 @@
++package tcp
++
++import (
++	"testing"
++	"time"
++
++	"github.com/sagernet/gvisor/pkg/tcpip/header"
++	"github.com/sagernet/gvisor/pkg/tcpip/stack"
++)
++
++func TestForwarderPacketHandlerSharesAdmission(t *testing.T) {
++	s := stack.New(stack.Options{TransportProtocols: []stack.TransportProtocolFactory{NewProtocol}})
++	defer s.Destroy()
++	type call struct {
++		source string
++		req    *ForwarderRequest
++	}
++	calls := make(chan call, 8)
++	handler := func(source string) func(*ForwarderRequest) {
++		return func(r *ForwarderRequest) { calls <- call{source, r} }
++	}
++	f := NewForwarder(s, 0, 1, handler("default"))
++	perPacket, ok := interface{}(f).(interface {
++		HandlePacketWithHandler(stack.TransportEndpointID, *stack.PacketBuffer, func(*ForwarderRequest)) bool
++	})
++	if !ok {
++		t.Fatal("forwarder does not support a request-specific handler")
++	}
++	packet := func(flags header.TCPFlags) *stack.PacketBuffer {
++		p := stack.NewPacketBuffer(stack.PacketBufferOptions{ReserveHeaderBytes: header.IPv4MinimumSize + header.TCPMinimumSize})
++		h := header.TCP(p.TransportHeader().Push(header.TCPMinimumSize))
++		h.Encode(&header.TCPFields{DataOffset: header.TCPMinimumSize, Flags: flags})
++		p.NetworkHeader().Push(header.IPv4MinimumSize)
++		p.NetworkProtocolNumber = header.IPv4ProtocolNumber
++		p.RXChecksumValidated = true
++		return p
++	}
++	accept := func(source string, id stack.TransportEndpointID) *ForwarderRequest {
++		t.Helper()
++		select {
++		case c := <-calls:
++			if c.source != source || c.req.ID() != id {
++				t.Fatalf("received %s/%+v, want %s/%+v", c.source, c.req.ID(), source, id)
++			}
++			return c.req
++		case <-time.After(5 * time.Second):
++			t.Fatal("admitted request was not delivered")
++			return nil
++		}
++	}
++	id := stack.TransportEndpointID{LocalPort: 80, RemotePort: 40001}
++	other := stack.TransportEndpointID{LocalPort: 80, RemotePort: 40002}
++	ack := packet(header.TCPFlagAck)
++	defer ack.DecRef()
++	if perPacket.HandlePacketWithHandler(id, ack, handler("unexpected ACK")) {
++		t.Fatal("non-SYN was handled")
++	}
++	syn := packet(header.TCPFlagSyn)
++	defer syn.DecRef()
++	if !perPacket.HandlePacketWithHandler(id, syn, handler("selected")) {
++		t.Fatal("SYN was not handled")
++	}
++	req := accept("selected", id)
++	drops := s.Stats().TCP.ForwardMaxInFlightDrop
++	before := drops.Value()
++	if !f.HandlePacket(id, syn) || drops.Value() != before {
++		t.Fatal("duplicate did not use the existing reservation")
++	}
++	if !perPacket.HandlePacketWithHandler(other, syn, handler("unexpected overflow")) || drops.Value() != before+1 {
++		t.Fatal("second flow did not observe the occupied slot")
++	}
++	req.Complete(false)
++
++	if !f.HandlePacket(id, syn) {
++		t.Fatal("completion did not release the first flow")
++	}
++	accept("default", id).Complete(false)
++	if !perPacket.HandlePacketWithHandler(other, syn, handler("next")) {
++		t.Fatal("slot did not admit a different flow")
++	}
++	accept("next", other).Complete(false)
++}
