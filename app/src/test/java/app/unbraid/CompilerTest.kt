@@ -466,6 +466,61 @@ class CompilerTest {
         assertEquals(usual["dns"]!!.jsonObject["rules"]!!.jsonArray.size + 1, held["dns"]!!.jsonObject["rules"]!!.jsonArray.size)
     }
 
+    @Test fun unattributedDataCannotUseADifferentVpnDefault() {
+        val traffic = app.unbraid.data.RestoreTraffic
+        val setup = example.copy(apps = mapOf("com.a" to "us"))
+        for (assigned in listOf("us", "removed")) for (blocked in listOf(emptySet(), setOf("us"))) {
+            val s = setup.copy(apps = mapOf("com.a" to assigned))
+            val c = app.unbraid.data.RestoreTraffic.Config(compile(s, blocked = blocked).toString(), s)
+            for (net in listOf("tcp", "udp")) for (name in listOf(null, "example.org")) {
+                val step = traffic.walk(c, emptySet(), name, Compiler.ipv4("203.0.113.4")!!.first, net, null)!!
+                assertEquals(traffic.HELD, step.out.exit)
+                assertEquals(app.unbraid.data.RestoreTraffic.By.App, step.by)
+                assertEquals("r-nl", traffic.connect(c, setOf("com.other"), name, net = net)?.exit)
+                assertEquals(if (assigned == "us" && blocked.isEmpty()) "r-us" else traffic.REJECT,
+                    traffic.connect(c, setOf("com.a"), name, net = net)?.exit)
+            }
+            assertEquals("r-nl", traffic.connect(c, emptySet(), null, net = "icmp")?.exit)
+        }
+    }
+
+    @Test fun unattributedDataOnlyNeedsHoldingForInTunnelAssignments() {
+        val traffic = app.unbraid.data.RestoreTraffic
+        fun unknown(s: Setup, lockdown: Boolean = false, kin: Set<String> = emptySet()): String? {
+            val input = Compiler.Input(s, links(s), "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db", blockedKin = kin)
+            return traffic.connect(app.unbraid.data.RestoreTraffic.Config(Compiler.compile(input), s), emptySet(), null)?.exit
+        }
+        for (apps in listOf(emptyMap(), mapOf("com.a" to "nl"), mapOf("com.a" to DIRECT)))
+            assertEquals("r-nl", unknown(example.copy(apps = apps)))
+        val direct = example.copy(apps = mapOf("com.a" to DIRECT))
+        assertEquals(traffic.HELD, unknown(direct, lockdown = true))
+        assertEquals("r-nl", unknown(direct, lockdown = true, kin = setOf("com.a")))
+        val filtered = direct.copy(prefs = direct.prefs.copy(filter = Filter(id = "quad9", directApps = true)))
+        assertEquals(traffic.HELD, unknown(filtered))
+        assertEquals("r-nl", unknown(filtered, kin = setOf("com.a")))
+    }
+
+    @Test fun aVpnDefaultsOwnerGuardPreservesExplicitRouteExceptions() {
+        val traffic = app.unbraid.data.RestoreTraffic
+        val s = example.copy(defaultRoute = "ts", routes = example.routes + Route("ts", tsExit = "nas"),
+            apps = mapOf("com.a" to "us"), sites = mapOf("example.org" to "us"))
+        val raw = Compiler.compile(Compiler.Input(s, links(s), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db",
+            tsLoginPending = true, probe = 40000 to "pw"))
+        val c = app.unbraid.data.RestoreTraffic.Config(raw, s)
+        for ((addr, exit) in listOf("192.168.1.9" to "direct", "192.168.178.7" to Compiler.TS_TAG, "100.100.100.9" to Compiler.TS_TAG))
+            assertEquals(exit, traffic.connect(c, emptySet(), null, address = addr)?.exit)
+        assertEquals("r-us", traffic.connect(c, emptySet(), "example.org")?.exit)
+        assertEquals("direct", traffic.connect(c, setOf("com.default"), "login.tailscale.com")?.exit)
+        assertEquals("r-us", traffic.connect(c, setOf("com.a"), "login.tailscale.com")?.exit)
+        assertEquals(traffic.HELD, traffic.connect(c, emptySet(), "login.tailscale.com")?.exit)
+
+        val rules = Json.parseToJsonElement(raw).jsonObject.rules()
+        val guard = rules.indexOfFirst { it["action"]?.jsonPrimitive?.content == "reject" && it["rules"]?.toString()?.contains("package_name_regex") == true }
+        val probes = rules.withIndex().filter { it.value["auth_user"] != null }
+        assertTrue(probes.isNotEmpty() && probes.all { it.index < guard })
+        assertTrue(rules[guard]["rules"]!!.jsonArray.contains(Json.parseToJsonElement("""{"inbound":["tun"]}""")))
+    }
+
     @Test fun unknownOwnerIsRefusedWhenDirectDefaultAndAnAppUsesAVpn() {
         val unknown = """{"package_name_regex":["."],"invert":true,"action":"reject"}"""
         // A lookup's: from the phone's apps only, as the tailnet's own lookups name no app either. Addresses pass (a
@@ -510,7 +565,7 @@ class CompilerTest {
         // An app on a route that is blocked or missing still counts (its apps are refused).
         assertEquals(1, conns(directDefault, blocked = setOf("us")))
         assertEquals(1, conns(directDefault.copy(apps = mapOf("com.a" to "gone", "com.x" to DIRECT))))
-        // Connections: nothing changes when the default is a VPN route, or no app leaves Direct.
+        // The Direct-default rule also covers ICMP. A VPN default uses a separate data-only rule.
         assertEquals(0, conns(example))
         assertEquals(0, conns(directDefault.copy(apps = mapOf("com.x" to DIRECT))))
         assertEquals(0, conns(directDefault.copy(apps = mapOf("com.x" to DIRECT)), lockdown = true))

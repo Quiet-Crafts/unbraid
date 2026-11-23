@@ -124,7 +124,8 @@ class BlockTest {
         assertTrue(lax["inbounds"]!!.jsonArray[0].jsonObject["route_exclude_address"] != null)
         assertEquals("reject", lax.rules().first { it.strings("package_name") == listOf("com.b") }.text("action"))
         val none = compile(setup.copy(apps = mapOf("com.a" to "us")))
-        assertTrue(none.rules().none { it["package_name_regex"] != null || it.text("network") == "icmp" || it.text("type") == "logical" })
+        // Removing Block removes its blanket owner and ping refusals; distinct VPN assignments still guard data.
+        assertTrue(none.rules().none { it["package_name_regex"] != null || it.text("network") == "icmp" || it == unnamed })
         assertTrue(none["inbounds"]!!.jsonArray[0].jsonObject["route_exclude_address"] != null)
     }
 

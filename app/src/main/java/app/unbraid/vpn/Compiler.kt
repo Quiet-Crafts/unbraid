@@ -444,6 +444,10 @@ object Compiler {
                     }
                     // Everything left follows the default: refused while it has no tunnel, after the LAN and home rules above.
                     if (defaultBlocked) { add(obj("action" to "reject", "no_drop" to true)); return@putJsonArray }
+                    // A socket without an owner could belong to an app assigned another exit or one that's unavailable.
+                    // Hold it before the default's sign-in exception and DNS. Ping follows the VPN default by design.
+                    if (s.defaultRoute != DIRECT && perApp.isNotEmpty() && barred.isEmpty())
+                        add(obj("type" to "logical", "mode" to "and", "rules" to JsonArray(unnamed + obj("network" to "icmp", "invert" to true)), "action" to "reject"))
                     if (onTs(s.defaultRoute)) tsLogin.forEach { add(obj(it, "outbound" to "direct")) }
                     // A connection Android can't name the app of matches no app rule. With Direct as the default it may
                     // be one of an app kept on a VPN, so it is refused rather than sent out on the phone's own connection.

@@ -227,8 +227,9 @@ object RestoreTraffic {
         val first = list.indexOfFirst { r -> keys(r).any { it in setOf("domain", "domain_suffix", "ip_cidr", "network", "port", "protocol", "query_type") } }.let { if (it < 0) Int.MAX_VALUE else it }
         return list.mapIndexed { i, r -> keys(r).let { k -> when {
             "domain" in k || "domain_suffix" in k -> By.Name
-            "ip_cidr" in k || "network" in k -> By.Address
+            "ip_cidr" in k -> By.Address
             "package_name" in k || "package_name_regex" in k -> if (i < first) By.AppFirst else By.App
+            "network" in k -> By.Address
             else -> By.None
         } } }
     }

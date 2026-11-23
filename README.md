@@ -206,7 +206,9 @@ apps -> TUN -> sing-box -> rules: block, DNS, home, LAN, website routes, the app
 ```
 
 Each TCP and UDP connection is routed by the app that owns it, which Android reports through
-`ConnectivityManager.getConnectionOwnerUid`. When an app hands a connection to another app or system service, such as
+`ConnectivityManager.getConnectionOwnerUid`. If Android cannot identify the owner of a TCP or UDP connection and an app in the tunnel has its own route,
+unbraid refuses the connection before it can use the default route. Website and network rules still run first.
+When an app hands a connection to another app or system service, such as
 for a download, a browser tab or a push message, that connection follows the other app or service's route. Ping has no owning app, so it follows the default route (when Direct is the default and other apps use VPN routes, internet ping is blocked instead). DNS is answered with fake addresses and looked up again on the exit
 the app really uses, so a site sees the country you picked for that app, or for that website when it has a route of its own. Apps you set to Direct are left out of the
 VPN by Android itself, unless you turn on "Block connections without VPN" or set the DNS filter to cover Direct
