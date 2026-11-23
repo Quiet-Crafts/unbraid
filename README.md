@@ -152,7 +152,8 @@ would cover every website that ends in it; add the website itself.
 An app on Block gets no internet connection while unbraid is connected: not through a route, not Direct, and no
 names are looked up for it. A switch decides whether it can still reach devices on your local network. While any
 app is blocked, unbraid refuses pings and connections that Android can't tie to an app; a name lookup Android can't
-tie to an app still gets a stand-in address, and other kinds of such lookups get an empty answer. A blocked website can't be
+tie to an app is refused for tailnet names. Local names use the local resolver if the switch allows it. For other
+permitted names, address lookups get a stand-in, HTTPS and SVCB lookups get an empty answer, and other record types are refused. A blocked website can't be
 looked up in the apps that go through unbraid, unless a more specific website under it has a route of its own. Block works only while unbraid is connected; for the time it is
 off, use Android's "Block connections without VPN".
 

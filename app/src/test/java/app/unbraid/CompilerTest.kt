@@ -1161,6 +1161,47 @@ class CompilerTest {
 
     // ---- tailnet DNS ----
 
+    @Test fun unattributedAppLookupsCannotReachTailnetDnsWhileAnAppIsBlocked() {
+        val block = app.unbraid.data.BLOCK
+        val headscale = example.home.copy(tsControlUrl = "https://control.example.org", tsSuffixAllowed = "corp.example")
+        for ((home, suffix) in listOf(example.home to "ts.net", headscale to "corp.example")) {
+            for (blockLan in listOf(false, true)) {
+                val s = example.copy(home = home, prefs = example.prefs.copy(blockLan = blockLan), apps = example.apps + ("com.barred" to block))
+                val raw = compile(s, tsSuffix = suffix)
+                val dns = raw["dns"]!!.jsonObject
+                val preview = app.unbraid.data.RestoreTraffic.Config(raw.toString(), s)
+                for (name in listOf(suffix, "printer.$suffix")) for (type in listOf("A", "AAAA", "HTTPS", "SVCB", "TXT", "PTR")) {
+                    assertEquals("$name $type", "reject", RoutingProbe.lookup(dns, "", name, type))
+                    assertEquals(app.unbraid.data.RestoreTraffic.HELD, app.unbraid.data.RestoreTraffic.lookup(preview, emptySet(), name, type)?.out?.exit)
+                }
+            }
+        }
+    }
+
+    @Test fun knownAppsAndEngineLookupsKeepTheirTailnetDnsPolicy() {
+        val s = example.copy(apps = example.apps + ("com.barred" to app.unbraid.data.BLOCK),
+            sites = mapOf("hidden.ts.net" to app.unbraid.data.BLOCK))
+        for (blockLan in listOf(false, true)) {
+            val dns = compile(s.copy(prefs = s.prefs.copy(blockLan = blockLan)))["dns"]!!.jsonObject
+            for (type in listOf("A", "AAAA", "TXT", "HTTPS", "SVCB", "PTR")) {
+                assertEquals("dns-tailnet", RoutingProbe.lookup(dns, "com.a", "peer.ts.net", type))
+                for (inbound in listOf("", Compiler.TS_TAG))
+                    assertEquals("dns-tailnet", RoutingProbe.lookup(dns, "", "peer.ts.net", type, inbound))
+                assertEquals("reject", RoutingProbe.lookup(dns, "com.barred", "peer.ts.net", type))
+                assertEquals("reject", RoutingProbe.lookup(dns, "com.a", "hidden.ts.net", type))
+                assertEquals("reject", RoutingProbe.lookup(dns, "", "hidden.ts.net", type, inbound = ""))
+                assertEquals(if (blockLan) "reject" else "local", RoutingProbe.lookup(dns, "", "printer.lan", type))
+            }
+            assertEquals("fake", RoutingProbe.lookup(dns, "", "ts.net.example", "A"))
+        }
+        val unapproved = s.copy(home = example.home.copy(tsControlUrl = "https://control.example.org"))
+        assertEquals("fake", RoutingProbe.lookup(compile(unapproved, tsSuffix = "corp.example")["dns"]!!.jsonObject, "", "host.corp.example", "A"))
+        val exitOnly = s.copy(home = Home(), defaultRoute = "ts", routes = s.routes + Route("ts", tsExit = "nas"))
+        assertEquals("fake", RoutingProbe.lookup(compile(exitOnly)["dns"]!!.jsonObject, "", "peer.ts.net", "A"))
+        val dns = compile(example)["dns"]!!.jsonObject
+        assertEquals("dns-tailnet", RoutingProbe.lookup(dns, "", "peer.ts.net", "TXT"))
+    }
+
     @Test fun tailnetSuffixIsRoutedToTailscaleDns() {
         fun suffixes(suffix: String?, home: Home = example.home): List<String> {
             val s = example.copy(home = home)

@@ -273,14 +273,20 @@ object Compiler {
                         if (own.isEmpty()) obj(*match(names), "action" to "reject")
                         else obj("type" to "logical", "mode" to "and", "rules" to JsonArray(listOf(obj(*match(names)), obj(*match(own), "invert" to true))), "action" to "reject")
                     })
-                    if (homeTs && tsDomains.isNotEmpty()) add(obj("domain_suffix" to arr(*tsDomains.toTypedArray()), "server" to "dns-tailnet"))
+                    if (homeTs && tsDomains.isNotEmpty()) {
+                        val tailnetNames = "domain_suffix" to arr(*tsDomains.toTypedArray())
+                        // An unidentified app may be blocked. The tailnet's own lookups have no TUN inbound.
+                        if (barred.isNotEmpty()) add(obj("type" to "logical", "mode" to "and",
+                            "rules" to JsonArray(unnamed + obj(tailnetNames)), "action" to "reject"))
+                        add(obj(tailnetNames, "server" to "dns-tailnet"))
+                    }
                     // With the local network blocked too for blocked apps, a local name Android names no app for may be a blocked
                     // app's: never asked of the local network's resolver.
                     if (s.prefs.lan && barred.isNotEmpty() && s.prefs.blockLan)
                         add(obj("type" to "logical", "mode" to "and", "rules" to JsonArray(unnamed + obj("domain_suffix" to arr(*LOCAL_NAMES.toTypedArray()))), "action" to "reject"))
                     if (s.prefs.lan) add(obj("domain_suffix" to arr(*LOCAL_NAMES.toTypedArray()), "server" to "local"))
                     // While an app is blocked, a lookup Android names no app for may be that app's: other than an address (or
-                    // a name of the tailnet or the local network, answered above), refused before any website's rule.
+                    // a local name allowed above), answered empty or refused before the remaining website rules.
                     if (barred.isNotEmpty()) unnamedLookups.forEach { add(it) }
                     add(obj("query_type" to arr("A", "AAAA"), "server" to "fake", "rewrite_ttl" to 1))
                     // HTTPS and SVCB records can carry address hints, which a program would connect to as they are: not stand-in
