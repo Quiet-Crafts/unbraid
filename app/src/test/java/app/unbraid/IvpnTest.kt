@@ -4,6 +4,13 @@ import app.unbraid.data.AuthException
 import app.unbraid.data.Challenge
 import app.unbraid.data.Ivpn
 import app.unbraid.data.Location
+import app.unbraid.data.NordApi
+import app.unbraid.data.Route
+import app.unbraid.data.Setup
+import app.unbraid.ui.ivpnKeyNote
+import app.unbraid.ui.ivpnKeyPending
+import app.unbraid.vpn.LinkPicker
+import app.unbraid.vpn.VpnState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -101,6 +108,30 @@ class IvpnTest {
         try { Ivpn.rekeyed(200 to """{"status":200,"ip_address":"10.0.0.1/8x","kem_cipher1":"good"}""", pending, 0); fail() } catch (e: IOException) { }
         // An account saved before these fields existed still reads.
         assertEquals(0L, Ivpn.account("""{"accountId":"a","sessionToken":"t","privateKey":"k","ipAddress":"10.0.0.2"}""").keyAt)
+    }
+
+    @Test fun transientKeyChangeKeepsTheConfirmedLinkAndExplainsThePendingReply() {
+        val account = acct.copy(psk = PSK, pending = Ivpn.Pending("next", "public", "kemPub", "kem"))
+        val route = Route("ivpn-route", Location("ivpn", countryCode = "NL"))
+        val setup = Setup(routes = listOf(route), defaultRoute = route.id)
+        fun encoded(a: Ivpn.Account) = NordApi.json.encodeToString(Ivpn.Account.serializer(), a)
+        val accounts = mapOf(Ivpn.id to encoded(account))
+        try { Ivpn.rekeyed(503 to """{"status":503}""", account, 1); fail() }
+        catch (e: IOException) { assertFalse(e is Ivpn.Rejected || e is AuthException) }
+
+        val link = Ivpn.link(list, route.loc, account)
+        assertEquals(acct.privateKey, link.peer.privateKey)
+        assertEquals(PSK, link.peer.presharedKey)
+        val picked = LinkPicker.pick(setup, mapOf(route.id to link), setup, accounts, accounts,
+            emptyMap(), offline = true) { Ivpn }
+        assertTrue(picked.blocked.isEmpty())
+        val on = VpnState(phase = VpnState.Phase.On, servers = picked.links.mapValues { it.value.server })
+        fun note(a: Ivpn.Account, vpn: VpnState = on) =
+            ivpnKeyNote(route, true, ivpnKeyPending(encoded(a)), vpn)
+        assertEquals("IVPN key change pending. unbraid will retry if needed.", note(account))
+        assertNull(note(account, on.copy(stalled = setOf(route.id))))
+        assertNull(note(account, on.copy(stuck = mapOf(Ivpn.id to true))))
+        assertNull(note(Ivpn.rekeyed(200 to """{"status":200,"kem_cipher1":"good"}""", account, 2)))
     }
 
     /** The Port setting also takes a number of the user's own, only inside IVPN's ranges; a typed port is used as is. */

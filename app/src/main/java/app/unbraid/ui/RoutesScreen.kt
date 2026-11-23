@@ -107,6 +107,7 @@ import app.unbraid.data.BLOCK
 import app.unbraid.data.DIRECT
 import app.unbraid.data.MAX_PROFILES
 import app.unbraid.data.Home
+import app.unbraid.data.Ivpn
 import app.unbraid.data.Nord
 import app.unbraid.data.Providers
 import app.unbraid.data.Route
@@ -161,6 +162,19 @@ internal fun routeWarning(stalled: Boolean, notAnswering: Boolean, offline: Stri
     // Own servers only: a provider's downloaded file (PureVPN's, unused for a while) may simply have expired.
     notAnswering -> "Not answering. If this file came from a provider, it may have expired: download a new one."
     else -> null
+}
+
+/** An unfinished saved key change may still be using a working tunnel. Only the account flag reaches the cards. */
+internal fun ivpnKeyPending(account: String?) =
+    account != null && runCatching { Ivpn.account(account).pending != null }.getOrDefault(false)
+
+internal fun ivpnKeyNote(route: Route?, active: Boolean, pending: Boolean, vpn: VpnState): String? {
+    if (!pending || !active || vpn.phase != Phase.On || route == null || route.imported || route.loc.provider != Ivpn.id) return null
+    // A refusal applies to the account. A temporary failure on a different IVPN route needn't hide this one's note.
+    val refused = vpn.stuck[Ivpn.id]
+    if (refused == true || (refused == false && route.id !in vpn.servers) ||
+        route.id in vpn.stalled || route.id in vpn.notAnswering) return null
+    return "IVPN key change pending. $APP will retry if needed."
 }
 
 /** Apps whose chosen route no longer exists: [n] of them, offline until they get another. */
@@ -307,6 +321,9 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     val pendingOf = { r: ExitReport? -> r != null && r.ip == null && asking }
     // Right after a sign-in, a provider's new key may not reach all its servers for a minute: say so instead of nothing.
     val accounts by ui.accounts.collectAsStateWithLifecycle()
+    val ivpnAccount = accounts[Ivpn.id]
+    val keyPending = remember(ivpnAccount) { ivpnKeyPending(ivpnAccount) }
+    fun keyNote(route: Route?) = ivpnKeyNote(route, lit && route?.id in activeIds, keyPending, vpn)
     val settingUp by produceState(emptySet<String>(), on, setup, accounts) {
         while (true) {
             value = if (on) Providers.settingUp().filterTo(HashSet()) { p -> setup.activeRoutes.any { !it.imported && it.loc.provider == p } } else emptySet()
@@ -451,6 +468,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         extra = if (route != null && server != null) serverId(route, server) else null,
                         border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
                         exit = exitOf(shown.defaultRoute)?.takeIf { offlineExit(vpn, route) == null }?.let { it to pendingOf(it) },
+                        keyNote = keyNote(route),
                         warning = routeWarning(lit && shown.defaultRoute in vpn.stalled, lit && shown.defaultRoute in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }),
                     ) { sheet = shown.defaultRoute } }
                 }
@@ -476,6 +494,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     Rise("routes", i + 1, reveal) { RouteRow(
                         ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size), sites = sitesBy[id].orEmpty(), hideApps = hideApps,
                         exit = if (route == null || offlineExit(vpn, route) != null) null else exitOf(id)?.let { it to pendingOf(it) },
+                        keyNote = keyNote(route),
                         warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }), blocked = id == BLOCK,
                     ) { sheet = id } }
                 }
@@ -805,7 +824,7 @@ internal fun appsLabel(pkgs: List<String>, labels: Map<String, String>, sites: L
 @Composable
 private fun DefaultTile(
     key: String, apps: String, code: String?, chip: Color, direct: Boolean, title: String, meta: String, extra: String?, border: Color,
-    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, onClick: () -> Unit,
+    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, keyNote: String? = null, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
@@ -835,7 +854,7 @@ private fun DefaultTile(
             Text(meta, style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             extra?.let { Text(it, style = Type.code, color = Ink.dim, maxLines = 1) }
         }
-        warning?.let { Text(it, style = Type.caption, color = Ink.bad) }
+        (warning ?: keyNote)?.let { Text(it, style = Type.caption, color = if (warning != null) Ink.bad else Ink.dim) }
         exit?.let { (r, pending) -> ExitLine(r, pending) }
     }
 }
@@ -844,7 +863,7 @@ private fun DefaultTile(
 @Composable
 private fun RouteRow(
     ui: Ui, route: Route?, live: Map<String, Server>, pkgs: List<String>, labels: Map<String, String>, lit: Boolean, shape: Shape,
-    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, sites: List<String> = emptyList(), blocked: Boolean = false, hideApps: Boolean = false, onClick: () -> Unit,
+    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, keyNote: String? = null, sites: List<String> = emptyList(), blocked: Boolean = false, hideApps: Boolean = false, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val press = squish(source)
@@ -864,7 +883,7 @@ private fun RouteRow(
     val where = @Composable { end: Boolean ->
         Text(route?.name ?: if (blocked) "Block" else "Direct", style = Type.title, color = Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
         Text(route?.let { place(it, live, ui.setup.value.routes) } ?: if (blocked) "No traffic" else "Skips the VPN", style = Type.caption, color = Ink.dim, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
-        warning?.let { Text(it, style = Type.caption, color = Ink.bad, textAlign = if (end) TextAlign.End else null) }
+        (warning ?: keyNote)?.let { Text(it, style = Type.caption, color = if (warning != null) Ink.bad else Ink.dim, textAlign = if (end) TextAlign.End else null) }
         if (!wide) exit?.let { (r, pending) -> ExitLine(r, pending) }
     }
     Column(
