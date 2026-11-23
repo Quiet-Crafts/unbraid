@@ -285,6 +285,68 @@ class RestoreTrafficTest {
         assertEquals(listOf("Your home WireGuard connects to another server at 203.0.113.7."), notes(home, home.copy(home = Home(wg = home.home.wg!!.copy(publicKey = "C".repeat(42) + "E=")))))
     }
 
+    @Test fun openVpnServerTrustChangesAreShown() {
+        fun ca(file: String) = javaClass.getResource("/ovpn/$file.ovpn")!!.readText()
+            .substringAfter("<ca>").substringBefore("</ca>").trim()
+        val a = ca("nord-double.udp")
+        val b = ca("expressvpn")
+        val pin = "ab".repeat(32)
+        val other = "cd".repeat(32)
+        fun config(certs: String, checks: String) = "client\ndev tun\nremote office.example 1194\n" +
+            (if (certs.isEmpty()) "" else "<ca>\n$certs\n</ca>\n") + checks
+        fun setup(text: String) = base.copy(servers = listOf(OwnServer("office", ovpn = Manual.parseOvpn(text, "Office", "", ""))))
+        fun check(before: String, after: String, changed: Boolean) {
+            val warning = "\"Office\" changes how it verifies the OpenVPN server's identity."
+            assertEquals(if (changed) listOf(warning) else emptyList<String>(), notes(setup(before), setup(after)))
+        }
+        val rules = "verify-x509-name Office name\npeer-fingerprint $pin\nremote-cert-tls server\n"
+        val here = config(a, rules)
+        check(here, config(b, rules), true)
+        check(here, config("", rules), true)
+        for (next in listOf(rules.replace(pin, other), rules.replace("Office", "office"), rules.replace("Office name", "Office name-prefix"),
+                rules.replace("remote-cert-tls server", "remote-cert-tls client"), rules + "remote-cert-ku a0\n",
+                rules + "tls-cert-profile preferred\n", rules + "ns-cert-type server\n")) {
+            check(here, config(a, next), true)
+        }
+        val cert = Manual.pemBlocks(a).first()
+        val rewrapped = cert.lines().let { rows -> listOf(rows.first()) + rows.drop(1).dropLast(1).joinToString("").chunked(20) + rows.last() }.joinToString("\n")
+        val equivalent = rules.replace("remote-cert-tls server\n", "").replace(pin, pin.uppercase().chunked(2).joinToString(":"))
+        check(config("$cert\n$b", rules + "peer-fingerprint $other\n"), config("$b\n$rewrapped\n$cert",
+            "peer-fingerprint $other\n$equivalent" + "tls-cert-profile legacy\nverb 4\n"), false)
+        check(config(a, "verify-x509-name Office\n"), config(a, "verify-x509-name Office subject\n"), false)
+        check(config("", rules), config("", rules + "tls-cert-profile preferred\n"), false)
+        check(here, here + "<cert>\n$cert\n</cert>\n<key>\n-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n</key>\n", false)
+        check(here, here.replace("verify-x509-name Office name", "verify-x509-name old name\nverify-x509-name Office name"), false)
+        check(config(a, "remote-cert-ku a0 88\n"), config(a, "remote-cert-ku 88 A0 a0\n"), false)
+        check(config(a, "remote-cert-ku 80 a0\n"), config(a, "remote-cert-ku 80\n"), false)
+        check(config(a, "remote-cert-ku 0xa0\n"), config(a, "remote-cert-ku a0\n"), true)
+        check(config(a, "remote-cert-ku 0 88\n"), config(a, "remote-cert-ku 88 0\n"), true)
+        check(config(a, "remote-cert-eku \"TLS Web Server Authentication\"\n"), config(a, "remote-cert-eku 1.3.6.1.5.5.7.3.1\n"), false)
+        check(config(a, "remote-cert-eku 1.3.6.1.5.5.7.3.1\n"), config(a, "remote-cert-tls server\n"), true)
+    }
+
+    @Test fun restoredOpenVpnProfilesCompareTheTrustThatWillRun() {
+        val original = "client\ndev tun\nremote office.example 1194\npeer-fingerprint ${"ab".repeat(32)}\n"
+        val peer = Manual.parseOvpn(original, "Office", "", "")
+        val route = Route("office", ovpn = peer, own = "server")
+        val here = Setup(routes = listOf(route), servers = listOf(OwnServer("server", ovpn = peer)),
+            defaultRoute = DIRECT, profiles = listOf(app.unbraid.data.Profile("Work", "office")), version = VERSION)
+        fun preview(text: String, keys: Boolean, keep: Boolean): List<String> {
+            val replacement = peer.copy(config = text, username = "new", password = "credentials")
+            val next = here.copy(servers = listOf(OwnServer("server", ovpn = replacement)),
+                routes = listOf(route.copy(ovpn = replacement)))
+            val file = Backup.read(Backup.export(next, "", 0, keys))
+            return app.unbraid.ui.RestoreGate.check(app.unbraid.ui.RestoreGate.Ask(here, file, keep)).notes
+        }
+        val note = "\"Office\" changes how it verifies the OpenVPN server's identity."
+        val replaced = original.replace("ab".repeat(32), "cd".repeat(32))
+        for (keep in listOf(false, true)) {
+            assertEquals(1, preview(replaced, true, keep).count { it == note })
+            assertTrue(note !in preview(replaced, false, keep))
+            assertTrue(note !in preview(original + "verb 3\n", true, keep))
+        }
+    }
+
     @Test fun aWebsiteOnDirectTakesAVpnAppDirectThereToo() {
         val here = base.copy(defaultRoute = DIRECT, apps = mapOf("org.browser" to "nl"))
         // Android ties some of its traffic to no app: held off Direct while an app is on a VPN, its website rule now sends it Direct.
