@@ -70,8 +70,9 @@ object FakePool {
      * and its retry keep what runs: a change the engine refused before the old one was given up stays refused.
      */
     fun restoreInput(last: Compiler.Input, block: Int?, spent: Int?, probe: Pair<Int, String>, tsSuffixAllowed: String?, tsSuffix: String?,
-                     lockdown: Boolean, tsLoginPending: Boolean, move: Boolean, kin: (Setup) -> Set<String>): Compiler.Input {
-        val setup = if (move) last.setup else last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = tsSuffixAllowed))
+                     lockdown: Boolean, tsLoginPending: Boolean, move: Boolean, verify: (Setup) -> Setup = { it }, kin: (Setup) -> Set<String>): Compiler.Input {
+        val checked = verify(last.setup)
+        val setup = if (move) checked else checked.copy(home = checked.home.copy(tsSuffixAllowed = tsSuffixAllowed))
         return Compiler.Input(setup, last.links, last.selfPackage, if (move) last.lockdown else lockdown, last.tsDir, last.cacheFile, if (move) last.tsSuffix else tsSuffix, probe,
             block ?: restoreBlock(last.fakeBlock, spent), last.blocked, last.tsLoginPending && tsLoginPending, last.blockedKin + runCatching { kin(setup) }.getOrDefault(emptySet()))
     }

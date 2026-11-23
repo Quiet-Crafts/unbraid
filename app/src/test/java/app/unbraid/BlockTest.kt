@@ -143,7 +143,7 @@ class BlockTest {
         // Saved in the new format, so a build from before Block refuses the file instead of taking the app for one on a lost route.
         assertEquals(3, Setup(apps = mapOf("com.b" to BLOCK), version = VERSION).stamped.version)
         assertEquals(3, Setup(profiles = listOf(Profile("Kids", "nl", mapOf("com.b" to BLOCK))), version = VERSION).stamped.version)
-        assertEquals(2, Setup(apps = mapOf("com.b" to DIRECT), version = VERSION).stamped.version)
+        assertEquals(5, Setup(apps = mapOf("com.b" to DIRECT), version = VERSION).stamped.version)
         // An app sharing the blocked app's Android user id is never left outside the VPN, where it would take the blocked one along.
         val kin = setup.copy(apps = setup.apps + ("com.kin" to DIRECT) + ("com.free" to DIRECT))
         val links = kin.activeRoutes.associate { it.id to WgLink(sv(it.id), Nord.peer(sv(it.id), wgKey)) }

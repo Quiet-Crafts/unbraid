@@ -4,6 +4,7 @@ import app.unbraid.APP
 import app.unbraid.data.BLOCK
 import app.unbraid.data.DIRECT
 import app.unbraid.data.builtIn
+import app.unbraid.data.permitsApp
 import app.unbraid.data.Filters
 import app.unbraid.data.Home
 import app.unbraid.data.Link
@@ -105,6 +106,16 @@ object Compiler {
      */
     const val PROBE = "probe"
 
+    /** Platform owner label for an assigned app whose signing identity changed since the config was compiled. */
+    internal const val UNVERIFIED_OWNER = "@unverified"
+
+    internal fun ownerNames(s: Setup, names: List<String>, identity: (String) -> app.unbraid.data.AppIdentity?): List<String> =
+        if (names.any { it in s.apps && s.apps[it] != BLOCK && !s.permitsApp(it, identity) }) listOf(UNVERIFIED_OWNER) else names
+
+    /** Android excludes the entire UID. Every explicitly granted sibling must still own its grant. */
+    internal fun mayExclude(s: Setup, pkg: String, kin: Set<String>?, identity: (String) -> app.unbraid.data.AppIdentity?): Boolean =
+        s.outside(pkg) && kin != null && pkg in kin && kin.none { keeps(s, pkg, it) || it in s.apps && !s.permitsApp(it, identity) }
+
     /** Route id → the tunnel tag it runs on: routes that resolve to one server with one login share a tunnel. */
     fun shared(s: Setup, links: Map<String, Link>, blocked: Set<String> = emptySet()): Map<String, String> {
         val owners = HashMap<String, String>()
@@ -155,6 +166,9 @@ object Compiler {
         val refused = i.blocked + missing(s) + BLOCK
         // Apps on Block: refused before anything else is decided for them, a website's route, the home network and the LAN included.
         val barred = JsonArray(s.apps.filterValues { it == BLOCK }.keys.sorted().map(::JsonPrimitive))
+        // A named owner whose signature changed gets an exact rejection. Matching grants keep the usual unnamed policy.
+        val deniedOwners = if (i.setup.apps.any { (pkg, route) -> route != BLOCK && pkg in i.setup.appSigners })
+            JsonArray(barred + JsonPrimitive(UNVERIFIED_OWNER)) else barred
         val active = s.activeRoutes.filter { it.id !in i.blocked }
         val defaultBlocked = s.defaultRoute in i.blocked
         require(active.mapNotNull { it.tsExit }.distinct().size <= 1) { "Tailscale allows one exit node at a time. Use the same node for every Tailscale route." }
@@ -268,7 +282,7 @@ object Compiler {
                 putJsonArray("rules") {
                     // Block comes first: no name is looked up for a blocked app, nor a blocked website's for anyone, except a
                     // name under it with a route of its own, which its own rule below answers.
-                    if (barred.isNotEmpty()) add(obj("package_name" to barred, "action" to "reject"))
+                    if (deniedOwners.isNotEmpty()) add(obj("package_name" to deniedOwners, "action" to "reject"))
                     for ((id, names) in runs) if (id == BLOCK) add(except(names).let { own ->
                         if (own.isEmpty()) obj(*match(names), "action" to "reject")
                         else obj("type" to "logical", "mode" to "and", "rules" to JsonArray(listOf(obj(*match(names)), obj(*match(own), "invert" to true))), "action" to "reject")
@@ -386,7 +400,7 @@ object Compiler {
                     if (tunnels.isNotEmpty()) add(obj("inbound" to JsonArray(tunnels.map(::JsonPrimitive)), "action" to "reject"))
                     // An app on Block gets nothing, on any route: before its lookups are taken over, the home network, the LAN, a
                     // website's route and its own.
-                    if (barred.isNotEmpty()) add(obj("package_name" to barred, "action" to "reject", "no_drop" to true))
+                    if (deniedOwners.isNotEmpty()) add(obj("package_name" to deniedOwners, "action" to "reject", "no_drop" to true))
                     add(obj("inbound" to arr("tun"), "protocol" to "dns", "action" to "hijack-dns"))
                     // UDP only: the engine never completes a hijacked TCP connection, and apps test "am I online?" by
                     // opening TCP to 8.8.8.8:53. That TCP goes out through the app's own exit like any other connection.

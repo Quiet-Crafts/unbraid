@@ -37,8 +37,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import app.unbraid.BuildConfig
 import app.unbraid.Unbraid
+import app.unbraid.data.AppIdentity
 import app.unbraid.data.Backup
 import app.unbraid.data.BEFORE_RESTORE
+import app.unbraid.data.DIRECT
+import app.unbraid.data.checkedApps
 import app.unbraid.data.Providers
 import app.unbraid.data.RestoreTraffic
 import app.unbraid.data.Setup
@@ -133,14 +136,33 @@ class RestoreGate {
 
     companion object {
         /** Works [a] out: slow for a large setup, never on the main thread. [kin]: the apps sharing a user id with an app; [tick] may throw to stop it. */
-        fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }, tick: () -> Unit = {}, installedAt: (String) -> Long? = { null }): Result {
+        internal fun check(a: Ask, kin: (String) -> Set<String> = { emptySet() }, tick: () -> Unit = {},
+                           installedAt: (String) -> Long? = { null }, identity: ((String) -> AppIdentity?)? = null): Result {
             val c = a.backup
             // As of now, as Restore works it out: a wait over by then only keeps less, so what can be kept here still can be.
             val now = System.currentTimeMillis()
             val plain = a.here.restoredFrom(c.setup, null, now, c.keys)!!
             val kept = if (a.here.untouched) null else a.here.restoredFrom(c.setup, BEFORE_RESTORE, now, c.keys, installedAt)
             val next = if (a.keep && kept != null) kept else plain
-            return Result(RestoreTraffic.notes(a.here, next, kin, tick), Backup.weak(plain, a.here), kept != null, plain.servers.count { it.keyless }, kept?.profiles?.lastOrNull()?.name)
+            // Check what could run here, including saved profiles selected by a network change or a tile.
+            // Both sides see the same package identities. The backup and the choices stored on restore stay intact.
+            val signers = mutableMapOf<String, AppIdentity?>()
+            fun signer(pkg: String): AppIdentity? {
+                if (pkg !in signers) { tick(); signers[pkg] = identity?.invoke(pkg) }
+                return signers[pkg]
+            }
+            fun checked(s: Setup) = s.checkedApps(::signer).copy(profiles = s.profiles.map { it.checkedApps(::signer) })
+            val notes = RestoreTraffic.notes(checked(a.here), checked(next), kin, tick)
+            // Missing packages and an unreadable signer are indistinguishable here. Either can match later.
+            val unresolved = (next.profiles + next.live).flatMap { profile ->
+                profile.appSigners.keys.filter { signers[it] == null }.mapNotNull(profile.apps::get)
+            }
+            val limit = when {
+                DIRECT in unresolved -> "An app identity could not be checked. If the installed app matches, its restored Direct route can use the phone's own connection."
+                unresolved.isNotEmpty() -> "An app identity could not be checked. If the installed app matches, it can use its restored route."
+                else -> null
+            }
+            return Result(notes + listOfNotNull(limit), Backup.weak(plain, a.here), kept != null, plain.servers.count { it.keyless }, kept?.profiles?.lastOrNull()?.name)
         }
     }
 }
@@ -176,6 +198,8 @@ class BackupFlow(private val ui: Ui) {
         private set
     private var judging: Job? = null
     private val gate = RestoreGate()
+    private var judgedApps: List<AppInfo>? = null
+    private var judgedDisclosure = false
     /** Bumped on every change of [gate], so the sheet follows it. */
     private var seen by mutableIntStateOf(0)
     /** What restoring [opened] makes weaker ([RestoreTraffic.notes]); null while it is worked out. */
@@ -207,6 +231,13 @@ class BackupFlow(private val ui: Ui) {
      * that share their user id with another are told to the walk, as Android and the engine decide by user id.
      */
     fun judge(here: Setup) {
+        val disclosed = ui.disclosed.value
+        val apps = ui.apps.value
+        if (apps !== judgedApps || disclosed != judgedDisclosure) {
+            gate.open(opened)
+            judgedApps = apps
+            judgedDisclosure = disclosed
+        }
         val ask = gate.ask(here, keep) ?: return
         seen++
         judging?.cancel()
@@ -215,18 +246,19 @@ class BackupFlow(private val ui: Ui) {
         judging = ui.viewModelScope.launch {
             val r = withContext(Dispatchers.Default) {
                 // The installed apps by user id, read once.
-                val all = runCatching { pm.getInstalledApplications(0) }.getOrDefault(emptyList())
-                val uid = all.associate { it.packageName to it.uid }
-                val byUid = all.groupBy({ it.uid }, { it.packageName })
+                val all = if (disclosed) runCatching { pm.getInstalledApplications(0) }.getOrNull() else null
+                val uid = all.orEmpty().associate { it.packageName to it.uid }
+                val byUid = all.orEmpty().groupBy({ it.uid }, { it.packageName })
                 // Stopped as soon as the sheet is closed or the check asked again.
-                RestoreGate.check(ask, { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }, { ensureActive() }, installedAt)
+                RestoreGate.check(ask, { pkg -> uid[pkg]?.let(byUid::get).orEmpty().toSet() }, { ensureActive() }, installedAt,
+                    identity = if (all == null) null else { pkg -> if (pkg in uid) AppIdentity.read(pm, pkg) else null })
             }
             gate.answer(ask, r); seen++
         }
     }
 
     /** Restore may go: the check is in for this backup, this setup and this keep choice, and weak servers are accepted. */
-    fun ready(here: Setup) = seen.let { gate.ready(here, keep) }
+    fun ready(here: Setup) = seen.let { judgedApps === ui.apps.value && judgedDisclosure == ui.disclosed.value && gate.ready(here, keep) }
 
     fun startSave() { close(); step = "save" }
 
@@ -415,6 +447,8 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
     val c = flow.opened ?: return
     val here by ui.setup.collectAsStateWithLifecycle()
     val vpn by ui.vpn.collectAsStateWithLifecycle()
+    val apps by ui.apps.collectAsStateWithLifecycle()
+    val disclosed by ui.disclosed.collectAsStateWithLifecycle()
     val b = c.setup
     val date = java.time.Instant.ofEpochMilli(c.created).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
         .format(java.time.format.DateTimeFormatter.ofPattern("d MMMM yyyy", java.util.Locale.UK))
@@ -430,7 +464,7 @@ private fun Confirm(ui: Ui, flow: BackupFlow) {
     if (missing > 0) Text("Saved without server keys: ${count(missing, "own server")} will need ${if (missing == 1) "its" else "their"} config added again. Until then, ${if (missing == 1) "its" else "their"} apps stay offline.", style = Type.caption, color = Ink.bad)
     if (here.home.wg != null && !(c.keys && b.home.wg == here.home.wg)) Text(homeNote(c.keys, b.home.wg != null), style = Type.caption, color = if (c.keys && b.home.wg == null) Ink.bad else Ink.dim)
     // What gets less protected, worked out for this backup, this setup and the keep choice; Restore waits for it.
-    LaunchedEffect(c, here, flow.keep) { flow.judge(here) }
+    LaunchedEffect(c, here, flow.keep, apps, disclosed) { flow.judge(here) }
     val notes = flow.notes
     if (notes == null) Text("Checking what the restore changes…", style = Type.caption, color = Ink.dim)
     else if (notes.isNotEmpty()) Text(notes.joinToString("\n"), style = Type.caption, color = Ink.bad)

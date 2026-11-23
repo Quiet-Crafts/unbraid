@@ -20,6 +20,58 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+/** Android verifies the rotation lineage for a single signer. Multiple signers identify the app as one exact set. */
+internal data class AppIdentity(val current: String, val ancestors: Set<String>) {
+    fun accepts(pin: String?) = !pin.isNullOrEmpty() &&
+        (pin == current || ',' !in current && ',' !in pin && pin in ancestors)
+
+    companion object {
+        fun read(pm: android.content.pm.PackageManager, pkg: String): AppIdentity? = runCatching {
+            from(pm.getPackageInfo(pkg, android.content.pm.PackageManager.PackageInfoFlags.of(
+                android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES.toLong())))
+        }.getOrNull()
+
+        fun from(info: android.content.pm.PackageInfo): AppIdentity? {
+            val signing = info.signingInfo ?: return null
+            fun digest(cert: android.content.pm.Signature) = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(cert.toByteArray()).toHexString()
+            val current = signing.apkContentsSigners.orEmpty().map(::digest).distinct().sorted()
+            if (current.isEmpty()) return null
+            val history = if (current.size == 1 && !signing.hasMultipleSigners())
+                signing.signingCertificateHistory.orEmpty().mapTo(HashSet(), ::digest) else emptySet()
+            return AppIdentity(current.joinToString(","), history)
+        }
+    }
+}
+
+/** Only app rules in the current profile run. Retain the user's original choice separately for reauthorization. */
+internal fun Setup.checkedApps(identity: (String) -> AppIdentity?): Setup {
+    val checked = live.checkedApps(identity)
+    return copy(apps = checked.apps, appSigners = checked.appSigners)
+}
+
+internal fun Profile.checkedApps(identity: (String) -> AppIdentity?): Profile {
+    val pins = appSigners.toMutableMap()
+    val checked = apps.mapValues { (pkg, route) ->
+        val verified = if (route == BLOCK) null else appSigners[pkg]?.let { pin -> identity(pkg)?.takeIf { it.accepts(pin) } }
+        if (verified == null) BLOCK else { pins[pkg] = verified.current; route }
+    }
+    return copy(apps = checked, appSigners = pins)
+}
+
+internal fun Setup.permitsApp(pkg: String, identity: (String) -> AppIdentity?): Boolean =
+    appSigners[pkg]?.let { identity(pkg)?.accepts(it) } == true
+
+/** Advance a verified signing lineage so reinstalling its previous key cannot recover a grant. Never adopt an unsigned choice. */
+internal fun Setup.advancedAppSigners(identity: (String) -> AppIdentity?): Setup {
+    val seen = HashMap<String, AppIdentity?>()
+    fun advance(pins: Map<String, String>) = pins.mapValues { (pkg, pin) ->
+        if (pkg !in seen) seen[pkg] = identity(pkg)
+        seen[pkg]?.takeIf { it.accepts(pin) }?.current ?: pin
+    }
+    return copy(appSigners = advance(appSigners), profiles = profiles.map { it.copy(appSigners = advance(it.appSigners)) })
+}
+
 /**
  * A provider account signed out of whose device slot isn't released yet ([Store.signOut]). [blob] holds its keys: sealed.
  * [since] is when it was signed out (0: not known, counted from the first failed try), [tries] the failed tries so far,
@@ -111,6 +163,17 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
         return marked(SETUP) { explicit.decodeFromString(Setup.serializer(), it).also { s -> newer = s.version > VERSION; check(!newer) { "newer format" } }.migrated() }
     }
 
+    /** Called off the main thread on start, package events and app-list refresh. Persist only a proven rotation. */
+    internal fun refreshAppSigners(identity: (String) -> AppIdentity?) {
+        val before = setup.value
+        val after = before.advancedAppSigners(identity)
+        if (before != after) update { current ->
+            if (current === before) after else current.advancedAppSigners(identity)
+        } else synchronized(this) {
+            if (setupFailed && !unreadable.value) saveSetup()
+        }
+    }
+
     /** Applies [f]; false when it couldn't be written (see [unsaved]), so callers keep a pasted secret on the clipboard. */
     @Synchronized
     fun update(f: (Setup) -> Setup): Boolean = change(f) && saveSetup()
@@ -142,7 +205,7 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     private fun change(f: (Setup) -> Setup, taken: (Boolean) -> Unit = {}) = synchronized(changing) {
         if (_unreadable.value) false else {
             _setup.update { old ->
-                f(old).let { new -> new.tidy(old.routes.map { it.id }.toSet() - new.routes.map { it.id }.toSet()).after(old) }
+                f(old).let { new -> new.tidy(old.routes.map { it.id }.toSet() - new.routes.map { it.id }.toSet()).after(old).tidyAppSigners() }
                     .takeIf { new -> reserved.none { g -> new.refusesRemoving(g(new), "") != null } }.also { taken(it != null) } ?: old
             }
             true

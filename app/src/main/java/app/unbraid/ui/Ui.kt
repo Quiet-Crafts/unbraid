@@ -20,6 +20,9 @@ import app.unbraid.Unbraid
 import app.unbraid.data.UpdateState
 import app.unbraid.data.Updates
 import app.unbraid.support.Report
+import app.unbraid.data.AppIdentity
+import app.unbraid.data.BLOCK
+import app.unbraid.data.checkedApps
 import app.unbraid.data.DIRECT
 import app.unbraid.stats.Stats
 import app.unbraid.data.Home
@@ -86,7 +89,32 @@ sealed interface Fetch {
 internal fun startFetch(fetches: Map<String, Fetch>, provider: String) = if (fetches[provider] == Fetch.Loading) null else fetches + (provider to Fetch.Loading)
 
 /** [uid]: its Android user id, which Android and the engine decide by: apps that share one go together. */
-data class AppInfo(val pkg: String, val label: String, val system: Boolean, val uid: Int)
+internal data class AppInfo(val pkg: String, val label: String, val system: Boolean, val uid: Int, val identity: AppIdentity? = null)
+
+/** Keep the saved choices available to edit, even when the installed app cannot use them. */
+internal class AppRoutes(val saved: Setup, val profileName: String? = saved.profile, identity: (String) -> AppIdentity?) {
+    val effective = saved.checkedApps(identity)
+    fun held(pkg: String) = effective.apps[pkg] == BLOCK && saved.apps[pkg] != BLOCK
+}
+
+/** The user's explicit choice applies to this profile. A different app cannot inherit a per-app DNS exception. */
+internal fun Setup.chooseAppRoute(profileName: String?, pkg: String, routeId: String?, identity: AppIdentity?): Setup {
+    if (routeId != BLOCK && identity == null) return this
+    val next = editing(profileName) { it.assigned(pkg, routeId, identity?.current) }
+    if (routeId == null || routeId == BLOCK || pkg !in prefs.filter.apps || identity == null) return next
+    val prior = viewAs(profileName)
+    if (identity.accepts(prior.appSigners[pkg])) return next
+    // Adding a choice to a blank profile doesn't replace a verified Direct app's existing filter preference.
+    if (prior.apps[pkg] == null || prior.apps[pkg] == BLOCK) {
+        if (apps[pkg] == DIRECT && identity.accepts(appSigners[pkg]) ||
+            profiles.any { it.apps[pkg] == DIRECT && identity.accepts(it.appSigners[pkg]) }) return next
+    }
+    return next.copy(prefs = prefs.copy(filter = prefs.filter.copy(apps = prefs.filter.apps - pkg)))
+}
+
+/** A grant requires both the signer the user saw and a fresh package read. Before disclosure no package is queried. */
+internal fun verifiedAppChoice(disclosed: Boolean, displayedPin: String?, read: () -> AppIdentity?) =
+    if (disclosed && displayedPin != null) read()?.takeIf { it.accepts(displayedPin) } else null
 
 /** Removed routes' apps follow the default. The default itself never moves: check [Setup.refusesRemoving] first. */
 private fun Setup.without(gone: Set<String>) = copy(routes = routes.filter { it.id !in gone }, apps = apps.filterValues { it !in gone })
@@ -111,7 +139,7 @@ internal fun keepKnown(s: Setup, known: Set<String>, now: Long = System.currentT
     val profiles = s.profiles.map { p -> p.copy(apps = keep(p.apps)) }
     val wait = (apps.keys + profiles.flatMap { it.apps.keys }).filterTo(HashSet()) { it in s.waiting && it !in known }
     return s.copy(apps = apps, profiles = profiles,
-        waiting = wait, waitingUntil = if (wait.isEmpty()) 0 else s.waitingUntil, waitingEach = s.waitingEach.filterKeys { it in wait })
+        waiting = wait, waitingUntil = if (wait.isEmpty()) 0 else s.waitingUntil, waitingEach = s.waitingEach.filterKeys { it in wait }).tidyAppSigners()
 }
 
 /**
@@ -175,7 +203,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** Counts catalog refreshes, also ones that brought the same list (its saved copy is fresh again). */
     val refreshed = MutableStateFlow(0)
     private val _apps = MutableStateFlow<List<AppInfo>>(emptyList())
-    val apps = _apps.asStateFlow()
+    internal val apps = _apps.asStateFlow()
+    private val pickerApp = state.getMutableStateFlow<Array<String>?>("appPickerIdentity", null)
     /** Store tips (Play build); null in the GitHub build. */
     val tips: TipJar? = Tips.jar(app)
 
@@ -605,16 +634,26 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                 // Archived apps (Android 15+) are not installed but still known, and come back with a tap: they keep their route.
                 val archived = if (android.os.Build.VERSION.SDK_INT >= 35) pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(PackageManager.MATCH_ARCHIVED_PACKAGES)).map { it.packageName to it.isArchived } else emptyList()
                 // One query for every app allowed online, not one permission check per app.
-                val online = pm.getPackagesHoldingPermissions(arrayOf(android.Manifest.permission.INTERNET), 0).mapTo(HashSet()) { it.packageName }
-                all.filter { it.packageName != self && it.packageName in online }
-                    .map { AppInfo(it.packageName, it.loadLabel(pm).toString(), it.flags and ApplicationInfo.FLAG_SYSTEM != 0 && pm.getLaunchIntentForPackage(it.packageName) == null, it.uid) }
-                    .sortedBy { it.label.lowercase() } to knownApps(all.map { it.packageName }, archived)
+                val online = pm.getPackagesHoldingPermissions(arrayOf(android.Manifest.permission.INTERNET), PackageManager.GET_SIGNING_CERTIFICATES)
+                online.mapNotNull { info ->
+                    val a = info.applicationInfo ?: return@mapNotNull null
+                    if (a.packageName == self || a.flags and ApplicationInfo.FLAG_INSTALLED == 0) return@mapNotNull null
+                    AppInfo(a.packageName, a.loadLabel(pm).toString(), a.flags and ApplicationInfo.FLAG_SYSTEM != 0 && pm.getLaunchIntentForPackage(a.packageName) == null,
+                        a.uid, runCatching { AppIdentity.from(info) }.getOrNull())
+                }.sortedBy { it.label.lowercase() } to knownApps(all.map { it.packageName }, archived)
             }.getOrNull()
-        } ?: return@launch
+        } ?: run {
+            if (n == appsAsked) _apps.value = apps.value.map { it.copy(identity = null) }
+            return@launch
+        }
         if (n != appsAsked) return@launch // a newer read is under way (checked and applied here, on the main thread)
         _apps.value = list
         val installedAt = installedAt()
         if (keepKnown(store.setup.value, known, installedAt = installedAt) != store.setup.value) store.edit { keepKnown(it, known, installedAt = installedAt) }
+        withContext(Dispatchers.IO) {
+            val identities = list.associate { it.pkg to it.identity }
+            store.refreshAppSigners(identities::get)
+        }
     } }
 
     /** A config file picked in a sign-in form, read here so a rotation during a slow read doesn't lose it. */
@@ -680,12 +719,14 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     /** A new route for [loc] (or the one already exiting there) for app [pkg], as one change; in the profile being viewed. */
     fun addRouteFor(pkg: String, loc: Location) {
+        val identity = currentChoice(pkg, pickerPin(pkg)) ?: return
+        val d = draft
         val f = { s: Setup ->
             val r = s.routes.firstOrNull { !it.imported && it.loc.ident() == loc.ident() } ?: Route(newId(), loc, hue = nextHue(s))
             // As [assign]: the app chose this route, also when it is the default.
-            s.copy(routes = if (r in s.routes) s.routes else s.routes + r).editing(draft) { p -> p.assigned(pkg, r.id) }
+            s.copy(routes = if (r in s.routes) s.routes else s.routes + r).chooseAppRoute(d, pkg, r.id, identity)
         }
-        if (draft != null) store.edit(f) else guarded(f = f)
+        saveAppChoice(d, pkg, identity, f)
     }
 
     /** Sets the default route of the profile being viewed to [loc] (a route already exiting there, or a new one). */
@@ -700,7 +741,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      * [limitAsk]. With one route of that provider already on a server, it offers to put both routes on that server.
      * [after] runs once [f] is saved, whether at once or on the user's yes.
      */
-    private fun guarded(after: () -> Unit = {}, f: (Setup) -> Setup) {
+    private fun guarded(after: () -> Unit = {}, stillValid: () -> Boolean = { true }, f: (Setup) -> Setup) {
         val old = setup.value
         val acc = accounts.value
         val o = Limits.over(old, f(old), { Limits.others(it, acc[it]) }) { p -> acc[p]?.let { a -> Providers.get(p)?.limit(a) } } ?: run { store.edit(f); after(); return }
@@ -710,9 +751,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val paired = f(old).let { n -> n.activeRoutes.any { r -> r.via != null && (r.loc.provider == o.provider || n.route(r.via)?.loc?.provider == o.provider) } }
         val anchor = old.activeRoutes.singleOrNull { !it.imported && it.loc.provider == o.provider }?.takeIf { a -> !paired && UnbraidVpn.running?.route(a.id)?.loc == a.loc }
         val server = anchor?.let { vpn.value.servers[it.id] }
-        limitAsk.value = LimitAsk(Limits.warning(name, o.limit, o.unit, o.n, o.others), { store.edit(f); after() }, server?.let { sv ->
+        limitAsk.value = LimitAsk(Limits.warning(name, o.limit, o.unit, o.n, o.others), { if (stillValid()) { store.edit(f); after() } }, server?.let { sv ->
             sv.name to {
-                if (setup.value.route(anchor.id)?.loc == anchor.loc && vpn.value.servers[anchor.id] == sv) {
+                if (stillValid() && setup.value.route(anchor.id)?.loc == anchor.loc && vpn.value.servers[anchor.id] == sv) {
                     store.edit { s ->
                         f(s).let { n -> n.copy(routes = n.routes.map { r -> if (!r.imported && r.loc.provider == o.provider && n.activeRoutes.any { it.id == r.id }) r.copy(loc = anchor.loc.copy(pinned = sv)) else r }) }
                     }
@@ -901,7 +942,10 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         if (s.routes.any { it.imported } || s.servers.isNotEmpty()) _signedIn.value = true
     }
     /** The setup as the viewed profile routes it: what Routes and Apps show. */
-    val shown = combine(setup, viewing) { s, v -> s.viewAs(v) }.stateIn(viewModelScope, SharingStarted.Eagerly, setup.value)
+    internal val appRoutes = combine(setup, viewing, apps) { s, v, installed ->
+        val byName = installed.associate { it.pkg to it.identity }
+        AppRoutes(s.viewAs(v), v?.takeIf { n -> s.profiles.any { it.name == n } } ?: s.profile, byName::get)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, AppRoutes(setup.value.viewAs(viewing.value), draft ?: setup.value.profile) { null })
     /** The viewed profile, if it exists and isn't the one in use: edits go to it alone. */
     private val draft get() = viewing.value?.takeIf { n -> n != setup.value.profile && setup.value.profiles.any { it.name == n } }
 
@@ -1029,13 +1073,54 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun moveProfile(name: String, by: Int) = store.edit { it.move(name, by) }
 
     /** App [pkg] chose route [routeId] (the default too: it stays there when the default changes); null = it follows the default. */
-    fun assign(pkg: String, routeId: String?) = editRoutes { p -> p.assigned(pkg, routeId) }
+    internal fun assign(pkg: String, routeId: String?, displayedPin: String? = pickerPin(pkg), profileName: String? = appProfile()) {
+        if (profileName != appProfile()) return
+        val identity = if (routeId == BLOCK) null else currentChoice(pkg, displayedPin) ?: return
+        val d = draft
+        val change = { s: Setup -> s.chooseAppRoute(d, pkg, routeId, identity) }
+        saveAppChoice(d, pkg, identity, change)
+    }
+
+    private fun saveAppChoice(d: String?, pkg: String, identity: AppIdentity?, change: (Setup) -> Setup) {
+        val active = setup.value.profile
+        if (d != null) store.edit(change) else guarded(stillValid = {
+            appProfile() == active && (identity == null || currentChoice(pkg, identity.current) != null)
+        }, f = change)
+    }
+
+    /** A picker may outlive a package replacement or process death. Bind its choice to the app that opened it. */
+    internal fun appPicker(a: AppInfo, profileName: String?): String? {
+        if (profileName != appProfile()) return null
+        val identity = currentChoice(a.pkg, a.identity?.current) ?: return null
+        pickerApp.value = arrayOf(a.pkg, identity.current, profileName.orEmpty())
+        return "app:${a.pkg}"
+    }
+
+    private fun appProfile() = draft ?: setup.value.profile
+    private fun pickerPin(pkg: String) = pickerApp.value?.takeIf { it.firstOrNull() == pkg && it.getOrNull(2) == appProfile().orEmpty() }?.getOrNull(1)
+
+    private fun currentChoice(pkg: String, displayedPin: String?): AppIdentity? {
+        verifiedAppChoice(disclosed.value, displayedPin) { AppIdentity.read(pm, pkg) }?.let { return it }
+        android.widget.Toast.makeText(getApplication(), "Couldn't verify this app. Check the app list and choose its route again.", android.widget.Toast.LENGTH_LONG).show()
+        refreshApps()
+        return null
+    }
+
+    internal fun appFilter(a: AppInfo, through: Boolean) {
+        val identity = currentChoice(a.pkg, a.identity?.current) ?: return
+        store.update { s ->
+            if (s.apps[a.pkg] != DIRECT || !identity.accepts(s.appSigners[a.pkg])) s
+            else s.copy(prefs = s.prefs.copy(filter = s.prefs.filter.let { f ->
+                f.copy(apps = if (through == f.directApps) f.apps - a.pkg else f.apps + (a.pkg to through))
+            }))
+        }
+    }
 
     /** Website [site] ([app.unbraid.data.Sites.clean]) goes through route [routeId] in the profile being viewed, whatever app opens it; null = no route of its own. */
     fun site(site: String, routeId: String?) = editRoutes { p -> p.copy(sites = if (routeId == null) p.sites - site else p.sites + (site to routeId)) }
 
     /** App [pkg] gives up its own route and follows the default of the profile being viewed. */
-    fun followDefault(pkg: String) = assign(pkg, null)
+    internal fun followDefault(a: AppInfo, profileName: String?) = assign(a.pkg, null, a.identity?.current, profileName)
 
     /** Route [id]'s own blocking choice; one equal to its provider page's is dropped, so the route follows the page again. */
     fun setFilter(id: String, on: Boolean) = store.update { it.blocking(id, on) }

@@ -154,7 +154,7 @@ class FakePoolTest {
     private fun input(block: Int, pending: Boolean = true) = Compiler.Input(setup, emptyMap(), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", "old.ts.net",
         1 to "old", block, setOf("nl"), tsLoginPending = pending, blockedKin = setOf("com.b"))
     private fun restore(last: Compiler.Input, block: Int?, spent: Int?, lockdown: Boolean = false, pending: Boolean = true, move: Boolean = false, kin: (Setup) -> Set<String> = { setOf("com.b") }) =
-        FakePool.restoreInput(last, block, spent, 2 to "new", null, "new.ts.net", lockdown, pending, move, kin)
+        FakePool.restoreInput(last, block, spent, 2 to "new", null, "new.ts.net", lockdown, pending, move, kin = kin)
 
     /**
      * A restore (also every move) runs what ran, with what may have changed since read again: a sibling of the blocked
@@ -237,7 +237,7 @@ class FakePoolTest {
         val tun = vpn.substringAfter("override fun openTun(").substringBefore("override fun ")
         assertFalse("openTun reads saved settings", tun.contains("store."))
         assertTrue(tun.contains("Compiler.searchDomain(tunInput)"))
-        assertEquals(2, Regex("""tunInput = input\b""").findAll(vpn).count()) // set by both starts of a compiled input
+        assertEquals(3, Regex("""tunInput = input\b""").findAll(vpn).count()) // both starts plus a signer change with identical engine JSON
         assertTrue(vpn.contains("if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix"))
     }
 
@@ -348,7 +348,7 @@ class FakePoolTest {
         assertTrue(vpn.contains("FakePool.spend(input.fakeBlock, lastBlock, filesDir) { store.fakeBlock = it }"))
         assertTrue(vpn.contains("FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->"))
         assertTrue(vpn.contains("FakePool.restoreInput(lastInput ?: error(\"nothing ran\"), block, spent, "))
-        assertTrue(vpn.contains("tsLoginPending, move) { blockedKin(it) }"))
+        assertTrue(vpn.contains("tsLoginPending, move, ::verifiedSetup) { blockedKin(it) }"))
         // An app whose lookup fails stays inside, at a start and on a restore alike; it costs no other app its own.
         assertTrue(vpn.contains("catch (e: RuntimeException) { null }"))
         assertTrue(vpn.contains("restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone, move = true)"))

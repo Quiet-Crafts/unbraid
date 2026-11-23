@@ -144,7 +144,8 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     val disclosed by ui.disclosed.collectAsStateWithLifecycle()
     val reveal = firstShow("apps")
     // The setup as the viewed profile routes it; its route list and prefs are the live ones.
-    val setup by ui.shown.collectAsStateWithLifecycle()
+    val routes by ui.appRoutes.collectAsStateWithLifecycle()
+    val setup = routes.effective
     val viewing by ui.viewing.collectAsStateWithLifecycle()
     val apps by ui.apps.collectAsStateWithLifecycle()
     // Apps by Android user id: an app on Direct may have to go as another app of its id ([keptWith]).
@@ -177,7 +178,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
 
     val query = q.trim()
     // The viewed profile's routes only: never another profile's, nor one no profile uses any more.
-    val offered = remember(setup, viewing) { setup.offered(viewing) }
+    val offered = remember(routes, viewing) { routes.saved.offered(viewing) }
     val motion = MaterialTheme.motionScheme
     // Grouped by exit: the other exits A to Z by name (Albania, Bulgaria, United States), then Direct, then the default.
     val rank = remember(setup) {
@@ -283,7 +284,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
             // Regrouping slides rows to their new place instead of jumping.
             Box(Modifier.animateItem(fadeInSpec = null, placementSpec = motion.defaultSpatialSpec(), fadeOutSpec = null).then(if (i == 0) tourAnchor(TourStop.AppsList) else Modifier)) {
                 Rise("apps", i, reveal) {
-                    AppRow(ui, a, setup, offered, byUid[a.uid].orEmpty().filter { it.pkg != a.pkg }, expanded = open == a.pkg, onToggle = {
+                    AppRow(ui, a, routes, offered, byUid[a.uid].orEmpty().filter { it.pkg != a.pkg }, expanded = open == a.pkg, onToggle = {
                         if (open == a.pkg) { if (openedAs != setup.routeOf(a.pkg)) land = a.pkg; open = null; openedAs = null }
                         else { open = a.pkg; openedAs = setup.routeOf(a.pkg) }
                     }, openPicker, draft = viewing != null && viewing != setup.profile, lockdown = lockdown)
@@ -322,15 +323,17 @@ private fun FilterChip(label: String, dot: Color?, on: Boolean, direct: Boolean 
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.data.Route>, kin: List<AppInfo>, expanded: Boolean, onToggle: () -> Unit, openPicker: (String) -> Unit, draft: Boolean = false, lockdown: Boolean = false) {
+private fun AppRow(ui: Ui, a: AppInfo, routes: AppRoutes, offered: List<app.unbraid.data.Route>, kin: List<AppInfo>, expanded: Boolean, onToggle: () -> Unit, openPicker: (String) -> Unit, draft: Boolean = false, lockdown: Boolean = false) {
     val haptic = LocalHapticFeedback.current
+    val setup = routes.effective
+    val held = routes.held(a.pkg)
     val explicit = setup.apps[a.pkg]
     // Apps of its user id that keep it from going Direct on its own: said in its menu and under its filter switch.
     val keptBy = keptWith(setup, a.pkg, kin)
     val current = setup.routeOf(a.pkg)
     val motion = MaterialTheme.motionScheme
     val ground by animateColorAsState(if (expanded) Ink.surface else Color.Transparent, motion.fastEffectsSpec(), label = "row")
-    val state = routeState(setup, a.pkg)
+    val state = if (held) "Blocked until you choose a route for this app" else routeState(setup, a.pkg)
     Column(Modifier.padding(horizontal = 8.dp).fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(ground)) {
         Row(
             Modifier.fillMaxWidth().heightIn(min = 60.dp).tap(onToggle, if (expanded) "Close" else "Choose a route")
@@ -341,6 +344,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(a.label, style = Type.body, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(a.pkg, style = Type.small, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (held) Text("Blocked until you choose a route", style = Type.small, color = Ink.bad)
             }
             // An empty profile has no default route yet: its unassigned apps have no exit.
             // Filled: the app chose this route (the default too); outlined: it follows the default.
@@ -359,8 +363,8 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
                 Tile(FOLLOW, "Follow default", Icons.layers, d?.let { Ink.route(it.hue) } ?: Ink.direct, tinted = false,
                     sub = followSub(setup)).takeIf { setup.defaultRoute.isNotEmpty() },
             ) + routeTiles(setup, offered) + Tile("", "More locations", Icons.more, Ink.dim, tinted = false)
-            RouteTiles(tiles, tickedTile(setup, a.pkg), outsideNote(setup, a.pkg, lockdown, keptBy) ?: BLOCK_NOTE.takeIf { explicit == BLOCK }) { id ->
-                when (id) { "" -> openPicker("app:${a.pkg}"); FOLLOW -> ui.followDefault(a.pkg); else -> ui.assign(a.pkg, id) }
+            RouteTiles(tiles, tickedTile(setup, a.pkg), if (held) "Choose a route below to authorize this installed app." else outsideNote(setup, a.pkg, lockdown, keptBy) ?: BLOCK_NOTE.takeIf { explicit == BLOCK }) { id ->
+                when (id) { "" -> ui.appPicker(a, routes.profileName)?.let(openPicker); FOLLOW -> ui.followDefault(a, routes.profileName); else -> ui.assign(a.pkg, id, a.identity?.current, routes.profileName) }
             }
         }
         // A Direct app's lookups: outside unbraid (the phone's DNS) or through it, with unbraid's filter.
@@ -369,7 +373,7 @@ private fun AppRow(ui: Ui, a: AppInfo, setup: Setup, offered: List<app.unbraid.d
         if (expanded && explicit == DIRECT && f.server() != null && !draft) {
             val on = f.through(a.pkg)
             GroupRow(0, 1, "Filter its lookups", lookupsSub(on, f.server()?.name, keptBy),
-                onClick = { ui.setPrefs { p -> p.copy(filter = p.filter.copy(apps = if (!on == p.filter.directApps) p.filter.apps - a.pkg else p.filter.apps + (a.pkg to !on))) } },
+                onClick = { ui.appFilter(a, !on) },
                 checked = on, trailing = { Toggle(on) }, modifier = Modifier.padding(start = 60.dp, end = 6.dp, bottom = 12.dp))
         }
     }

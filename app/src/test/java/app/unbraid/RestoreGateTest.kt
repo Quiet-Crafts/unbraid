@@ -1,5 +1,8 @@
 package app.unbraid
 
+import app.unbraid.data.AppIdentity
+import app.unbraid.data.BLOCK
+import app.unbraid.data.Profile
 import app.unbraid.data.Backup
 import app.unbraid.data.DIRECT
 import app.unbraid.data.Location
@@ -19,6 +22,29 @@ import org.junit.Test
 class RestoreGateTest {
     private val here = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands"))), defaultRoute = "nl", apps = mapOf("org.example.mail" to "nl"), version = VERSION)
     private fun open(s: Setup) = Backup.read(Backup.export(s, "3.0.2", 0))
+
+    @Test fun restoreComparesTheRoutesAuthorizedForThisPhone() {
+        val pkg = "org.example.mail"
+        val pin = "ab".repeat(32)
+        val otherPin = "cd".repeat(32)
+        val blocked = here.copy(apps = mapOf(pkg to BLOCK))
+        val direct = here.copy(apps = mapOf(pkg to DIRECT), appSigners = mapOf(pkg to pin))
+        val ask = RestoreGate.Ask(blocked, open(direct), false)
+        val matched = AppIdentity(pin, emptySet())
+        assertTrue(RestoreGate.check(ask, identity = { matched }).notes.isNotEmpty())
+        assertTrue(RestoreGate.check(ask, identity = { AppIdentity(otherPin, emptySet()) }).notes.isEmpty())
+        assertTrue(RestoreGate.check(ask, identity = { null }).notes.any { it.contains("phone's own connection") })
+        assertTrue(RestoreGate.check(ask).notes.any { it.contains("phone's own connection") })
+        assertEquals(DIRECT, ask.backup.setup.apps[pkg])
+
+        // A saved profile can become active later, even when the current profile has no assignment.
+        val profile = Profile("Work", defaultRoute = "nl", apps = blocked.apps)
+        val current = here.copy(apps = emptyMap(), profiles = listOf(profile))
+        val backup = current.copy(profiles = listOf(profile.copy(apps = direct.apps, appSigners = direct.appSigners)))
+        val profileAsk = RestoreGate.Ask(current, open(backup), false)
+        assertTrue(RestoreGate.check(profileAsk, identity = { matched }).notes.any { it.contains("Work") })
+        assertTrue(RestoreGate.check(profileAsk, identity = { null }).notes.any { it.contains("phone's own connection") })
+    }
 
     @Test fun restoreWaitsForTheCheckOfThisBackupSetupAndChoice() {
         val g = RestoreGate()

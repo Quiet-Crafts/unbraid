@@ -191,10 +191,15 @@ data class Profile(
     val added: List<String> = emptyList(),
     /** Websites with a route of their own ([Sites]): address → route id or [DIRECT]. A website's route beats its app's. */
     @SavedSites val sites: Map<String, String> = emptyMap(),
+    /** SHA-256 of the Android signing certificate(s) when each app route was chosen. */
+    val appSigners: Map<String, String> = emptyMap(),
 ) {
     val ready get() = defaultRoute.isNotEmpty()
     /** App [pkg] on route [routeId], its default included: a choice that stays when the default changes. Null = it follows the default. */
-    fun assigned(pkg: String, routeId: String?) = copy(apps = if (routeId == null) apps - pkg else apps + (pkg to routeId))
+    fun assigned(pkg: String, routeId: String?, signer: String? = null) = copy(
+        apps = if (routeId == null) apps - pkg else apps + (pkg to routeId),
+        appSigners = if (routeId == null || routeId == BLOCK || signer == null) appSigners - pkg else appSigners + (pkg to signer),
+    )
     /** The routes this profile lists: its default, those its apps and websites use, and those added to it. */
     val own get() = setOf(defaultRoute) + apps.values + sites.values + added
 }
@@ -227,7 +232,7 @@ fun String.takeGraphemes(n: Int): String = chars(this).let { b -> var end = 0; r
  * The newest [Setup.version]. 2: every value is written, defaults too (older files left out those equal to a default).
  * 3: website routes, which an older build would drop without a word; only a setup that has one is saved as 3 ([Setup.stamped]).
  */
-const val VERSION = 4
+const val VERSION = 5
 
 @Serializable
 data class Setup(
@@ -261,6 +266,8 @@ data class Setup(
      * import replace its placeholder route. A file without it (older versions) reads as false: set up by its user.
      */
     val pristine: Boolean = false,
+    /** Signers of the live app choices. A saved profile holds its own bindings. */
+    val appSigners: Map<String, String> = emptyMap(),
     /** Apps a restore brought that weren't on this phone yet: they keep their route until [waitingUntil] (epoch ms), to be installed. */
     val waiting: Set<String> = emptySet(),
     val waitingUntil: Long = 0,
@@ -275,10 +282,17 @@ data class Setup(
     val saved get() = profiles.map { if (it.name == profile) live else it }
 
     /** This setup routing as [p] does. */
-    private fun routedAs(p: Profile) = copy(defaultRoute = p.defaultRoute, apps = p.apps, added = p.added, sites = p.sites)
+    private fun routedAs(p: Profile) = copy(defaultRoute = p.defaultRoute, apps = p.apps, added = p.added, sites = p.sites, appSigners = p.appSigners)
+
+    /** Discard identities whose app rule was removed, on every store change and before exporting. */
+    internal fun tidyAppSigners(): Setup {
+        if (appSigners.keys.all { it in apps && apps[it] != BLOCK } && profiles.all { p -> p.appSigners.keys.all { it in p.apps && p.apps[it] != BLOCK } }) return this
+        fun pins(rules: Map<String, String>, signers: Map<String, String>) = signers.filterKeys { it in rules && rules[it] != BLOCK }
+        return copy(appSigners = pins(apps, appSigners), profiles = profiles.map { it.copy(appSigners = pins(it.apps, it.appSigners)) })
+    }
 
     /** The live setup as a profile: what is in use. */
-    private val live get() = Profile(profile.orEmpty(), defaultRoute, apps, added, sites)
+    internal val live get() = Profile(profile.orEmpty(), defaultRoute, apps, added, sites, appSigners)
 
     /** No profile is in use and none holds the setup in use: switching to another would lose it, unless [use] keeps it. */
     val loose get() = profile == null && profiles.none { it.copy(name = "") == live.copy(name = "") }
@@ -362,9 +376,22 @@ data class Setup(
     fun back(ran: Setup): Setup {
         val ok = { id: String -> builtIn(id) || route(id) != null }
         // Its profile again only if still as it ran: one edited meanwhile keeps those edits, the routes run unprofiled.
-        val same = profiles.firstOrNull { it.name == ran.profile }?.takeIf { it == ran.live }
+        val previous = profiles.firstOrNull { it.name == ran.profile }
+        val same = previous?.takeIf { it == ran.live }
+        val pins = ran.appSigners.mapNotNull { (pkg, pin) ->
+            val route = ran.apps[pkg] ?: return@mapNotNull null
+            if (!ok(route) || route == BLOCK) return@mapNotNull null
+            // A switch can fail after this profile observed a rotation. Keep its newer pin only for the same grant.
+            val saved = when {
+                previous == null || previous.appSigners[pkg] == pin -> pin
+                previous.apps[pkg] == route -> previous.appSigners[pkg]
+                else -> null
+            }
+            saved?.let { pkg to it }
+        }.toMap()
         return copy(profiles = saved, profile = same?.name,
-            defaultRoute = ran.defaultRoute.takeIf(ok) ?: defaultRoute, apps = ran.apps.filterValues(ok), added = ran.added.filter(ok), sites = ran.sites.filterValues(ok))
+            defaultRoute = ran.defaultRoute.takeIf(ok) ?: defaultRoute, apps = ran.apps.filterValues(ok),
+            appSigners = pins, added = ran.added.filter(ok), sites = ran.sites.filterValues(ok))
     }
 
     /** Moves profile [name] [by] places (negative = earlier). */
@@ -501,11 +528,13 @@ data class Setup(
     fun site(name: String?, site: String, routeId: String?) = editing(name) { it.copy(sites = if (routeId == null) it.sites - site else it.sites + (site to routeId)) }
 
     /**
-     * As saved: format 4 only with a Via somewhere, format 3 only with a website route or a Block, so a setup without
+     * As saved: format 5 for signer-gated app choices, including legacy grants awaiting approval. Format 4 with a
+     * Via somewhere, format 3 with a website route or a Block, so a setup without
      * them still opens in a build from before them. An older build would drop them: send a Via route straight to its
      * server, drop the websites, and take a blocked app for one on a route that is gone.
      */
     val stamped get() = copy(version = when {
+        (profiles + live).any { p -> p.apps.values.any { it != BLOCK } } -> 5
         routes.any { it.via != null } -> 4
         (profiles + live).all { it.sites.isEmpty() && BLOCK !in it.apps.values } -> minOf(version, 2)
         else -> 3

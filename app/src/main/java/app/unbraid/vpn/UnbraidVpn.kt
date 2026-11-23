@@ -21,6 +21,8 @@ import android.util.Log
 import app.unbraid.MainActivity
 import app.unbraid.R
 import app.unbraid.Unbraid
+import app.unbraid.data.AppIdentity
+import app.unbraid.data.checkedApps
 import app.unbraid.data.AuthException
 import app.unbraid.data.Link
 import app.unbraid.data.Providers
@@ -336,15 +338,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      */
     private val installed = object : android.content.BroadcastReceiver() {
         override fun onReceive(c: Context, intent: Intent) {
-            if (destroyed || intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return // an update keeps its user id
+            if (destroyed) return
             val pkg = intent.data?.schemeSpecificPart ?: return
             val uid = intent.getIntExtra(Intent.EXTRA_UID, -1)
             val added = intent.action == Intent.ACTION_PACKAGE_ADDED
+            if (!added && intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return // recheck the completed update
             scope.launch {
                 // Removed: the apps left in its user id may now go otherwise (a Direct one no longer kept inside by it).
                 val others = runCatching { packageManager.getPackagesForUid(uid)?.size ?: 0 }.getOrDefault(-1)
                 val shared = uid < 0 || others < 0 || if (added) others > 1 else others > 0
-                if (!shared && !(added && pkg in store.setup.value.apps)) return@launch
+                val setup = store.setup.value
+                if (added && (pkg in setup.appSigners || setup.profiles.any { pkg in it.appSigners })) store.refreshAppSigners(::identity)
+                if (!shared && pkg !in setup.apps && pkg !in tunInput?.setup?.apps.orEmpty() && pkg !in knownIds.keys) return@launch
                 installs.incrementAndGet()
                 if (state.value.phase == VpnState.Phase.On) reload()
             }
@@ -477,6 +482,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // them. Meanwhile no app goes online at all, rather than on the normal connection.
             if (store.unreadable.value && !store.reopen()) { hold(); return }
             val seen = restores.get() // before the setup: a restore between the two reads errs on the side of stopping
+            store.refreshAppSigners(::identity)
             val setup = store.setup.value
             // Refused before any provider is asked for a server: the engine would refuse it anyway.
             if (setup.defaultMissing) throw Compiler.MissingDefault()
@@ -627,6 +633,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             probe = next
             state.update { it.copy(tsSuffix = input.tsSuffix) }
         }
+        tunInput = input
         lastGood = json
         builtInstalls = counted
         lastInput = input // also when nothing restarted: a move restarts what is applied now
@@ -709,7 +716,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         runCatching {
             // A move runs what runs: saved settings aren't read for it.
             val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, spent, newProbe(),
-                if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move) { blockedKin(it) }
+                if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move, ::verifiedSetup) { blockedKin(it) }
             input to Compiler.compile(input).also(Libbox::checkConfig)
         }.onFailure { Log.e(TAG, "restore: ${logLine(it)}") }.getOrThrow()
     }, note = { store.fakeBlock = it }, commit = { input ->
@@ -941,6 +948,15 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val regular = now >= round
             // A new key whose reply got lost may already be the only one IVPN takes: finish it as soon as it can be.
             if (regular) Rotation.run(store.setup.value, { store.accounts.value }, store::replaceAccount, finishOnly = true)
+            if (regular) {
+                // An unreadable signing identity can recover without a package broadcast.
+                val saved = store.setup.value
+                val held = lastInput?.setup?.apps.orEmpty()
+                if (saved == applied && saved.appSigners.any { (pkg, pin) -> held[pkg] == app.unbraid.data.BLOCK && identity(pkg)?.accepts(pin) == true }) {
+                    store.refreshAppSigners(::identity)
+                    reload()
+                }
+            }
             if (regular) scope.launch { runCatching { announceUpdate(this@UnbraidVpn, store) } }
             // A provider whose new key is still reaching its servers isn't judged yet.
             val settingUp = Providers.settingUp()
@@ -1099,7 +1115,24 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var portNet: android.net.Network? = null
 
     private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
-        Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(setup))
+        verifiedSetup(setup).let { checked ->
+            Compiler.Input(checked, LinkPicker.ported(checked, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(checked))
+        }
+
+    private fun identity(pkg: String) = AppIdentity.read(packageManager, pkg)
+
+    /** An earlier running profile also respects a newer signer observed for one of its grants. */
+    private fun verifiedIdentity(setup: Setup, pkg: String): AppIdentity? {
+        val installed = identity(pkg) ?: return null
+        val saved = store.setup.value
+        val pins = if (saved.profile == setup.profile) saved.appSigners else saved.profiles.firstOrNull { it.name == setup.profile }?.appSigners
+        return installed.takeIf { pins?.get(pkg)?.let(installed::accepts) != false }
+    }
+
+    private fun verifiedSetup(setup: Setup) = setup.checkedApps { verifiedIdentity(setup, it) }
+
+    private fun packagesSharing(pkg: String): Set<String>? =
+        runCatching { packageManager.getPackagesForUid(packageManager.getPackageUid(pkg, 0))?.toSet() }.getOrNull()
 
     /**
      * The apps on Direct that another app of their Android user id keeps inside ([Compiler.Input.blockedKin]). An app that
@@ -1355,7 +1388,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     override fun openTun(o: TunOptions): Int {
         if (prepare(this) != null) error("VPN permission missing")
-        val out = buildList { if (o.autoRoute) o.excludePackage.forEachString { add(it) } }
+        val requested = buildList { if (o.autoRoute) o.excludePackage.forEachString { add(it) } }
+        val setup = tunInput?.setup
+        fun allowed(pkg: String) = pkg == packageName || setup != null &&
+            Compiler.mayExclude(setup, pkg, packagesSharing(pkg)) { verifiedIdentity(setup, it) }
+        val out = requested.filter(::allowed)
         fun builder(leaveOut: List<String>) = Builder().setSession("$APP").setMtu(o.mtu).setMetered(false).also { b ->
             o.inet4Address.forEach { b.addAddress(it.address(), it.prefix()) }
             o.inet6Address.forEach { b.addAddress(it.address(), it.prefix()) }
@@ -1381,13 +1418,21 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val ids = out.associateWith(uidOf).filterValues { it >= 0 }
         val moved = ids.filter { (n, id) -> knownIds[n]?.let { it != id } == true || n in unsure }.keys
         val interim = if (tun != null && moved.isNotEmpty()) builder(out - moved).establish()?.also { tun?.close(); tun = it } else null
-        val pfd = builder(out).establish() ?: error("VPN permission revoked")
+        var pfd = builder(out).establish() ?: error("VPN permission revoked")
         tun?.close()
         tun = pfd
         // Looked up again: an app installed or removed while the tunnel was built may have met the builder with another id.
         val after = out.associateWith(uidOf).filterValues { it >= 0 }
         // One whose id changed in between may have met Android with the old one: not taken as known, built in two steps next.
         val changed = (after.keys + ids.keys).filterTo(HashSet()) { after[it] != ids[it] }
+        changed += out.filterNot(::allowed)
+        if (changed.isNotEmpty()) {
+            val safe = builder(out - changed).establish() ?: error("VPN permission revoked")
+            pfd.close()
+            tun = safe
+            pfd = safe
+        }
+        knownIds.keys.retainAll(out.toSet() - changed)
         knownIds.putAll(after - changed)
         unsure = if (changed.isEmpty()) emptySet() else unsure + changed
         if (changed.isNotEmpty()) installs.incrementAndGet().also { scope.launch { reload() } }
@@ -1405,7 +1450,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     override fun findConnectionOwner(proto: Int, src: String, sport: Int, dst: String, dport: Int): ConnectionOwner {
         val uid = cm.getConnectionOwnerUid(proto, InetSocketAddress(src, sport), InetSocketAddress(dst, dport))
         if (uid == Process.INVALID_UID) error("owner not found")
-        val pkgs = packageManager.getPackagesForUid(uid).orEmpty().toList()
+        val names = packageManager.getPackagesForUid(uid).orEmpty().toList()
+        val pkgs = tunInput?.setup?.let { setup -> Compiler.ownerNames(setup, names) { verifiedIdentity(setup, it) } } ?: names
         return ConnectionOwner().apply {
             userId = uid
             userName = pkgs.firstOrNull().orEmpty()

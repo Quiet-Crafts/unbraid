@@ -283,7 +283,7 @@ object Backup {
      * servers and the routes through them keep only what isn't secret ([withoutSecrets]), and the home peer is left out.
      */
     fun contents(s: Setup, keys: Boolean = true): Setup {
-        val c = s.copy(home = Home(wg = s.home.wg), prefs = s.prefs.copy(stats = false), pristine = false,
+        val c = s.tidyAppSigners().copy(home = Home(wg = s.home.wg), prefs = s.prefs.copy(stats = false), pristine = false,
             waiting = emptySet(), waitingUntil = 0, waitingEach = emptyMap(), version = VERSION, testing = emptySet())
         if (keys) return c
         val linked = linked(c)
@@ -433,6 +433,13 @@ object Backup {
         need(s.defaultRoute.let(ok) && s.apps.values.all(ok) && s.added.all(ok) && pkgs(s.apps), "an app or the default route names a route that isn't there")
         // The filter's own choices per app are app choices too: as many at most, and package names.
         need(s.prefs.filter.apps.keys.all { it.length <= 255 && PKG.matches(it) }, "the Protection filter's app choices are damaged")
+        val fingerprint = Regex("[0-9a-f]{64}")
+        fun validPins(pins: Map<String, String>, rules: Map<String, String>) = pins.all { (pkg, pin) ->
+            pkg in rules && rules[pkg] != BLOCK && pkg.length <= 255 && PKG.matches(pkg) && pin.length <= 64 * 65 && pin.split(',').let { certs ->
+                certs.all(fingerprint::matches) && certs == certs.distinct().sorted()
+            }
+        }
+        need(validPins(s.appSigners, s.apps) && s.profiles.all { validPins(it.appSigners, it.apps) }, "an app signing identity is damaged")
         need(sites(s.sites), "a website's route is damaged")
         need(s.onNet.all { (kind, name) -> kind in NET_KINDS && s.profiles.any { it.name == name } }, "a profile to switch to isn't there")
         s.profiles.forEach { p ->
@@ -573,7 +580,7 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val m = { id: String -> rt[id] ?: id }
     // The first profile: every route shown until now stays listed, as when the first profile is saved ([Setup.saveAs]).
     if (r.profiles.isEmpty()) r = r.copy(added = (r.added + (r.routes.map { it.id } - (setOf(r.defaultRoute) + r.apps.values + r.sites.values + r.added))).distinct())
-    val kept = Profile(name, if (ok(defaultRoute) && defaultRoute.isNotEmpty()) m(defaultRoute) else "", apps.mapValues { m(it.value) }, listed.filter(ok).map(m), sites.mapValues { m(it.value) })
+    val kept = Profile(name, if (ok(defaultRoute) && defaultRoute.isNotEmpty()) m(defaultRoute) else "", apps.mapValues { m(it.value) }, listed.filter(ok).map(m), sites.mapValues { m(it.value) }, appSigners.filterKeys { it in apps })
     // Choices of the kept setup's apps still waiting to be installed wait on, each until the deadline it had: otherwise the
     // next look at the installed apps drops them, Block too. One the backup has as well waits as the backup's do.
     val still = apps.filterKeys { it in waiting && installedAt(it) == null }.mapNotNull { (p, x) ->
