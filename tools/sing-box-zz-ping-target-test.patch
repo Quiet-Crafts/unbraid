@@ -1,0 +1,310 @@
+diff --git a/route/tun_ping_address_test.go b/route/tun_ping_address_test.go
+new file mode 100644
+index 0000000..15bfe4f
+--- /dev/null
++++ b/route/tun_ping_address_test.go
+@@ -0,0 +1,304 @@
++//go:build with_gvisor
++
++package route
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"errors"
++	"net/netip"
++	"slices"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/sagernet/gvisor/pkg/buffer"
++	"github.com/sagernet/gvisor/pkg/tcpip"
++	"github.com/sagernet/gvisor/pkg/tcpip/header"
++	"github.com/sagernet/gvisor/pkg/tcpip/link/channel"
++	"github.com/sagernet/gvisor/pkg/tcpip/stack"
++	"github.com/sagernet/sing-box/adapter"
++	O "github.com/sagernet/sing-box/adapter/outbound"
++	C "github.com/sagernet/sing-box/constant"
++	"github.com/sagernet/sing-box/log"
++	"github.com/sagernet/sing-box/option"
++	R "github.com/sagernet/sing-box/route/rule"
++	tun "github.com/sagernet/sing-tun"
++	N "github.com/sagernet/sing/common/network"
++	"github.com/stretchr/testify/require"
++)
++
++type pingTestPort struct {
++	N.Dialer
++	O.Adapter
++	written chan []byte
++	back    tun.Return
++}
++
++func (*pingTestPort) PreMatchFlow(string, netip.Addr) adapter.PreMatchAction {
++	return adapter.PreMatchFlow
++}
++func (*pingTestPort) PortAddresses() (netip.Addr, netip.Addr) {
++	return netip.IPv4Unspecified(), netip.IPv6Unspecified()
++}
++func (*pingTestPort) PortMTU() uint32 { return 0 }
++func (p *pingTestPort) AttachReturn(r tun.Return) error {
++	if p.back != nil && p.back != r {
++		return errors.New("a different return path is already attached")
++	}
++	p.back = r
++	return nil
++}
++func (*pingTestPort) DetachReturn(tun.Return) error { return nil }
++func (p *pingTestPort) WritePackets(packets [][]byte) error {
++	for _, v := range packets {
++		p.written <- slices.Clone(v)
++	}
++	return nil
++}
++
++type pingTestTun struct {
++	udpTestTun
++	returned chan []byte
++}
++
++func (p pingTestTun) WritePacket(pkt *stack.PacketBuffer) (int, error) {
++	v := pkt.ToView()
++	defer v.Release()
++	b := slices.Clone(v.AsSlice())
++	p.returned <- b
++	return len(b), nil
++}
++
++type pingTestStore struct {
++	adapter.FakeIPStore
++	alias netip.Addr
++}
++
++func (s pingTestStore) Contains(a netip.Addr) bool { return a == s.alias || a == s.alias.Next() }
++func (s pingTestStore) Lookup(a netip.Addr) (string, bool) {
++	if a == s.alias.Next() {
++		return "second.example", true
++	}
++	return "device.example", a == s.alias
++}
++
++type pingTestFake struct {
++	adapter.FakeIPTransport
++	store pingTestStore
++}
++
++func (f pingTestFake) Store() adapter.FakeIPStore { return f.store }
++
++type pingTestTransports struct {
++	flowTestTransports
++	fake pingTestFake
++}
++
++func (m pingTestTransports) FakeIP() adapter.FakeIPTransport { return m.fake }
++
++func pingTestIP(src, dst netip.Addr, protocol tcpip.TransportProtocolNumber, data []byte) []byte {
++	if src.Is6() {
++		raw := make([]byte, header.IPv6MinimumSize+len(data))
++		header.IPv6(raw).Encode(&header.IPv6Fields{PayloadLength: uint16(len(data)), TransportProtocol: protocol, HopLimit: 64, SrcAddr: tun.AddressFromAddr(src), DstAddr: tun.AddressFromAddr(dst)})
++		copy(raw[header.IPv6MinimumSize:], data)
++		return raw
++	}
++	raw := make([]byte, header.IPv4MinimumSize+len(data))
++	ip := header.IPv4(raw)
++	ip.Encode(&header.IPv4Fields{TotalLength: uint16(len(raw)), TTL: 64, Protocol: uint8(protocol), SrcAddr: tun.AddressFromAddr(src), DstAddr: tun.AddressFromAddr(dst)})
++	ip.SetChecksum(^ip.CalculateChecksum())
++	copy(ip.Payload(), data)
++	return raw
++}
++func pingTestEcho(src, dst netip.Addr, id uint16, body []byte, reply bool) []byte {
++	e := make([]byte, 8+len(body))
++	copy(e[8:], body)
++	if src.Is4() {
++		h := header.ICMPv4(e)
++		h.SetType(header.ICMPv4Echo)
++		if reply {
++			h.SetType(header.ICMPv4EchoReply)
++		}
++		h.SetIdent(id)
++		h.SetSequence(7)
++		h.SetChecksum(header.ICMPv4Checksum(h, 0))
++		return pingTestIP(src, dst, header.ICMPv4ProtocolNumber, e)
++	}
++	h := header.ICMPv6(e)
++	h.SetType(header.ICMPv6EchoRequest)
++	if reply {
++		h.SetType(header.ICMPv6EchoReply)
++	}
++	h.SetIdent(id)
++	h.SetSequence(7)
++	h.SetChecksum(header.ICMPv6Checksum(header.ICMPv6ChecksumParams{Header: h, Src: tun.AddressFromAddr(src), Dst: tun.AddressFromAddr(dst)}))
++	return pingTestIP(src, dst, header.ICMPv6ProtocolNumber, e)
++}
++func pingTestFragments(raw []byte, src, dst netip.Addr) [][]byte {
++	var ip header.Network = header.IPv4(raw)
++	if src.Is6() {
++		ip = header.IPv6(raw)
++	}
++	split := 16
++	if len(raw) > 9000 {
++		split = 8976
++	}
++	var out [][]byte
++	for i, data := range [][]byte{ip.Payload()[:split], ip.Payload()[split:]} {
++		if src.Is4() {
++			r := pingTestIP(src, dst, header.ICMPv4ProtocolNumber, data)
++			h := header.IPv4(r)
++			h.SetID(311)
++			flags := uint8(header.IPv4FlagMoreFragments)
++			if i == 1 {
++				flags = 0
++			}
++			h.SetFlagsFragmentOffset(flags, uint16(i*split))
++			h.SetChecksum(0)
++			h.SetChecksum(^h.CalculateChecksum())
++			out = append(out, r)
++		} else {
++			f := make([]byte, 8+len(data))
++			f[0] = uint8(header.ICMPv6ProtocolNumber)
++			off := uint16(1)
++			if i == 1 {
++				off = uint16(split)
++			}
++			binary.BigEndian.PutUint16(f[2:], off)
++			binary.BigEndian.PutUint32(f[4:], 311)
++			copy(f[8:], data)
++			out = append(out, pingTestIP(src, dst, 44, f))
++		}
++	}
++	return out
++}
++func pingTestInject(ep *channel.Endpoint, src, dst netip.Addr, id uint16, body []byte, fragmented bool) {
++	raw := pingTestEcho(src, dst, id, body, false)
++	frames := [][]byte{raw}
++	if fragmented {
++		frames = pingTestFragments(raw, src, dst)
++	}
++	proto := header.IPv4ProtocolNumber
++	if src.Is6() {
++		proto = header.IPv6ProtocolNumber
++	}
++	for _, frame := range frames {
++		p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(frame)})
++		ep.InjectInbound(proto, p)
++		p.DecRef()
++	}
++}
++
++func pingTestNetwork(t *testing.T, raw []byte, v6 bool) header.Network {
++	t.Helper()
++	if v6 {
++		h := header.IPv6(raw)
++		require.True(t, h.IsValid(len(raw)))
++		require.Equal(t, header.ICMPv6ProtocolNumber, h.TransportProtocol())
++		return h
++	}
++	h := header.IPv4(raw)
++	require.True(t, h.IsValid(len(raw)))
++	require.True(t, h.IsChecksumValid())
++	require.Equal(t, header.ICMPv4ProtocolNumber, h.TransportProtocol())
++	return h
++}
++
++func pingTestReceive(t *testing.T, ctx context.Context, c <-chan []byte) []byte {
++	t.Helper()
++	select {
++	case b := <-c:
++		return b
++	case <-ctx.Done():
++		t.Fatal("expected an echo at the selected port or tunnel")
++	}
++	return nil
++}
++
++func TestPingUsesNarrowedDestination(t *testing.T) {
++	for _, family := range []struct{ name, src, alias, home, other, network string }{
++		{"IPv4", "192.0.2.10", "198.18.0.20", "192.168.1.20", "203.0.113.10", "192.168.0.0/16"},
++		{"IPv6", "2001:db8:1::10", "fd00::20", "fd12::20", "2001:db8:2::10", "fd12::/64"},
++	} {
++		for _, form := range []string{"ordinary", "reassembled"} {
++			t.Run(family.name+"/"+form, func(t *testing.T) {
++				src, alias, home := netip.MustParseAddr(family.src), netip.MustParseAddr(family.alias), netip.MustParseAddr(family.home)
++				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++				defer cancel()
++				rule, err := R.NewRule(ctx, log.StdLogger(), option.Rule{Type: C.RuleTypeDefault, DefaultOptions: option.DefaultRule{
++					RawDefaultRule: option.RawDefaultRule{IPCIDR: []string{family.network}}, RuleAction: option.RuleAction{Action: C.RuleActionTypeRoute, RouteOptions: option.RouteActionOptions{Outbound: "home"}},
++				}}, true)
++				require.NoError(t, err)
++				var lookups atomic.Int32
++				r := flowTestRouter(flowTestDNS{lookup: func(context.Context, string, adapter.DNSQueryOptions) ([]netip.Addr, error) {
++					lookups.Add(1)
++					return []netip.Addr{netip.MustParseAddr(family.other), home}, nil
++				}},
++					flowTestRule{action: &R.RuleActionResolve{Server: "a"}}, rule)
++				r.dnsTransport = pingTestTransports{r.dnsTransport.(flowTestTransports), pingTestFake{store: pingTestStore{alias: alias}}}
++				port := &pingTestPort{Adapter: O.NewAdapter(C.TypeDirect, "home", []string{"icmp"}, nil), written: make(chan []byte, 2)}
++				otherPort := &pingTestPort{Adapter: O.NewAdapter(C.TypeDirect, "proxy", []string{"icmp"}, nil), written: make(chan []byte, 1)}
++				r.outbound = udpTestOutbounds{byTag: map[string]adapter.Outbound{"home": port, "proxy": otherPort}}
++				ep := channel.New(8, 9000, "")
++				defer ep.Close()
++				dev := pingTestTun{udpTestTun{link: ep}, make(chan []byte, 1)}
++				s, err := tun.NewGVisor(tun.StackOptions{Context: ctx, Tun: dev, Handler: warmTestHandler{router: r}, UDPTimeout: time.Minute, Logger: log.StdLogger()})
++				require.NoError(t, err)
++				require.NoError(t, s.Start())
++				defer s.Close()
++				const id = 43
++				firstFragmented := form == "reassembled"
++				type peer struct {
++					alias, source netip.Addr
++					wireID        uint16
++				}
++				var peers []peer
++				for i, target := range []netip.Addr{alias, alias.Next(), alias} {
++					fragmented := (i == 0) == firstFragmented
++					body := []byte("hello from the tunnel")
++					if fragmented && src.Is4() {
++						body = bytes.Repeat(body, 435)
++					}
++					pingTestInject(ep, src, target, id, body, fragmented)
++					raw := pingTestReceive(t, ctx, port.written)
++					h := pingTestNetwork(t, raw, src.Is6())
++					require.Equal(t, home, tun.AddrFromAddress(h.DestinationAddress()))
++					wire := peer{target, tun.AddrFromAddress(h.SourceAddress()), binary.BigEndian.Uint16(h.Payload()[4:])}
++					expected := pingTestEcho(wire.source, home, wire.wireID, body, false)
++					require.Equal(t, expected[len(expected)-len(h.Payload()):], h.Payload())
++					peers = append(peers, wire)
++				}
++				require.EqualValues(t, 2, lookups.Load(), "both forms reuse the established decision")
++				require.NotEqual(t, peers[0].wireID, peers[1].wireID)
++				require.Equal(t, peers[0], peers[2], "mixed forms share the established wire identity")
++				for _, remote := range []peer{peers[1], peers[0]} {
++					// A distinct reply body proves that the physical peer responded.
++					body := []byte("reply to " + remote.alias.String())
++					raw := pingTestEcho(home, remote.source, remote.wireID, body, true)
++					require.Empty(t, port.back.ReturnPackets([][]byte{append(make([]byte, port.back.ReturnHeadroom()), raw...)}))
++					reply := pingTestReceive(t, ctx, dev.returned)
++					h := pingTestNetwork(t, reply, src.Is6())
++					require.Equal(t, remote.alias, tun.AddrFromAddress(h.SourceAddress()))
++					require.Equal(t, src, tun.AddrFromAddress(h.DestinationAddress()))
++					expected := pingTestEcho(remote.alias, src, id, body, true)
++					require.Equal(t, expected[len(expected)-len(h.Payload()):], h.Payload())
++				}
++				// A literal outside the selected network must use its normal route.
++				outside := netip.MustParseAddr(family.other)
++				pingTestInject(ep, src, outside, id, []byte("direct literal peer"), false)
++				literal := pingTestNetwork(t, pingTestReceive(t, ctx, otherPort.written), src.Is6())
++				require.Equal(t, outside, tun.AddrFromAddress(literal.DestinationAddress()))
++				require.Empty(t, port.written)
++
++				s.ResetNetwork()
++				remote := peers[0]
++				late := pingTestEcho(home, remote.source, remote.wireID, []byte("previous echo"), true)
++				packets := [][]byte{append(make([]byte, port.back.ReturnHeadroom()), late...)}
++				require.Len(t, port.back.ReturnPackets(packets), 1, "a retired alias must not consume old replies")
++				require.Empty(t, dev.returned)
++			})
++		}
++	}
++}

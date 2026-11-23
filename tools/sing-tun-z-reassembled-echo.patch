@@ -1,0 +1,350 @@
+diff --git a/flow_dispatch.go b/flow_dispatch.go
+index aa03dba..e943534 100644
+--- a/flow_dispatch.go
++++ b/flow_dispatch.go
+@@ -118,7 +118,7 @@ type ForwardDispatcher struct {
+ 	logger      logger.Logger
+ 	udpTimeout  time.Duration
+ 	icmpTimeout time.Duration
+-	access      sync.RWMutex
++	access      sync.Mutex
+ 
+ 	table        map[flowKey]*flowEntry
+ 	lastSweep    int64
+@@ -214,9 +214,9 @@ func (d *ForwardDispatcher) Dispatch(packet []byte) bool {
+ }
+ 
+ func (d *ForwardDispatcher) dispatchParsed(packet []byte, parsed forwardPacket, miss judgeMiss) bool {
+-	d.access.RLock()
++	d.access.Lock()
+ 	if d.returnPath.closed.Load() {
+-		d.access.RUnlock()
++		d.access.Unlock()
+ 		return false
+ 	}
+ 	key := parsed.flowKey()
+@@ -228,10 +228,10 @@ func (d *ForwardDispatcher) dispatchParsed(packet []byte, parsed forwardPacket,
+ 	}
+ 	if loaded {
+ 		handled := d.handleHit(key, entry, &parsed, packet, now)
+-		d.access.RUnlock()
++		d.access.Unlock()
+ 		return handled
+ 	}
+-	d.access.RUnlock()
++	d.access.Unlock()
+ 	if parsed.protocol == uint8(header.TCPProtocolNumber) &&
+ 		(parsed.tcpFlags&header.TCPFlagSyn == 0 || parsed.tcpFlags&header.TCPFlagAck != 0) {
+ 		return false
+@@ -298,6 +298,11 @@ func (d *ForwardDispatcher) judgeAndInstall(key flowKey, packet *forwardPacket,
+ }
+ 
+ func (d *ForwardDispatcher) installVerdict(key flowKey, packet *forwardPacket, raw []byte, verdict FlowVerdict) bool {
++	d.access.Lock()
++	defer d.access.Unlock()
++	if d.returnPath.closed.Load() {
++		return false
++	}
+ 	if verdict.Transient {
+ 		if verdict.Action == ActionReject {
+ 			d.stageReject(packet)
+@@ -307,12 +312,30 @@ func (d *ForwardDispatcher) installVerdict(key flowKey, packet *forwardPacket, r
+ 	if verdict.Action == ActionBypass && verdict.Port != nil {
+ 		verdict.Action = ActionFlow
+ 	}
+-	d.access.RLock()
+-	defer d.access.RUnlock()
+-	if d.returnPath.closed.Load() {
+-		return false
+-	}
+ 	now := d.now()
++	// Raw and reassembled echoes may finish admission in different orders.
++	// Keep a live refusal and reuse the reverse mapping only for the same route.
++	if isICMPProtocol(packet.protocol) {
++		if prior := d.table[key]; prior != nil {
++			switch {
++			case d.entryExpired(prior, now):
++				d.removeEntry(key, prior, FlowCloseTimeout)
++			case verdict.Action == ActionFlow && (prior.action == ActionDrop || prior.action == ActionReject):
++				return d.handleHit(key, prior, packet, raw, now)
++			case verdict.Action == ActionFlow && prior.flow != nil:
++				target := verdict.Destination.Addr()
++				if !target.IsValid() {
++					target = packet.destination.Addr()
++				}
++				if prior.flow.nat.port == verdict.Port && prior.flow.serverAddress == target {
++					return d.handleHit(key, prior, packet, raw, now)
++				}
++				return true
++			case prior.flow != nil:
++				d.removeEntry(key, prior, FlowCloseReset)
++			}
++		}
++	}
+ 	switch verdict.Action {
+ 	case ActionFlow:
+ 		if verdict.Port != nil {
+@@ -613,8 +636,8 @@ func (d *ForwardDispatcher) Flush() {
+ 	if d == nil || d.returnPath.closed.Load() {
+ 		return
+ 	}
+-	d.access.RLock()
+-	defer d.access.RUnlock()
++	d.access.Lock()
++	defer d.access.Unlock()
+ 	if d.returnPath.closed.Load() {
+ 		return
+ 	}
+diff --git a/stack_gvisor.go b/stack_gvisor.go
+index 2248f61..cf52115 100644
+--- a/stack_gvisor.go
++++ b/stack_gvisor.go
+@@ -137,6 +137,7 @@ func (t *GVisor) Start() error {
+ 	ipStack.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
+ 	t.udpForwarder = udpForwarder
+ 	icmpForwarder := NewICMPForwarder(ipStack, t.handler, t.logger)
++	icmpForwarder.dispatcher = t.dispatcher
+ 	if tcpForwarder.decisions != nil {
+ 		icmpForwarder.decisions = &t.transportDecisions[2]
+ 	}
+diff --git a/stack_gvisor_icmp.go b/stack_gvisor_icmp.go
+index d17263c..7e9fbb9 100644
+--- a/stack_gvisor_icmp.go
++++ b/stack_gvisor_icmp.go
+@@ -21,10 +21,11 @@ import (
+ )
+ 
+ type ICMPForwarder struct {
+-	decisions *flowDecisionQueue
+-	stack     *stack.Stack
+-	handler   Handler
+-	logger    logger.Logger
++	dispatcher *ForwardDispatcher
++	decisions  *flowDecisionQueue
++	stack      *stack.Stack
++	handler    Handler
++	logger     logger.Logger
+ 
+ 	returnPath icmpForwarderReturn
+ 
+@@ -41,6 +42,14 @@ type icmpFlowKey struct {
+ 	identifier  uint16
+ }
+ 
++func (k icmpFlowKey) flowKey() flowKey {
++	protocol := header.ICMPv4ProtocolNumber
++	if k.v6 {
++		protocol = header.ICMPv6ProtocolNumber
++	}
++	return flowKey{uint8(protocol), netip.AddrPortFrom(k.source, k.identifier), netip.AddrPortFrom(k.destination, k.identifier)}
++}
++
+ type icmpFlow struct {
+ 	port     Port
+ 	tracker  FlowTracker
+@@ -103,7 +112,6 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
+ 		destination: AddrFromAddress(id.LocalAddress),
+ 		v6:          pkt.NetworkProtocolNumber == header.IPv6ProtocolNumber,
+ 	}
+-	protocol := header.ICMPv4ProtocolNumber
+ 	if key.v6 {
+ 		h := header.ICMPv6(pkt.TransportHeader().Slice())
+ 		if h.Type() != header.ICMPv6EchoRequest {
+@@ -114,7 +122,6 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
+ 			return true
+ 		}
+ 		key.identifier = h.Ident()
+-		protocol = header.ICMPv6ProtocolNumber
+ 	} else {
+ 		h := header.ICMPv4(pkt.TransportHeader().Slice())
+ 		if h.Type() != header.ICMPv4Echo || h.Code() != 0 {
+@@ -122,11 +129,10 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
+ 		}
+ 		key.identifier = h.Ident()
+ 	}
+-	source := netip.AddrPortFrom(key.source, key.identifier)
+-	destination := netip.AddrPortFrom(key.destination, key.identifier)
++	tuple := key.flowKey()
+ 	if handler, ok := f.handler.(DeferredFlowHandler); ok && f.decisions != nil {
+ 		admission := transportAdmission{
+-			key: flowKey{uint8(protocol), source, destination}, handle: handler,
++			key: tuple, handle: handler,
+ 			cached: func(p *stack.PacketBuffer) bool { return f.forwardCached(key, p) },
+ 			commit: func(p *stack.PacketBuffer, v FlowVerdict) { f.completeEcho(id, key, p, v) },
+ 		}
+@@ -136,7 +142,7 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
+ 	if f.forwardCached(key, pkt) {
+ 		return true
+ 	}
+-	verdict := f.handler.JudgeFlow(uint8(protocol), source, destination, nil)
++	verdict := f.handler.JudgeFlow(tuple.protocol, tuple.source, tuple.destination, nil)
+ 	f.completeEcho(id, key, pkt, verdict)
+ 	return true
+ }
+@@ -146,6 +152,12 @@ func (f *ICMPForwarder) completeEcho(id stack.TransportEndpointID, key icmpFlowK
+ 	case ActionReject, ActionDrop:
+ 		return
+ 	case ActionFlow, ActionBypass:
++		if target := verdict.Destination.Addr(); target.IsValid() && target != key.destination {
++			if f.dispatcher != nil && verdict.Port != nil && target.Is4() == key.destination.Is4() {
++				f.forwardTranslatedEcho(key, pkt, verdict)
++			}
++			return
++		}
+ 		if f.installFlow(key, verdict, pkt) {
+ 			return
+ 		}
+@@ -216,6 +228,9 @@ func (f *ICMPForwarder) completeEcho(id stack.TransportEndpointID, key icmpFlowK
+ }
+ 
+ func (f *ICMPForwarder) forwardCached(key icmpFlowKey, pkt *stack.PacketBuffer) bool {
++	if f.forwardCachedTranslation(key, pkt) {
++		return true
++	}
+ 	now := time.Now()
+ 	f.flowAccess.Lock()
+ 	flow, loaded := f.flows[key]
+diff --git a/stack_gvisor_icmp_translate.go b/stack_gvisor_icmp_translate.go
+new file mode 100644
+index 0000000..dec0f29
+--- /dev/null
++++ b/stack_gvisor_icmp_translate.go
+@@ -0,0 +1,91 @@
++//go:build with_gvisor
++
++package tun
++
++import (
++	"math"
++
++	"github.com/sagernet/gvisor/pkg/tcpip/header"
++	"github.com/sagernet/gvisor/pkg/tcpip/stack"
++)
++
++// Forward only the transport's admitted echo. The active dispatcher owns the
++// port's return path and assigns distinct echo IDs when aliases share an answer.
++func (f *ICMPForwarder) forwardTranslatedEcho(key icmpFlowKey, pkt *stack.PacketBuffer, verdict FlowVerdict) {
++	raw, packet, ok := translatedEchoPacket(key, pkt)
++	if !ok {
++		return
++	}
++	f.dispatcher.installVerdict(packet.flowKey(), &packet, raw, verdict)
++	f.dispatcher.Flush()
++}
++
++// An established aliased echo may arrive whole or reassembled on later sends.
++// Share its normal idle timer, return selector, and reset with raw dispatch.
++func (f *ICMPForwarder) forwardCachedTranslation(key icmpFlowKey, pkt *stack.PacketBuffer) bool {
++	d := f.dispatcher
++	if d == nil {
++		return false
++	}
++	k := key.flowKey()
++	d.access.Lock()
++	entry := d.table[k]
++	if entry == nil || entry.action != ActionFlow || !entry.flow.dnatAddress || d.entryExpired(entry, d.now()) {
++		d.access.Unlock()
++		return false
++	}
++	raw, packet, ok := translatedEchoPacket(key, pkt)
++	if ok {
++		d.handleHit(k, entry, &packet, raw, d.now())
++	}
++	d.access.Unlock()
++	d.Flush()
++	return true
++}
++
++func translatedEchoPacket(key icmpFlowKey, pkt *stack.PacketBuffer) ([]byte, forwardPacket, bool) {
++	network := pkt.NetworkHeader().Slice()
++	transport := pkt.TransportHeader().Slice()
++	length := len(transport) + pkt.Data().Size()
++	if key.v6 {
++		if len(network) < header.IPv6MinimumSize || length > math.MaxUint16 {
++			return nil, forwardPacket{}, false
++		}
++		// After reassembly the first fragment's network header remains attached.
++		// Strip only a sole fragment header immediately preceding the echo.
++		switch uint8(header.IPv6(network).TransportProtocol()) {
++		case uint8(header.ICMPv6ProtocolNumber):
++			if len(network) != header.IPv6MinimumSize {
++				return nil, forwardPacket{}, false
++			}
++		case uint8(header.IPv6FragmentExtHdrIdentifier):
++			if len(network) != header.IPv6MinimumSize+header.IPv6FragmentHeaderSize || network[header.IPv6MinimumSize] != uint8(header.ICMPv6ProtocolNumber) {
++				return nil, forwardPacket{}, false
++			}
++		default:
++			return nil, forwardPacket{}, false
++		}
++		network = network[:header.IPv6MinimumSize]
++	} else if len(network) < header.IPv4MinimumSize || len(network) != int(header.IPv4(network).HeaderLength()) || length+len(network) > math.MaxUint16 {
++		return nil, forwardPacket{}, false
++	}
++	raw := make([]byte, 0, len(network)+length)
++	raw = append(raw, network...)
++	raw = append(raw, transport...)
++	raw = append(raw, pkt.Data().AsRange().ToSlice()...)
++	if key.v6 {
++		h := header.IPv6(raw)
++		h.SetNextHeader(uint8(header.ICMPv6ProtocolNumber))
++		h.SetPayloadLength(uint16(length))
++	} else {
++		h := header.IPv4(raw)
++		h.SetTotalLength(uint16(len(raw)))
++		h.SetChecksum(0)
++		h.SetChecksum(^h.CalculateChecksum())
++	}
++	packet, ok := parseForwardPacket(raw)
++	if !ok || packet.fragment || !packet.hasFlow || packet.flowKey() != key.flowKey() {
++		return nil, forwardPacket{}, false
++	}
++	return raw, packet, true
++}
+diff --git a/stack_gvisor_icmp_translate_test.go b/stack_gvisor_icmp_translate_test.go
+new file mode 100644
+index 0000000..932b232
+--- /dev/null
++++ b/stack_gvisor_icmp_translate_test.go
+@@ -0,0 +1,41 @@
++//go:build with_gvisor
++
++package tun
++
++import (
++	"net/netip"
++	"testing"
++
++	"github.com/sagernet/sing-tun/gtcpip/header"
++)
++
++// Two ordinary requests for the same tuple can finish different stages of
++// admission independently. A late positive must preserve a live refusal.
++func TestEchoKeepsLiveRefusal(t *testing.T) {
++	raw := make([]byte, header.IPv4MinimumSize+header.ICMPv4MinimumSize)
++	ip := header.IPv4(raw)
++	ip.Encode(&header.IPv4Fields{
++		TotalLength: uint16(len(raw)), TTL: 64, Protocol: uint8(header.ICMPv4ProtocolNumber),
++		SrcAddr: netip.MustParseAddr("192.0.2.1"), DstAddr: netip.MustParseAddr("198.51.100.2"),
++	})
++	ip.SetChecksum(^ip.CalculateChecksum())
++	echo := header.ICMPv4(ip.Payload())
++	echo.SetType(header.ICMPv4Echo)
++	echo.SetIdent(43)
++	echo.SetChecksum(header.ICMPv4Checksum(echo, 0))
++	packet, ok := parseForwardPacket(raw)
++	if !ok || !packet.hasFlow {
++		t.Fatal("invalid test echo")
++	}
++	for _, action := range []FlowAction{ActionDrop, ActionReject} {
++		d := NewForwardDispatcher(nil, &pendingTestWriteback{}, nil, 0, 0)
++		key := packet.flowKey()
++		d.installVerdict(key, &packet, raw, FlowVerdict{Action: action})
++		entry := d.table[key]
++		handled := d.installVerdict(key, &packet, raw, FlowVerdict{Action: ActionFlow, Destination: netip.MustParseAddrPort("192.0.2.2:43")})
++		if !handled || d.table[key] != entry || entry.action != action {
++			t.Fatalf("late approval replaced refusal %v", action)
++		}
++		d.Close()
++	}
++}
