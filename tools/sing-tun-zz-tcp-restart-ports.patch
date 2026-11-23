@@ -1,0 +1,137 @@
+diff --git a/flow_nat.go b/flow_nat.go
+index 4d2bca3..b46979b 100644
+--- a/flow_nat.go
++++ b/flow_nat.go
+@@ -1,6 +1,7 @@
+ package tun
+ 
+ import (
++	"math/rand/v2"
+ 	"net/netip"
+ 	"runtime"
+ 	"sync"
+@@ -22,8 +23,9 @@ type portNAT struct {
+ 	selectorStart uint16
+ 	selectorCount uint16
+ 
+-	counter uint32
+-	pending [][]byte
++	tcpOffset uint32
++	counter   uint32
++	pending   [][]byte
+ }
+ 
+ type natShard struct {
+@@ -45,6 +47,9 @@ func newPortNAT(port Port) *portNAT {
+ 	if rangedPort, isRanged := port.(PortWithSelectorRange); isRanged {
+ 		nat.selectorStart, nat.selectorCount = rangedPort.PortSelectorRange()
+ 	}
++	// A recent connection may still occupy its tuple at the peer after this NAT has been rebuilt.
++	_, count := nat.selectorRange(uint8(header.TCPProtocolNumber))
++	nat.tcpOffset = rand.Uint32N(count)
+ 	for i := range nat.shards {
+ 		nat.shards[i].flows = make(map[flowKey]*forwardFlow)
+ 	}
+@@ -109,9 +114,15 @@ func (n *portNAT) allocateSelector(protocol uint8, portAddress, serverAddress ne
+ 			return clientSelector, key, true
+ 		}
+ 	}
++	offset := n.counter
++	if protocol == uint8(header.TCPProtocolNumber) {
++		// Bound the start before scanning so even a wrapping counter visits every slot in a custom range.
++		offset = offset%rangeCount + n.tcpOffset
++	}
+ 	for range rangeCount {
+ 		n.counter++
+-		candidate := rangeStart + uint16(n.counter%rangeCount)
++		offset++
++		candidate := rangeStart + uint16(offset%rangeCount)
+ 		key := n.reverseKeyFor(protocol, portAddress, serverAddress, serverPort, candidate)
+ 		if n.lookup(key) == nil {
+ 			return candidate, key, true
+diff --git a/flow_nat_tcp_test.go b/flow_nat_tcp_test.go
+new file mode 100644
+index 0000000..5d74aed
+--- /dev/null
++++ b/flow_nat_tcp_test.go
+@@ -0,0 +1,80 @@
++package tun
++
++import (
++	"math"
++	"net/netip"
++	"testing"
++
++	"github.com/sagernet/sing-tun/gtcpip/header"
++)
++
++type selectorTestPort struct {
++	Port
++	start, count uint16
++}
++
++func (p selectorTestPort) PortSelectorRange() (uint16, uint16) { return p.start, p.count }
++
++func TestTCPFallbackVisitsEverySlot(t *testing.T) {
++	const tcp = uint8(header.TCPProtocolNumber)
++	local := netip.MustParseAddr("192.0.2.1")
++	remote := netip.MustParseAddr("192.0.2.2")
++	for _, width := range []uint16{1, 3, 7, 16} {
++		start := uint16(65536 - uint32(width))
++		for available := range width {
++			nat := newPortNAT(selectorTestPort{start: start, count: width})
++			nat.counter = math.MaxUint32 - 1
++			for index := range width {
++				if index != available {
++					nat.insert(nat.reverseKeyFor(tcp, local, remote, 443, start+index), &forwardFlow{})
++				}
++			}
++			port, key, ok := nat.allocateSelector(tcp, local, remote, 443, 80)
++			if !ok || port != start+available {
++				t.Fatalf("width %d: free %d, selected %d, ok %v", width, start+available, port, ok)
++			}
++			nat.insert(key, &forwardFlow{})
++			if _, _, ok := nat.allocateSelector(tcp, local, remote, 443, 80); ok {
++				t.Fatal("allocated over an occupied tuple")
++			}
++			// The same translated source is still free to another remote port.
++			if p, _, ok := nat.allocateSelector(tcp, local, remote, 444, port); !ok || p != port {
++				t.Fatal("distinct destination lost its preferred port")
++			}
++		}
++	}
++}
++
++func TestTCPFallbackAcrossPortNATs(t *testing.T) {
++	const tcp = uint8(header.TCPProtocolNumber)
++	local := netip.MustParseAddr("192.0.2.1")
++	remote := netip.MustParseAddr("192.0.2.2")
++	for _, offset := range []uint32{0, 1, 6} {
++		nat := newPortNAT(selectorTestPort{start: 55000, count: 7})
++		if nat.tcpOffset >= 7 {
++			t.Fatalf("TCP offset %d outside custom range", nat.tcpOffset)
++		}
++		// Control the offset on each new map. Two real starts can legitimately draw the same value.
++		nat.tcpOffset = offset
++		port, preferred, ok := nat.allocateSelector(tcp, local, remote, 443, 55003)
++		if !ok || port != 55003 || nat.counter != 0 {
++			t.Fatal("free preferred source consumed a fallback")
++		}
++		nat.insert(preferred, &forwardFlow{})
++		want := uint16(55000 + (offset+1)%7)
++		port, _, ok = nat.allocateSelector(tcp, local, remote, 443, 55003)
++		if !ok || port != want {
++			t.Fatalf("offset %d: fallback got %d, want %d", offset, port, want)
++		}
++		port, _, ok = nat.allocateSelector(uint8(header.UDPProtocolNumber), local, remote, 443, 80)
++		if !ok || port != 55002 {
++			t.Fatal("TCP offset changed next UDP fallback")
++		}
++		for i, protocol := range []uint8{uint8(header.ICMPv4ProtocolNumber), uint8(header.ICMPv6ProtocolNumber)} {
++			port, _, ok = nat.allocateSelector(protocol, local, remote, 0, 1)
++			if !ok || port != uint16(natSelectorMin+3+i) {
++				t.Fatal("TCP offset changed echo identifier fallback")
++			}
++		}
++	}
++}
