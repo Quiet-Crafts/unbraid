@@ -1670,7 +1670,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             checkPolicy()
             blocks = false // Android may already have replaced it when a check below fails
             val pfd = builder.establish() ?: error("VPN permission revoked")
-            try { checkPolicy() } catch (e: Exception) { pfd.close(); throw e }
+            try { checkPolicy() } catch (e: Exception) {
+                // Android has replaced the old tunnel with this one: closed now, apps would be outside until the next. Kept,
+                // with no engine behind it, until [lose] or a new start replaces it; closed only when stopping.
+                if (destroyed || tunPolicy !== policy) pfd.close() else { runCatching { tun?.close() }; tun = pfd; leftOut = excluded }
+                throw e
+            }
             return pfd
         }
         // Android turns the apps to leave out into user ids only when that list changes: with the same names it keeps the
