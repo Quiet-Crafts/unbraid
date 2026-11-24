@@ -1,7 +1,7 @@
 package app.unbraid.ui
 
-import android.content.Intent
-import android.net.VpnService
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -64,12 +64,15 @@ fun ProxyScreen(ui: Ui) {
 private fun ChooseApp(ui: Ui, close: () -> Unit, pick: (AppInfo) -> Unit) {
     val apps by ui.apps.collectAsStateWithLifecycle()
     val pm = LocalContext.current.packageManager
-    // Apps that can run a VPN: proxy apps nearly always can.
-    val vpns by produceState(emptySet<String>()) {
-        value = withContext(Dispatchers.IO) { runCatching { pm.queryIntentServices(Intent(VpnService.SERVICE_INTERFACE), 0).map { it.serviceInfo.packageName }.toSet() }.getOrDefault(emptySet()) }
+    // Apps that can run a VPN: proxy apps nearly always can. Read app by app, as a search skips services that
+    // aren't exported; the list waits for it, or the likely ones would appear above what is in view.
+    val vpns by produceState<Set<String>?>(null, apps) {
+        if (apps.isNotEmpty()) value = withContext(Dispatchers.IO) { apps.filter { a -> !a.system && runCatching {
+            pm.getPackageInfo(a.pkg, PackageManager.GET_SERVICES).services?.any { it.permission == Manifest.permission.BIND_VPN_SERVICE }
+        }.getOrNull() == true }.map { it.pkg }.toSet() }
     }
     var q by rememberSaveable { mutableStateOf("") }
-    val (likely, others) = remember(apps, vpns, q.trim()) { proxyApps(apps, vpns, q.trim()) }
+    val (likely, others) = remember(apps, vpns, q.trim()) { vpns?.let { proxyApps(apps, it, q.trim()) } ?: (emptyList<AppInfo>() to emptyList()) }
     Screen(
         overline = "Providers & servers", title = "Add proxy server", sub = "Choose the app that runs it",
         navigation = { IconTap(Icons.close, "Close", close) }, search = { SearchField(q, { q = it }, "Find an installed app") },
@@ -83,7 +86,7 @@ private fun ChooseApp(ui: Ui, close: () -> Unit, pick: (AppInfo) -> Unit) {
         }
         list("Likely", likely, "VPN or proxy app")
         list("Other apps", others, null)
-        if (likely.isEmpty() && others.isEmpty()) item { Caption("No matching apps. Install the app that runs your proxy, then try again.") }
+        if (vpns != null && likely.isEmpty() && others.isEmpty()) item { Caption("No matching apps. Install the app that runs your proxy, then try again.") }
     }
 }
 
