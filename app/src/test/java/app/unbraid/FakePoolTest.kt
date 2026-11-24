@@ -1,5 +1,8 @@
 package app.unbraid
 
+import app.unbraid.data.Filter
+import app.unbraid.data.DIRECT
+import app.unbraid.data.AppIdentity
 import app.unbraid.vpn.Compiler
 import app.unbraid.vpn.FakePool
 import app.unbraid.vpn.FakePool.Step
@@ -543,5 +546,35 @@ class FakePoolTest {
 
     @Test fun everyBlockRefusesTheOthersInTheBlockEverythingConfig() = Compiler.FAKE_RANGES.indices.forEach { b ->
         assertRefusesOtherBlocks(kotlinx.serialization.json.Json.parseToJsonElement(Compiler.blockAll("app.unbraid", "/tmp/cache.db", b)).jsonObject, b)
+    }
+
+    // With no engine left, apps wait offline: only those on Direct by choice stay out of the tunnel.
+    private val lostPin = "aa".repeat(32)
+    private val lostRoute = Route("r", tsExit = "100.64.0.1")
+    private val lostSetup = Setup(routes = listOf(lostRoute), defaultRoute = DIRECT, apps = mapOf("d" to DIRECT, "v" to "r", "b" to BLOCK, "gone" to "x"),
+        appSigners = mapOf("d" to lostPin, "v" to lostPin, "gone" to lostPin))
+    private fun lostOut(s: Setup, lockdown: Boolean = false, kin: (String) -> Set<String>? = { setOf(it) }, identity: (String) -> AppIdentity? = { AppIdentity(lostPin, emptySet()) }) =
+        Compiler.mayStayOut(s, lockdown, kin, identity)
+
+    @Test fun onlyVerifiedDirectAppsStayOut() {
+        assertEquals(setOf("d"), lostOut(lostSetup)) // not the app on a route, on Block, on a route that is gone, nor any that follows a Direct default
+        assertTrue(lostOut(lostSetup, lockdown = true).isEmpty())
+        assertTrue(lostOut(lostSetup, identity = { AppIdentity("bb".repeat(32), emptySet()) }).isEmpty())
+        assertTrue(lostOut(lostSetup, identity = { null }).isEmpty())
+        assertTrue(lostOut(lostSetup, kin = { null }).isEmpty())
+        assertTrue(lostOut(lostSetup, kin = { setOf(it, "v") }).isEmpty()) // shares its user id with an app on a route
+        assertTrue(lostOut(lostSetup.copy(prefs = lostSetup.prefs.copy(filter = Filter(id = "own", value = "9.9.9.9", directApps = true)))).isEmpty())
+    }
+
+    @Test fun anAppMovedOffDirectIsInsideAtOnce() {
+        for (to in listOf("r", BLOCK)) assertTrue(lostOut(lostSetup.copy(apps = lostSetup.apps + ("d" to to))).isEmpty())
+    }
+
+    @Test fun triesSlowDownAndNeverStop() {
+        val waits = (0..20).map(FakePool::lostWait)
+        assertEquals(5_000L, waits.first())
+        assertEquals(waits.sorted(), waits)
+        assertEquals(600_000L, waits.last())
+        assertEquals(600_000L, FakePool.lostWait(Int.MAX_VALUE))
     }
 }
