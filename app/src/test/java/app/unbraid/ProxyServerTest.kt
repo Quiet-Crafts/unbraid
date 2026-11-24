@@ -119,6 +119,10 @@ class ProxyServerTest {
         val answered = on.copy(passed = Health.Passed(3, 1, mapOf("r" to Health.checkedAs(ok.route("r")!!))))
         fun words(s: Setup, vpn: VpnState, running: Set<String>? = setOf("r"), silent: Boolean = false) = proxyStatus(s, s.servers.single(), vpn, silent, running, 1).second
         assertEquals("Not connected", words(ok, VpnState(), null))
+        // Saved in a route no app uses: not a fault, whether the VPN runs or not.
+        val idle = ok.copy(apps = mapOf(app.pkg to DIRECT))
+        assertEquals("No app uses it yet", words(idle, VpnState(), null))
+        assertEquals("No app uses it yet", words(idle, answered, emptySet()))
         assertEquals("Not connected", words(ok, answered, emptySet()))
         assertEquals("Checking", words(ok, on)) // a wrong login looks like this until its first check fails
         assertEquals("Connected", words(ok, answered))
