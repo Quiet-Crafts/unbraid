@@ -273,6 +273,43 @@ class Socks5BridgeTest {
         }
     }
 
+    /** Every packet is checked: an owner that changes on a running association gets nothing more, and gets nothing in. */
+    @Test fun udpOwnerChangingOnARunningAssociationStopsTheNextPacketEachWay() {
+        for (outbound in listOf(true, false)) server().use { target ->
+            udp(target.localPort).use { relay ->
+                val allowed = java.util.concurrent.atomic.AtomicBoolean(true)
+                Socks5Bridge.start("127.0.0.1", target.localPort, "u", "p", udpEnabled = true,
+                    udpRelayOwnerVerified = { _, _ -> allowed.get() }) { true }.use { bridge ->
+                    client(bridge).use { control ->
+                        assertEquals(0, authenticate(control, bridge))
+                        control.write(udpConnect)
+                        target.accept().use { peer ->
+                            val sourcePort = upstreamUdpHandshake(peer)
+                            peer.write(ok.copyOf(8) + portBytes(relay.localPort))
+                            assertArrayEquals(ok, control.read(10))
+                            val destination = byteArrayOf(1, 192.toByte(), 0, 2, 9) + portBytes(99)
+                            control.write(byteArrayOf(1) + destination)
+                            val frame = portBytes(2) + "ok".toByteArray()
+                            val reply = ByteArray(3) + destination + "ok".toByteArray()
+                            repeat(2) {
+                                control.write(frame)
+                                assertEquals(reply.size, relay.receive().length)
+                                relay.send(reply, sourcePort)
+                                assertArrayEquals(frame, control.read(frame.size))
+                            }
+                            allowed.set(false)
+                            if (outbound) control.write(frame + frame) else relay.send(reply, sourcePort)
+                            assertEquals(-1, control.getInputStream().read())
+                            assertEquals(-1, peer.getInputStream().read())
+                            relay.soTimeout = 100
+                            assertThrows(SocketTimeoutException::class.java) { relay.receive() }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     @Test fun udpRejectsBadProxyLoginInvalidRelayAndWrongRelayOwner() {
         server().use { target ->
             udp().use { relay ->

@@ -1275,12 +1275,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         Compiler.SocksBridge(exit.bridge.port, exit.bridge.username, exit.bridge.password, exit.profile.allowUdp)
     }
 
-    private fun companionUid(profile: Socks5Profile, signer: AppIdentity? = identity(profile.packageName)): Int? = runCatching {
-        val pkg = profile.packageName
-        val uid = packageManager.getPackageUid(pkg, 0)
-        uid.takeIf { signer?.accepts(profile.identity) == true &&
-            packageManager.getPackagesForUid(uid)?.toSet() == setOf(pkg) }
+    private fun companionUid(profile: Socks5Profile): Int? = runCatching {
+        val uid = packageManager.getPackageUid(profile.packageName, 0)
+        uid.takeIf { soleOwner(profile, identity(profile.packageName), uid) }
     }.getOrNull()
+
+    /** Whether the proxy app, still with its signer, is the only one with [uid]: looked up now, for each check. */
+    private fun soleOwner(profile: Socks5Profile, signer: AppIdentity?, uid: Int) = signer?.accepts(profile.identity) == true &&
+        runCatching { packageManager.getPackagesForUid(uid)?.toSet() == setOf(profile.packageName) }.getOrDefault(false)
 
     /** Look up the peer's socket, with that socket's endpoint first. UDP ownership is only a snapshot. */
     private fun socksOwner(protocol: Int, peer: InetSocketAddress, local: InetSocketAddress, uid: Int): Boolean =
@@ -1312,7 +1314,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     if (destroyed || store.restoreGeneration != restore || isLockdownEnabled || !saved.outside(pkg) ||
                         saved.route(route.id)?.let { profile.sameConnection(it.socks5) && !it.keyless } != true) return false
                     val signer = verifiedIdentity(saved, pkg)
-                    return saved.permitsApp(pkg) { signer } && companionUid(profile, signer) == uid
+                    return saved.permitsApp(pkg) { signer } && soleOwner(profile, signer, uid) // the only app with that id, so no second lookup of its id
                 }
                 val bridge = runCatching {
                     Socks5Bridge.start(profile.host, profile.port, profile.username, profile.password, socksPorts(setup),
