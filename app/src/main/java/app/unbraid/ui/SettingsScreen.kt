@@ -568,7 +568,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                             Text("LEAK-PROOF", style = Type.overline, color = Ink.dim, modifier = Modifier.weight(1f))
                             Text(if (!running) "CONNECT TO CHECK" else "$done OF 2", style = Type.code, color = if (!running) Ink.dim else if (done == 2) Ink.good else Ink.accent)
                         }
-                        Text("Two switches in Android keep apps offline whenever $APP isn't running. Android decides both; $APP can only open its page.", style = Type.body.copy(fontWeight = FontWeight.Normal), color = Ink.text)
+                        Text("Two switches in Android keep apps offline whenever $APP isn't running. Android decides both; $APP can only open its page." + if (setup.usesProxy) " A proxy server can't be used with the second one." else "", style = Type.body.copy(fontWeight = FontWeight.Normal), color = Ink.text)
                         FlagRow(Icons.power, "Always-on VPN", "Starts $APP when the phone starts", vpn.alwaysOn.takeIf { running })
                         FlagRow(Icons.block, "Block connections without VPN", "Apps can't go online without $APP", vpn.lockdown.takeIf { running })
                         Primary("Open Android VPN settings", vpnSettings)

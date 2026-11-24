@@ -483,6 +483,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // Automatic routes start on WireGuard again with every connection.
         app.unbraid.data.AutoProtocol.reset()
         state.value = VpnState(VpnState.Phase.Connecting)
+        var from = -1L // the restores the setup being started was read after
         try {
             net.start()
             // Saved settings that won't open would start on defaults, another routing policy: the app offers to recover
@@ -491,6 +492,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             store.refreshWaiting(System.currentTimeMillis(), ::installation)
             store.refreshAppSigners(::identity)
             val (setup, seen) = store.policySnapshot()
+            from = seen
             // Refused before any provider is asked for a server: the engine would refuse it anyway.
             if (setup.defaultMissing) throw Compiler.MissingDefault()
             // A saved Tailscale node that won't open fails here with its own message, not as an engine error.
@@ -543,7 +545,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${logLine(e)}")
             // After an update the notice offers the reconnect; a tap shows what fails, in the app.
-            if (lost != null) lose(Redact.message(e, "Could not connect")) else if (updated) { teardown(null); AfterUpdate.tell(this) } else teardown(Redact.message(e, "Could not connect"))
+            // A setup restored meanwhile refused this one: Android may have the VPN up already, so apps wait for the restored one.
+            if (lost != null || from >= 0 && from != store.restoreGeneration) lose(Redact.message(e, "Could not connect")) else if (updated) { teardown(null); AfterUpdate.tell(this) } else teardown(Redact.message(e, "Could not connect"))
         }
     }
 

@@ -1113,7 +1113,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** [f] on the profile being viewed when it isn't the one in use (nothing connects, no limit to check), else live and guarded. */
     private fun editRoutes(f: (app.unbraid.data.Profile) -> app.unbraid.data.Profile) {
         val d = draft
-        if (d != null) store.edit { it.editing(d, f) } else guarded { it.editing(null, f) }
+        // Checked as it is saved: a connection-limit question may be answered later.
+        val change = { s: Setup -> s.editing(d, f).let { if (strands(s, it)) s else it } }
+        if (d != null) store.edit(change) else guarded(f = change)
     }
 
     // ---- viewing a profile ----
