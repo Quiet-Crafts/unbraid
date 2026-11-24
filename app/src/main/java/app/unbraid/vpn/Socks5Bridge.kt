@@ -33,8 +33,10 @@ class Socks5Bridge private constructor(
 ) : Closeable {
     companion object {
         private const val HANDSHAKE_MS = 5_000
-        private const val CONNECTIONS = 64
-        private const val UDP_ASSOCIATIONS = 32
+        private const val HANDSHAKES = 64
+        private const val TCP_STREAMS = 256
+        private const val UDP_ASSOCIATIONS = 128
+        private const val UDP_EVICT_NANOS = 5_000_000_000L
         private const val UDP_RECEIVE_MS = 2_000
         private const val UDP_IDLE_NANOS = 120_000_000_000L
         private const val UDP_MAX_BYTES = 65_507
@@ -116,11 +118,18 @@ class Socks5Bridge private constructor(
     private val listener = bindListener(forbiddenListenerPorts)
     val port: Int = listener.localPort
     private val lock = Any()
+    private val sendLock = Any()
     private var closed = false
     private var revoked = false
     private val sockets = mutableSetOf<Closeable>()
-    private val slots = Semaphore(CONNECTIONS)
-    private val udpSlots = Semaphore(UDP_ASSOCIATIONS)
+    private val handshakes = Semaphore(HANDSHAKES)
+    private val tcpSlots = Semaphore(TCP_STREAMS)
+    private val associations = mutableSetOf<UdpSlot>()
+
+    private class UdpSlot(val client: Socket) {
+        val sockets = mutableSetOf<Closeable>(client)
+        val activity = AtomicLong(System.nanoTime())
+    }
     private val workers = Executors.newCachedThreadPool { r -> Thread(r, "SOCKS bridge stream").apply { isDaemon = true } }
 
     init {
@@ -145,15 +154,15 @@ class Socks5Bridge private constructor(
                 Thread.sleep(250)
                 continue
             }
-            if (!slots.tryAcquire()) { client.close(); continue }
-            if (!register(client)) { client.close(); slots.release(); continue }
+            if (!handshakes.tryAcquire()) { client.close(); continue }
+            if (!register(client)) { client.close(); handshakes.release(); continue }
             try {
                 workers.execute {
                     try { serve(client) } catch (_: Exception) {
                         // Closing the client also signals a failed or incomplete handshake.
-                    } finally { drop(client); slots.release() }
+                    } finally { drop(client) }
                 }
-            } catch (_: RejectedExecutionException) { drop(client); slots.release(); return }
+            } catch (_: RejectedExecutionException) { drop(client); handshakes.release(); return }
         }
     }
 
@@ -175,42 +184,69 @@ class Socks5Bridge private constructor(
         client.getOutputStream().write(byteArrayOf(5, status.toByte(), 0, 1, 0, 0, 0, 0, 0, 0))
 
     private fun serve(client: Socket) {
-        val deadline = System.nanoTime() + HANDSHAKE_MS * 1_000_000L
-        val input = handshakeInput(client, deadline)
-        if (!authenticate(client, input) || input.readUnsignedByte() != 5) return
-        val command = input.readUnsignedByte()
-        if (input.readUnsignedByte() != 0) return
-        if (command != 1) { reply(client, 7); return }
-        val type = input.readUnsignedByte()
-        if (type !in listOf(1, 3, 4)) { reply(client, 8); return }
-        val destination = byteArrayOf(type.toByte()) + address(input, type)
-        val host = destination.domain()
-        if (host.equals(UDP_MAGIC, ignoreCase = true) || host.equals(LEGACY_UDP_MAGIC, ignoreCase = true)) {
-            if (udpRelayOwnerVerified == null || host != UDP_MAGIC || destination.portAt(destination.size - 2) != 0) {
-                reply(client, 7)
+        var inHandshake = true
+        try {
+            val deadline = System.nanoTime() + HANDSHAKE_MS * 1_000_000L
+            val input = handshakeInput(client, deadline)
+            if (!authenticate(client, input) || input.readUnsignedByte() != 5) return
+            val command = input.readUnsignedByte()
+            if (input.readUnsignedByte() != 0) return
+            if (command != 1) { reply(client, 7); return }
+            val type = input.readUnsignedByte()
+            if (type !in listOf(1, 3, 4)) { reply(client, 8); return }
+            val destination = byteArrayOf(type.toByte()) + address(input, type)
+            val host = destination.domain()
+            if (host.equals(UDP_MAGIC, ignoreCase = true) || host.equals(LEGACY_UDP_MAGIC, ignoreCase = true)) {
+                if (udpRelayOwnerVerified == null || host != UDP_MAGIC || destination.portAt(destination.size - 2) != 0) {
+                    reply(client, 7)
+                    return
+                }
+                handshakes.release()
+                inHandshake = false
+                val slot = UdpSlot(client)
+                val evicted: List<Closeable>?
+                synchronized(lock) {
+                    if (closed || revoked) return
+                    val oldest = associations.minByOrNull { it.activity.get() }
+                    if (associations.size >= UDP_ASSOCIATIONS &&
+                        (oldest == null || System.nanoTime() - oldest.activity.get() < UDP_EVICT_NANOS)) {
+                        evicted = null
+                    } else {
+                        evicted = if (associations.size >= UDP_ASSOCIATIONS) {
+                            associations.remove(oldest!!)
+                            oldest.sockets.toList()
+                        } else emptyList()
+                        associations.add(slot)
+                    }
+                }
+                if (evicted == null) { reply(client, 1); return }
+                evicted.forEach { runCatching { it.close() } }
+                try { associate(client, deadline, slot) } finally { synchronized(lock) { associations.remove(slot) } }
                 return
             }
-            if (!udpSlots.tryAcquire()) { reply(client, 1); return }
-            try { associate(client, deadline) } finally { udpSlots.release() }
-            return
-        }
-        val upstream = Socket()
-        if (!register(upstream)) { upstream.close(); return }
-        try {
-            val response = try {
-                upstream.connect(target, HANDSHAKE_MS)
-                verifyAcceptedPeer(upstream)
-                connectUpstream(upstream, byteArrayOf(5, 1, 0) + destination, deadline)
-            } catch (_: Exception) { reply(client, 1); return }
-            client.getOutputStream().write(response)
-            if (response[1].toInt() != 0) return
-            upstream.soTimeout = 0
-            client.soTimeout = 0
-            // Both directions can half-close independently. Hold the slot until both are done.
-            val downstream = workers.submit { pump(upstream, client) }
-            pump(client, upstream)
-            downstream.get()
-        } finally { drop(upstream) }
+            handshakes.release()
+            inHandshake = false
+            if (!tcpSlots.tryAcquire()) { reply(client, 1); return }
+            try {
+                val upstream = Socket()
+                if (!register(upstream)) { upstream.close(); return }
+                try {
+                    val response = try {
+                        upstream.connect(target, HANDSHAKE_MS)
+                        verifyAcceptedPeer(upstream)
+                        connectUpstream(upstream, byteArrayOf(5, 1, 0) + destination, deadline)
+                    } catch (_: Exception) { reply(client, 1); return }
+                    client.getOutputStream().write(response)
+                    if (response[1].toInt() != 0) return
+                    upstream.soTimeout = 0
+                    client.soTimeout = 0
+                    // Both directions can half-close independently. Hold the slot until both are done.
+                    val downstream = workers.submit { pump(upstream, client) }
+                    pump(client, upstream)
+                    downstream.get()
+                } finally { drop(upstream) }
+            } finally { tcpSlots.release() }
+        } finally { if (inHandshake) handshakes.release() }
     }
 
     private fun ByteArray.portAt(offset: Int) =
@@ -241,12 +277,16 @@ class Socks5Bridge private constructor(
         return InetSocketAddress(address, port)
     }
 
-    private fun associate(client: Socket, deadline: Long) {
+    private fun register(socket: Closeable, slot: UdpSlot) = synchronized(lock) {
+        !closed && !revoked && slot in associations && sockets.add(socket).also { if (it) slot.sockets.add(socket) }
+    }
+
+    private fun associate(client: Socket, deadline: Long, slot: UdpSlot) {
         val upstream = Socket()
-        if (!register(upstream)) { upstream.close(); return }
+        if (!register(upstream, slot)) { upstream.close(); return }
         try {
             val relay = DatagramSocket(InetSocketAddress(loopback, 0))
-            if (!register(relay)) { relay.close(); return }
+            if (!register(relay, slot)) { relay.close(); return }
             try {
                 val peer = try {
                     upstream.connect(target, HANDSHAKE_MS)
@@ -270,7 +310,7 @@ class Socks5Bridge private constructor(
                 }
                 val destination = readUdpAddress(header, packetMode = false)
                 client.soTimeout = 0
-                Association(client, upstream, relay, peer, destination.takeIf { connected }).run()
+                Association(client, upstream, relay, peer, destination.takeIf { connected }, slot).run()
             } finally { drop(relay) }
         } finally { drop(upstream) }
     }
@@ -296,8 +336,9 @@ class Socks5Bridge private constructor(
         private val relay: DatagramSocket,
         private val peer: InetSocketAddress,
         private val fixedDestination: ByteArray?,
+        private val slot: UdpSlot,
     ) {
-        private val activity = AtomicLong(System.nanoTime())
+        private val activity = slot.activity
 
         fun run() {
             relay.soTimeout = UDP_RECEIVE_MS
@@ -332,10 +373,12 @@ class Socks5Bridge private constructor(
                 if (payload.size + destination.size + 3 > UDP_MAX_BYTES || !validDestination(destination)) continue
                 if (!ownedRelay(upstream, relay, peer)) throw IOException("Unverified SOCKS relay")
                 val packet = ByteArray(3) + destination + payload
-                synchronized(lock) {
-                    if (revoked || closed) throw EOFException()
+                synchronized(sendLock) {
+                    synchronized(lock) {
+                        if (revoked || closed || slot !in associations) throw EOFException()
+                        activity.set(System.nanoTime())
+                    }
                     relay.send(DatagramPacket(packet, packet.size, peer))
-                    activity.set(System.nanoTime())
                 }
             }
         }
@@ -347,6 +390,7 @@ class Socks5Bridge private constructor(
             while (System.nanoTime() - activity.get() < UDP_IDLE_NANOS) {
                 packet.length = buffer.size
                 try { relay.receive(packet) } catch (_: SocketTimeoutException) { continue }
+                synchronized(lock) { if (slot in associations) activity.set(System.nanoTime()) }
                 if (packet.length > UDP_MAX_BYTES) continue
                 val input = DataInputStream(ByteArrayInputStream(packet.data, 0, packet.length))
                 val source = try {
@@ -357,7 +401,7 @@ class Socks5Bridge private constructor(
                 if (!validDestination(source)) continue
                 if (fixedDestination != null && !sameUdpSource(fixedDestination, source)) continue
                 if (!ownedRelay(upstream, relay, peer)) throw IOException("Unverified SOCKS relay")
-                synchronized(lock) { if (revoked || closed) throw EOFException() }
+                synchronized(lock) { if (revoked || closed || slot !in associations) throw EOFException() }
                 val length = input.available()
                 val size = byteArrayOf((length ushr 8).toByte(), length.toByte())
                 if (fixedDestination == null) {
@@ -370,7 +414,6 @@ class Socks5Bridge private constructor(
                 } else {
                     output.write(size + input.bytes(length))
                 }
-                activity.set(System.nanoTime())
             }
         }
 
@@ -428,18 +471,22 @@ class Socks5Bridge private constructor(
 
     /** Keep the port bound while an old engine might still be dialing it. Revoke is permanent. */
     fun revoke() {
-        val open = synchronized(lock) {
-            revoked = true
-            sockets.toList()
+        val open = synchronized(sendLock) {
+            synchronized(lock) {
+                revoked = true
+                sockets.toList()
+            }
         }
         open.forEach { runCatching { it.close() } }
     }
 
     override fun close() {
-        val open = synchronized(lock) {
-            if (closed) return
-            closed = true
-            sockets.toList()
+        val open = synchronized(sendLock) {
+            synchronized(lock) {
+                if (closed) return
+                closed = true
+                sockets.toList()
+            }
         }
         runCatching { listener.close() }
         open.forEach { runCatching { it.close() } }

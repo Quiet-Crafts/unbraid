@@ -319,4 +319,178 @@ class Socks5BridgeTest {
             }
         }
     }
+
+    private inner class CapacityProxy : AutoCloseable {
+        val listener = ServerSocket(0, 256, loopback)
+        val relay = udp()
+        val peers = java.util.Collections.synchronizedList(mutableListOf<Socket>())
+        val relayPorts = java.util.Collections.synchronizedList(mutableListOf<Int>())
+        val executor = Executors.newCachedThreadPool()
+        val pauseOwner = java.util.concurrent.atomic.AtomicBoolean(false)
+        val ownerEntered = java.util.concurrent.CountDownLatch(1)
+        val ownerResume = java.util.concurrent.CountDownLatch(1)
+        val replacementPort = AtomicInteger()
+        val bridge = Socks5Bridge.start(
+            "127.0.0.1", listener.localPort, null, null, udpEnabled = true,
+            udpRelayOwnerVerified = { local, remote ->
+                if (pauseOwner.get()) {
+                    replacementPort.set(local.port)
+                    ownerEntered.countDown()
+                    ownerResume.await(5, TimeUnit.SECONDS)
+                }
+                remote == relay.localSocketAddress
+            },
+        ) { true }
+        val clients = java.util.Collections.synchronizedList(mutableListOf<Socket>())
+        val destination = byteArrayOf(1) + loopback.address + portBytes(12345)
+        val frame = byteArrayOf(0, 1, 42)
+        val started = executor.submit {
+            while (!listener.isClosed) {
+                val peer = try { listener.accept() } catch (_: Exception) { break }
+                peers.add(peer)
+                try {
+                    assertArrayEquals(byteArrayOf(5, 1, 0), peer.read(3))
+                    peer.write(byteArrayOf(5, 0))
+                    val request = peer.read(4)
+                    val type = request[3].toInt()
+                    val address = when (type) {
+                        1 -> peer.read(6)
+                        3 -> peer.read(peer.getInputStream().read() + 2)
+                        4 -> peer.read(18)
+                        else -> error("unexpected address")
+                    }
+                    if (request[1].toInt() == 3) relayPorts.add(address.portAtEnd())
+                    peer.write(if (request[1].toInt() == 3) ok.copyOf(8) + portBytes(relay.localPort) else ok)
+                } catch (_: Exception) { peer.close() }
+            }
+        }
+        val echo = executor.submit {
+            while (!relay.isClosed) {
+                try {
+                    val packet = relay.receive()
+                    relay.send(DatagramPacket(packet.data, packet.length, packet.socketAddress))
+                } catch (_: SocketTimeoutException) {
+                } catch (_: java.net.SocketException) { break }
+            }
+        }
+
+        fun open(udpRequest: Boolean): Pair<Socket, Int> {
+            val socket = client(bridge)
+            clients.add(socket)
+            assertEquals(0, authenticate(socket, bridge))
+            socket.write(if (udpRequest) udpConnect else connect)
+            val status = socket.read(10)[1].toInt()
+            if (status == 0 && udpRequest) socket.write(byteArrayOf(1) + destination)
+            return socket to status
+        }
+
+        fun pulse(socket: Socket) {
+            socket.write(frame)
+            assertArrayEquals(frame, socket.read(frame.size))
+        }
+
+        override fun close() {
+            ownerResume.countDown()
+            bridge.close()
+            clients.forEach { runCatching { it.close() } }
+            listener.close()
+            relay.close()
+            synchronized(peers) { peers.forEach { runCatching { it.close() } } }
+            executor.shutdownNow()
+            started.get(5, TimeUnit.SECONDS)
+            echo.get(5, TimeUnit.SECONDS)
+        }
+    }
+
+    private fun waitUntilOld(start: Long) {
+        while (System.nanoTime() - start < TimeUnit.SECONDS.toNanos(6)) {
+            java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10))
+        }
+    }
+
+    @Test fun capacityEvictsOldestIdleAndRefusesWhenAllAreBusy() {
+        CapacityProxy().use { proxy ->
+            val first = proxy.open(true).also { assertEquals(0, it.second) }.first
+            proxy.pulse(first)
+            val firstTime = System.nanoTime()
+            val second = proxy.open(true).also { assertEquals(0, it.second) }.first
+            val rest = (2 until 128).map { proxy.open(true).also { assertEquals(0, it.second) }.first }
+            // Make the first association strictly older than the second, then refresh all but first.
+            waitUntilOld(firstTime)
+            (listOf(second) + rest).forEach(proxy::pulse)
+            val replacement = proxy.open(true)
+            assertEquals(0, replacement.second)
+            proxy.pulse(replacement.first)
+            assertEquals(-1, first.getInputStream().read())
+            val busyStart = System.nanoTime()
+            (listOf(second) + rest).forEach(proxy::pulse)
+            proxy.pulse(replacement.first)
+            assertTrue(System.nanoTime() - busyStart < TimeUnit.SECONDS.toNanos(5))
+            assertEquals(1, proxy.open(true).second)
+        }
+    }
+
+    @Test fun independentLimitsAndSilentHandshakes() {
+        CapacityProxy().use { proxy ->
+            val udpClients = (0 until 128).map { proxy.open(true).also { assertEquals(0, it.second) }.first }
+            val tcpClients = (0 until 256).map { proxy.open(false).also { assertEquals(0, it.second) }.first }
+            assertEquals(1, proxy.open(false).second)
+            // Close one UDP control and keep retrying until its slot has actually been returned.
+            udpClients.first().close()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            var reopened: Pair<Socket, Int>
+            do { reopened = proxy.open(true) } while (reopened.second != 0 && System.nanoTime() < deadline)
+            assertEquals(0, reopened.second)
+            proxy.pulse(reopened.first)
+            tcpClients.forEach { it.close() }
+        }
+        CapacityProxy().use { proxy ->
+            val silent = (0 until 63).map {
+                client(proxy.bridge).also {
+                    it.write(byteArrayOf(5, 1, 2))
+                    assertArrayEquals(byteArrayOf(5, 2), it.read(2))
+                }
+            }
+            try {
+                assertEquals(0, proxy.open(true).second)
+                assertEquals(0, proxy.open(false).second)
+            } finally { silent.forEach { it.close() } }
+        }
+    }
+
+    @Test fun slotsReturnRepeatedlyAndRevokeClosesEvictedAndReplacementSockets() {
+        CapacityProxy().use { proxy ->
+            repeat(300) {
+                val udp = proxy.open(true)
+                assertEquals(0, udp.second)
+                proxy.pulse(udp.first)
+                udp.first.close()
+                val tcp = proxy.open(false)
+                assertEquals(0, tcp.second)
+                tcp.first.shutdownOutput()
+                synchronized(proxy.peers) { proxy.peers.last().close() }
+                assertEquals(-1, tcp.first.getInputStream().read())
+                tcp.first.close()
+            }
+        }
+        CapacityProxy().use { proxy ->
+            val associations = (0 until 128).map { proxy.open(true).also { assertEquals(0, it.second) }.first }
+            val evictedPort = proxy.relayPorts[proxy.relayPorts.size - 128]
+            val time = System.nanoTime()
+            waitUntilOld(time)
+            proxy.pauseOwner.set(true)
+            val replacement = proxy.executor.submit { runCatching { proxy.open(true) } }
+            assertTrue(proxy.ownerEntered.await(3, TimeUnit.SECONDS))
+            udp(evictedPort).close()
+            proxy.bridge.revoke()
+            udp(proxy.replacementPort.get()).close()
+            proxy.ownerResume.countDown()
+            replacement.get(5, TimeUnit.SECONDS)
+            associations.forEach { assertEquals(-1, it.getInputStream().read()) }
+            synchronized(proxy.peers) {
+                proxy.peers.filterNot { it.isClosed }.forEach { it.soTimeout = 3000; assertEquals(-1, it.getInputStream().read()) }
+            }
+        }
+    }
+
 }
