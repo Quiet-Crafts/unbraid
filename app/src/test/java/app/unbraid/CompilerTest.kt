@@ -199,6 +199,10 @@ class CompilerTest {
             assertEquals("dns-r-socks", rules[last]["server"]!!.jsonPrimitive.content)
             assertEquals("dns-r-socks", c["dns"]!!.jsonObject["final"]!!.jsonPrimitive.content)
             assertTrue(c.dnsRules().any { it.refuses() && it.unnamed() })
+            // An app sharing the proxy app's user id is refused before its rules, for connections and names alike, signed choices or not.
+            val denied = { r: JsonObject -> r.refuses() && "@unverified" in r["package_name"]?.toString().orEmpty() }
+            assertTrue(rules.indexOfFirst(denied) in 0 until own)
+            assertEquals(0, c.dnsRules().indexOfFirst(denied))
             assertTrue(c.dnsRules().none { it["server"] == JsonPrimitive("local") && it["package_name"] != JsonArray(listOf(JsonPrimitive("com.proxy"))) && "domain_suffix" !in it })
         }
     }
