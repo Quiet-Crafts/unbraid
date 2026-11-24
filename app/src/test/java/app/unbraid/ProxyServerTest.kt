@@ -117,7 +117,7 @@ class ProxyServerTest {
         val ok = setup.copy(apps = mapOf(app.pkg to DIRECT, "org.example.browser" to "r"))
         val on = VpnState(VpnState.Phase.On, engine = 3)
         val answered = on.copy(passed = Health.Passed(3, 1, mapOf("r" to Health.checkedAs(ok.route("r")!!))))
-        fun words(s: Setup, vpn: VpnState, running: Set<String>? = setOf("r"), silent: Boolean = false) = proxyStatus(s, s.servers.single(), vpn, silent, running).second
+        fun words(s: Setup, vpn: VpnState, running: Set<String>? = setOf("r"), silent: Boolean = false) = proxyStatus(s, s.servers.single(), vpn, silent, running, 1).second
         assertEquals("Not connected", words(ok, VpnState(), null))
         assertEquals("Not connected", words(ok, answered, emptySet()))
         assertEquals("Checking", words(ok, on)) // a wrong login looks like this until its first check fails
@@ -128,7 +128,8 @@ class ProxyServerTest {
         assertEquals("Its proxy isn't running", words(ok, VpnState(), null, silent = true))
         val unchecked = ok.copy(routes = ok.routes.map { it.copy(checkInternet = false) })
         assertEquals("Running, checks off", words(unchecked, answered))
-        assertTrue(words(ok, on.copy(lockdown = true), emptySet()).startsWith("Offline: Block connections"))
+        for (silent in listOf(false, true)) assertTrue(words(ok, on.copy(lockdown = true), emptySet(), silent).startsWith("Offline: Block connections"))
+        for (net in listOf(null, 0L, 2L)) assertEquals("Checking", proxyStatus(ok, server, answered, false, setOf("r"), net).second) // another network's check
         assertEquals("Its app needs Direct", words(ok.copy(apps = ok.apps - app.pkg), answered))
         assertEquals("Not used", words(ok.copy(routes = emptyList(), apps = mapOf(app.pkg to DIRECT)), VpnState(), null))
         assertEquals("Confirm its app", words(ok.copy(servers = listOf(server.copy(socks5 = proxy.copy(needsConfirmation = true)))), answered))

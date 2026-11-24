@@ -29,11 +29,12 @@ class Socks5Bridge private constructor(
     private val secret: ByteArray?,
     forbiddenListenerPorts: Set<Int>,
     private val udpRelayOwnerVerified: ((InetSocketAddress, InetSocketAddress) -> Boolean)?,
+    private val now: () -> Long,
     private val peerOwnerVerified: (Socket) -> Boolean,
 ) : Closeable {
     companion object {
         private const val HANDSHAKE_MS = 5_000
-        private const val HANDSHAKES = 64
+        private const val HANDSHAKES = 256
         private const val TCP_STREAMS = 256
         private const val UDP_ASSOCIATIONS = 128
         private const val UDP_EVICT_NANOS = 5_000_000_000L
@@ -49,6 +50,7 @@ class Socks5Bridge private constructor(
             host: String, port: Int, username: String?, password: String?,
             forbiddenListenerPorts: Set<Int> = emptySet(), udpEnabled: Boolean = false,
             udpRelayOwnerVerified: ((InetSocketAddress, InetSocketAddress) -> Boolean)? = null,
+            now: () -> Long = System::nanoTime,
             peerOwnerVerified: (Socket) -> Boolean,
         ): Socks5Bridge {
             val address = when (host) {
@@ -63,7 +65,7 @@ class Socks5Bridge private constructor(
             require(!udpEnabled || udpRelayOwnerVerified != null)
             return Socks5Bridge(
                 InetSocketAddress(address, port), user, pass, forbiddenListenerPorts + port,
-                udpRelayOwnerVerified.takeIf { udpEnabled }, peerOwnerVerified,
+                udpRelayOwnerVerified.takeIf { udpEnabled }, now, peerOwnerVerified,
             )
         }
 
@@ -71,7 +73,7 @@ class Socks5Bridge private constructor(
             val reserved = mutableListOf<ServerSocket>()
             try {
                 repeat(16) {
-                    val listener = ServerSocket(0, 32, loopback)
+                    val listener = ServerSocket(0, 128, loopback)
                     if (listener.localPort !in excluded) return listener
                     reserved.add(listener)
                 }
@@ -126,9 +128,9 @@ class Socks5Bridge private constructor(
     private val tcpSlots = Semaphore(TCP_STREAMS)
     private val associations = mutableSetOf<UdpSlot>()
 
-    private class UdpSlot(val client: Socket) {
+    private inner class UdpSlot(val client: Socket) {
         val sockets = mutableSetOf<Closeable>(client)
-        val activity = AtomicLong(System.nanoTime())
+        val activity = AtomicLong(now())
     }
     private val workers = Executors.newCachedThreadPool { r -> Thread(r, "SOCKS bridge stream").apply { isDaemon = true } }
 
@@ -162,7 +164,8 @@ class Socks5Bridge private constructor(
                         // Closing the client also signals a failed or incomplete handshake.
                     } finally { drop(client) }
                 }
-            } catch (_: RejectedExecutionException) { drop(client); handshakes.release(); return }
+            } catch (_: RejectedExecutionException) { drop(client); handshakes.release(); return
+            } catch (_: OutOfMemoryError) { drop(client); handshakes.release() } // no thread left: this one is refused
         }
     }
 
@@ -205,18 +208,21 @@ class Socks5Bridge private constructor(
                 inHandshake = false
                 val slot = UdpSlot(client)
                 val evicted: List<Closeable>?
-                synchronized(lock) {
-                    if (closed || revoked) return
-                    val oldest = associations.minByOrNull { it.activity.get() }
-                    if (associations.size >= UDP_ASSOCIATIONS &&
-                        (oldest == null || System.nanoTime() - oldest.activity.get() < UDP_EVICT_NANOS)) {
-                        evicted = null
-                    } else {
-                        evicted = if (associations.size >= UDP_ASSOCIATIONS) {
-                            associations.remove(oldest!!)
-                            oldest.sockets.toList()
-                        } else emptyList()
-                        associations.add(slot)
+                // A packet being sent for the one that goes is out before its slot is.
+                synchronized(sendLock) {
+                    synchronized(lock) {
+                        if (closed || revoked) return
+                        val oldest = associations.minByOrNull { it.activity.get() }
+                        if (associations.size >= UDP_ASSOCIATIONS &&
+                            (oldest == null || now() - oldest.activity.get() < UDP_EVICT_NANOS)) {
+                            evicted = null
+                        } else {
+                            evicted = if (associations.size >= UDP_ASSOCIATIONS) {
+                                associations.remove(oldest!!)
+                                oldest.sockets.toList()
+                            } else emptyList()
+                            associations.add(slot)
+                        }
                     }
                 }
                 if (evicted == null) { reply(client, 1); return }
@@ -376,7 +382,7 @@ class Socks5Bridge private constructor(
                 synchronized(sendLock) {
                     synchronized(lock) {
                         if (revoked || closed || slot !in associations) throw EOFException()
-                        activity.set(System.nanoTime())
+                        activity.set(now())
                     }
                     relay.send(DatagramPacket(packet, packet.size, peer))
                 }
@@ -387,10 +393,9 @@ class Socks5Bridge private constructor(
             val buffer = ByteArray(UDP_MAX_BYTES + 1)
             val packet = DatagramPacket(buffer, buffer.size)
             val output = client.getOutputStream()
-            while (System.nanoTime() - activity.get() < UDP_IDLE_NANOS) {
+            while (now() - activity.get() < UDP_IDLE_NANOS) {
                 packet.length = buffer.size
                 try { relay.receive(packet) } catch (_: SocketTimeoutException) { continue }
-                synchronized(lock) { if (slot in associations) activity.set(System.nanoTime()) }
                 if (packet.length > UDP_MAX_BYTES) continue
                 val input = DataInputStream(ByteArrayInputStream(packet.data, 0, packet.length))
                 val source = try {
@@ -401,7 +406,10 @@ class Socks5Bridge private constructor(
                 if (!validDestination(source)) continue
                 if (fixedDestination != null && !sameUdpSource(fixedDestination, source)) continue
                 if (!ownedRelay(upstream, relay, peer)) throw IOException("Unverified SOCKS relay")
-                synchronized(lock) { if (revoked || closed || slot !in associations) throw EOFException() }
+                synchronized(lock) {
+                    if (revoked || closed || slot !in associations) throw EOFException()
+                    activity.set(now())
+                }
                 val length = input.available()
                 val size = byteArrayOf((length ushr 8).toByte(), length.toByte())
                 if (fixedDestination == null) {

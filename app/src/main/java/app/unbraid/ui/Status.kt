@@ -30,16 +30,16 @@ fun proxyRunning(s: app.unbraid.data.Setup, vpn: app.unbraid.vpn.VpnState): Set<
  * does), and what the engine's own checks saw of the routes it runs as saved ([running], null: not connected).
  * Connected only on an answered check.
  */
-fun proxyStatus(s: app.unbraid.data.Setup, sv: app.unbraid.data.OwnServer, vpn: app.unbraid.vpn.VpnState, silent: Boolean, running: Set<String>? = proxyRunning(s, vpn)): Pair<Tone, String> {
+fun proxyStatus(s: app.unbraid.data.Setup, sv: app.unbraid.data.OwnServer, vpn: app.unbraid.vpn.VpnState, silent: Boolean, running: Set<String>? = proxyRunning(s, vpn), net: Long? = app.unbraid.vpn.AutoSwitch.net.value?.id): Pair<Tone, String> {
     val p = sv.socks5 ?: return Tone.Idle to "Not used"
     val active = s.activeRoutes.filter { it.own == sv.id }
-    val passed = vpn.passed?.takeIf { it.engine == vpn.engine }
+    val passed = vpn.passed?.takeIf { net != null && net != 0L && it.engine == vpn.engine && it.net == net }
     return when {
         sv.keyless || p.needsConfirmation -> Tone.Bad to "Confirm its app"
         !s.outside(p.packageName) -> Tone.Warn to "Its app needs Direct"
-        silent -> Tone.Bad to "Its proxy isn't running"
-        s.routes.none { it.own == sv.id } -> Tone.Idle to "Not used"
+        s.routes.none { it.own == sv.id } -> if (silent) Tone.Bad to "Its proxy isn't running" else Tone.Idle to "Not used"
         vpn.lockdown && running != null -> Tone.Warn to "Offline: Block connections without VPN is on in Android"
+        silent -> Tone.Bad to "Its proxy isn't running"
         running == null || active.isEmpty() || !running.containsAll(active.map { it.id }) -> Tone.Idle to "Not connected"
         active.any { it.id in vpn.notAnswering } -> Tone.Bad to "Not answering"
         active.none { it.checksInternet } -> Tone.Idle to "Running, checks off"

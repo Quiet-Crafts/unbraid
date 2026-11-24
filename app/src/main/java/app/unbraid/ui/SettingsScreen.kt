@@ -304,7 +304,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
     val filter = prefs.filter
     val filterDns = filter.server()
     // unbraid's filter on VPN routes replaces each provider's own blocking: those switches show off, their choice kept.
-    val silentProxies by rememberSilentProxies(ui, setup.servers.takeIf { page == "providers" || page?.startsWith("proxy:") == true }.orEmpty())
+    val silentProxies by rememberSilentProxies(ui, setup.servers.filter { page == "providers" || page == "proxy:${it.id}" })
     val customDns = filterDns != null && filter.routes
     val setFilter = { f: (app.unbraid.data.Filter) -> app.unbraid.data.Filter -> ui.setPrefs { it.copy(filter = f(it.filter)) } }
     // The open provider page's settings and device slot: some come from the provider's server list, so read off the main thread.

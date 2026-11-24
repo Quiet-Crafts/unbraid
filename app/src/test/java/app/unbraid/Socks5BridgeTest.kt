@@ -330,8 +330,10 @@ class Socks5BridgeTest {
         val ownerEntered = java.util.concurrent.CountDownLatch(1)
         val ownerResume = java.util.concurrent.CountDownLatch(1)
         val replacementPort = AtomicInteger()
+        val clock = java.util.concurrent.atomic.AtomicLong(1)
+        fun later(seconds: Long) { clock.addAndGet(TimeUnit.SECONDS.toNanos(seconds)) }
         val bridge = Socks5Bridge.start(
-            "127.0.0.1", listener.localPort, null, null, udpEnabled = true,
+            "127.0.0.1", listener.localPort, null, null, udpEnabled = true, now = { clock.get() },
             udpRelayOwnerVerified = { local, remote ->
                 if (pauseOwner.get()) {
                     replacementPort.set(local.port)
@@ -402,30 +404,22 @@ class Socks5BridgeTest {
         }
     }
 
-    private fun waitUntilOld(start: Long) {
-        while (System.nanoTime() - start < TimeUnit.SECONDS.toNanos(6)) {
-            java.util.concurrent.locks.LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10))
-        }
-    }
-
     @Test fun capacityEvictsOldestIdleAndRefusesWhenAllAreBusy() {
         CapacityProxy().use { proxy ->
-            val first = proxy.open(true).also { assertEquals(0, it.second) }.first
-            proxy.pulse(first)
-            val firstTime = System.nanoTime()
-            val second = proxy.open(true).also { assertEquals(0, it.second) }.first
-            val rest = (2 until 128).map { proxy.open(true).also { assertEquals(0, it.second) }.first }
-            // Make the first association strictly older than the second, then refresh all but first.
-            waitUntilOld(firstTime)
-            (listOf(second) + rest).forEach(proxy::pulse)
+            val all = (0 until 128).map { proxy.open(true).also { assertEquals(0, it.second) }.first }
+            all.forEach(proxy::pulse)
+            assertEquals(1, proxy.open(true).second) // each was used just now
+            proxy.later(4)
+            assertEquals(1, proxy.open(true).second)
+            // The one that goes is the longest idle, not the first that came.
+            val idle = all[70]
+            (all - idle).forEach(proxy::pulse)
+            proxy.later(2)
             val replacement = proxy.open(true)
             assertEquals(0, replacement.second)
             proxy.pulse(replacement.first)
-            assertEquals(-1, first.getInputStream().read())
-            val busyStart = System.nanoTime()
-            (listOf(second) + rest).forEach(proxy::pulse)
-            proxy.pulse(replacement.first)
-            assertTrue(System.nanoTime() - busyStart < TimeUnit.SECONDS.toNanos(5))
+            assertEquals(-1, idle.getInputStream().read())
+            (all - idle).forEach(proxy::pulse) // every other still works
             assertEquals(1, proxy.open(true).second)
         }
     }
@@ -445,7 +439,7 @@ class Socks5BridgeTest {
             tcpClients.forEach { it.close() }
         }
         CapacityProxy().use { proxy ->
-            val silent = (0 until 63).map {
+            val silent = (0 until 200).map {
                 client(proxy.bridge).also {
                     it.write(byteArrayOf(5, 1, 2))
                     assertArrayEquals(byteArrayOf(5, 2), it.read(2))
@@ -477,7 +471,7 @@ class Socks5BridgeTest {
             val associations = (0 until 128).map { proxy.open(true).also { assertEquals(0, it.second) }.first }
             val evictedPort = proxy.relayPorts[proxy.relayPorts.size - 128]
             val time = System.nanoTime()
-            waitUntilOld(time)
+            proxy.later(6)
             proxy.pauseOwner.set(true)
             val replacement = proxy.executor.submit { runCatching { proxy.open(true) } }
             assertTrue(proxy.ownerEntered.await(3, TimeUnit.SECONDS))

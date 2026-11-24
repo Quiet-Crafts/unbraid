@@ -103,7 +103,8 @@ internal fun rememberSilentProxies(ui: Ui, servers: List<OwnServer>): State<Set<
     return produceState(emptySet<String>(), ports) {
         if (ports.isEmpty()) { value = emptySet(); return@produceState }
         life.repeatOnLifecycle(Lifecycle.State.RESUMED) { while (true) {
-            value = withContext(Dispatchers.IO) { ports.filter { (_, port) -> !ui.accepts(port) }.map { it.first }.toSet() }
+            val dead = ports.map { it.second }.distinct().filterTo(HashSet()) { port -> withContext(Dispatchers.IO) { !ui.accepts(port) } }
+            value = ports.filter { it.second in dead }.map { it.first }.toSet()
             delay(4_000)
         } }
     }
