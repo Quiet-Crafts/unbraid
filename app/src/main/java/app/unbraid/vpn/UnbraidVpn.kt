@@ -62,7 +62,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -557,12 +556,22 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var losses = 0
     private val heldNotice get() = lost?.let { "Apps are offline: $it" } ?: UNREADABLE
 
-    /** Android's tunnel with no engine behind it: every app inside is offline; only apps on Direct in [setup] stay out. */
-    private fun blockingTun(setup: Setup): android.os.ParcelFileDescriptor? {
-        val out = Compiler.mayStayOut(verifiedSetup(setup), isLockdownEnabled, ::packagesSharing) { verifiedIdentity(setup, it) }
-        return Builder().setSession("$APP").setMetered(false).addAddress("172.19.0.1", 30).addAddress("fdfe:dcba:9876::1", 126)
-            .addRoute("0.0.0.0", 0).addRoute("::", 0).addDnsServer("172.19.0.2")
-            .also { b -> (out + packageName).forEach { runCatching { b.addDisallowedApplication(it) } } }.establish()
+    /** Android's tunnel with no engine behind it: every app inside is offline, only [out] stays out. */
+    private fun blockingTun(out: Set<String>) = Builder().setSession("$APP").setMetered(false).addAddress("172.19.0.1", 30).addAddress("fdfe:dcba:9876::1", 126)
+        .addRoute("0.0.0.0", 0).addRoute("::", 0).addDnsServer("172.19.0.2")
+        .also { b -> (out + packageName).forEach { runCatching { b.addDisallowedApplication(it) } } }.establish()
+
+    /** Puts the blocking tunnel in place, leaving out the apps on Direct as saved now. False: Android lets no tunnel block any more. */
+    private fun block(): Boolean {
+        fun put(out: Set<String>): Boolean = blockingTun(out)?.let { b -> runCatching { tun?.close() }; tun = b; true } ?: false
+        fun may() = store.setup.value.let { s -> Compiler.mayStayOut(verifiedSetup(s), isLockdownEnabled, ::packagesSharing) { verifiedIdentity(s, it) } }
+        return runCatching {
+            val out = may()
+            // Checked again with it up: an app changed meanwhile comes inside.
+            put(out).also { if (it) { val still = may(); if (!still.containsAll(out)) put(out intersect still) } }
+        }.onFailure { Log.e(TAG, "block: ${logLine(it)}") }.getOrNull()
+            ?: runCatching { put(emptySet()) }.getOrNull()
+            ?: (tun != null && runCatching { prepare(this) == null }.getOrDefault(false)) // the one there stays, with nothing behind it
     }
 
     /**
@@ -571,11 +580,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      * Disconnect and Pause work as always. Caller holds [lock].
      */
     private fun lose(why: String) {
-        val block = if (destroyed) null else runCatching { blockingTun(store.setup.value) }.onFailure { Log.e(TAG, "lose: ${logLine(it)}") }.getOrNull()
-        if (block == null) { teardown(why); return } // no VPN permission any more: nothing can hold the apps
+        // Taken before the tunnel is built: what changes from here on starts the next try.
+        fun now() = listOf(store.setup.value, store.accounts.value, store.restoreGeneration, installs.get())
+        val seen = now()
+        if (destroyed || !block()) { teardown(why); return }
         val tries = losses
-        runCatching { tun?.close() }
-        tun = block
         stopEngine(keepTun = true)
         lost = why; losses = tries + 1; holding = true
         state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), error = "Apps are offline: $why", lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
@@ -585,13 +594,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val mine = session
         watch = scope.launch {
             kotlinx.coroutines.withTimeoutOrNull(FakePool.lostWait(tries)) {
-                combine(store.setup, store.accounts, store.restores) { s, a, r -> Triple(s, a, r) }.drop(1).first()
-                kotlinx.coroutines.delay(400)
+                while (now() == seen) kotlinx.coroutines.delay(500)
             }
             lock.withLock {
                 if (session != mine || lost == null || destroyed) return@withLock
                 // First the apps that may stay out, as saved now: an app just moved off Direct doesn't wait for the engine.
-                runCatching { blockingTun(store.setup.value) }.getOrNull()?.let { b -> runCatching { tun?.close() }; tun = b }
+                block()
                 holding = false
                 watch = null
                 state.value = VpnState(VpnState.Phase.Connecting)
