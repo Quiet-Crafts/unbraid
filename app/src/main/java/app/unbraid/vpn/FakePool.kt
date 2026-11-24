@@ -134,6 +134,9 @@ object FakePool {
         return if (current()) result else Outcome.Superseded
     }
 
+    /** How long apps wait offline before try number [n] (0: the first) to connect again after the engine was lost, unless something changes. */
+    fun lostWait(n: Int): Long = longArrayOf(5_000, 15_000, 30_000, 60_000, 120_000, 300_000).let { it.getOrElse(n) { _ -> 600_000 } }
+
     /**
      * A move to the next block: [attempt] (`gone` false) and, if its start failed after the old engine was given up,
      * once more with what ran (`gone` true), whose every failure ends the connection.

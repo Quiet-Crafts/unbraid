@@ -171,6 +171,10 @@ object Compiler {
     internal fun mayExclude(s: Setup, pkg: String, kin: Set<String>?, identity: (String) -> app.unbraid.data.AppIdentity?): Boolean =
         s.outside(pkg) && kin != null && pkg in kin && kin.none { keeps(s, pkg, it) || it in s.apps && !s.permitsApp(it, identity) }
 
+    /** The apps a tunnel with no engine may leave out: Direct by choice now, verified, and none when Android blocks everything outside. */
+    internal fun mayStayOut(s: Setup, lockdown: Boolean, kin: (String) -> Set<String>?, identity: (String) -> app.unbraid.data.AppIdentity?): Set<String> =
+        if (lockdown) emptySet() else s.apps.keys.filterTo(HashSet()) { mayExclude(s, it, kin(it), identity) }
+
     /** Route id → the tunnel tag it runs on: routes that resolve to one server with one login share a tunnel. */
     fun shared(s: Setup, links: Map<String, Link>, blocked: Set<String> = emptySet()): Map<String, String> =
         shared(s, links, blocked, s.activeRoutes)

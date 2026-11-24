@@ -62,6 +62,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -134,7 +135,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val state = MutableStateFlow(VpnState())
         /** Runs [block] under the running service's lifecycle lock, so no engine starts meanwhile; null when none runs. Blocks: never on the main thread nor under that lock. */
         fun <T> underLock(block: () -> T): T? = kotlinx.coroutines.runBlocking { lock.withLock { current?.takeIf { !it.destroyed }?.let { block() } } }
-        const val RESTORE_REFUSED = "The restored setup couldn't start, so unbraid is off. Check your routes, then connect again."
+        const val RESTORE_REFUSED = "The restored setup couldn't start. Check your routes."
         /** Route id → engine tunnel tag of the running setup (speed tests dial through it). */
         @Volatile var tags: Map<String, String> = emptyMap()
         /** Tunnel tag → the DNS server that tunnel's own lookups use (health checks look their servers up there). */
@@ -436,7 +437,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 val p = intent?.getIntExtra(EXTRA_PAUSE, 0) ?: 0
                 if (p != 0 && pauses != 0 && (p != pauses || state.value.phase != VpnState.Phase.Paused)) {
                     // Its start put up "Connecting…" if the pause had already ended: put the running notice back.
-                    if (state.value.phase == VpnState.Phase.On) { if (holding) notice(UNREADABLE) else notify(store.setup.value) } else stopWanted = state.value.phase == VpnState.Phase.Off
+                    if (state.value.phase == VpnState.Phase.On) { if (holding) notice(heldNotice) else notify(store.setup.value) } else stopWanted = state.value.phase == VpnState.Phase.Off
                     return
                 }
                 // Android's own start (after it killed the app, or Always-on) during a pause the user set: paused on until its end.
@@ -474,7 +475,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (state.value.phase == VpnState.Phase.On) { // a repeated start (Always-on, tile)
             readFlags()
             if (state.value.phase == VpnState.Phase.On) { // a failed reload may have ended it
-                if (holding) notice(UNREADABLE) else notify(store.setup.value)
+                if (holding) notice(heldNotice) else notify(store.setup.value)
                 AfterUpdate.on(this) // still on: a start after an update may have cleared the note meanwhile
             }
             return
@@ -507,6 +508,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             apply(srv, setup, picked, accounts, seen)
             requireCurrent(seen)
             ranRestores = seen
+            lost = null; losses = 0
             // With the tailnet domain the engine was just compiled with: a reload that changes nothing never sets it again.
             state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), tsSuffix = lastInput?.tsSuffix, lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, stuck = stuck(setup, picked.blocked), engine = starts,
                 applied = if (picked.blocked.values.none { it is LinkPicker.Waiting }) setup.hashCode() else 0)
@@ -540,12 +542,63 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${logLine(e)}")
             // After an update the notice offers the reconnect; a tap shows what fails, in the app.
-            if (updated) { teardown(null); AfterUpdate.tell(this) } else teardown(Redact.message(e, "Could not connect"))
+            if (lost != null) lose(Redact.message(e, "Could not connect")) else if (updated) { teardown(null); AfterUpdate.tell(this) } else teardown(Redact.message(e, "Could not connect"))
         }
     }
 
     /** The engine runs [Compiler.blockAll] because the saved settings won't open ([hold]); nothing else is applied then. */
     private var holding = false
+
+    /**
+     * Why no engine runs although the VPN was on ([lose]), until one runs again or the user stops it; with [losses], how
+     * many tries failed. [holding] too while waiting for the next try.
+     */
+    private var lost: String? = null
+    private var losses = 0
+    private val heldNotice get() = lost?.let { "Apps are offline: $it" } ?: UNREADABLE
+
+    /** Android's tunnel with no engine behind it: every app inside is offline; only apps on Direct in [setup] stay out. */
+    private fun blockingTun(setup: Setup): android.os.ParcelFileDescriptor? {
+        val out = Compiler.mayStayOut(verifiedSetup(setup), isLockdownEnabled, ::packagesSharing) { verifiedIdentity(setup, it) }
+        return Builder().setSession("$APP").setMetered(false).addAddress("172.19.0.1", 30).addAddress("fdfe:dcba:9876::1", 126)
+            .addRoute("0.0.0.0", 0).addRoute("::", 0).addDnsServer("172.19.0.2")
+            .also { b -> (out + packageName).forEach { runCatching { b.addDisallowedApplication(it) } } }.establish()
+    }
+
+    /**
+     * The engine is gone and what ran before didn't come back: apps stay offline behind a tunnel of its own, never on
+     * the normal connection, while connecting is tried again: after a while, or at once when something is changed.
+     * Disconnect and Pause work as always. Caller holds [lock].
+     */
+    private fun lose(why: String) {
+        val block = if (destroyed) null else runCatching { blockingTun(store.setup.value) }.onFailure { Log.e(TAG, "lose: ${logLine(it)}") }.getOrNull()
+        if (block == null) { teardown(why); return } // no VPN permission any more: nothing can hold the apps
+        val tries = losses
+        runCatching { tun?.close() }
+        tun = block
+        stopEngine(keepTun = true)
+        lost = why; losses = tries + 1; holding = true
+        state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), error = "Apps are offline: $why", lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
+        stopWanted = false
+        notice(heldNotice)
+        if (tries == 0) alert(heldNotice)
+        val mine = session
+        watch = scope.launch {
+            kotlinx.coroutines.withTimeoutOrNull(FakePool.lostWait(tries)) {
+                combine(store.setup, store.accounts, store.restores) { s, a, r -> Triple(s, a, r) }.drop(1).first()
+                kotlinx.coroutines.delay(400)
+            }
+            lock.withLock {
+                if (session != mine || lost == null || destroyed) return@withLock
+                // First the apps that may stay out, as saved now: an app just moved off Direct doesn't wait for the engine.
+                runCatching { blockingTun(store.setup.value) }.getOrNull()?.let { b -> runCatching { tun?.close() }; tun = b }
+                holding = false
+                watch = null
+                state.value = VpnState(VpnState.Phase.Connecting)
+                connect()
+            }
+        }
+    }
 
     /** Accepted restore generation of the last successful install. */
     private var ranRestores = 0L
@@ -582,6 +635,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         starts++
         releaseRetiredSocks()
         holding = true
+        lost = null; losses = 0
         state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
         stopWanted = false
         AfterUpdate.on(this)
@@ -601,6 +655,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 forgetLookups(this@UnbraidVpn)
                 net.stop()
                 state.value = VpnState(VpnState.Phase.Connecting)
+                lost = "Could not connect" // offline until now: a start that fails leaves apps so
                 connect()
             }
         }
@@ -798,12 +853,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     FakePool.Step.Nothing, FakePool.Step.Wait -> {}
                     FakePool.Step.Exhausted -> if (!exhaustedSaid) { exhaustedSaid = true; Log.w(TAG, "fake IPs: block used up before the next move is due, new lookups fail until then") }
                     FakePool.Step.Rotate -> when (FakePool.move { gone -> restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone, move = true) }) {
-                        FakePool.Outcome.Ran -> if (ranRestores != store.restoreGeneration) teardown(RESTORE_REFUSED) else {
+                        FakePool.Outcome.Ran -> if (ranRestores != store.restoreGeneration) lose(RESTORE_REFUSED) else {
                             exhaustedSaid = false; Log.i(TAG, "fake IPs: moved to the next block"); retime()
                         }
                         FakePool.Outcome.Kept -> Log.w(TAG, "fake IPs: move not started, tried again at the next check")
-                        FakePool.Outcome.Failed -> teardown("Connection lost")
-                        FakePool.Outcome.Superseded -> teardown(RESTORE_REFUSED)
+                        FakePool.Outcome.Failed -> lose("Connection lost")
+                        FakePool.Outcome.Superseded -> lose(RESTORE_REFUSED)
                     }
                 }
             }
@@ -906,8 +961,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         retireSocksExcept(FakePool.retainedBridges(lastInput?.socksBridges.orEmpty(), socksEndpoints()).keys)
         val outcome = FakePool.afterFailure(restarted, { ranRestores == store.restoreGeneration }) { restoreLastGood(srv) }
         restarting = false
-        if (outcome == FakePool.Outcome.Superseded || ranRestores != store.restoreGeneration) teardown(RESTORE_REFUSED)
-        else if (outcome == FakePool.Outcome.Failed) teardown(Redact.message(e, "Connection lost"))
+        if (outcome == FakePool.Outcome.Superseded || ranRestores != store.restoreGeneration) lose(RESTORE_REFUSED)
+        else if (outcome == FakePool.Outcome.Failed) lose(Redact.message(e, "Connection lost"))
         else {
             // A retry of the running setup that failed before any engine restart is tried again later; one that restarted
             // every tunnel isn't, so a failing server never takes all apps offline every few minutes (a network change
@@ -1367,7 +1422,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     /** Stops the engine and the tunnel; the service itself stays. Caller holds [lock]. */
-    private fun stopEngine() {
+    private fun stopEngine(keepTun: Boolean = false) {
+        lost = null; losses = 0
         watch?.cancel(); watch = null
         health?.cancel(); health = null
         pool?.cancel(); pool = null; exhaustedSaid = false
@@ -1382,7 +1438,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         restarting = false
         runCatching { server?.closeService() }
         closeSocks()
-        runCatching { tun?.close() }; tun = null
+        if (!keepTun) { runCatching { tun?.close() }; tun = null }
         openTable(false)
         forgetLookups(this)
         net.stop()
