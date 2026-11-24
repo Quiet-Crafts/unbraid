@@ -54,8 +54,10 @@ fun ProxyScreen(ui: Ui) {
             AppsDisclosure({ ui.acceptDisclosure() }, close)
         }
         draft.proxyApp == null || choosing -> {
-            BackHandler(choosing) { choosing = false }
-            ChooseApp(ui, if (choosing) ({ choosing = false }) else close) { draft.proxyChoice(it); choosing = false }
+            // Editing, the list came from the details and goes back there; adding, it is the first page and leaves.
+            val editing = choosing && draft.refill != null && draft.proxyApp != null
+            BackHandler(editing) { choosing = false }
+            ChooseApp(ui, if (editing) ({ choosing = false }) else close) { draft.proxyChoice(it); choosing = false }
         }
         else -> {
             // Back to the list when adding; editing starts here, so Back leaves.
