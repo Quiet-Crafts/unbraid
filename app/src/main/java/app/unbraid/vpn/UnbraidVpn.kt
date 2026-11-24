@@ -1668,6 +1668,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 leaveOut.forEach { runCatching { b.addDisallowedApplication(it) } }
             }
         }
+        // The user id each has before the tunnel is built: what Android is about to leave out.
+        val ids = out.associateWith(::uidOf).filterValues { it >= 0 }
         fun establish(excluded: List<String>): android.os.ParcelFileDescriptor {
             val builder = builder(excluded)
             checkPolicy()
@@ -1676,7 +1678,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             try { checkPolicy() } catch (e: Exception) {
                 // Android has replaced the old tunnel with this one: closed now, apps would be outside until the next. Kept,
                 // with no engine behind it, until [lose] or a new start replaces it; closed only when stopping.
-                if (destroyed || tunPolicy !== policy) pfd.close() else { runCatching { tun?.close() }; tun = pfd; leftOut = excluded }
+                if (destroyed || tunPolicy !== policy) pfd.close() else {
+                    runCatching { tun?.close() }; tun = pfd; leftOut = excluded
+                    // So the blocking tunnel can leave out the same ones, checked again there: else Android swaps with a gap.
+                    knownIds.putAll(ids.filterKeys { it in excluded })
+                }
                 throw e
             }
             return pfd
@@ -1686,7 +1692,6 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // those apps inside (the safe side, for an instant), so the real list is a change and is read afresh.
         // Each app's user id is remembered from every tunnel built, also while it was away: one back with another id is
         // moved, whatever else changed in the list.
-        val ids = out.associateWith(::uidOf).filterValues { it >= 0 }
         val moved = ids.filter { (n, id) -> knownIds[n]?.let { it != id } == true || n in unsure }.keys
         val interim = if (tun != null && moved.isNotEmpty()) establish(out - moved).also { tun?.close(); tun = it; leftOut = out - moved } else null
         var pfd = establish(out)
