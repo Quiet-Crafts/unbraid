@@ -151,13 +151,26 @@ class CompilerTest {
             socksInput(setup.copy(sites = mapOf("example.com" to socks.id))),
         )) {
             assertEquals(setOf(socks.id), input.unavailableSocks)
-            assertTrue(input.socksCompanions.isEmpty())
+            if (input.socksBridges.isNotEmpty()) assertTrue(input.socksCompanions.isEmpty())
             val raw = Compiler.compile(input)
             assertFalse(raw.contains("bridge-password"))
             val rules = Json.parseToJsonElement(raw).jsonObject.rules()
             if (input.setup.defaultRoute != socks.id)
                 assertTrue(rules.any { it["package_name"] == JsonArray(listOf(JsonPrimitive("com.target"))) && it["action"] == JsonPrimitive("reject") })
         }
+    }
+
+    /** A proxy route that can't be used yet leaves the same apps outside the tunnel, so Android swaps tunnels without a gap. */
+    @Test fun aProxyRouteComingOrGoingMovesNoAppOutOfTheTunnel() {
+        val setup = Setup(routes = listOf(socks), defaultRoute = DIRECT,
+            apps = mapOf("com.target" to socks.id, "com.proxy" to DIRECT, "com.direct" to DIRECT))
+        val (up, down) = listOf(true, false).map { bridge ->
+            Json.parseToJsonElement(Compiler.compile(socksInput(setup, bridge = bridge))).jsonObject }
+        fun outside(c: JsonObject) = c["inbounds"]!!.jsonArray.map { it.jsonObject }.single { it["type"]!!.jsonPrimitive.content == "tun" }["exclude_package"]
+        assertEquals(outside(up), outside(down))
+        assertTrue("com.proxy" !in outside(down)!!.jsonArray.map { it.jsonPrimitive.content })
+        assertTrue(down.rules().any { it["package_name"] == JsonArray(listOf(JsonPrimitive("com.target"))) && it["action"] == JsonPrimitive("reject") })
+        assertTrue(down.rules().any { r -> r["package_name"] == JsonArray(listOf(JsonPrimitive("com.proxy"))) && r["outbound"]?.jsonPrimitive?.content == "direct" })
     }
 
     /** Each new domain table hands out fake IPs from its block of the pool and refuses the others, before any exit is chosen. */

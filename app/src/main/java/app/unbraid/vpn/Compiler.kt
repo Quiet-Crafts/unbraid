@@ -108,10 +108,11 @@ object Compiler {
         val companions = HashSet<String>()
         for (r in routed) {
             val profile = r.socks5 ?: continue
-            if (r.id in i.blocked || i.links[r.id] !is Socks5Link || i.socksBridges[r.id]?.allowUdp != profile.allowUdp ||
-                socksPolicyProblem(i.setup, r, i.selfPackage, i.lockdown, i.blockedKin, i.tsSuffix) != null)
-                unavailable.add(r.id)
-            else companions.add(profile.packageName)
+            val problem = socksPolicyProblem(i.setup, r, i.selfPackage, i.lockdown, i.blockedKin, i.tsSuffix)
+            // Its app keeps its place also while the route can't be used: moved out of the tunnel and back, Android would
+            // end one tunnel before the next starts.
+            if (problem == null) companions.add(profile.packageName)
+            if (problem != null || r.id in i.blocked || i.links[r.id] !is Socks5Link || i.socksBridges[r.id]?.allowUdp != profile.allowUdp) unavailable.add(r.id)
         }
         return SocksPolicy(unavailable, companions)
     }
