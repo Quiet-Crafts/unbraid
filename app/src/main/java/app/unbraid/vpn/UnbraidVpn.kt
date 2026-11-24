@@ -526,7 +526,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val built = startingLockdown(lastInput, isLockdownEnabled)
             health = scope.launch { watchHealth(built) }
             pool = scope.launch { watchPool() }
-            watch = combine(store.setup, store.accounts, store.restores) { s, a, _ -> s to a }.debounce(400).onEach { (s, a) ->
+            watch = combine(store.setup, store.accounts, store.restores) { s, a, _ -> s to a }.debounce { (s, _) ->
+                // Edits in a row are taken together, but one that moves apps off Direct doesn't wait.
+                if (LinkPicker.leavesDirect(applied, s, s.activeRoutes.mapTo(HashSet()) { it.id }, lastInput?.tsSuffix, store.tsSuffix)) 0L else 400L
+            }.onEach { (s, a) ->
                 val allowed = s.activeRoutes.filter { it.imported && Health.eligible(it) }.map { it.id }.toSet()
                 state.update { it.copy(notAnswering = it.notAnswering intersect allowed) }
                 // Not awaited: a slow provider must never hold up the next edit (which may have to block an app at once).
@@ -541,12 +544,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // One that came while this was starting (before the hook was set) is checked now.
             if (app.unbraid.data.Mullvad.listVersion != startList) scope.launch { reload() }
             // An app installed while this was starting: judged now, with the VPN on.
-            if (installs.get() != builtInstalls || again) scope.launch { reload() }
+            if (installs.get() != builtInstalls || again || store.setup.value != setup || store.restoreGeneration != seen) scope.launch { reload() } // changed meanwhile: at once
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${logLine(e)}")
             // After an update the notice offers the reconnect; a tap shows what fails, in the app.
             // A setup restored meanwhile refused this one: Android may have the VPN up already, so apps wait for the restored one.
-            if (lost != null || from >= 0 && from != store.restoreGeneration) lose(Redact.message(e, "Could not connect")) else if (updated) { teardown(null); AfterUpdate.tell(this) } else teardown(Redact.message(e, "Could not connect"))
+            if (FakePool.waits(lost != null, from, store.restoreGeneration)) lose(Redact.message(e, "Could not connect")) else if (updated) { teardown(null); AfterUpdate.tell(this) } else teardown(Redact.message(e, "Could not connect"))
         }
     }
 
@@ -561,7 +564,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var losses = 0
     /** The [session] the blocking tunnel took over from. */
     private var lostFrom = -1
-    private val heldNotice get() = lost?.let { "Apps are offline: $it" } ?: UNREADABLE
+    // Android kept the old tunnel and let no other be built: apps it leaves out may be online, and it is tried again soon.
+    private val heldNotice get() = lost?.let { if (blocks) "Apps are offline: $it" else "Some apps may be online: $it" } ?: UNREADABLE
 
     /**
      * The apps the tunnel in place leaves out, in the order Android got them. Android swaps two tunnels without a gap only
@@ -606,13 +610,13 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         lostFrom = session
         stopEngine(keepTun = true)
         lost = why; losses = tries + 1; holding = true
-        state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), error = "Apps are offline: $why", lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
+        state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), error = heldNotice, lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
         stopWanted = false
         notice(heldNotice)
         if (tries == 0) problem(this, heldNotice, APP, 2) // not "is off": it is on, and keeps apps offline
         val mine = session
         watch = scope.launch {
-            kotlinx.coroutines.withTimeoutOrNull(FakePool.lostWait(tries)) {
+            kotlinx.coroutines.withTimeoutOrNull(if (blocks) FakePool.lostWait(tries) else 2_000L) {
                 while (now() == seen) kotlinx.coroutines.delay(1_000)
             }
             lock.withLock {

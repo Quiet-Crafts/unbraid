@@ -382,6 +382,8 @@ object Backup {
         if (setup.servers.any { it.socks5?.allowUdp == true } || setup.routes.any { it.socks5?.allowUdp == true }) {
             need(setup.version >= 8, "UDP consent needs the newer setup format")
         }
+        val proxies = setup.routes.filter { it.socks5 != null }.mapTo(HashSet()) { it.id }
+        if ((setup.profiles + setup.live).any { it.defaultRoute in proxies }) need(setup.version >= 9, "a proxy default needs the newer setup format")
         if (!c.keys) {
             need(setup.servers.none { it.socks5 != null && !it.keyless } && setup.routes.none { it.socks5 != null && !it.keyless },
                 "a backup without keys holds a local proxy config")

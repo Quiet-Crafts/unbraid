@@ -570,6 +570,12 @@ class FakePoolTest {
         for (to in listOf("r", BLOCK)) assertTrue(lostOut(lostSetup.copy(apps = lostSetup.apps + ("d" to to))).isEmpty())
     }
 
+    @Test fun aRestoreDuringAStartKeepsAppsWaiting() {
+        assertTrue(FakePool.waits(lost = true, from = -1, restores = 0))
+        assertTrue(FakePool.waits(lost = false, from = 3, restores = 4))
+        for (from in listOf(-1L, 4L)) assertFalse(FakePool.waits(lost = false, from = from, restores = 4)) // not read yet, or none came
+    }
+
     @Test fun triesSlowDownAndNeverStop() {
         val waits = (0..20).map(FakePool::lostWait)
         assertEquals(5_000L, waits.first())

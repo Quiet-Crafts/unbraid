@@ -106,6 +106,15 @@ class Socks5StorageTest {
         assertTrue(setup.copy(apps = mapOf("org.example.browser" to route.id)).supportsSocks5Assignments())
     }
 
+    @Test fun aBackupWithAProxyDefaultUnderAnOlderFormatIsRefused() {
+        for (s in listOf(setup.copy(defaultRoute = route.id, apps = mapOf(route.socks5!!.packageName to DIRECT)), setup.copy(profiles = listOf(Profile("Other", route.id))))) {
+            val text = Backup.export(s, "3.2", 0).toString(Charsets.UTF_8)
+            assertEquals(route.id, Backup.read(text.toByteArray()).setup.let { b -> (b.profiles + b.live).first { it.defaultRoute == route.id }.defaultRoute })
+            assertTrue("\"version\":9" in text)
+            assertThrows(Backup.Failed::class.java) { Backup.read(text.replace("\"version\":9", "\"version\":8").toByteArray()) }
+        }
+    }
+
     /** A proxy default whose own app isn't on Direct there would leave every app on it offline: named, for each profile. */
     @Test fun aDefaultWhoseProxyAppIsNotDirectIsNamed() {
         val pkg = route.socks5!!.packageName

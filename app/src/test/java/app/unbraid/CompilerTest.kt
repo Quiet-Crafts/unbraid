@@ -174,7 +174,7 @@ class CompilerTest {
     private fun JsonObject.final() = this["route"]!!.jsonObject["final"]!!.jsonPrimitive.content
     private fun JsonObject.dnsRules() = this["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
     private fun JsonObject.refuses() = this["action"] == JsonPrimitive("reject")
-    private fun JsonObject.unnamed() = this["type"] == JsonPrimitive("logical") && "package_name_regex" in toString() && "invert" in toString()
+    private fun JsonObject.unnamed() = this["type"] == JsonPrimitive("logical") && this["rules"]!!.jsonArray.map { it.jsonObject }.any { it["package_name_regex"] != null && it["invert"] == JsonPrimitive(true) }
 
     /** A proxy as the default, its own app the only exception: nothing without a name, no ping and no UDP gets past it. */
     @Test fun aProxyDefaultCarriesOrRefusesEverythingItsAppIsTheOnlyWayOut() {
