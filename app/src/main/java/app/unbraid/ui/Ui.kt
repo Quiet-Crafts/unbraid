@@ -852,6 +852,11 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             notice.value = "A proxy server can't be used there: not for its own app, a website route or Via."
             return ""
         }
+        // Asked first, so a default that is refused leaves no route behind.
+        if (target == "default" && s.socks5 != null) setup.value.let { now ->
+            val named = now.viewAs(draft).let { if (it.outside(s.socks5.packageName)) null else s.socks5.packageName }
+            if (named != null) { refusal.value = needsDirect(named, draft); return "" }
+        }
         val reuse = setup.value.takeIf { it.route(target) == null }?.serverRoute(s, draft)
             ?: return addImported(target) { setup, r ->
                 // As saved now: a proxy server edited or removed meanwhile never comes back from an older copy.
@@ -929,16 +934,19 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                         val next = if (s.profile != live) null else if (old != null) s.refilled(id, server, old) else if (target == null || s.allowsLocalProxy(target, app.pkg)) s.copy(servers = s.servers + server) else null
                         refused = if (next != null) null else if (s.profile != live) moved else if (old != null) "That server changed or was removed. Open its settings again." else "A proxy server can't be used there any more."
                         // Only what the page said: anything else leaves the app's route as it is.
-                        if (next == null) s else if (shown is ProxyDirect.Grant && s.proxyDirect(profile, app.copy(identity = signer), sharesUid(app.pkg)) == shown) next.goingDirect(profile, app.pkg, signer) else next
+                        val done = if (shown is ProxyDirect.Grant && s.proxyDirect(profile, app.copy(identity = signer), sharesUid(app.pkg)) == shown) next?.goingDirect(profile, app.pkg, signer) else next
+                        if (done != null && strands(s, done)) { refused = refusal.value; refusal.value = null }
+                        done?.takeIf { refused == null } ?: s
                     }
                     refused?.let { throw IllegalStateException(it) }
                     _signedIn.value = true
+                    var landed = target // not the default after all: its own page instead, with the reason
                     if (old == null) setup.value.importFor(target, alone = store.accounts.value.isEmpty() && draft == null)?.let { to ->
-                        useServer(to, server).let { route -> if (to == "default" && route.isNotEmpty()) setDefault(route) }
+                        useServer(to, server).let { route -> if (to == "default" && route.isNotEmpty() && !setDefault(route)) landed = null }
                     }
                     if (saved && pass.isNotEmpty()) clearClipboardIf(pass)
                     d.clear()
-                    proxySaved.value = target to id
+                    proxySaved.value = landed to id
                 } catch (e: Exception) { d.error = problem(e) }
             }
         }
@@ -1008,8 +1016,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         store.edit { s ->
             val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, socks5 = null, tsExit = null, tsName = null, own = null, keyless = false) ?: Route(id, hue = nextHue(s))
             val made = source(s, blank)
-            refused = made == null
-            made?.let { s.imported(id, it, alone = store.accounts.value.isEmpty() && draft == null) } ?: s
+            val next = made?.let { s.imported(id, it, alone = store.accounts.value.isEmpty() && draft == null) }?.takeIf { !strands(s, it) }
+            refused = next == null
+            next ?: s
         }
         if (refused) return ""
         if (target.startsWith("app:")) assign(target.removePrefix("app:"), id)
@@ -1072,18 +1081,32 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      * Makes route [id] the default of the profile being viewed (saved only, nothing connects) or of the live setup. Apps
      * that chose a route keep it; returns how many installed apps follow the default and so move ([moving], asked first).
      */
-    fun setDefault(id: String): Int {
-        if (setup.value.route(id)?.socks5?.let { !proxyReady(it.packageName) } == true) return 0
-        return moving(id).also { editRoutes { p -> p.copy(defaultRoute = id) } }
+    fun setDefault(id: String): Boolean {
+        val s = setup.value
+        if (s.route(id)?.socks5 != null) {
+            if (draft == null && vpn.value.lockdown) { refusal.value = "Android's Block connections without VPN is on, and a proxy server can't be used with it."; return false }
+            if (strands(s, s.editing(draft) { it.copy(defaultRoute = id) })) return false
+        }
+        editRoutes { p -> p.copy(defaultRoute = id) }
+        return true
     }
 
     /** How many installed apps would move if route [id] became the default of the profile being viewed: those that follow it. 0 for the same default, or before the app list is read. */
     fun moving(id: String) = setup.value.viewAs(draft).let { s -> if (id == s.defaultRoute) 0 else s.followers(apps.value.map { it.pkg }) }
 
-    /** Whether proxy app [pkg] is on Direct already, as a default needs: else every app on it would be offline. Says so if not. */
-    fun proxyReady(pkg: String) = setup.value.viewAs(draft).outside(pkg).also { ready ->
-        if (!ready) notice.value = "Set ${apps.value.firstOrNull { it.pkg == pkg }?.label ?: "its proxy app"} to Direct in Apps first, without the DNS filter."
+    /** Why a change wasn't made, shown over any screen. */
+    val refusal = MutableStateFlow<String?>(null)
+
+    /** Whether [next] would leave a proxy default without its own app on Direct, every app on it offline, where [now] doesn't: says so ([refusal]). */
+    private fun strands(now: Setup, next: Setup): Boolean {
+        val (name, pkg) = (next.stuckDefaults() - now.stuckDefaults().keys).entries.firstOrNull() ?: return false
+        refusal.value = needsDirect(pkg, name)
+        return true
     }
+
+    private fun needsDirect(pkg: String, profile: String?) = (apps.value.firstOrNull { it.pkg == pkg }?.label ?: "The proxy app") +
+        " must be on Direct, without the DNS filter, while its proxy is the default route" + (if (profile == null) "" else " of $profile") + ". Set it in Apps, or choose another default first."
+
 
     /** [f] on the profile being viewed when it isn't the one in use (nothing connects, no limit to check), else live and guarded. */
     private fun editRoutes(f: (app.unbraid.data.Profile) -> app.unbraid.data.Profile) {
@@ -1248,6 +1271,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val identity = if (routeId == BLOCK) null else currentChoice(pkg, displayedPin) ?: return
         val d = draft
         val change = { s: Setup -> s.chooseAppRoute(d, pkg, routeId, identity) }
+        if (strands(setup.value, change(setup.value))) return
         saveAppChoice(d, pkg, identity, change)
     }
 
@@ -1282,7 +1306,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
             if (s.apps[a.pkg] != DIRECT || !identity.accepts(s.appSigners[a.pkg])) s
             else s.copy(prefs = s.prefs.copy(filter = s.prefs.filter.let { f ->
                 f.copy(apps = if (through == f.directApps) f.apps - a.pkg else f.apps + (a.pkg to through))
-            }))
+            })).let { next -> if (strands(s, next)) s else next }
         }
     }
 
@@ -1314,7 +1338,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     }
 
     // Privacy and protection settings wait for the disk, as setHome does: a restart must never bring back an older one.
-    fun setPrefs(f: (Prefs) -> Prefs) { store.update { it.copy(prefs = f(it.prefs)) } }
+    fun setPrefs(f: (Prefs) -> Prefs) { store.update { s -> s.copy(prefs = f(s.prefs)).let { if (strands(s, it)) s else it } } }
 
     /** Statistics on or off; while off nothing is recorded (the app's observer starts and stops the collector). */
     fun setStats(on: Boolean) = setPrefs { it.copy(stats = on) }

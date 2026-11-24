@@ -260,7 +260,7 @@ class MainActivity : ComponentActivity() {
                     if (vpn.phase != VpnState.Phase.Off) Onboarding.consentFailed = false
                     if (vpn.phase != VpnState.Phase.On) return@LaunchedEffect
                     // Protection is checked live each time, so turning blocking off later brings the offer or reminder back.
-                    if (!(vpn.alwaysOn && vpn.lockdown) && Onboarding.leak == 0 && tour < 0 && sheet == null) sheet = "leak"
+                    if (!(vpn.alwaysOn && (vpn.lockdown || liveSetup.usesProxy)) && Onboarding.leak == 0 && tour < 0 && sheet == null) sheet = "leak"
                 }
 
                 LaunchedEffect(vpn.phase, vpn.lockdown, liveSetup, tour, sheet) {
@@ -362,6 +362,8 @@ class MainActivity : ComponentActivity() {
                 }
                 // Asked before a route change goes over a provider's connection limit, wherever it was made.
                 LimitSheet(ui)
+                val refusal by ui.refusal.collectAsStateWithLifecycle()
+                refusal?.let { why -> Prompt("Not changed", "OK", { ui.refusal.value = null }, { ui.refusal.value = null }) { Text(why, style = Type.sub) } }
                 when (sheet) {
                     "vpn" -> VpnDisclosure(
                         agree = { Onboarding.acceptVpn(); sheet = null; if (connectAfter) { connectAfter = false; proceed() } },
@@ -373,9 +375,9 @@ class MainActivity : ComponentActivity() {
                     }
                     "apps" -> AppsDisclosure(agree = { ui.acceptDisclosure(); sheet = null }, dismiss = { sheet = null })
                     "leak" -> {
-                        val both = vpn.alwaysOn && vpn.lockdown
+                        val both = vpn.alwaysOn && (vpn.lockdown || liveSetup.usesProxy)
                         LeakSheet(
-                            vpn.alwaysOn, vpn.lockdown,
+                            vpn.alwaysOn, vpn.lockdown, liveSetup.usesProxy,
                             open = { runCatching { startActivity(Intent(Settings.ACTION_VPN_SETTINGS)) } },
                             later = { if (!both) Onboarding.snoozeLeak(); sheet = null },
                             never = { Onboarding.leak(3); sheet = null },

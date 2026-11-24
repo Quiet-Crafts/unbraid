@@ -216,6 +216,7 @@ class ScreenTextTest {
 
     @Test fun routeCardWarnings() {
         assertEquals("Doesn't work on this network", routeWarning(stalled = true, notAnswering = true))
+        assertEquals("Not answering. Check that its proxy app is running.", routeWarning(stalled = false, notAnswering = true, proxy = true))
         assertEquals("Not answering. If this file came from a provider, it may have expired: download a new one.", routeWarning(stalled = false, notAnswering = true))
         assertEquals(null, routeWarning(stalled = false, notAnswering = false))
         assertEquals("home-mac is offline: its apps have no internet. Tap to choose another exit.", routeWarning(stalled = false, notAnswering = false, offline = "home-mac"))

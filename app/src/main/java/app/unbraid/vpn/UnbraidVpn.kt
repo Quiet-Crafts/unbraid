@@ -1719,11 +1719,14 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     override fun autoDetectInterfaceControl(fd: Int) { protect(fd) }
     override fun usePlatformAutoDetectInterfaceControl() = true
 
+    /** The proxy apps of the setup being started and of the one it replaces: either engine may be asking. */
+    private fun proxyApps() = listOfNotNull(tunInput?.setup, lastInput?.setup).flatMapTo(HashSet()) { s -> s.routes.mapNotNull { it.socks5?.packageName } }
+
     override fun findConnectionOwner(proto: Int, src: String, sport: Int, dst: String, dport: Int): ConnectionOwner {
         val uid = cm.getConnectionOwnerUid(proto, InetSocketAddress(src, sport), InetSocketAddress(dst, dport))
         if (uid == Process.INVALID_UID) error("owner not found")
         val names = packageManager.getPackagesForUid(uid).orEmpty().toList()
-        val pkgs = tunInput?.setup?.let { setup -> Compiler.ownerNames(setup, names, tunInput?.socksCompanions.orEmpty()) { verifiedIdentity(setup, it) } } ?: names
+        val pkgs = tunInput?.setup?.let { setup -> Compiler.ownerNames(setup, names, proxyApps()) { verifiedIdentity(setup, it) } } ?: names
         return ConnectionOwner().apply {
             userId = uid
             // Use the kernel UID and the original package list, before routing can substitute a marker.

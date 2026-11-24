@@ -566,11 +566,6 @@ object Compiler {
                     // Hold it before the default's sign-in exception and DNS. Ping follows the VPN default by design.
                     if (s.defaultRoute != DIRECT && (perApp.isNotEmpty() || socksDefault) && barred.isEmpty())
                         add(obj("type" to "logical", "mode" to "and", "rules" to JsonArray(unnamed + obj("network" to "icmp", "invert" to true)), "action" to "reject"))
-                    // A proxy carries no ping, and no UDP unless it is allowed: refused before anything is looked up for them.
-                    if (socksDefault) {
-                        add(obj("network" to "icmp", "action" to "reject"))
-                        if (tcpOnly(s.defaultRoute)) add(obj("network" to "udp", "action" to "reject", "no_drop" to true))
-                    }
                     if (onTs(s.defaultRoute)) tsLogin.forEach { add(obj(it, "outbound" to "direct")) }
                     // A connection Android can't name the app of matches no app rule. With Direct as the default it may
                     // be one of an app kept on a VPN, so it is refused rather than sent out on the phone's own connection.
@@ -579,6 +574,11 @@ object Compiler {
                     if (unnamedRefused) add(obj("package_name_regex" to arr("."), "invert" to true, "action" to "reject"))
                     add(obj("action" to "resolve", "server" to defaultDns))
                     network.forEach { add(it) }
+                    // A proxy carries no ping, and no UDP unless it is allowed. After the LAN and home rules, names resolved.
+                    if (socksDefault) {
+                        add(obj("network" to "icmp", "action" to "reject"))
+                        if (tcpOnly(s.defaultRoute)) add(obj("network" to "udp", "action" to "reject", "no_drop" to true))
+                    }
                     // Ping has no owner the engine can look up, so it never matches an app's rule and lands here: with
                     // Direct as the default, an app kept on a VPN could ping out from the phone's own address. Refused,
                     // after the LAN and home rules (names resolved), so pinging the router or a home box still works.

@@ -156,9 +156,10 @@ internal fun dropLabel(draft: String, removes: Boolean) = if (removes) "Remove r
  * the service stopped moving because no server works on this network ([stalled]), or an own server whose internet check
  * fails ([notAnswering]); null when none.
  */
-internal fun routeWarning(stalled: Boolean, notAnswering: Boolean, offline: String? = null) = when {
+internal fun routeWarning(stalled: Boolean, notAnswering: Boolean, offline: String? = null, proxy: Boolean = false) = when {
     offline != null -> "$offline is offline: its apps have no internet. Tap to choose another exit."
     stalled -> "Doesn't work on this network"
+    notAnswering && proxy -> "Not answering. Check that its proxy app is running."
     // Own servers only: a provider's downloaded file (PureVPN's, unused for a while) may simply have expired.
     notAnswering -> "Not answering. If this file came from a provider, it may have expired: download a new one."
     else -> null
@@ -341,7 +342,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     var tick by remember { mutableStateOf(0) }
     LaunchedEffect(Onboarding.leakUntil) { (Onboarding.leakUntil - System.currentTimeMillis()).takeIf { it > 0 }?.let { delay(it); tick++ } }
     val leakDue = remember(resumed, tick, Onboarding.leak, Onboarding.leakUntil) { Onboarding.leakDue }
-    val leakShown = leakDue && on && !(vpn.alwaysOn && vpn.lockdown)
+    val leakShown = leakDue && on && !(vpn.alwaysOn && (vpn.lockdown || setup.usesProxy))
 
     // One card slot at the top: a newer version first, otherwise (rarely) the support ask on a calm visit.
     val updates by ui.updates.collectAsStateWithLifecycle()
@@ -470,7 +471,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
                         exit = exitOf(shown.defaultRoute)?.takeIf { offlineExit(vpn, route) == null }?.let { it to pendingOf(it) },
                         keyNote = keyNote(route),
-                        warning = routeWarning(lit && shown.defaultRoute in vpn.stalled, lit && shown.defaultRoute in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }),
+                        warning = routeWarning(lit && shown.defaultRoute in vpn.stalled, lit && shown.defaultRoute in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }, route?.socks5 != null),
                     ) { sheet = shown.defaultRoute } }
                 }
                 // Android refused the VPN: most often another VPN app holds Always-on.
@@ -496,7 +497,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size), sites = sitesBy[id].orEmpty(), hideApps = hideApps,
                         exit = if (route == null || offlineExit(vpn, route) != null) null else exitOf(id)?.let { it to pendingOf(it) },
                         keyNote = keyNote(route),
-                        warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }), blocked = id == BLOCK,
+                        warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }, route?.socks5 != null), blocked = id == BLOCK,
                     ) { sheet = id } }
                 }
                 // Nothing set apart yet: say what that means instead of leaving the page empty.

@@ -434,7 +434,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                         { if (px.allowUdp) ui.setProxyUdp(sv, false) else dialog = "udp:${sv.id}" }.takeUnless { confirm }, checked = px.allowUdp, icon = Icons.phone) { Toggle(px.allowUdp, enabled = !confirm) }))
                     val routes = setup.routes.filter { it.own == sv.id }
                     if (routes.isEmpty()) caption("Not used yet. In Routes, add a route and choose it under Own servers.")
-                    else group("Used by", routes.map { r -> val n = setup.apps.count { it.value == r.id }; Item(r.name, "$n ${if (n == 1) "app" else "apps"}") })
+                    else group("Used by", routes.map { r -> val n = setup.apps.count { it.value == r.id }; Item(r.name, listOfNotNull("Default route".takeIf { r.id == setup.defaultRoute }, "$n ${if (n == 1) "app" else "apps"}".takeIf { n > 0 || r.id != setup.defaultRoute }).joinToString(" · ")) })
                     group(null, listOf(
                         Item("Rename", null, { dialog = "rename:${sv.id}" }, icon = Icons.edit) { Chevron() },
                         Item("Remove proxy server", "Its routes go too", { dialog = "remove:${sv.id}" }, danger = true),

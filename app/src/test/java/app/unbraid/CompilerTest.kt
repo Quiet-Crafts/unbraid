@@ -189,8 +189,9 @@ class CompilerTest {
             val last = rules.indexOfFirst { it["action"] == JsonPrimitive("resolve") && "package_name" !in it }
             val before = rules.take(last)
             assertTrue(before.any { it.refuses() && it.unnamed() })
-            assertTrue(before.any { it.refuses() && it["network"] == JsonPrimitive("icmp") })
-            assertEquals(!udp, before.any { it.refuses() && it["network"] == JsonPrimitive("udp") && "package_name" !in it })
+            // After the home rules saw the name: a home box is reached by name too.
+            assertTrue(rules.drop(last).any { it.refuses() && it["network"] == JsonPrimitive("icmp") })
+            assertEquals(!udp, rules.drop(last).any { it.refuses() && it["network"] == JsonPrimitive("udp") && "package_name" !in it })
             // Its own app first, straight out with the phone's DNS; the names of everything else through the proxy.
             val own = rules.indexOfFirst { it["outbound"] == JsonPrimitive("direct") && it["package_name"] == JsonArray(listOf(JsonPrimitive("com.proxy"))) }
             assertTrue(own in 0 until before.indexOfFirst { it.refuses() && it.unnamed() })

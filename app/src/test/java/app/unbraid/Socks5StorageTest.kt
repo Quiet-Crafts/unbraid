@@ -106,6 +106,21 @@ class Socks5StorageTest {
         assertTrue(setup.copy(apps = mapOf("org.example.browser" to route.id)).supportsSocks5Assignments())
     }
 
+    /** A proxy default whose own app isn't on Direct there would leave every app on it offline: named, for each profile. */
+    @Test fun aDefaultWhoseProxyAppIsNotDirectIsNamed() {
+        val pkg = route.socks5!!.packageName
+        val ok = setup.copy(defaultRoute = route.id, apps = mapOf(pkg to DIRECT))
+        assertEquals(emptyMap<String?, String>(), ok.stuckDefaults())
+        assertEquals(mapOf<String?, String>(null to pkg), ok.copy(apps = emptyMap()).stuckDefaults()) // it would follow its own proxy
+        assertEquals(mapOf<String?, String>(null to pkg), ok.copy(apps = mapOf(pkg to app.unbraid.data.BLOCK)).stuckDefaults())
+        val filtered = ok.copy(prefs = ok.prefs.copy(filter = app.unbraid.data.Filter("quad9", directApps = true)))
+        assertEquals(mapOf<String?, String>(null to pkg), filtered.stuckDefaults())
+        // Another profile keeps its own app choices: Direct at home doesn't make it Direct on the trip.
+        val two = ok.copy(profile = "Home", profiles = listOf(Profile("Home", route.id, mapOf(pkg to DIRECT)), Profile("Trip", route.id)))
+        assertEquals(mapOf<String?, String>("Trip" to pkg), two.stuckDefaults())
+        assertEquals(emptyMap<String?, String>(), setup.copy(apps = mapOf("org.example.browser" to route.id)).stuckDefaults()) // only a default
+    }
+
     @Test fun everyRestoreRequiresLocalConfirmationEvenOnTheSamePhone() {
         for (keys in listOf(false, true)) {
             val b = file(keys)

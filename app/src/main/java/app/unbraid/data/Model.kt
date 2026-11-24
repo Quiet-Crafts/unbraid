@@ -534,6 +534,8 @@ data class Setup(
      * wherever it was imported from: a reset with the VPN running lands on Routes, not on the first-run list.
      */
     fun importFor(target: String?, alone: Boolean) = target ?: "".takeIf { alone && untouched }
+    /** A proxy server carries something: Android's Block connections without VPN can't be used with it. */
+    val usesProxy get() = activeRoutes.any { it.socks5 != null }
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute
     /** App [pkg] has no route of its own: it goes where the default goes. */
     fun follows(pkg: String) = pkg !in apps
@@ -603,6 +605,12 @@ data class Setup(
         (profiles + live).all { it.sites.isEmpty() && BLOCK !in it.apps.values } -> minOf(version, 2)
         else -> 3
     })
+
+    /** The profiles (null: none) whose default is a proxy that can't work there, its app ([packageName]) not on Direct without the filter. */
+    fun stuckDefaults(): Map<String?, String> = (listOf(profile) + profiles.map { it.name }).distinct().mapNotNull { name ->
+        val s = viewAs(name)
+        s.route(s.defaultRoute)?.socks5?.packageName?.takeIf { !s.outside(it) }?.let { name to it }
+    }.toMap()
 
     /** Local proxies carry apps and a default, never websites, with no Via on either side. */
     fun supportsSocks5Assignments(): Boolean {

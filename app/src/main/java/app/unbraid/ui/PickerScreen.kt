@@ -380,11 +380,9 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         val n = list.size + if (add) 1 else 0
         item(key = "proxyLabel") { SectionLabel("Proxy servers") }
         itemsIndexed(list, key = { _, s -> "proxy:${s.id}" }) { i, s ->
-            val (tone, words) = proxyStatus(setup, s, vpn, s.id in silent)
+            val (tone, words) = proxyStatus(setup.viewAs(draft), s, vpn, s.id in silent)
             GroupRow(i, n, s.name, "SOCKS5 · $words", onClick = {
-                    if (!closed && (target != "default" || ui.proxyReady(s.socks5!!.packageName))) ui.useServer(target, s).let { id ->
-                        if (id.isNotEmpty()) once { if (target == "default") ui.setDefault(id); close() }
-                    }
+                    if (!closed) ui.useServer(target, s).let { id -> if (id.isNotEmpty() && (target != "default" || ui.setDefault(id))) once(close) }
                 },
                 leading = { ToneDot(tone) }, trailing = { if (route?.own == s.id) Icon(Icons.checkCircle, "Selected", tint = tint, modifier = Modifier.size(22.dp)) })
         }
