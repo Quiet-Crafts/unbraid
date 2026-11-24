@@ -22,7 +22,7 @@ android {
         applicationId = "app.unbraid"
         minSdk = 33
         targetSdk = 37
-        versionCode = 81
+        versionCode = 82
         versionName = "3.2.4"
         ndk { abiFilters += "arm64-v8a" }
     }
