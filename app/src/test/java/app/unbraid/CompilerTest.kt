@@ -207,6 +207,101 @@ class CompilerTest {
         }
     }
 
+    /** A connection or lookup of the phone as the rules see it. [pkgs] empty: Android names no app. [ip] null: a looked-up name. */
+    private class Flow(val pkgs: List<String>, val network: String, val ip: String?, val port: Int, val type: String = "")
+
+    /** Whether [rule] takes [f]; [resolved]: a resolve came before. Every key must be known here, so a new kind of rule fails the test. */
+    private fun takes(rule: JsonObject, f: Flow, resolved: Boolean, dns: Boolean): Boolean {
+        fun texts(k: String) = rule[k]!!.let { if (it is JsonArray) it.map { x -> x.jsonPrimitive.content } else listOf(it.jsonPrimitive.content) }
+        if (rule["type"] == JsonPrimitive("logical")) {
+            val parts = rule["rules"]!!.jsonArray.map { takes(it.jsonObject, f, resolved, dns) }
+            return (if (rule["mode"] == JsonPrimitive("or")) parts.any { it } else parts.all { it }) != (rule["invert"] == JsonPrimitive(true))
+        }
+        val ok = rule.keys.filter { it !in setOf("action", "outbound", "server", "no_drop", "invert", "rewrite_ttl", "rcode", "method", "answer", "strategy") }.all { k ->
+            when (k) {
+                "inbound" -> "tun" in texts(k)
+                "package_name" -> texts(k).any(f.pkgs::contains)
+                "package_name_regex" -> f.pkgs.isNotEmpty().also { assertEquals(listOf("."), texts(k)) }
+                "network" -> f.network in texts(k)
+                "port" -> "${f.port}" in texts(k)
+                "protocol" -> texts(k) == listOf("dns") && f.port == 53
+                "query_type" -> dns && f.type in texts(k)
+                "domain", "domain_suffix" -> false // an ordinary name: a saved website's or a home network's rule comes first by the user's choice
+                "auth_user" -> false
+                // A public address; a looked-up name has none until it is resolved.
+                "ip_cidr" -> (f.ip != null || resolved) && texts(k).any { it == "0.0.0.0/0" }
+                else -> throw AssertionError("rule key $k is new here: $rule")
+            }
+        }
+        return ok != (rule["invert"] == JsonPrimitive(true))
+    }
+
+    /**
+     * Over every mix of settings: what an app on a proxy default, or one Android can't name, sends to the internet or looks
+     * up goes through the proxy or nowhere. The app's own choices (websites, home, LAN) are left out on purpose.
+     */
+    @Test fun nothingOnAProxyDefaultLeavesAnotherWayWhateverElseIsSet() {
+        val fritz = WgConf.parse(FRITZ, "Home").copy(allowedIps = listOf("192.168.178.0/24"))
+        val filters = listOf(Filter(), Filter("quad9", routes = true), Filter(Filters.OWN, "tls://dns.example.org", routes = true), Filter(Filters.OWN, "1.1.1.1", routes = true, direct = true),
+            Filter("quad9", direct = true), Filter("quad9", routes = true, directApps = true, apps = mapOf("com.proxy" to false)), Filter(Filters.OWN, "192.168.178.53", routes = true))
+        var checked = 0; var through = 0
+        for (bits in 0 until (1 shl 12)) for (filter in filters) {
+            fun on(i: Int) = bits shr i and 1 == 1
+            val udp = on(0); val bridge = on(1); val lockdown = on(2)
+            val px = socks.copy(socks5 = socks.socks5!!.copy(allowUdp = udp))
+            val nl = Route("nl", Location("nord", 153, "NL", "Netherlands")); val ts = Route("ts", tsExit = "100.101.102.103", hue = 4)
+            val setup = Setup(routes = listOf(px, nl, ts), defaultRoute = px.id,
+                apps = buildMap {
+                    put("com.proxy", DIRECT)
+                    if (on(3)) put("com.blocked", app.unbraid.data.BLOCK)
+                    if (on(4)) put("com.vpn", "nl")
+                    if (on(5)) put("com.direct", DIRECT)
+                    if (on(6)) put("com.exit", "ts")
+                },
+                sites = buildMap { if (on(7)) { put("direct.example", DIRECT); put("blocked.example", app.unbraid.data.BLOCK); put("vpn.example", "nl") } },
+                home = Home(tailscale = on(8), subnets = if (on(8)) listOf("192.168.1.0/24") else emptyList(), wg = fritz.takeIf { on(9) }),
+                prefs = Prefs(lan = on(10), blockLan = on(11), filter = filter))
+            val used = setup.activeRoutes.filter { it.socks5 == null }
+            val input = Compiler.Input(setup, links(setup.copy(routes = used)).filterKeys { k -> used.any { it.id == k } } + (px.id to Socks5Link(sv(px.id))), "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db",
+                if (on(8)) "tail1234.ts.net" else null, socksBridges = if (bridge) mapOf(px.id to Compiler.SocksBridge(22331, "bridge-user", "bridge-password", udp)) else emptyMap())
+            val c = Json.parseToJsonElement(Compiler.compile(input)).jsonObject
+            val servers = c["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }.associateBy { it["tag"]!!.jsonPrimitive.content }
+            // A resolver is fine when it hands out stand-ins or is asked through the proxy, its own name included.
+            fun safe(tag: String, depth: Int = 0): Boolean = servers.getValue(tag).let { s ->
+                s["type"] == JsonPrimitive("fakeip") || depth < 4 && s["detour"] == JsonPrimitive("r-socks") &&
+                    s["domain_resolver"].let { r -> r == null || safe(if (r is JsonObject) r["server"]!!.jsonPrimitive.content else r.jsonPrimitive.content, depth + 1) }
+            }
+            val what = "bits=${bits.toString(2)} filter=$filter"
+            assertTrue(what, "com.follower" !in c.excluded() && c.excluded().all { it == "app.unbraid" || it == "com.direct" || it == "com.proxy" && px.id in input.unavailableSocks })
+            val owners = listOf(listOf("com.follower"), emptyList(), listOf("android", "com.system"), listOf("com.proxy", "com.sibling", "@unverified"))
+            for (o in owners) {
+                for (net in listOf("tcp", "udp", "icmp")) for (ip in listOf("8.8.4.4", null)) for (port in listOf(443, 853, 53)) {
+                    val f = Flow(o, net, ip, port); var resolved = false
+                    var end: JsonObject? = null
+                    for (r in c.rules()) {
+                        if (!takes(r, f, resolved, false)) continue
+                        if (r["action"] == JsonPrimitive("resolve")) { if (ip == null) assertTrue("$what looks up with ${r["server"]}", safe(r["server"]!!.jsonPrimitive.content)); resolved = true; continue }
+                        if (r["action"] == JsonPrimitive("sniff")) continue
+                        end = r; break
+                    }
+                    val out = end?.get("outbound")?.jsonPrimitive?.content ?: if (end == null) c.final() else null
+                    val action = end?.get("action")?.jsonPrimitive?.content
+                    assertTrue("$what $o $net $ip:$port -> $end final=${c.final()}", out == "r-socks" || out == null && action in setOf("reject", "hijack-dns"))
+                    if (out == "r-socks") { through++; assertTrue(what, bridge && !lockdown && (net == "tcp" || net == "udp" && udp) && o.isNotEmpty() && "@unverified" !in o) }
+                    checked++
+                }
+                for (type in listOf("A", "AAAA", "HTTPS", "SVCB", "TXT", "MX", "PTR", "ANY")) {
+                    val r = c.dnsRules().firstOrNull { takes(it, Flow(o, "udp", null, 53, type), false, true) }
+                    if (r != null && r["server"] == null) assertTrue("$what $o $type $r", r["action"] in listOf(JsonPrimitive("reject"), JsonPrimitive("predefined")))
+                    else assertTrue("$what $o $type -> $r", safe(r?.get("server")?.jsonPrimitive?.content ?: c["dns"]!!.jsonObject["final"]!!.jsonPrimitive.content))
+                    checked++
+                }
+            }
+        }
+        assertTrue("$checked checked, $through through the proxy", checked > 2_000_000 && through > 50_000)
+        println("proxy default: $checked checked, $through through the proxy")
+    }
+
     /** A proxy default that can't be used leaves the apps on it offline, names included: no other way out, only its own app. */
     @Test fun anUnusableProxyDefaultIsOffline() {
         val setup = Setup(routes = listOf(socks), defaultRoute = socks.id, apps = mapOf("com.proxy" to DIRECT))
