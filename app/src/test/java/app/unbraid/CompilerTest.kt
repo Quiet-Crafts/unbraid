@@ -18,6 +18,8 @@ import app.unbraid.data.PROTECT
 import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.data.Setup
+import app.unbraid.data.Socks5Link
+import app.unbraid.data.Socks5Profile
 import app.unbraid.data.SsLink
 import app.unbraid.data.SsProfile
 import app.unbraid.data.WgConf
@@ -25,6 +27,7 @@ import app.unbraid.vpn.Compiler
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -68,6 +71,94 @@ class CompilerTest {
     private fun JsonObject.rules() = this["route"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
     private fun JsonObject.endpointTags() = this["endpoints"]!!.jsonArray.map { it.jsonObject["tag"]!!.jsonPrimitive.content }
     private fun JsonObject.excluded() = this["inbounds"]!!.jsonArray[0].jsonObject["exclude_package"]!!.jsonArray.map { it.jsonPrimitive.content }
+
+    private val socks = Route("socks", socks5 = Socks5Profile("Companion", "127.0.0.1", 10808,
+        "com.proxy", "a".repeat(64), "listener-user", "listener-password"))
+
+    private fun socksInput(setup: Setup, lockdown: Boolean = false, bridge: Boolean = true, bridgeUdp: Boolean = false) =
+        Compiler.Input(setup, mapOf(socks.id to Socks5Link(sv(socks.id))), "app.unbraid",
+            lockdown, "/tmp/ts", "/tmp/cache.db", socksBridges = if (bridge)
+                mapOf(socks.id to Compiler.SocksBridge(22331, "bridge-user", "bridge-password", bridgeUdp)) else emptyMap())
+
+    @Test fun socksUsesOnlyTheTcpBridgeAndGivesItsCompanionPriority() {
+        val setup = Setup(routes = listOf(socks), defaultRoute = DIRECT,
+            apps = mapOf("com.target" to socks.id, "com.proxy" to DIRECT), sites = mapOf("upstream.example" to DIRECT))
+        val input = socksInput(setup)
+        val raw = Compiler.compile(input)
+        val config = Json.parseToJsonElement(raw).jsonObject
+        val outbound = config["outbounds"]!!.jsonArray.map { it.jsonObject }.single { it["type"] == JsonPrimitive("socks") }
+        assertEquals(JsonPrimitive(22331), outbound["server_port"])
+        assertEquals(JsonPrimitive("bridge-user"), outbound["username"])
+        assertEquals(JsonPrimitive("bridge-password"), outbound["password"])
+        assertNull(outbound["udp_over_tcp"])
+        assertEquals(setOf("r-socks"), Compiler.tcpOnly(raw))
+        assertFalse(raw.contains("10808"))
+        assertFalse(raw.contains("listener-password"))
+        assertEquals(setOf("com.proxy"), input.socksCompanions)
+        assertFalse("com.proxy" in config.excluded())
+        val dns = config["dns"]!!.jsonObject
+        val resolver = dns["servers"]!!.jsonArray.map { it.jsonObject }.single { it["tag"] == JsonPrimitive("dns-r-socks") }
+        assertEquals(JsonPrimitive("tcp"), resolver["type"])
+        assertEquals(JsonPrimitive("r-socks"), resolver["detour"])
+        val companion = JsonArray(listOf(JsonPrimitive("com.proxy")))
+        val dnsRules = dns["rules"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(JsonPrimitive("local"), dnsRules.first { it["package_name"] == companion }["server"])
+        assertTrue(dnsRules.indexOfFirst { it["package_name"] == companion } < dnsRules.indexOfFirst { it["server"] == JsonPrimitive("fake") })
+        val routeRules = config.rules()
+        assertTrue(routeRules.any {
+            it["package_name"] == JsonArray(listOf(JsonPrimitive("com.target"))) &&
+                it["network"] == JsonPrimitive("udp") && it["action"] == JsonPrimitive("reject")
+        })
+        val direct = routeRules.indexOfFirst { it["package_name"] == companion && it["outbound"] == JsonPrimitive("direct") }
+        val website = routeRules.indexOfFirst { it["domain"] != null || it["domain_suffix"] != null }
+        assertTrue(direct >= 0 && website > direct)
+    }
+
+    @Test fun socksUdpRequiresBothOptInAndACapableBridgeButKeepsTcpDns() {
+        val enabled = socks.copy(socks5 = socks.socks5!!.copy(allowUdp = true))
+        val setup = Setup(routes = listOf(enabled), defaultRoute = DIRECT,
+            apps = mapOf("com.target" to socks.id, "com.proxy" to DIRECT))
+        val raw = Compiler.compile(socksInput(setup, bridgeUdp = true))
+        val config = Json.parseToJsonElement(raw).jsonObject
+        val outbound = config["outbounds"]!!.jsonArray.map { it.jsonObject }.single { it["type"] == JsonPrimitive("socks") }
+        assertNull(outbound["network"])
+        assertEquals(JsonPrimitive(true), outbound["udp_over_tcp"])
+        assertTrue(Compiler.tcpOnly(raw).isEmpty())
+        val resolver = config["dns"]!!.jsonObject["servers"]!!.jsonArray.map { it.jsonObject }
+            .single { it["tag"] == JsonPrimitive("dns-r-socks") }
+        assertEquals(JsonPrimitive("tcp"), resolver["type"])
+        val target = JsonArray(listOf(JsonPrimitive("com.target")))
+        assertTrue(config.rules().any { it["package_name"] == target && it["outbound"] == JsonPrimitive("r-socks") })
+        assertFalse(config.rules().any {
+            it["package_name"] == target && it["network"] == JsonPrimitive("udp") && it["action"] == JsonPrimitive("reject")
+        })
+        for (input in listOf(socksInput(setup), socksInput(setup.copy(routes = listOf(socks)), bridgeUdp = true))) {
+            assertEquals(setOf(socks.id), input.unavailableSocks)
+            val refused = Json.parseToJsonElement(Compiler.compile(input)).jsonObject
+            assertTrue(refused.rules().any { it["package_name"] == target && it["action"] == JsonPrimitive("reject") })
+            assertFalse(refused["outbounds"]!!.jsonArray.any { it.jsonObject["type"] == JsonPrimitive("socks") })
+        }
+    }
+
+    @Test fun unavailableOrUnsafeSocksIsRefusedWithoutAnOutbound() {
+        val setup = Setup(routes = listOf(socks), defaultRoute = DIRECT,
+            apps = mapOf("com.target" to socks.id, "com.proxy" to DIRECT))
+        for (input in listOf(
+            socksInput(setup, bridge = false),
+            socksInput(setup, lockdown = true),
+            socksInput(setup.copy(apps = setup.apps - "com.proxy")),
+            socksInput(setup.copy(defaultRoute = socks.id)),
+            socksInput(setup.copy(sites = mapOf("example.com" to socks.id))),
+        )) {
+            assertEquals(setOf(socks.id), input.unavailableSocks)
+            assertTrue(input.socksCompanions.isEmpty())
+            val raw = Compiler.compile(input)
+            assertFalse(raw.contains("bridge-password"))
+            val rules = Json.parseToJsonElement(raw).jsonObject.rules()
+            if (input.setup.defaultRoute != socks.id)
+                assertTrue(rules.any { it["package_name"] == JsonArray(listOf(JsonPrimitive("com.target"))) && it["action"] == JsonPrimitive("reject") })
+        }
+    }
 
     /** Each new domain table hands out fake IPs from its block of the pool and refuses the others, before any exit is chosen. */
     @Test fun aFakeIpFromAnotherBlockIsRefused() = Compiler.FAKE_RANGES.indices.forEach { h ->

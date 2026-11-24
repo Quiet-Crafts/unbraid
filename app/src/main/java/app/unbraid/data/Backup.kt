@@ -190,8 +190,8 @@ object Backup {
             return label.waiting()
         }
         return s.copy(
-            servers = s.servers.map { it.copy(wg = peer(it.wgIdentity, it.wg, it.keyless, it.ovpn != null || it.ss != null), wgIdentity = null) },
-            routes = s.routes.map { it.copy(wg = peer(it.wgIdentity, it.wg, it.keyless, it.ovpn != null || it.ss != null || it.tsExit != null), wgIdentity = null) },
+            servers = s.servers.map { it.copy(wg = peer(it.wgIdentity, it.wg, it.keyless, it.ovpn != null || it.ss != null || it.socks5 != null), wgIdentity = null) },
+            routes = s.routes.map { it.copy(wg = peer(it.wgIdentity, it.wg, it.keyless, it.ovpn != null || it.ss != null || it.socks5 != null || it.tsExit != null), wgIdentity = null) },
         )
     }
 
@@ -333,18 +333,18 @@ object Backup {
         val c = clean.copy(home = Home(wg = s.home.wg), prefs = s.prefs.copy(stats = false), pristine = false,
             waitOverrides = emptyMap(), profiles = clean.profiles.map { it.copy(waitOverrides = emptyMap()) },
             waiting = emptySet(), waitingUntil = 0, waitingEach = emptyMap(), version = VERSION, testing = emptySet())
-        if (keys) return c
+        if (keys) return if (c.routes.any { it.socks5 != null && c.servers.none { sv -> sv.id == it.own } }) linked(c, localOnly = true) else c
         val linked = linked(c)
         return linked.copy(home = Home(), servers = linked.servers.map { it.withoutSecrets() }, routes = linked.routes.map { it.withoutSecrets() })
     }
 
     /** [s] with every imported route tied to an own server, so a route saved without keys has one to get them back through. */
-    private fun linked(s: Setup): Setup {
+    private fun linked(s: Setup, localOnly: Boolean = false): Setup {
         var servers = s.servers
         val routes = s.routes.map { r ->
-            if (!r.imported || r.tsExit != null || servers.any { it.id == r.own }) return@map r
-            val o = servers.firstOrNull { it.wg == r.wg && it.ovpn == r.ovpn && it.ss == r.ss }
-                ?: OwnServer(generateSequence { "s" + java.util.UUID.randomUUID().toString().take(8) }.first { id -> servers.none { it.id == id } }, r.wg, r.ovpn, r.ss)
+            if (localOnly && r.socks5 == null || !r.imported || r.tsExit != null || servers.any { it.id == r.own }) return@map r
+            val o = servers.firstOrNull { it.wg == r.wg && it.ovpn == r.ovpn && it.ss == r.ss && it.socks5 == r.socks5 }
+                ?: OwnServer(generateSequence { "s" + java.util.UUID.randomUUID().toString().take(8) }.first { id -> servers.none { it.id == id } }, r.wg, r.ovpn, r.ss, socks5 = r.socks5)
                     .also { servers = servers + it }
             r.copy(own = o.id)
         }
@@ -376,6 +376,16 @@ object Backup {
         if (c.format > WG_LABELS || c.setup.version > VERSION) fail(Reason.Newer)
         need(c.format >= CONTENTS, "its backup format is invalid")
         val setup = expandWgLabels(c)
+        if (setup.servers.any { it.socks5 != null } || setup.routes.any { it.socks5 != null }) {
+            need(setup.version >= 7, "a local proxy needs the newer setup format")
+        }
+        if (setup.servers.any { it.socks5?.allowUdp == true } || setup.routes.any { it.socks5?.allowUdp == true }) {
+            need(setup.version >= 8, "UDP consent needs the newer setup format")
+        }
+        if (!c.keys) {
+            need(setup.servers.none { it.socks5 != null && !it.keyless } && setup.routes.none { it.socks5 != null && !it.keyless },
+                "a backup without keys holds a local proxy config")
+        }
         val checked = valid(shown(named(setup.migrated())))
         return c.copy(app = c.app.takeIf { APP_VERSION.matches(it) }.orEmpty(), setup =
             if (c.format == CONTENTS) checkLegacyWgFields(checked, text) else checked)
@@ -469,11 +479,11 @@ object Backup {
         need(s.routes.all { ID.matches(it.id) && !builtIn(it.id) } && s.routes.map { it.id }.toSet().size == s.routes.size, "a route has a missing or repeated name")
         need(s.servers.all { ID.matches(it.id) } && s.servers.map { it.id }.toSet().size == s.servers.size, "an own server has a missing or repeated name")
         s.servers.forEach { sv ->
-            need(sv.wgIdentity == null && listOfNotNull(sv.wg, sv.ovpn, sv.ss).size == 1, "an own server has no configuration")
-            if (sv.keyless) keyless(sv.name, sv.wg, sv.ovpn, sv.ss) else server(sv.name, sv.wg, sv.ovpn, sv.ss)
+            need(sv.wgIdentity == null && listOfNotNull(sv.wg, sv.ovpn, sv.ss, sv.socks5).size == 1, "an own server has no configuration")
+            if (sv.keyless) keyless(sv.name, sv.wg, sv.ovpn, sv.ss, sv.socks5) else server(sv.name, sv.wg, sv.ovpn, sv.ss, sv.socks5)
         }
         s.routes.forEach { r ->
-            val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.tsExit).size
+            val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.socks5, r.tsExit).size
             need(r.wgIdentity == null && n <= 1, "a route has more than one exit")
             if (n == 0) need(Providers.get(r.loc.provider) != null, "a route uses a provider this unbraid doesn't know")
             // Its node's name and its place are never refused, as older versions kept them unchecked; what is only shown is cleaned ([shown]).
@@ -481,9 +491,11 @@ object Backup {
             // A route saved without keys gets them back only through its own server, which must be saved without them too.
             val own = r.own?.let(serverById::get)
             need(r.keyless == (own?.keyless == true) && (!r.keyless || (n == 1 && r.tsExit == null)), "a route and its own server don't match")
-            if (r.keyless) keyless(r.name, r.wg, r.ovpn, r.ss) else server(r.name, r.wg, r.ovpn, r.ss)
+            if (r.socks5 != null || own?.socks5 != null) need(own != null && own.socks5 == r.socks5, "a local proxy and its route do not match")
+            if (r.keyless) keyless(r.name, r.wg, r.ovpn, r.ss, r.socks5) else server(r.name, r.wg, r.ovpn, r.ss, r.socks5)
         }
-        s.home.wg?.let { server(it.name, it, null, null) }
+        need(s.supportsSocks5Assignments(), "a local proxy can only be assigned to apps")
+        s.home.wg?.let { server(it.name, it, null, null, null) }
         // An app or a website may be on Block; a default route never is.
         val ok = { id: String -> builtIn(id) || id in routeIds }
         val pkgs = { m: Map<String, String> -> m.keys.all { it.length <= 255 && PKG.matches(it) } }
@@ -533,11 +545,12 @@ object Backup {
     }
 
     /** A server saved without keys holds nothing secret, and the rest of it is as an import would leave it. */
-    private fun keyless(name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?) {
+    private fun keyless(name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?, socks5: Socks5Profile?) {
         val ok = plainName(name) && when {
             wg != null -> wg.privateKey.isEmpty() && wg.presharedKey == null && wg.endpoint.length <= 300 && wg.publicKey.length <= 64 &&
                 wg.address.size <= 16 && wg.allowedIps.size <= 256 && wg.dns.size <= 16 && (wg.address + wg.allowedIps + wg.dns).all { it.length <= 64 && it.none(Char::isISOControl) }
             ovpn != null -> ovpn == OvpnProfile(ovpn.name, "")
+            socks5 != null -> socks5.username.isEmpty() && socks5.password.isEmpty() && socks5.needsConfirmation && runCatching { socks5.checked() }.isSuccess
             ss != null -> ss.password.isEmpty() && ss.pluginOpts == null && ss.server.length <= 253 && ss.method.length <= 64 && ss.port in 1..65535 &&
                 (ss.plugin?.length ?: 0) <= 64 && (ss.server + ss.method + ss.plugin.orEmpty()).none(Char::isISOControl)
             else -> false
@@ -546,22 +559,31 @@ object Backup {
     }
 
     /** Checks an own server's config as an import would; its reason names the server, never a key or a password. */
-    private fun server(name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?) {
+    private fun server(name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?, socks5: Socks5Profile?) {
         val why = runCatching {
             wg?.let { require(plainName(it.name) && WgConf.parse(WgConf.text(it), it.name) == it) { "its WireGuard settings are damaged" } }
             ovpn?.let { require(plainName(it.name) && it.config.length <= 256 * 1024 && it.username.length <= 1024 && it.password.length <= 1024) { "it is damaged" }; Manual.parseOvpn(it.config, it.name, it.username, it.password) }
+            socks5?.checked()
             ss?.let { require(plainName(it.name) && Manual.parseSs(Manual.ssLink(it), it.name) == it) { "its Shadowsocks settings are damaged" } }
         }.exceptionOrNull() ?: return
         bad("own server ${label(name, "with no visible name", 40)}:${(why.message ?: "it is damaged").replaceFirstChar(Char::lowercase).removeSuffix(".")}")
     }
 }
 
-/** Own server [id], restored without keys, with [server]'s config and name, and every route through it unblocked. */
-fun Setup.refilled(id: String, server: OwnServer): Setup? {
-    if (servers.none { it.id == id && it.keyless }) return null
+/** Refills a waiting server and all of its route copies. Editing a confirmed proxy also requires the exact record shown. */
+fun Setup.refilled(id: String, server: OwnServer, expectedProxy: OwnServer? = null): Setup? {
+    val saved = servers.firstOrNull { it.id == id } ?: return null
+    if (expectedProxy != null && (saved.socks5 == null || saved != expectedProxy)) return null
+    if (!saved.keyless && saved.socks5?.needsConfirmation != true && expectedProxy == null) return null
+    if (saved.socks5 != null || server.socks5 != null) {
+        if (expectedProxy == null) return null
+        val confirmed = server.socks5 ?: return null
+        val previous = saved.socks5 ?: return null
+        if (confirmed.needsConfirmation || (saved.keyless || previous.needsConfirmation) && previous.authRequired && !confirmed.authRequired || runCatching { confirmed.checked() }.isFailure) return null
+    }
     val sv = server.copy(id = id, keyless = false)
     return copy(servers = servers.map { if (it.id == id) sv else it },
-        routes = routes.map { r -> if (r.own != id) r else r.copy(wg = sv.wg, ovpn = sv.ovpn, ss = sv.ss, keyless = false) })
+        routes = routes.map { r -> if (r.own != id) r else r.copy(wg = sv.wg, ovpn = sv.ovpn, ss = sv.ss, socks5 = sv.socks5, keyless = false) })
 }
 
 /** Apps restored but not on this phone keep their route this long, to be installed meanwhile. */
@@ -700,18 +722,24 @@ internal fun Setup.restoredWithInstalls(backup: Setup, keepAs: String?, now: Lon
     return kept.mergeBackup(backup, keepAs, now, keys)?.resolveWaiting(now, read)
 }
 
-private fun Setup.mergeBackup(backup: Setup, keepAs: String?, now: Long, keys: Boolean): Setup? {
+private fun Setup.mergeBackup(source: Setup, keepAs: String?, now: Long, keys: Boolean): Setup? {
+    if (!source.supportsSocks5Assignments()) return null
+    // Even a backup that contains credentials cannot confirm who owns a listener on this phone.
+    val backup = source.copy(
+        servers = source.servers.map { s -> s.socks5?.let { s.copy(socks5 = it.copy(needsConfirmation = true, allowUdp = false)) } ?: s },
+        routes = source.routes.map { r -> r.socks5?.let { r.copy(socks5 = it.copy(needsConfirmation = true, allowUdp = false)) } ?: r },
+    )
     // A compact WireGuard label cannot establish which tunnel settings to use. Older files carry the
     // settings on both the server and its route copies. Only a consistent, exact local match can refill them.
     val byOwn = backup.routes.groupBy { it.own }
-    val full = backup.servers.filter { it.keyless }.mapNotNull { k ->
+    val full = backup.servers.filter { it.keyless && it.socks5 == null }.mapNotNull { k ->
         if (k.wg?.let { it.address.isEmpty() || it.allowedIps.isEmpty() } == true) return@mapNotNull null
         val copies = byOwn[k.id].orEmpty()
         if (copies.any { it.wg != k.wg }) return@mapNotNull null
         val saved = servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) }
         val match = saved ?: copies.asSequence().mapNotNull { x ->
             route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }
-                ?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf { k.ovpn == null && k.sameAs(it) }
+                ?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss, socks5 = it.socks5) }?.takeIf { k.ovpn == null && k.sameAs(it) }
         }.let { candidates -> if (k.wg == null) candidates.firstOrNull() else candidates.distinct().singleOrNull() }
         match?.let { k.id to it }
     }.toMap()

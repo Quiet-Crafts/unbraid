@@ -60,6 +60,10 @@ object FakePool {
      */
     fun restoreBlock(ran: Int, spent: Int?) = spent ?: ran
 
+    /** A route id may already have a different listener and login after a refused edit. Only the exact published bridge survives. */
+    fun retainedBridges(published: Map<String, Compiler.SocksBridge>, available: Map<String, Compiler.SocksBridge>) =
+        available.filter { (id, bridge) -> published[id] == bridge }
+
     /**
      * What a restore or a move runs: what last ran ([last]) as it was compiled, on [block] (a move) or else
      * [restoreBlock], with a new probe pair, the sign-in way around the exit only ever narrowed, and the apps kept inside
@@ -70,11 +74,12 @@ object FakePool {
      * and its retry keep what runs: a change the engine refused before the old one was given up stays refused.
      */
     fun restoreInput(last: Compiler.Input, block: Int?, spent: Int?, probe: Pair<Int, String>, tsSuffixAllowed: String?, tsSuffix: String?,
-                     lockdown: Boolean, tsLoginPending: Boolean, move: Boolean, verify: (Setup) -> Setup = { it }, kin: (Setup) -> Set<String>): Compiler.Input {
+                     lockdown: Boolean, tsLoginPending: Boolean, move: Boolean, verify: (Setup) -> Setup = { it }, socksBridges: Map<String, Compiler.SocksBridge> = emptyMap(), kin: (Setup) -> Set<String>): Compiler.Input {
         val checked = verify(last.setup)
         val setup = if (move) checked else checked.copy(home = checked.home.copy(tsSuffixAllowed = tsSuffixAllowed))
-        return Compiler.Input(setup, last.links, last.selfPackage, if (move) last.lockdown else lockdown, last.tsDir, last.cacheFile, if (move) last.tsSuffix else tsSuffix, probe,
-            block ?: restoreBlock(last.fakeBlock, spent), last.blocked, last.tsLoginPending && tsLoginPending, last.blockedKin + runCatching { kin(setup) }.getOrDefault(emptySet()))
+        val blockNetwork = if (move) last.lockdown || lockdown && last.socksBridges.isNotEmpty() else lockdown
+        return Compiler.Input(setup, last.links, last.selfPackage, blockNetwork, last.tsDir, last.cacheFile, if (move) last.tsSuffix else tsSuffix, probe,
+            block ?: restoreBlock(last.fakeBlock, spent), last.blocked, last.tsLoginPending && tsLoginPending, last.blockedKin + runCatching { kin(setup) }.getOrDefault(emptySet()), socksBridges = retainedBridges(last.socksBridges, socksBridges))
     }
 
     /**

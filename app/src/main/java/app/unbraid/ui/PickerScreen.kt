@@ -372,12 +372,13 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         typed?.let { t -> item(key = "tsTyped") { GroupRow(0, 1, "Use $t", "As this route's Tailscale exit node", onClick = { exit(t, t) }, trailing = { Chevron() }) } }
     }
 
+    val eligibleServers = setup.servers.filter { it.socks5 == null || setup.allowsLocalProxy(target, it.socks5.packageName) }
     fun LazyListScope.saved(list: List<OwnServer>) {
         if (list.isEmpty()) return
         item(key = "savedLabel") { SectionLabel("Saved servers") }
         itemsIndexed(list, key = { _, s -> "own:${s.id}" }) { i, s ->
             GroupRow(
-                i, list.size, s.name, s.kind, onClick = { once { ui.useServer(target, s).let { id -> if (target == "default") ui.setDefault(id) }; close() } },
+                i, list.size, s.name, s.kind, onClick = { once { ui.useServer(target, s).let { id -> if (target == "default" && id.isNotEmpty()) ui.setDefault(id) }; close() } },
                 leading = { Code(s.code, Ink.dim, filled = false) },
                 trailing = { if (route?.own == s.id) Icon(Icons.checkCircle, "Selected", tint = tint, modifier = Modifier.size(22.dp)) },
             )
@@ -392,7 +393,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                if (empty) "No servers yet. Add a WireGuard, OpenVPN or Shadowsocks server, or turn on Tailscale, in Settings."
+                if (empty) "No servers yet. Add a WireGuard, OpenVPN, Shadowsocks or local SOCKS5 server, or turn on Tailscale, in Settings."
                 else "Add or manage servers in Settings.",
                 style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f),
             )
@@ -403,7 +404,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     fun LazyListScope.myServers() {
         tsNote?.let { item(key = "tsLockNote") { Caption(it, color = Ink.text) } }
         tailscale(nodes)
-        saved(setup.servers)
+        saved(eligibleServers)
         settingsNote(empty = !setup.tailscale && setup.servers.isEmpty())
     }
 
@@ -418,7 +419,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     fun LazyListScope.results() {
         if (mine) {
             val devices = nodes.filter { hit(it.name) || hit(it.ip) }
-            val own = setup.servers.filter { hit(it.name) || hit(it.kind) }
+            val own = eligibleServers.filter { hit(it.name) || hit(it.kind) }
             val typed = query.takeIf { setup.tailscale && validNode(it) && vpn.tsExitNodes.none { n -> n.ip == it || n.name.equals(it, true) } }
             if (devices.isEmpty() && own.isEmpty() && typed == null) item(key = "noMatches") { Text("No matches", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp)) }
             if (devices.isNotEmpty() || typed != null) tailscale(devices, searching = true, typed = typed)
@@ -475,7 +476,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             // Via: this route's tunnel goes through another route first. Saved at once, apart from the location.
             // Also shown for a Via the route can no longer use (it changed protocol, say), so it can always be cleared.
             if (route != null && (route.via != null || route.wg != null || !route.imported && route.loc.protocol?.startsWith("openvpn") != true)) {
-                val entries = setup.routes.filter { it.id != route.id && it.via == null && it.tsExit == null }
+                val entries = setup.routes.filter { it.id != route.id && it.via == null && it.tsExit == null && it.socks5 == null }
                 fun label(r: app.unbraid.data.Route) = listOfNotNull(r.name, Providers.short(r.loc.provider).takeIf { !r.imported }).joinToString(" · ")
                 Row(Modifier.padding(horizontal = Gutter).padding(bottom = 8.dp)) {
                     val hops = Providers.get(route.loc.provider)?.takeIf { !route.imported && it.nativeHop }

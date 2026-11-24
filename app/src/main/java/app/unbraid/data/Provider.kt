@@ -152,6 +152,10 @@ data class OvpnLink(override val server: Server, val profile: OvpnProfile) : Lin
 @Serializable
 data class SsLink(override val server: Server, val profile: SsProfile) : Link
 
+/** Route metadata only. The running VPN supplies the verified listener through a local bridge. */
+@Serializable
+data class Socks5Link(override val server: Server) : Link
+
 /** Goes out through the built-in Tailscale client's exit node. */
 @Serializable
 data class TsLink(override val server: Server) : Link

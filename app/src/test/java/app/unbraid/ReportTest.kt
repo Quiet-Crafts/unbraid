@@ -9,6 +9,7 @@ import app.unbraid.data.Prefs
 import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.data.Setup
+import app.unbraid.data.Socks5Profile
 import app.unbraid.data.SsProfile
 import app.unbraid.data.WgPeer
 import app.unbraid.support.Report
@@ -56,6 +57,20 @@ class ReportTest {
         for (s in secrets) assertFalse("leaked $s", text.contains(s, ignoreCase = true))
         // Other values the system supplies are cleaned too.
         assertFalse(Report.build("<b>1.0</b>\nSECRET", "foss", "17", "Phone;rm -rf /", setup, vpn, null, null).let { it.contains("<") || it.contains(";") || it.contains("SECRET\n") })
+    }
+
+    @Test fun localProxyReportsOnlyItsKind() {
+        val proxy = Socks5Profile("private label", "127.0.0.1", 40982, "org.example.privateproxy",
+            "a1".repeat(32), "private username", "private password")
+        val withProxy = setup.copy(routes = setup.routes + Route("proxy", socks5 = proxy))
+        val text = Report.build("1", "foss", "17", "Phone", withProxy, vpn, withProxy, 20)
+        assertTrue(text.contains("Own SOCKS5"))
+        assertTrue(text.contains("UDP off"))
+        val enabled = withProxy.copy(routes = withProxy.routes.dropLast(1) + Route("proxy", socks5 = proxy.copy(allowUdp = true)))
+        assertTrue(Report.build("1", "foss", "17", "Phone", enabled, vpn, enabled, 20).contains("UDP on"))
+        for (value in listOf(proxy.name, proxy.host, proxy.port.toString(), proxy.packageName, proxy.identity, proxy.username, proxy.password)) {
+            assertFalse("report included a proxy setting", text.contains(value))
+        }
     }
 
     @Test fun routesAndStatuses() {

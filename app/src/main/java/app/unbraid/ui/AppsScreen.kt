@@ -179,6 +179,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
     val query = q.trim()
     // The viewed profile's routes only: never another profile's, nor one no profile uses any more.
     val offered = remember(routes, viewing) { routes.saved.offered(viewing) }
+    val siteRoutes = remember(offered) { offered.filter { it.socks5 == null } }
     val motion = MaterialTheme.motionScheme
     // Grouped by exit: the other exits A to Z by name (Albania, Bulgaria, United States), then Direct, then the default.
     val rank = remember(setup) {
@@ -237,11 +238,12 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
             Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = Gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip("All", Ink.text, chosen == null) { choose(null) }
                 // Two routes with one country code (NordVPN NL, Mullvad NL) are told apart by provider.
-                offered.forEach { r ->
+                val filterRoutes = if (sites) siteRoutes else offered
+                filterRoutes.forEach { r ->
                     // Same code and source too (two WireGuard servers): the route's own name.
                     val label = when {
-                        offered.count { it.code == r.code } == 1 -> r.code
-                        offered.count { it.code == r.code && it.source == r.source } == 1 -> "${r.code} · ${r.source}"
+                        filterRoutes.count { it.code == r.code } == 1 -> r.code
+                        filterRoutes.count { it.code == r.code && it.source == r.source } == 1 -> "${r.code} · ${r.source}"
                         else -> "${r.code} · ${r.name}"
                     }
                     FilterChip(label, Ink.route(r.hue), chosen == r.id) { choose(r.id) }
@@ -262,7 +264,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
         },
     ) {
         if (sites) {
-            websites(ui, setup, offered, shownSites(setup, siteQ.trim(), siteFilter), siteQ.trim(), siteFilter, { siteFilter = null }, openSite, { openSite = it }, outside = !lockdown && setup.apps.keys.any(setup::outside))
+            websites(ui, setup, siteRoutes, shownSites(setup, siteQ.trim(), siteFilter), siteQ.trim(), siteFilter, { siteFilter = null }, openSite, { openSite = it }, outside = !lockdown && setup.apps.keys.any(setup::outside))
             return@Screen
         }
         if (!disclosed) item("disclose") {
@@ -293,7 +295,7 @@ fun AppsScreen(ui: Ui, disclose: () -> Unit, openPicker: (String) -> Unit) {
         }
     }
 
-    if (addSite) SiteSheet(setup, offered, ui.vpn.collectAsStateWithLifecycle().value.tsSuffix, { site, to -> ui.site(site, to); addSite = false }, { addSite = false })
+    if (addSite) SiteSheet(setup, siteRoutes, ui.vpn.collectAsStateWithLifecycle().value.tsSuffix, { site, to -> ui.site(site, to); addSite = false }, { addSite = false })
 }
 
 @Composable
@@ -362,7 +364,7 @@ private fun AppRow(ui: Ui, a: AppInfo, routes: AppRoutes, offered: List<app.unbr
             val tiles = listOfNotNull(
                 Tile(FOLLOW, "Follow default", Icons.layers, d?.let { Ink.route(it.hue) } ?: Ink.direct, tinted = false,
                     sub = followSub(setup)).takeIf { setup.defaultRoute.isNotEmpty() },
-            ) + routeTiles(setup, offered) + Tile("", "More locations", Icons.more, Ink.dim, tinted = false)
+            ) + routeTiles(setup, offered.filter { it.socks5?.packageName != a.pkg }) + Tile("", "More locations", Icons.more, Ink.dim, tinted = false)
             RouteTiles(tiles, tickedTile(setup, a.pkg), if (held) "Choose a route below to authorize this installed app." else outsideNote(setup, a.pkg, lockdown, keptBy) ?: BLOCK_NOTE.takeIf { explicit == BLOCK }) { id ->
                 when (id) { "" -> ui.appPicker(a, routes.profileName)?.let(openPicker); FOLLOW -> ui.followDefault(a, routes.profileName); else -> ui.assign(a.pkg, id, a.identity?.current, routes.profileName) }
             }

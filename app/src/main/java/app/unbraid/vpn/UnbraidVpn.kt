@@ -21,7 +21,9 @@ import android.util.Log
 import app.unbraid.MainActivity
 import app.unbraid.R
 import app.unbraid.Unbraid
+import app.unbraid.data.Socks5Profile
 import app.unbraid.data.AppIdentity
+import app.unbraid.data.permitsApp
 import app.unbraid.data.InstallState
 import app.unbraid.data.deadline
 import app.unbraid.data.waitAdmits
@@ -498,7 +500,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val accounts = store.accounts.value
             // The app's own tests get a fresh way in with each engine start (see apply); none until it runs.
             probe = null
-            val picked = pickLinks(setup, emptyMap(), accounts)
+            val picked = prepareSocks(setup, pickLinks(setup, emptyMap(), accounts))
             if (destroyed) return // the service went away during the provider calls: start no engine for it
             forgetLookups(this)
             val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
@@ -561,6 +563,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var lastNoted = true
 
     private fun hold() {
+        retireSocksExcept(emptySet())
         forgetLookups(this)
         val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
         generation++
@@ -577,6 +580,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         tunPolicy = TunPolicy(null, null) // the unreadable-store hold only refuses traffic
         engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
         starts++
+        releaseRetiredSocks()
         holding = true
         state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
         stopWanted = false
@@ -651,6 +655,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         requireCurrent(seen)
         if (!fresh) tunPolicy = TunPolicy(input, seen)
         lastGood = json
+        releaseRetiredSocks()
         builtInstalls = counted
         lastInput = input // also when nothing restarted: a move restarts what is applied now
         tunnelDns = runCatching { Compiler.probeDns(json) }.getOrDefault(emptyMap())
@@ -733,7 +738,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // A move keeps the routes that ran. An observed restored app may have settled while this engine was active.
             store.refreshWaiting(System.currentTimeMillis(), ::installation)
             val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, spent, newProbe(),
-                if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move, ::verifiedSetup) { blockedKin(it) }
+                if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move, ::verifiedSetup, socksEndpoints()) { blockedKin(it) }
             input to Compiler.compile(input).also(Libbox::checkConfig)
         }.onFailure { Log.e(TAG, "restore: ${logLine(it)}") }.getOrThrow()
     }, note = { blockSpent ->
@@ -756,7 +761,13 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         requireCurrent(ranRestores)
         tcpOnly = Compiler.tcpOnly(json)
         starts++
-        state.update { it.restarted(starts) }
+        // The restored engine has now released the failed candidate. Its revoked ports can be freed.
+        retireSocksExcept(input.socksBridges.keys - input.unavailableSocks)
+        releaseRetiredSocks()
+        val offline = input.unavailableSocks
+        links = links - offline
+        tags = tags - offline
+        state.update { it.restarted(starts).copy(servers = it.servers - offline) }
         probe = input.probe
         lastGood = json
     }
@@ -851,7 +862,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // So does a running tunnel that now has to go through another route (Via): never straight while the entry is fetched.
             // And an app or the default moved onto a Via route still waiting: blocked meanwhile, not left on its old route.
             // And a running tunnel without the disguise its provider now asks for: never plain while a disguised one is fetched.
-            val stopNow = ready.blocked.any { (id, e) -> (e is AuthException || e is LinkPicker.Unsuited) && id in links } ||
+            val socksChanged = setup.activeRoutes.any { r -> r.socks5 != null && r != applied?.route(r.id) } ||
+                localExits.keys.any { it !in ready.links }
+            val stopNow = socksChanged || ready.blocked.any { (id, e) -> (e is AuthException || e is LinkPicker.Unsuited) && id in links } ||
                 ready.blocked.keys.any { id -> setup.route(id)?.via != null && (id in links || applied?.let { LinkPicker.movedOnto(it, setup, id) } == true) } ||
                 links.keys.any { id -> setup.route(id)?.via != applied?.route(id)?.via || plain(setup, id) } ||
                 !LinkPicker.stillSuits(setup, links, Providers::get) // also a running tunnel left out of [keep] by a health move
@@ -874,7 +887,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     /** Runs [picked] on the engine and shows it; on failure brings back what ran. False if it didn't apply. Caller holds [lock]. */
-    private fun install(srv: CommandServer, setup: Setup, picked: LinkPicker.Result, accounts: Map<String, String>, seen: Long): Boolean = try {
+    private fun install(srv: CommandServer, setup: Setup, selection: LinkPicker.Result, accounts: Map<String, String>, seen: Long): Boolean = try {
+        val picked = prepareSocks(setup, selection)
         apply(srv, setup, picked, accounts, seen)
         requireCurrent(seen)
         ranRestores = seen
@@ -888,6 +902,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // libbox stops the old engine before starting the new one: only then bring the last good config back. It comes
         // back with a new probe pair too: the old password may have been seen while the old engine's port was free.
         val restarted = restarting
+        // A failed candidate can already own live listeners. Revoke those that never belonged to the last good input.
+        retireSocksExcept(FakePool.retainedBridges(lastInput?.socksBridges.orEmpty(), socksEndpoints()).keys)
         val outcome = FakePool.afterFailure(restarted, { ranRestores == store.restoreGeneration }) { restoreLastGood(srv) }
         restarting = false
         if (outcome == FakePool.Outcome.Superseded || ranRestores != store.restoreGeneration) teardown(RESTORE_REFUSED)
@@ -1147,8 +1163,101 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
         verifiedSetup(setup).let { checked ->
-            Compiler.Input(checked, LinkPicker.ported(checked, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(checked))
+            Compiler.Input(checked, LinkPicker.ported(checked, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(checked), socksBridges = socksEndpoints())
         }
+
+    // Access to the registry is serialized with engine installs. Verification runs on the bridge's
+    // I/O threads and reads the live policy and package identity afresh on the connected socket.
+    private class LocalExit(val profile: Socks5Profile, val uid: Int, val restore: Long, val bridge: Socks5Bridge)
+    private val localExits = mutableMapOf<String, LocalExit>()
+    private val retiredExits = mutableListOf<Socks5Bridge>()
+
+    private fun retireSocksExcept(keep: Set<String>) {
+        for (id in localExits.keys - keep) {
+            val bridge = localExits.remove(id)!!.bridge
+            bridge.revoke()
+            val published = lastInput?.socksBridges?.get(id)?.port == bridge.port ||
+                tunInput?.socksBridges?.get(id)?.port == bridge.port
+            if (published) retiredExits += bridge else bridge.close()
+        }
+    }
+
+    private fun releaseRetiredSocks() {
+        retiredExits.forEach { it.close() }
+        retiredExits.clear()
+    }
+
+    private fun closeSocks() {
+        retireSocksExcept(emptySet())
+        releaseRetiredSocks()
+    }
+
+    private fun socksEndpoints() = localExits.mapValues { (_, exit) ->
+        Compiler.SocksBridge(exit.bridge.port, exit.bridge.username, exit.bridge.password, exit.profile.allowUdp)
+    }
+
+    private fun companionUid(profile: Socks5Profile, signer: AppIdentity? = identity(profile.packageName)): Int? = runCatching {
+        val pkg = profile.packageName
+        val uid = packageManager.getPackageUid(pkg, 0)
+        uid.takeIf { signer?.accepts(profile.identity) == true &&
+            packageManager.getPackagesForUid(uid)?.toSet() == setOf(pkg) }
+    }.getOrNull()
+
+    /** Look up the peer's socket, with that socket's endpoint first. UDP ownership is only a snapshot. */
+    private fun socksOwner(protocol: Int, peer: InetSocketAddress, local: InetSocketAddress, uid: Int): Boolean =
+        runCatching { cm.getConnectionOwnerUid(protocol, peer, local) == uid }.getOrDefault(false)
+
+    private fun prepareSocks(setup: Setup, picked: LinkPicker.Result): LinkPicker.Result {
+        val routes = setup.activeRoutes.filter { it.socks5 != null && it.id in picked.links }
+        if (routes.isEmpty() && localExits.isEmpty()) return picked
+        val blocked = picked.blocked.toMutableMap()
+        val restore = store.restoreGeneration
+        val checked = verifiedSetup(setup)
+        val kin = blockedKin(checked)
+        val keep = mutableSetOf<String>()
+        for (route in routes) {
+            val profile = route.socks5!!
+            val uid = companionUid(profile)
+            val reason = Compiler.socksPolicyProblem(checked, route, packageName, isLockdownEnabled, kin, store.tsSuffix)
+                ?: if (uid == null) "The proxy app could not be verified on this phone" else null
+            if (reason != null || uid == null) {
+                blocked[route.id] = Fail(reason ?: "Proxy app unavailable")
+                continue
+            }
+            val current = localExits[route.id]
+            if (current == null || !profile.sameConnection(current.profile) || current.uid != uid || current.restore != restore) {
+                retireSocksExcept(localExits.keys - route.id)
+                fun companionStillAllowed(): Boolean {
+                    val saved = store.setup.value
+                    val pkg = profile.packageName
+                    if (destroyed || store.restoreGeneration != restore || isLockdownEnabled || !saved.outside(pkg) ||
+                        saved.route(route.id)?.let { profile.sameConnection(it.socks5) && !it.keyless } != true) return false
+                    val signer = verifiedIdentity(saved, pkg)
+                    return saved.permitsApp(pkg) { signer } && companionUid(profile, signer) == uid
+                }
+                val bridge = runCatching {
+                    Socks5Bridge.start(profile.host, profile.port, profile.username, profile.password, socksPorts(setup),
+                        udpEnabled = profile.allowUdp,
+                        udpRelayOwnerVerified = { local, remote ->
+                            companionStillAllowed() && socksOwner(android.system.OsConstants.IPPROTO_UDP, remote, local, uid)
+                        },
+                    ) { socket ->
+                        companionStillAllowed() && socksOwner(android.system.OsConstants.IPPROTO_TCP,
+                            socket.remoteSocketAddress as InetSocketAddress, socket.localSocketAddress as InetSocketAddress, uid)
+                    }
+                }.getOrNull()
+                if (bridge == null || bridge.port == profile.port) {
+                    bridge?.close()
+                    blocked[route.id] = Fail("Could not open the local proxy connection")
+                    continue
+                }
+                localExits[route.id] = LocalExit(profile, uid, restore, bridge)
+            }
+            keep += route.id
+        }
+        retireSocksExcept(keep)
+        return LinkPicker.Result(picked.links - blocked.keys, picked.remember, blocked)
+    }
 
     private fun identity(pkg: String) = AppIdentity.read(packageManager, pkg)
 
@@ -1197,9 +1306,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
 
     /** The app's own way into each exit ([Compiler.PROBE]): a free loopback port and a 24-byte random password. */
-    private fun newProbe(): Pair<Int, String> =
-        java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress()).use { it.localPort } to
-            java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(24).also { java.security.SecureRandom().nextBytes(it) })
+    private fun socksPorts(setup: Setup): Set<Int> =
+        (setup.servers.mapNotNull { it.socks5?.port } + setup.routes.mapNotNull { it.socks5?.port }).toSet()
+
+    private fun newProbe(): Pair<Int, String> {
+        val excluded = socksPorts(store.setup.value)
+        repeat(16) {
+            val port = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
+            if (port !in excluded) return port to java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(ByteArray(24).also { java.security.SecureRandom().nextBytes(it) })
+        }
+        throw Fail("Could not allocate a local check port")
+    }
 
     private fun watchTailscale() {
         ts = runCatching {
@@ -1263,6 +1381,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         tunPolicy = null
         restarting = false
         runCatching { server?.closeService() }
+        closeSocks()
         runCatching { tun?.close() }; tun = null
         openTable(false)
         forgetLookups(this)
@@ -1376,6 +1495,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 // Closing the command server alone leaves a running engine (and its own copy of the tunnel) alive.
                 runCatching { server?.closeService() }
                 runCatching { server?.close() }
+                closeSocks()
                 server = null
                 runCatching { tun?.close() }; tun = null
                 net.quit()
@@ -1442,7 +1562,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         checkPolicy()
         val requested = buildList { if (o.autoRoute) o.excludePackage.forEachString { add(it) } }
         val setup = policy.input?.setup
-        fun allowed(pkg: String) = pkg == packageName || setup != null &&
+        fun allowed(pkg: String) = pkg == packageName || setup != null && pkg !in policy.input?.socksCompanions.orEmpty() &&
             Compiler.mayExclude(setup, pkg, packagesSharing(pkg)) { verifiedIdentity(setup, it) }
         val out = requested.filter(::allowed)
         fun builder(leaveOut: List<String>) = Builder().setSession("$APP").setMtu(o.mtu).setMetered(false).also { b ->

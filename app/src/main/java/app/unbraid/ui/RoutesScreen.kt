@@ -214,6 +214,7 @@ private fun where(r: Route, live: Map<String, Server>) = when {
     r.wg != null -> "WireGuard"
     r.ovpn != null -> "OpenVPN"
     r.ss != null -> "Shadowsocks"
+    r.socks5 != null -> if (r.socks5.allowUdp) "Local SOCKS5 · TCP and UDP" else "Local SOCKS5 · TCP only"
     r.tsExit != null -> "Tailscale exit node"
     else -> listOfNotNull(
         r.source,
@@ -556,7 +557,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     // Editing a profile not in use never reaches what is shared: no rename, no removal of the route itself.
                     if (draft != null) {
                         if (id != shown.defaultRoute) {
-                            SheetAction("Make default") { act { makeDefault(id) } }
+                            if (shown.route(id)?.socks5 == null) SheetAction("Make default") { act { makeDefault(id) } }
                             SheetAction(dropLabel(draft, ui.dropRemoves(id)), Ink.bad) { act { dropping = id } }
                             SheetNote("Its apps in $draft will use its default route.")
                         }
@@ -564,13 +565,13 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         setup.route(id)?.takeIf { it.imported }?.let { r -> SheetAction("Rename") { act { newName = r.name; renaming = id } } }
                     }
                     // A Shadowsocks plugin carries TCP only: the engine sends nothing else through it.
-                    if (shown.route(id)?.ss?.plugin != null) SheetNote("Calls and other UDP traffic don't go through this server.", sub = true)
+                    if (shown.route(id)?.let { it.ss?.plugin != null || it.socks5?.allowUdp == false } == true) SheetNote("Calls and other UDP traffic don't go through this server.", sub = true)
                     // An own server may not reach the internet by design (a home network only): its check is the user's call.
-                    setup.route(id)?.takeIf { draft == null && (it.wg != null || it.ovpn != null || it.ss != null) }?.let { r ->
+                    setup.route(id)?.takeIf { draft == null && (it.wg != null || it.ovpn != null || it.ss != null || it.socks5 != null) }?.let { r ->
                         SheetSwitch("Check internet access", "Shows Not answering when this server stops reaching the internet. Turn off for a server that only reaches a private network.", r.checksInternet) { ui.setCheckInternet(id, it) }
                     }
                     if (draft == null && id != setup.defaultRoute) {
-                        SheetAction("Make default") { act { makeDefault(id) } }
+                        if (shown.route(id)?.socks5 == null) SheetAction("Make default") { act { makeDefault(id) } }
                         SheetAction("Remove route", Ink.bad) { act { ui.removeRouteRefused(id)?.let(refuse) ?: run { removing = id } } }
                         val others = setup.saved.filter { p -> p.name != setup.profile && id in p.own }.map { it.name }
                         SheetNote("Its apps will use the default route." + if (others.isEmpty()) "" else " It also goes from ${others.joinToString()}.")

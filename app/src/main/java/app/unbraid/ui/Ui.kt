@@ -121,6 +121,16 @@ internal fun Setup.chooseAppRoute(profileName: String?, pkg: String, routeId: St
 internal fun verifiedAppChoice(disclosed: Boolean, displayedPin: String?, read: () -> AppIdentity?) =
     if (disclosed && displayedPin != null) read()?.takeIf { it.accepts(displayedPin) } else null
 
+/** An existing route can change globally, including for inactive profiles. Local proxies serve app choices only. */
+internal fun Setup.allowsLocalProxy(target: String?, proxyPackage: String? = null): Boolean {
+    if (proxyPackage != null && target == "app:$proxyPackage") return false
+    if (target == null || target.isEmpty() || target.startsWith("app:")) return true
+    if (target == "default") return false
+    val current = route(target) ?: return false
+    return current.via == null && routes.none { it.via == target } &&
+        (profiles + live).none { it.defaultRoute == target || target in it.sites.values }
+}
+
 /** Removed routes' apps follow the default. The default itself never moves: check [Setup.refusesRemoving] first. */
 private fun Setup.without(gone: Set<String>) = copy(routes = routes.filter { it.id !in gone }, apps = apps.filterValues { it !in gone })
 
@@ -719,7 +729,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun setLocation(id: String, loc: Location, blocking: Boolean? = null) = guarded { s ->
         // A route's blocking choice belongs to its provider: another provider starts from its own page.
-        s.copy(routes = s.routes.map { if (it.id == id) it.copy(loc = loc, wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null, keyless = false, filter = it.filter.takeIf { _ -> it.loc.provider == loc.provider && !it.imported }) else it })
+        s.copy(routes = s.routes.map { if (it.id == id) it.copy(loc = loc, wg = null, ovpn = null, ss = null, socks5 = null, tsExit = null, tsName = null, own = null, keyless = false, filter = it.filter.takeIf { _ -> it.loc.provider == loc.provider && !it.imported }) else it })
             .let { n -> if (blocking == null) n else n.blocking(id, blocking) }
     }
 
@@ -793,6 +803,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun importServer(target: String?, server: OwnServer): Boolean {
         val s = server.copy(id = newServerId(setup.value.servers))
+        require(s.socks5 == null || setup.value.allowsLocalProxy(target, s.socks5.packageName)) { "Choose an app route other than the proxy app’s own, a default, website route or Via." }
         val to = setup.value.importFor(target, alone = store.accounts.value.isEmpty() && draft == null)
         val saved = store.update { it.copy(servers = it.servers + s) }
         _signedIn.value = true
@@ -805,8 +816,12 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      * route already through [s] is reused, as a provider location's is, instead of adding another.
      */
     fun useServer(target: String, s: OwnServer): String {
+        if (s.socks5 != null && !setup.value.allowsLocalProxy(target, s.socks5.packageName)) {
+            notice.value = "Choose a separate app route for this proxy. Its own app needs Direct."
+            return ""
+        }
         val reuse = setup.value.takeIf { it.route(target) == null }?.serverRoute(s, draft)
-            ?: return addImported(target) { it.copy(wg = s.wg, ovpn = s.ovpn, ss = s.ss, own = s.id, keyless = s.keyless) }
+            ?: return addImported(target) { it.copy(wg = s.wg, ovpn = s.ovpn, ss = s.ss, socks5 = s.socks5, own = s.id, keyless = s.keyless) }
         if (target.startsWith("app:")) assign(target.removePrefix("app:"), reuse) else if (target.isEmpty()) keep(reuse)
         return reuse
     }
@@ -815,23 +830,29 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      * Gives saved server [id], restored without keys, the config [server] the user imported again (named as the prompt left it), and
      * unblocks every route through it. False if it is gone, already has its config, or the write failed.
      */
-    fun refillServer(id: String, server: OwnServer): Boolean {
+    fun refillServer(id: String, server: OwnServer, expected: OwnServer? = null): Boolean {
         var done = false
-        val saved = store.update { s -> s.refilled(id, server)?.also { done = true } ?: s }
-        if (!done) throw IllegalStateException("That server already has its config, or was removed.")
+        val saved = store.update { s ->
+            if (server.socks5 != null && expected == null) s
+            else s.refilled(id, server, expected)?.also { done = true } ?: s
+        }
+        if (!done) throw IllegalStateException("That server changed or was removed. Open its settings again.")
         return saved
     }
 
     /** Renames a saved server and every route using it. */
     /** Route [id] goes through route [via] first (null: straight to its server); the entry may add a tunnel, so the limit is checked. */
-    fun setVia(id: String, via: String?, native: Boolean = false) = guarded { s -> s.copy(routes = s.routes.map { if (it.id == id) it.copy(via = via, viaNative = via != null && native) else it }) }
+    fun setVia(id: String, via: String?, native: Boolean = false) = guarded { s ->
+        if (via != null && (s.route(id)?.socks5 != null || s.route(via)?.socks5 != null)) s
+        else s.copy(routes = s.routes.map { if (it.id == id) it.copy(via = via, viaNative = via != null && native) else it })
+    }
 
     fun renameServer(id: String, name: String) = Manual.cleanName(name, 40).takeIf { it.isNotEmpty() }?.let { n ->
-        fun OwnServer.named() = copy(wg = wg?.copy(name = n), ovpn = ovpn?.copy(name = n), ss = ss?.copy(name = n))
+        fun OwnServer.named() = copy(wg = wg?.copy(name = n), ovpn = ovpn?.copy(name = n), ss = ss?.copy(name = n), socks5 = socks5?.copy(name = n))
         store.edit { s ->
             s.copy(
                 servers = s.servers.map { if (it.id == id) it.named() else it },
-                routes = s.routes.map { r -> if (r.own != id) r else r.copy(wg = r.wg?.copy(name = n), ovpn = r.ovpn?.copy(name = n), ss = r.ss?.copy(name = n)) },
+                routes = s.routes.map { r -> if (r.own != id) r else r.copy(wg = r.wg?.copy(name = n), ovpn = r.ovpn?.copy(name = n), ss = r.ss?.copy(name = n), socks5 = r.socks5?.copy(name = n)) },
             )
         }
     }
@@ -858,7 +879,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     fun addImported(target: String, source: (Route) -> Route): String {
         val id = target.takeIf { setup.value.route(it) != null } ?: newId()
         store.edit { s ->
-            val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, tsExit = null, tsName = null, own = null, keyless = false) ?: Route(id, hue = nextHue(s))
+            val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, socks5 = null, tsExit = null, tsName = null, own = null, keyless = false) ?: Route(id, hue = nextHue(s))
             s.imported(id, source(blank), alone = store.accounts.value.isEmpty() && draft == null)
         }
         if (target.startsWith("app:")) assign(target.removePrefix("app:"), id)
@@ -900,7 +921,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val n = Manual.cleanName(name, 40).ifEmpty { return }
         store.edit { s ->
             s.copy(routes = s.routes.map { r ->
-                if (r.id != id) r else r.copy(wg = r.wg?.copy(name = n), ovpn = r.ovpn?.copy(name = n), ss = r.ss?.copy(name = n), tsName = r.tsExit?.let { n })
+                if (r.id != id) r else r.copy(wg = r.wg?.copy(name = n), ovpn = r.ovpn?.copy(name = n), ss = r.ss?.copy(name = n), socks5 = r.socks5?.copy(name = n), tsName = r.tsExit?.let { n })
             })
         }
     }
@@ -921,7 +942,10 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      * Makes route [id] the default of the profile being viewed (saved only, nothing connects) or of the live setup. Apps
      * that chose a route keep it; returns how many installed apps follow the default and so move ([moving], asked first).
      */
-    fun setDefault(id: String): Int = moving(id).also { editRoutes { p -> p.copy(defaultRoute = id) } }
+    fun setDefault(id: String): Int {
+        if (setup.value.route(id)?.socks5 != null) return 0
+        return moving(id).also { editRoutes { p -> p.copy(defaultRoute = id) } }
+    }
 
     /** How many installed apps would move if route [id] became the default of the profile being viewed: those that follow it. 0 for the same default, or before the app list is read. */
     fun moving(id: String) = setup.value.viewAs(draft).let { s -> if (id == s.defaultRoute) 0 else s.followers(apps.value.map { it.pkg }) }
@@ -1082,6 +1106,10 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** App [pkg] chose route [routeId] (the default too: it stays there when the default changes); null = it follows the default. */
     internal fun assign(pkg: String, routeId: String?, displayedPin: String? = pickerPin(pkg), profileName: String? = appProfile()) {
         if (profileName != appProfile()) return
+        if (routeId != null && setup.value.route(routeId)?.socks5?.packageName == pkg) {
+            notice.value = "The proxy app needs its own unfiltered Direct route."
+            return
+        }
         val identity = if (routeId == BLOCK) null else currentChoice(pkg, displayedPin) ?: return
         val d = draft
         val change = { s: Setup -> s.chooseAppRoute(d, pkg, routeId, identity) }
@@ -1124,7 +1152,10 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     }
 
     /** Website [site] ([app.unbraid.data.Sites.clean]) goes through route [routeId] in the profile being viewed, whatever app opens it; null = no route of its own. */
-    fun site(site: String, routeId: String?) = editRoutes { p -> p.copy(sites = if (routeId == null) p.sites - site else p.sites + (site to routeId)) }
+    fun site(site: String, routeId: String?) {
+        if (routeId != null && setup.value.route(routeId)?.socks5 != null) return
+        editRoutes { p -> p.copy(sites = if (routeId == null) p.sites - site else p.sites + (site to routeId)) }
+    }
 
     /** App [pkg] gives up its own route and follows the default of the profile being viewed. */
     internal fun followDefault(a: AppInfo, profileName: String?) = assign(a.pkg, null, a.identity?.current, profileName)

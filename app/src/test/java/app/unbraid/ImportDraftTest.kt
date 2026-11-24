@@ -1,5 +1,10 @@
 package app.unbraid
 
+import app.unbraid.data.DIRECT
+import app.unbraid.data.Profile
+import app.unbraid.data.Route
+import app.unbraid.data.Setup
+import app.unbraid.ui.allowsLocalProxy
 import app.unbraid.ui.ImportDraft
 import app.unbraid.ui.unlessReplaced
 import kotlinx.coroutines.CompletableDeferred
@@ -32,6 +37,52 @@ class ImportDraftTest {
         val (d, applied) = run { it.clear() }
         assertTrue(applied.isEmpty())
         assertNull(d.wg)
+    }
+
+    @Test fun importOffersLocalProxyOnlyForAppRoutesInEveryProfile() {
+        val route = Route("own")
+        val other = Route("other")
+        val s = Setup(routes = listOf(route, other), defaultRoute = other.id)
+        for (target in listOf(null, "", "app:org.example.browser", route.id)) assertTrue(s.allowsLocalProxy(target))
+        for (target in listOf("default", other.id, "gone")) assertFalse(s.allowsLocalProxy(target))
+        assertFalse(s.allowsLocalProxy("app:org.example.proxy", "org.example.proxy"))
+        assertFalse(s.copy(profiles = listOf(Profile("Travel", route.id))).allowsLocalProxy(route.id))
+        assertFalse(s.copy(profiles = listOf(Profile("Travel", DIRECT, sites = mapOf("example.org" to route.id)))).allowsLocalProxy(route.id))
+        assertFalse(s.copy(routes = listOf(route.copy(via = other.id), other)).allowsLocalProxy(route.id))
+        assertFalse(s.copy(routes = listOf(route, other.copy(via = route.id))).allowsLocalProxy(route.id))
+    }
+
+    @Test fun editingProxyDoesNotTransferUdpConsentToAnotherListener() {
+        val pin = "aa".repeat(32)
+        val proxy = app.unbraid.data.Socks5Profile("Proxy", "127.0.0.1", 1080, "org.example.proxy", pin, allowUdp = true)
+        val d = ImportDraft().apply { proxyRefill = app.unbraid.data.OwnServer("p", socks5 = proxy); port = "1080"; allowUdp = true }
+        val same = app.unbraid.ui.AppInfo(proxy.packageName, "Proxy", false, 1, app.unbraid.data.AppIdentity(pin, emptySet()))
+        d.proxyChoice(same)
+        assertTrue(d.allowUdp)
+        d.proxyPort("1081")
+        assertFalse(d.allowUdp)
+        d.allowUdp = true
+        d.proxyChoice(same.copy(pkg = "org.example.other"))
+        assertFalse(d.allowUdp)
+        d.allowUdp = true
+        d.proxyChoice(same)
+        assertFalse(d.allowUdp) // changing back also needs fresh consent
+        d.allowUdp = true
+        d.proxyChoice(same.copy(identity = app.unbraid.data.AppIdentity("bb".repeat(32), emptySet())))
+        assertFalse(d.allowUdp)
+        d.allowUdp = true
+        d.clear()
+        assertFalse(d.allowUdp)
+    }
+
+    @Test fun cancellingLocalProxyEntryDiscardsCredentialsAndSelection() {
+        val d = ImportDraft().apply { socksOpen = true; port = "1080"; user = "local"; pass = "private" }
+        d.clear()
+        assertFalse(d.socksOpen)
+        assertNull(d.proxyApp)
+        assertEquals("", d.port)
+        assertEquals("", d.user)
+        assertEquals("", d.pass)
     }
 
     @Test fun replacedPromptKeepsTheNewOne() {

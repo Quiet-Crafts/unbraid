@@ -201,7 +201,7 @@ class RestoreGate {
             val nextDeadline = (a.here.profiles + a.here.live).minOfOrNull { profile ->
                 profile.apps.keys.mapNotNull { a.here.deadline(profile, it) }.filter { it > now }.minOrNull() ?: Long.MAX_VALUE
             }?.takeUnless { it == Long.MAX_VALUE }
-            return Result(notes + listOfNotNull(limit), Backup.weak(plain, a.here), kept != null, plain.servers.count { it.keyless },
+            return Result(notes + listOfNotNull(limit), Backup.weak(plain, a.here), kept != null, plain.servers.count { it.keyless && it.socks5 == null },
                 kept?.profiles?.lastOrNull()?.name, observations, peers, now, nextDeadline)
         }
     }
@@ -437,7 +437,8 @@ class BackupFlow(private val ui: Ui) {
         finish(true, listOfNotNull(
             if (saved) "Settings restored." else "Settings restored, but they couldn't be saved yet. Keep unbraid open and try again from the notice.",
             if (kept) "Your current setup is kept as the profile ${t.profiles.last().name}." else null,
-            t.servers.filter { it.keyless }.takeIf { it.isNotEmpty() }?.let { "Add the config again for ${it.joinToString { s -> Backup.label(s.name, "an own server") }} in Settings, Providers & servers. Until then, ${if (it.size == 1) "its" else "their"} apps stay offline." },
+            t.servers.filter { it.keyless && it.socks5 == null }.takeIf { it.isNotEmpty() }?.let { "Add the config again for ${it.joinToString { s -> Backup.label(s.name, "an own server") }} in Settings, Providers & servers. Until then, ${if (it.size == 1) "its" else "their"} apps stay offline." },
+            "Confirm the local proxy app in Settings, Providers & servers before using its SOCKS5 route.".takeIf { t.servers.any { it.socks5?.needsConfirmation == true } },
             signIns(t)?.let { "Sign in to $it to use their routes." },
             "unbraid is reconnecting with them.".takeIf { UnbraidVpn.state.value.phase == VpnState.Phase.On },
         ).joinToString(" "))

@@ -10,6 +10,7 @@ import app.unbraid.data.Home
 import app.unbraid.data.Link
 import app.unbraid.data.Manual
 import app.unbraid.data.OvpnLink
+import app.unbraid.data.Socks5Link
 import app.unbraid.data.SsLink
 import app.unbraid.data.TsLink
 import app.unbraid.data.validWgKey
@@ -62,6 +63,9 @@ object Compiler {
      */
     fun blockAfterHalf(half: Int?) = if (half == 1) FAKE_RANGES.size - 1 else FAKE_RANGES.size / 2 - 1
 
+    /** Credentials for the engine's TCP connection to the service-owned bridge. */
+    data class SocksBridge(val port: Int, val username: String, val password: String, val allowUdp: Boolean = false)
+
     class Input(
         val setup: Setup,
         val links: Map<String, Link>,
@@ -85,7 +89,58 @@ object Compiler {
          * or routed app out with it); inside, the engine knows the user id, not which of its apps asked, so they go as that app does.
          */
         val blockedKin: Set<String> = emptySet(),
-    )
+        val socksBridges: Map<String, SocksBridge> = emptyMap(),
+    ) {
+        private val socksPolicy by lazy {
+            if (setup.routes.none { it.socks5 != null }) SocksPolicy()
+            else socksPolicy(this, setup.activeRoutes)
+        }
+        val unavailableSocks: Set<String> get() = socksPolicy.unavailable
+
+        /** The companion must enter the TUN so Android can identify its sockets for the bridge. */
+        val socksCompanions: Set<String> get() = socksPolicy.companions
+    }
+
+    private class SocksPolicy(val unavailable: Set<String> = emptySet(), val companions: Set<String> = emptySet())
+
+    private fun socksPolicy(i: Input, routed: List<Route>): SocksPolicy {
+        val unavailable = HashSet<String>()
+        val companions = HashSet<String>()
+        for (r in routed) {
+            val profile = r.socks5 ?: continue
+            if (r.id in i.blocked || i.links[r.id] !is Socks5Link || i.socksBridges[r.id]?.allowUdp != profile.allowUdp ||
+                socksPolicyProblem(i.setup, r, i.selfPackage, i.lockdown, i.blockedKin, i.tsSuffix) != null)
+                unavailable.add(r.id)
+            else companions.add(profile.packageName)
+        }
+        return SocksPolicy(unavailable, companions)
+    }
+
+    @OptIn(SavedSites::class)
+    fun socksRouteProblem(setup: Setup, route: Route): String? {
+        val profile = route.socks5 ?: return null
+        return when {
+            route.keyless || profile.needsConfirmation || setup.servers.any { it.id == route.own && it.keyless } ->
+                "Confirm the SOCKS5 companion again"
+            runCatching(profile::checked).isFailure -> "The local SOCKS5 configuration is invalid"
+            route.id == setup.defaultRoute || route.id in setup.sites.values -> "SOCKS5 works for selected apps only"
+            route.via != null -> "SOCKS5 cannot use Via"
+            !setup.outside(profile.packageName) -> "Set the SOCKS5 companion to unfiltered Direct"
+            else -> null
+        }
+    }
+
+    fun socksPolicyProblem(setup: Setup, route: Route, selfPackage: String, lockdown: Boolean,
+        blockedKin: Set<String>, tsSuffix: String? = null): String? {
+        val profile = route.socks5 ?: return null
+        return socksRouteProblem(setup, route) ?: when {
+            lockdown -> "Turn off Android VPN lockdown to use SOCKS5"
+            profile.packageName == selfPackage || profile.packageName in blockedKin -> "The SOCKS5 companion cannot go Direct on its own"
+            setup.prefs.filter.routes && setup.prefs.filter.server()?.let { homeVia(setup, it, tsDomains(setup.home, tsSuffix)) } != null ->
+                "The SOCKS5 route needs DNS through its own connection"
+            else -> null
+        }
+    }
 
     /**
      * Whether [other], an app of Direct app [p]'s Android user id, keeps [p] from going Direct on its own: it goes through
@@ -117,10 +172,13 @@ object Compiler {
         s.outside(pkg) && kin != null && pkg in kin && kin.none { keeps(s, pkg, it) || it in s.apps && !s.permitsApp(it, identity) }
 
     /** Route id → the tunnel tag it runs on: routes that resolve to one server with one login share a tunnel. */
-    fun shared(s: Setup, links: Map<String, Link>, blocked: Set<String> = emptySet()): Map<String, String> {
+    fun shared(s: Setup, links: Map<String, Link>, blocked: Set<String> = emptySet()): Map<String, String> =
+        shared(s, links, blocked, s.activeRoutes)
+
+    private fun shared(s: Setup, links: Map<String, Link>, blocked: Set<String>, routed: List<Route>): Map<String, String> {
         val owners = HashMap<String, String>()
-        val routes = s.activeRoutes.filter { it.tsExit == null && it.id !in blocked }
-        require(clashes(s, links).isEmpty()) { CLASH } // [LinkPicker] blocks them first
+        val routes = routed.filter { it.tsExit == null && it.id !in blocked }
+        require(clashes(s, links, routed).isEmpty()) { CLASH } // [LinkPicker] blocks them first
         return routes.associate { r ->
             val link = links[r.id] ?: error("No server for ${r.name}")
             // A tunnel through another route is a tunnel of its own, never shared with one that goes straight there.
@@ -163,18 +221,26 @@ object Compiler {
         if (s.defaultMissing) throw MissingDefault()
         // Blocked routes get no tunnel, DNS server or probe; their apps still match, to be refused. So do apps on a route
         // that no longer exists.
-        val refused = i.blocked + missing(s) + BLOCK
+        val activeRoutes = s.activeRoutes
+        val socksIds = s.routes.mapNotNull { route -> route.id.takeIf { route.socks5 != null } }.toSet()
+        val socks = if (socksIds.isEmpty()) SocksPolicy() else socksPolicy(i, activeRoutes)
+        val blocked = if (socksIds.isEmpty()) i.blocked else i.blocked + socks.unavailable + activeRoutes.mapNotNull { route ->
+            route.id.takeIf { route.via in socksIds }
+        }
+        val socksCompanions = socks.companions
+        val companionPackages = JsonArray(socksCompanions.sorted().map(::JsonPrimitive))
+        val refused = blocked + missing(s) + BLOCK
         // Apps on Block: refused before anything else is decided for them, a website's route, the home network and the LAN included.
         val barred = JsonArray(s.apps.filterValues { it == BLOCK }.keys.sorted().map(::JsonPrimitive))
         // A named owner whose signature changed gets an exact rejection. Matching grants keep the usual unnamed policy.
         val deniedOwners = if (i.setup.apps.any { (pkg, route) -> route != BLOCK && pkg in i.setup.appSigners })
             JsonArray(barred + JsonPrimitive(UNVERIFIED_OWNER)) else barred
-        val active = s.activeRoutes.filter { it.id !in i.blocked }
-        val defaultBlocked = s.defaultRoute in i.blocked
+        val active = activeRoutes.filter { it.id !in blocked }
+        val defaultBlocked = s.defaultRoute in blocked
         require(active.mapNotNull { it.tsExit }.distinct().size <= 1) { "Tailscale allows one exit node at a time. Use the same node for every Tailscale route." }
         // Tailscale-exit routes have no tunnel of their own: they ride the Tailscale endpoint, whose exit node is set below.
         // Routes that resolve to the same server with the same credentials share one tunnel: two with one key would fight over it.
-        val shared = shared(s, i.links, i.blocked)
+        val shared = shared(s, i.links, blocked, activeRoutes)
         val tag = { id: String -> if (id == DIRECT || id == FILTERED) "direct" else if (s.route(id)?.tsExit != null) TS_TAG else shared[id] ?: "r-$id" }
         val tsDomains = tsDomains(s.home, i.tsSuffix)
         // OpenVPN routes use the DNS their server pushes, except NordVPN's own routes: those keep Nord's
@@ -187,7 +253,8 @@ object Compiler {
         // Direct apps that pass through unbraid for the filter: still straight out, but not left out of the VPN.
         val through = direct.filter(s.prefs.filter::through).toSet()
         val homeWg = s.home.wg
-        val ts = s.tailscale
+        val tsExit = activeRoutes.firstNotNullOfOrNull { it.tsExit }
+        val ts = s.home.tailscale || tsExit != null
         // An exit keeps the endpoint running, but only the home toggle grants every app tailnet access.
         val homeTs = s.home.tailscale
         // A filter that lives in a home network is asked through that tunnel, as any connection to its address goes.
@@ -198,7 +265,12 @@ object Compiler {
         val ovpnBoot = { id: String -> filterRoutes && filter != null && filterVia == null && Filters.byName(filter) && i.links[id] is OvpnLink && s.route(id)?.imported == true }
         // A Shadowsocks plugin (obfs-local, v2ray-plugin) carries TCP only: the engine sends UDP straight to the server,
         // past the plugin, where a server behind one often doesn't answer. Such routes look names up over TCP and carry no UDP.
-        val tcpOnly = { id: String -> (i.links[id] as? SsLink)?.profile?.plugin != null }
+        val tcpOnly = { id: String ->
+            i.links[id] is Socks5Link && i.socksBridges[id]?.allowUdp != true ||
+                (i.links[id] as? SsLink)?.profile?.plugin != null
+        }
+        // Keep SOCKS DNS independent of UDP relay availability so TCP still works with a TCP-only companion.
+        val tcpDns = { id: String -> i.links[id] is Socks5Link || tcpOnly(id) }
         val dnsFor = { id: String -> if (id == FILTERED) "dns-filter" else if (id == DIRECT) "local" else if (ovpnDns(id)) "dns-ovpn-${tag(id)}" else "dns-r-$id" }
         val directFiltered = filter != null && s.prefs.filter.direct && s.defaultRoute == DIRECT
         // Direct websites are looked up with the filter when Direct traffic passing through is: also when the only filtered
@@ -261,14 +333,14 @@ object Compiler {
                     val boots = HashSet<String>() // one lookup server per tunnel: the engine allows one OpenVPN DNS server per endpoint
                     active.filter { !ovpnDns(it.id) }.forEach { r ->
                         val boot = "boot-${tag(r.id)}"
-                        val own = obj("type" to if (tcpOnly(r.id)) "tcp" else "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))
+                        val own = obj("type" to if (tcpDns(r.id)) "tcp" else "udp", "tag" to "dns-r-${r.id}", "server" to dnsServer(s, r, i.links[r.id]), "detour" to tag(r.id))
                         if (filter == null || !filterRoutes) add(own) else if (filterVia != null) add(filterDns(filter, "dns-r-${r.id}", filterVia, "dns-tailnet")) else {
                             // A filter reached by name is looked up first through the same tunnel, with the route's own resolver.
                             if (Filters.byName(filter) && boots.add(boot)) add(
                                 if (ovpnBoot(r.id)) obj("type" to "openvpn", "tag" to boot, "endpoint" to tag(r.id), "accept_default_resolvers" to true, "fallback_server" to "9.9.9.9")
                                 else JsonObject(own + ("tag" to JsonPrimitive(boot))),
                             )
-                            add(filterDns(filter, "dns-r-${r.id}", tag(r.id), boot, tcpOnly(r.id)))
+                            add(filterDns(filter, "dns-r-${r.id}", tag(r.id), boot, tcpDns(r.id)))
                         }
                     }
                     // Direct traffic the filter applies to goes to it straight, not through a tunnel.
@@ -283,6 +355,7 @@ object Compiler {
                     // Block comes first: no name is looked up for a blocked app, nor a blocked website's for anyone, except a
                     // name under it with a route of its own, which its own rule below answers.
                     if (deniedOwners.isNotEmpty()) add(obj("package_name" to deniedOwners, "action" to "reject"))
+                    if (socksCompanions.isNotEmpty()) add(obj("package_name" to companionPackages, "server" to "local"))
                     for ((id, names) in runs) if (id == BLOCK) add(except(names).let { own ->
                         if (own.isEmpty()) obj(*match(names), "action" to "reject")
                         else obj("type" to "logical", "mode" to "and", "rules" to JsonArray(listOf(obj(*match(names)), obj(*match(own), "invert" to true))), "action" to "reject")
@@ -352,7 +425,7 @@ object Compiler {
                         put("route_exclude_address", JsonArray((LAN - home.toSet()).map(::JsonPrimitive)))
                     }
                     // Left out by Android: the apps the setup calls outside, so the screens and the engine follow one rule.
-                    put("exclude_package", JsonArray(((if (i.lockdown) emptyList() else s.apps.keys.filter { s.outside(it) && it !in i.blockedKin }.sorted()) + i.selfPackage).map(::JsonPrimitive)))
+                    put("exclude_package", JsonArray(((if (i.lockdown) emptyList() else s.apps.keys.filter { s.outside(it) && it !in i.blockedKin && it !in socksCompanions }.sorted()) + i.selfPackage).map(::JsonPrimitive)))
                 })
                 // No tunnel to test, no inbound: sing-box would run a proxy with an empty user list unauthenticated.
                 i.probe?.takeIf { probeTags.isNotEmpty() }?.let { (port, password) ->
@@ -369,7 +442,7 @@ object Compiler {
                         is WgLink -> add(wg(tag(r.id), l.peer, r.name, r.via?.takeIf { !r.viaNative }?.let { v -> shared[v] ?: error("${r.name}: its Via isn't connected") }))
                         // Keeps the pushed DNS if any route on this tunnel uses it, not only the route that owns it.
                         is OvpnLink -> Manual.ovpnEndpoint(tag(r.id), l.profile).let { e -> add(if (active.any { tag(it.id) == tag(r.id) && (ovpnDns(it.id) || ovpnBoot(it.id)) }) openVpn(e) else e) }
-                        is SsLink, is TsLink -> Unit
+                        is Socks5Link, is SsLink, is TsLink -> Unit
                     }
                 }
                 homeWg?.let { add(wg("home-wg", it.copy(mtu = minOf(it.mtu, app.unbraid.data.MTU_MIN)), "the home network")) }
@@ -381,7 +454,7 @@ object Compiler {
                     s.home.tsAuthKey?.let { put("auth_key", it) }
                     // Over plain HTTP a network attacker could hand Tailscale a fake control-server key.
                     s.home.tsControlUrl?.let { require(it.startsWith("https://")) { "Headscale needs an https:// address. Change it in Settings." }; put("control_url", it) }
-                    s.tsExit?.let { put("exit_node", it); put("exit_node_allow_lan_access", s.prefs.lan) }
+                    tsExit?.let { put("exit_node", it); put("exit_node_allow_lan_access", s.prefs.lan) }
                 })
             }
             putJsonArray("outbounds") {
@@ -390,6 +463,16 @@ object Compiler {
                 active.filter { shared[it.id] == "r-${it.id}" }.forEach { r -> (i.links[r.id] as? SsLink)?.let {
                     add(Manual.ssOutbound(tag(r.id), it.profile).let { o -> if (tcpOnly(r.id)) JsonObject(o + ("network" to JsonPrimitive("tcp"))) else o })
                 } }
+                active.forEach { r ->
+                    if (i.links[r.id] is Socks5Link) i.socksBridges.getValue(r.id).let { bridge ->
+                        val outbound = obj("type" to "socks", "tag" to tag(r.id), "server" to "127.0.0.1", "server_port" to bridge.port,
+                            "version" to "5", "username" to bridge.username, "password" to bridge.password)
+                        // Carry engine datagrams on the authenticated local stream. The bridge uses UDP to the companion.
+                        val transport = if (bridge.allowUdp) "udp_over_tcp" to JsonPrimitive(true)
+                            else "network" to JsonPrimitive("tcp")
+                        add(JsonObject(outbound + transport))
+                    }
+                }
             }
             putJsonObject("route") {
                 putJsonArray("rules") {
@@ -416,6 +499,11 @@ object Compiler {
                     // Fake IPs an app kept from the previous domain table name nothing now: refused at once, so the app
                     // looks the name up again instead of waiting on a dead address.
                     add(obj("ip_cidr" to JsonArray((FAKE_RANGES - FAKE_RANGES[i.fakeBlock]).map(::JsonPrimitive)), "action" to "reject", "no_drop" to true))
+                    // The companion's upstream must never return through its own SOCKS5 listener.
+                    if (socksCompanions.isNotEmpty()) {
+                        add(obj("inbound" to arr("tun"), "package_name" to companionPackages, "action" to "resolve", "server" to "local"))
+                        add(obj("inbound" to arr("tun"), "package_name" to companionPackages, "outbound" to "direct"))
+                    }
                     // The app's own tests: each proxy user goes out through its exit only, names resolved there too.
                     if (i.probe != null) probeTags.forEach { (t, dns) -> // nothing to add when there is no tunnel
                         add(obj("inbound" to PROBE, "auth_user" to arr(t), "action" to "resolve", "server" to dns))
@@ -426,7 +514,7 @@ object Compiler {
                     // exit node can't carry them before the sign-in. Other apps keep their own exits, and once signed in
                     // these sites follow the exit too (the engine's own control traffic never needs the rule).
                     val tsLogin = if (!ts || !i.tsLoginPending) emptyList() else listOfNotNull(
-                        ("domain_suffix" to arr("tailscale.com", "tailscale.io")).takeIf { s.tsExit != null && officialTs(s.home) },
+                        ("domain_suffix" to arr("tailscale.com", "tailscale.io")).takeIf { tsExit != null && officialTs(s.home) },
                         // An address only when it truly is one (no lookup): "1hs.example.com" is a name.
                         s.home.tsControlUrl?.let { u -> java.net.URI(u).host?.let { h ->
                             when {
@@ -456,6 +544,8 @@ object Compiler {
                     }
                     for ((id, p) in perApp) {
                         if (id in refused) { add(obj("package_name" to p, "action" to "reject", "no_drop" to true)); continue }
+                        if (i.links[id] is Socks5Link && tcpOnly(id))
+                            add(obj("package_name" to p, "network" to "udp", "action" to "reject", "no_drop" to true))
                         // Before its exit's DNS, which an exit node not yet signed in can't answer; Direct resolves locally.
                         if (onTs(id)) tsLogin.forEach { add(obj("package_name" to p, it, "outbound" to "direct")) }
                         add(obj("package_name" to p, "action" to "resolve", "server" to dnsFor(id)))
@@ -657,7 +747,7 @@ object Compiler {
             .associate { ((it["auth_user"] as JsonArray)[0] as JsonPrimitive).content to (it["server"] as JsonPrimitive).content }
     }
 
-    /** Tunnel tags that carry TCP only (a Shadowsocks plugin), read back from a compiled [config]: nothing else goes to their server. */
+    /** Tunnel tags that carry TCP only, read back from a compiled [config] so probes can omit UDP. */
     fun tcpOnly(config: String): Set<String> = kotlinx.serialization.json.Json.parseToJsonElement(config).let { c ->
         ((c as JsonObject)["outbounds"] as? JsonArray).orEmpty().map { it as JsonObject }
             .filter { it["network"] == JsonPrimitive("tcp") }.mapNotNull { (it["tag"] as? JsonPrimitive)?.content }.toSet()
@@ -671,6 +761,7 @@ object Compiler {
         is OvpnLink -> listOf("ovpn", sha(l.profile.config), l.profile.username, sha(l.profile.password))
         // The plugin and its options (TLS, certificate, host) are part of the tunnel too.
         is SsLink -> listOf("ss", l.profile.server, l.profile.port.toString(), l.profile.method, sha(l.profile.password), l.profile.plugin.orEmpty(), sha(l.profile.pluginOpts.orEmpty()))
+        is Socks5Link -> listOf("socks5", r.id)
         is TsLink -> listOf("ts")
     }.joinToString("|")
 
@@ -686,16 +777,18 @@ object Compiler {
      * Routes whose WireGuard identity (client key on one server) is already taken, with other settings, by an earlier
      * route or the home tunnel: one identity can be one tunnel only, two would knock each other off.
      */
-    fun clashes(s: Setup, links: Map<String, Link>): Set<String> {
+    fun clashes(s: Setup, links: Map<String, Link>): Set<String> = clashes(s, links, s.activeRoutes)
+
+    private fun clashes(s: Setup, links: Map<String, Link>, routed: List<Route>): Set<String> {
         val seen = HashMap<String, String>().apply { s.home.wg?.let { put(wgIdentity(it), "home") } }
-        return s.activeRoutes.filter { it.tsExit == null }.mapNotNullTo(HashSet()) { r ->
+        val active by lazy { routed.map { it.id } }
+        return routed.filter { it.tsExit == null }.mapNotNullTo(HashSet()) { r ->
             val p = (links[r.id] as? WgLink)?.peer ?: return@mapNotNullTo null
             // The same key on the same server by another path (Via or not) clashes too.
             val key = wgKey(p) + "|via=" + r.via.orEmpty()
             // The same key to the same exit server, straight and by the provider's multi-hop (another address, the same
             // server key): the server can't tell them apart, so they clash too.
             // Two multi-hop paths to one exit (through two entries) likewise: the later one gives way.
-            val active = s.activeRoutes.map { it.id }
             val hop = (links[r.id] as? WgLink)?.hopEntry != null
             val twin = hop && links.any { (id, o) -> id != r.id && id in active && o is WgLink && o.peer.publicKey == p.publicKey && o.peer.privateKey == p.privateKey &&
                 o.peer.endpoint != p.endpoint && (o.hopEntry == null || active.indexOf(id) < active.indexOf(r.id)) }

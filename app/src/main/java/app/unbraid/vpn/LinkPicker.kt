@@ -11,6 +11,7 @@ import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.data.Setup
 import app.unbraid.data.Sites
+import app.unbraid.data.Socks5Link
 import app.unbraid.data.SsLink
 import app.unbraid.data.TsLink
 import app.unbraid.data.WgLink
@@ -110,8 +111,9 @@ object LinkPicker {
             // Also a route given a server still waiting for its config, however it got there.
             if (r.keyless || setup.servers.any { it.id == r.own && it.keyless }) { blocked[r.id] = KeyLeftOut(r.name); continue }
             // A Via that can't be used stops the route before its provider is asked anything (PIA's set-up would reach the exit).
-            setup.viaProblem(r)?.let { blocked[r.id] = Fail(it); continue }
+            (Compiler.socksRouteProblem(setup, r) ?: setup.viaProblem(r))?.let { blocked[r.id] = Fail(it); continue }
             val link = try { when {
+                r.socks5 != null -> Socks5Link(Server(r.socks5.name, "", "", "", 0))
                 r.wg != null -> WgLink(Server(r.wg.name, r.wg.endpoint.substringBeforeLast(':'), "", r.wg.publicKey, 0), r.wg)
                 r.ovpn != null -> OvpnLink(Server(r.ovpn.name, r.ovpn.name, "", "", 0), r.ovpn)
                 r.ss != null -> SsLink(Server(r.ss.name, r.ss.server, r.ss.server, "", 0), r.ss)

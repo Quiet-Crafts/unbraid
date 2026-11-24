@@ -247,9 +247,12 @@ object RestoreTraffic {
      */
     fun compile(s: Setup, kin: (String) -> Set<String>, given: Boolean = false, at: Situation = Situation(false)): Config? = runCatching {
         val p = LinkPicker.pick(s, emptyMap(), null, emptyMap(), emptyMap(), emptyMap(), offline = true) { Providers.get(it) }
-        val providers = s.activeRoutes.filter { !it.imported || (given && p.blocked[it.id] is LinkPicker.KeyLeftOut) }
-        val links = p.links + providers.mapIndexed { n, r -> r.id to standIn(r, n) }
-        Config(Compiler.compile(Compiler.Input(s, links, "app.unbraid", at.lockdown, "", "", at.suffix, blocked = p.blocked.keys - providers.map { it.id }.toSet(),
+        // The preview cannot verify a live socket owner, even in its hypothetical "after refill" pass.
+        val active = s.activeRoutes
+        val local = active.filter { it.socks5 != null }.mapTo(HashSet()) { it.id }
+        val providers = active.filter { it.id !in local && (!it.imported || given && p.blocked[it.id] is LinkPicker.KeyLeftOut) }
+        val links = (p.links - local) + providers.mapIndexed { n, r -> r.id to standIn(r, n) }
+        Config(Compiler.compile(Compiler.Input(s, links, "app.unbraid", at.lockdown, "", "", at.suffix, blocked = (p.blocked.keys + local) - providers.map { it.id }.toSet(),
             tsLoginPending = at.signIn, blockedKin = Compiler.keptIn(s, kin))), s)
     }.getOrNull()
 
@@ -729,6 +732,12 @@ object RestoreTraffic {
         val now = next.prefs.filter.server()
         val filterOff = was != null && now == null
         if (was != null && now != null && was != now) out += Note("The DNS filter changes to another server.")
+        if (current.routes.any { it.socks5 != null } || next.routes.any { it.socks5 != null }) {
+            out += Note("This comparison treats local SOCKS5 routes as blocked because it cannot verify a running proxy app.")
+        }
+        if (next.servers.any { it.socks5?.needsConfirmation == true }) {
+            out += Note("Restored local SOCKS5 routes stay blocked until you confirm the proxy app on this phone.")
+        }
         exitChanges(current, next).forEach { if (out.none { n -> n.text == it }) out += Note(it) }
         // A new install's placeholder isn't the user's: there is no traffic to compare.
         if (current.untouched) return listOfNotNull(Note(FILTER_OFF).takeIf { filterOff }) + out
@@ -819,19 +828,19 @@ object RestoreTraffic {
 
     /** Every own server, every route through one (it runs its own copy) and the home tunnel; none waiting for its config. */
     private fun exits(s: Setup): List<Exit> {
-        fun exit(key: String, name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?): Exit {
+        fun exit(key: String, name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?, socks5: Socks5Profile? = null): Exit {
             // OpenVPN: every remote the engine may pick, with the port and protocol it gets, as the import builds them.
             val endpoint = ovpn?.let { runCatching { Manual.ovpnEndpoint("check", it) }.getOrNull() }
-            val remotes = wg?.let { listOf(it.endpoint) } ?: ss?.let { listOf("${it.server}:${it.port}") } ?: endpoint?.let { e ->
+            val remotes = wg?.let { listOf(it.endpoint) } ?: ss?.let { listOf("${it.server}:${it.port}") } ?: socks5?.let { listOf("${it.host}:${it.port}") } ?: endpoint?.let { e ->
                 ((e["servers"] as? JsonArray)?.map { it.jsonObject } ?: listOf(e))
                     .map { "${it.str("server")}:${it["server_port"]}/${it.str("network")}" }
             }.orEmpty()
-            val host = wg?.endpoint?.substringBeforeLast(':')?.trim('[', ']') ?: ss?.server ?: remotes.firstOrNull()?.let(::hostOf)
-            return Exit(key, name, host, remotes.map { it.lowercase() }, wg?.publicKey, wg?.dns.orEmpty(),
+            val host = wg?.endpoint?.substringBeforeLast(':')?.trim('[', ']') ?: ss?.server ?: socks5?.host ?: remotes.firstOrNull()?.let(::hostOf)
+            return Exit(key, name, host, remotes.map { it.lowercase() }, wg?.publicKey ?: socks5?.let { "${it.packageName}/${it.identity}" }, wg?.dns.orEmpty(),
                 endpoint?.obj("tls")?.let(::openVpnTrust))
         }
-        return s.servers.filter { !it.keyless }.map { exit("s:" + it.id, it.name, it.wg, it.ovpn, it.ss) } +
-            s.routes.filter { it.imported && it.tsExit == null && !it.keyless }.map { exit("r:" + it.id, it.name, it.wg, it.ovpn, it.ss) } +
+        return s.servers.filter { !it.keyless }.map { exit("s:" + it.id, it.name, it.wg, it.ovpn, it.ss, it.socks5) } +
+            s.routes.filter { it.imported && it.tsExit == null && !it.keyless }.map { exit("r:" + it.id, it.name, it.wg, it.ovpn, it.ss, it.socks5) } +
             listOfNotNull(s.home.wg?.let { exit("home", "", it, null, null) })
     }
 

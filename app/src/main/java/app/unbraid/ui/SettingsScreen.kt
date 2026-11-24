@@ -395,11 +395,11 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 }.ifEmpty { listOf(Item("No provider yet", "Sign in to one with Add connection", null)) })
                 if (setup.servers.isNotEmpty()) group("Own servers", setup.servers.map { sv ->
                     val n = setup.routes.count { it.own == sv.id }
-                    Item(sv.name, if (sv.keyless) "${sv.kind} · needs its config again" else "${sv.kind} · ${if (n == 0) "not used" else "used by $n ${if (n == 1) "route" else "routes"}"}", { dialog = "server:${sv.id}" }) { Chevron() }
+                    Item(sv.name, if (sv.socks5?.needsConfirmation == true) "SOCKS5 · confirm this phone’s proxy app" else if (sv.keyless) "${sv.kind} · needs its config again" else "${sv.kind} · ${if (n == 0) "not used" else "used by $n ${if (n == 1) "route" else "routes"}"}", { dialog = "server:${sv.id}" }) { Chevron() }
                 })
                 item { Box(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Tonal("Add connection", Icons.add) { importer.error = null; dialog = "add" } } }
                 importer.error?.let { e -> item { Text(e, style = Type.caption, color = Ink.bad, modifier = Modifier.padding(start = 24.dp, end = Gutter)) } }
-                caption("A provider sign-in, a WireGuard or OpenVPN file, or a Shadowsocks link. Tailscale exit nodes are under Tailscale.")
+                caption("A provider sign-in, a WireGuard or OpenVPN file, a Shadowsocks link, or a local SOCKS5 proxy. Tailscale exit nodes are under Tailscale.")
             }
 
             p.startsWith("provider:") -> {
@@ -715,6 +715,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                     Triple("Sign in to a provider", Providers.all.filter { it.id !in accounts }.take(4).joinToString(", ") { it.name } + " and more") { dialog = null; addProvider() },
                     Triple("WireGuard or OpenVPN file", ".conf or .ovpn, from any provider or your own server") { dialog = null; importer.file("any") },
                     Triple("Shadowsocks link", "Paste an ss:// access key") { dialog = null; importer.shadowsocks() },
+                    Triple("Local SOCKS5 proxy", "Use another app on this phone as a proxy") { dialog = null; importer.socks5() },
                     Triple("Provider without an app here?", Providers.imports.joinToString(", ") { it.name } + ": download, then import") { dialog = "guides" },
                 )
                 opts.forEachIndexed { i, (t, sub, go) -> GroupRow(i, opts.size, t, sub, onClick = go, trailing = { Chevron() }) }
@@ -786,7 +787,11 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                     Prompt(s.name, "Save", { ui.renameServer(s.id, name); dialog = null }, { dialog = null }, enabled = name.isNotBlank()) {
                         Text("${s.kind}${if (used > 0) " · used by ${if (used == 1) "1 route" else "$used routes"}" else ""}", style = Type.sub)
                         DialogField(name, { name = it.take(40) }, "Name", "e.g. Home VPS")
-                        if (s.keyless) {
+                        if (s.socks5 != null) {
+                            val confirm = s.keyless || s.socks5.needsConfirmation
+                            if (confirm) Text("Confirm the proxy on this phone and re-enter its login, if required. The route stays offline until then.", style = Type.caption, color = Ink.bad)
+                            Secondary(if (confirm) "Confirm proxy app" else "Edit proxy settings", { dialog = null; importer.socks5(refill = s.id) })
+                        } else if (s.keyless) {
                             Text("Restored from a backup saved without keys. Its apps stay offline until you add its config file or link again.", style = Type.caption, color = Ink.bad)
                             Secondary("Add its config again", { dialog = null; if (s.ss != null) importer.shadowsocks(refill = s.id) else importer.file(if (s.wg != null) "wg" else "ovpn", refill = s.id) })
                         }

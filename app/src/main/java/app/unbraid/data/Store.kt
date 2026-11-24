@@ -389,7 +389,7 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     /** Apply the same route cleanup, signer cleanup and reservations to an edit or restore. Caller holds [changing]. */
     private fun acceptedSetup(old: Setup, new: Setup): Setup? =
         new.tidy(old.routes.map { it.id }.toSet() - new.routes.map { it.id }.toSet()).after(old).tidyAppSigners()
-            .takeIf { next -> reserved.none { g -> next.refusesRemoving(g(next), "") != null } }
+            .takeIf { next -> next.supportsSocks5Assignments() && reserved.none { g -> next.refusesRemoving(g(next), "") != null } }
 
     /** Routes about to be removed, each set as [reserve] named it: no change makes one of them a default meanwhile. */
     private val reserved = java.util.concurrent.CopyOnWriteArrayList<(Setup) -> Set<String>>()

@@ -151,8 +151,8 @@ class FakePoolTest {
 
     private val setup = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands"))), defaultRoute = "nl",
         apps = mapOf("com.b" to BLOCK), version = VERSION, home = Home(tsSuffixAllowed = "old.ts.net"))
-    private fun input(block: Int, pending: Boolean = true) = Compiler.Input(setup, emptyMap(), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", "old.ts.net",
-        1 to "old", block, setOf("nl"), tsLoginPending = pending, blockedKin = setOf("com.b"))
+    private fun input(block: Int, pending: Boolean = true, bridges: Map<String, Compiler.SocksBridge> = emptyMap(), lockdown: Boolean = false) = Compiler.Input(setup, emptyMap(), "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db", "old.ts.net",
+        1 to "old", block, setOf("nl"), tsLoginPending = pending, blockedKin = setOf("com.b"), socksBridges = bridges)
     private fun restore(last: Compiler.Input, block: Int?, spent: Int?, lockdown: Boolean = false, pending: Boolean = true, move: Boolean = false, kin: (Setup) -> Set<String> = { setOf("com.b") }) =
         FakePool.restoreInput(last, block, spent, 2 to "new", null, "new.ts.net", lockdown, pending, move, kin = kin)
 
@@ -177,6 +177,22 @@ class FakePoolTest {
         assertFalse(restore(input(3), null, 3, lockdown = false).lockdown) // today's, as a reload would compile it
         assertEquals(true, restore(input(3), null, 3).tsLoginPending)
         assertEquals(false, FakePool.restoreInput(input(3, pending = false), null, 3, 2 to "new", null, null, false, true, false) { emptySet() }.tsLoginPending)
+    }
+
+    @Test fun aFailedReloadKeepsOnlyTheSamePublishedBridge() {
+        val first = Compiler.SocksBridge(10010, "first", "private")
+        val second = Compiler.SocksBridge(10011, "second", "private")
+        val last = input(3, bridges = mapOf("kept" to first, "changed" to second, "gone" to second, "mode" to second))
+        val new = mapOf("kept" to first, "changed" to second.copy(password = "rotated"), "new" to second,
+            "mode" to second.copy(allowUdp = true))
+        assertEquals(mapOf("kept" to first), FakePool.retainedBridges(last.socksBridges, new))
+        for (move in listOf(true, false)) {
+            val restored = FakePool.restoreInput(last, 4, 3, 2 to "probe", null, null, true, false, move, socksBridges = new) { emptySet() }
+            assertEquals(mapOf("kept" to first), restored.socksBridges)
+            assertTrue(restored.lockdown)
+        }
+        val locked = FakePool.restoreInput(input(3, bridges = last.socksBridges, lockdown = true), 4, 3, 2 to "probe", null, null, false, false, true, socksBridges = new) { emptySet() }
+        assertTrue(locked.lockdown)
     }
 
     /**
@@ -401,7 +417,7 @@ class FakePoolTest {
         assertTrue(vpn.contains("FakePool.spend(input.fakeBlock, lastBlock, filesDir) { store.fakeBlock = it }"))
         assertTrue(vpn.contains("FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->"))
         assertTrue(vpn.contains("FakePool.restoreInput(lastInput ?: error(\"nothing ran\"), block, spent, "))
-        assertTrue(vpn.contains("tsLoginPending, move, ::verifiedSetup) { blockedKin(it) }"))
+        assertTrue(vpn.contains("tsLoginPending, move, ::verifiedSetup, socksEndpoints()) { blockedKin(it) }"))
         // An app whose lookup fails stays inside, at a start and on a restore alike; it costs no other app its own.
         assertTrue(vpn.contains("catch (e: RuntimeException) { null }"))
         assertTrue(vpn.contains("restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone, move = true)"))

@@ -85,6 +85,7 @@ private fun Choose(ui: Ui, importFor: String, onImported: (() -> Unit)?, onClose
         val other = listOfNotNull(
             Other("Import a config file", "WireGuard .conf or OpenVPN .ovpn") { importer.file() },
             Other("Shadowsocks link", "Paste an ss:// access key") { importer.shadowsocks() },
+            Other("Local SOCKS5 proxy", "Use another app on this phone as a proxy") { importer.socks5() }.takeIf { ui.setup.value.allowsLocalProxy(importFor) },
             Other("Tailscale only", "No VPN provider, just your tailnet") { ui.useTailscaleOnly() }.takeIf { onClose == null },
             Other("Restore a backup", "A file saved with Back up settings") { ui.backup.startRestore() }.takeIf { onClose == null },
         )
