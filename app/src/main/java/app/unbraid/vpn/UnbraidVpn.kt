@@ -556,21 +556,30 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var losses = 0
     private val heldNotice get() = lost?.let { "Apps are offline: $it" } ?: UNREADABLE
 
-    /** Android's tunnel with no engine behind it: every app inside is offline, only [out] stays out. */
-    private fun blockingTun(out: Set<String>) = Builder().setSession("$APP").setMetered(false).addAddress("172.19.0.1", 30).addAddress("fdfe:dcba:9876::1", 126)
-        .addRoute("0.0.0.0", 0).addRoute("::", 0).addDnsServer("172.19.0.2")
-        .also { b -> (out + packageName).forEach { runCatching { b.addDisallowedApplication(it) } } }.establish()
+    /**
+     * The apps the tunnel in place leaves out, in the order Android got them. Android swaps two tunnels without a gap only
+     * when this list is the same; else it ends one before the next starts, and apps are outside for an instant.
+     */
+    @Volatile private var leftOut: List<String> = emptyList()
 
-    /** Puts the blocking tunnel in place, leaving out the apps on Direct as saved now. False: Android lets no tunnel block any more. */
+    /** Android's tunnel with no engine behind it: every app inside is offline, only [out] stays out. */
+    private fun blockingTun(out: List<String>) = Builder().setSession("$APP").setMetered(false).addAddress("172.19.0.1", 30).addAddress("fdfe:dcba:9876::1", 126)
+        .addRoute("0.0.0.0", 0).addRoute("::", 0).addDnsServer("172.19.0.2")
+        .also { b -> out.forEach { runCatching { b.addDisallowedApplication(it) } } }.establish()
+
+    /** Puts the blocking tunnel in place, leaving out those left out before that still may be. False: Android lets no tunnel block any more. */
     private fun block(): Boolean {
-        fun put(out: Set<String>): Boolean = blockingTun(out)?.let { b -> runCatching { tun?.close() }; tun = b; true } ?: false
-        fun may() = store.setup.value.let { s -> Compiler.mayStayOut(verifiedSetup(s), isLockdownEnabled, ::packagesSharing) { verifiedIdentity(s, it) } }
+        fun may(): List<String> = store.setup.value.let { s ->
+            val direct = Compiler.mayStayOut(verifiedSetup(s), isLockdownEnabled, ::packagesSharing) { verifiedIdentity(s, it) }
+            leftOut.filter { it in direct || it == packageName }.ifEmpty { listOf(packageName) }
+        }
+        fun put(out: List<String>): Boolean = blockingTun(out)?.let { b -> runCatching { tun?.close() }; tun = b; leftOut = out; true } ?: false
         return runCatching {
-            val out = may()
+            if (lost != null && tun != null && may() == leftOut) true // the one there already does
             // Checked again with it up: an app changed meanwhile comes inside.
-            put(out).also { if (it) { val still = may(); if (!still.containsAll(out)) put(out intersect still) } }
+            else put(may()).also { if (it && may() != leftOut) put(may()) }
         }.onFailure { Log.e(TAG, "block: ${logLine(it)}") }.getOrNull()
-            ?: runCatching { put(emptySet()) }.getOrNull()
+            ?: runCatching { put(listOf(packageName)) }.getOrNull()
             ?: (tun != null && runCatching { prepare(this) == null }.getOrDefault(false)) // the one there stays, with nothing behind it
     }
 
@@ -1660,10 +1669,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         val uidOf = { n: String -> runCatching { packageManager.getPackageUid(n, 0) }.getOrDefault(-1) }
         val ids = out.associateWith(uidOf).filterValues { it >= 0 }
         val moved = ids.filter { (n, id) -> knownIds[n]?.let { it != id } == true || n in unsure }.keys
-        val interim = if (tun != null && moved.isNotEmpty()) establish(out - moved).also { tun?.close(); tun = it } else null
+        val interim = if (tun != null && moved.isNotEmpty()) establish(out - moved).also { tun?.close(); tun = it; leftOut = out - moved } else null
         var pfd = establish(out)
         tun?.close()
         tun = pfd
+        leftOut = out
         // Looked up again: an app installed or removed while the tunnel was built may have met the builder with another id.
         val after = out.associateWith(uidOf).filterValues { it >= 0 }
         // One whose id changed in between may have met Android with the old one: not taken as known, built in two steps next.
@@ -1673,6 +1683,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val safe = establish(out - changed)
             pfd.close()
             tun = safe
+            leftOut = out - changed
             pfd = safe
         }
         knownIds.keys.retainAll(out.toSet() - changed)
