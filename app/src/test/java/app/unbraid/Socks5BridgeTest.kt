@@ -310,6 +310,33 @@ class Socks5BridgeTest {
         }
     }
 
+    /** Frames that arrive together are each checked: one answer never lets the next one out. */
+    @Test fun udpFramesReadTogetherAreCheckedOneByOne() {
+        server().use { target ->
+            udp(target.localPort).use { relay ->
+                val checks = AtomicInteger()
+                Socks5Bridge.start("127.0.0.1", target.localPort, "u", "p", udpEnabled = true,
+                    udpRelayOwnerVerified = { _, _ -> checks.incrementAndGet() <= 2 }) { true }.use { bridge -> // the setup's and one frame's
+                    client(bridge).use { control ->
+                        assertEquals(0, authenticate(control, bridge))
+                        control.write(udpConnect)
+                        target.accept().use { peer ->
+                            upstreamUdpHandshake(peer)
+                            peer.write(ok.copyOf(8) + portBytes(relay.localPort))
+                            assertArrayEquals(ok, control.read(10))
+                            val frame = portBytes(2) + "ok".toByteArray()
+                            control.write(byteArrayOf(1, 1, 192.toByte(), 0, 2, 9) + portBytes(99) + frame + frame + frame)
+                            relay.receive()
+                            assertEquals(-1, control.getInputStream().read())
+                            relay.soTimeout = 100
+                            assertThrows(SocketTimeoutException::class.java) { relay.receive() }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     @Test fun udpRejectsBadProxyLoginInvalidRelayAndWrongRelayOwner() {
         server().use { target ->
             udp().use { relay ->

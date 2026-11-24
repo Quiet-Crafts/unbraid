@@ -40,7 +40,6 @@ class Socks5Bridge private constructor(
         private const val UDP_EVICT_NANOS = 5_000_000_000L
         private const val UDP_RECEIVE_MS = 2_000
         private const val UDP_IDLE_NANOS = 120_000_000_000L
-        private const val UDP_RECEIVE_BUFFER = 256 * 1024 // Linux doubles it; its default holds about 140 packets
         private const val UDP_MAX_BYTES = 65_507
         private const val UDP_MAGIC = "sp.v2.udp-over-tcp.arpa"
         private const val LEGACY_UDP_MAGIC = "sp.udp-over-tcp.arpa"
@@ -297,7 +296,6 @@ class Socks5Bridge private constructor(
             val relay = DatagramSocket(InetSocketAddress(loopback, 0))
             if (!register(relay, slot)) { relay.close(); return }
             try {
-                runCatching { if (relay.receiveBufferSize < 2 * UDP_RECEIVE_BUFFER) relay.receiveBufferSize = UDP_RECEIVE_BUFFER }
                 val peer = try {
                     upstream.connect(target, HANDSHAKE_MS)
                     verifyAcceptedPeer(upstream)
