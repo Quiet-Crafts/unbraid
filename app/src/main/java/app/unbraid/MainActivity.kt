@@ -89,6 +89,8 @@ import app.unbraid.ui.VpnDisclosure
 import app.unbraid.ui.Welcome
 import app.unbraid.ui.settingsHub
 import app.unbraid.ui.settingsProviders
+import app.unbraid.ui.settingsProxy
+import app.unbraid.ui.ProxyScreen
 import app.unbraid.ui.importTarget
 import app.unbraid.ui.reselected
 import app.unbraid.stats.Stats
@@ -237,6 +239,7 @@ class MainActivity : ComponentActivity() {
                     if (!routesWanted) return@LaunchedEffect
                     ui.routesWanted.value = false
                     if (adding) ui.discardForced()
+                    ui.importDraft.clear()
                     picker = null; adding = false; pickerAfter = null; tab = Tab.Routes
                 }
 
@@ -245,6 +248,7 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(signedIn) { if (signedIn && Onboarding.tourPending && tour < 0) tour = 0 }
                 LaunchedEffect(tour) {
                     if (tour < 0) return@LaunchedEffect
+                    if (ui.importDraft.socksOpen) ui.importDraft.clear()
                     picker = null; adding = false
                     TourStop.entries[tour].tab.let { if (it == Tab.Settings && tab != Tab.Settings) settingsHub(); tab = it }
                 }
@@ -269,11 +273,21 @@ class MainActivity : ComponentActivity() {
                 }
 
                 // The screen shown; the picker's carries its route, so a closing picker keeps its identity while it leaves.
-                val screenNow = when {
+                val proxy = ui.importDraft.socksOpen
+                val under = when {
                     !signedIn -> "signin"
                     adding -> "add"
                     picker != null -> "picker:$picker"
                     else -> tab.name
+                }
+                val screenNow = if (proxy) "proxy" else under
+                // A proxy server was saved: back to where it was added from, its page when that was Settings.
+                val proxySaved by ui.proxySaved.collectAsStateWithLifecycle()
+                LaunchedEffect(proxySaved) {
+                    val (target, id) = proxySaved ?: return@LaunchedEffect
+                    ui.proxySaved.value = null
+                    if (target == null) settingsProxy(id) else picker = null
+                    adding = false
                 }
                 // Seekable, so the predictive back gesture can drive the real transition (the picker shrinking back into
                 // its route) and commit or cancel it.
@@ -281,17 +295,17 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(screenNow) { screens.animateTo(screenNow) }
                 val scope = rememberCoroutineScope()
                 val motion = MaterialTheme.motionScheme
-                PredictiveBackHandler(adding || picker != null) { events ->
+                PredictiveBackHandler(proxy || adding || picker != null) { events ->
                     try {
                         // Leaving Add provider opened from the picker goes back to that picker.
-                        events.collect { screens.seekTo(it.progress, targetState = if (adding && picker != null) "picker:$picker" else tab.name) }
-                        if (adding) adding = false else picker = null
+                        events.collect { screens.seekTo(it.progress, targetState = if (proxy) under else if (adding && picker != null) "picker:$picker" else tab.name) }
+                        if (proxy) ui.importDraft.clear() else if (adding) adding = false else picker = null
                     } catch (e: CancellationException) {
                         scope.launch { screens.animateTo(screens.currentState) }
                         throw e
                     }
                 }
-                BackHandler(picker == null && !adding && tab != Tab.Routes) {
+                BackHandler(!proxy && picker == null && !adding && tab != Tab.Routes) {
                     pickerAfter?.let { picker = it; pickerAfter = null } ?: run { tab = Tab.Routes }
                 }
 
@@ -307,11 +321,12 @@ class MainActivity : ComponentActivity() {
                             ) { screen ->
                                 CompositionLocalProvider(LocalScreen provides this) {
                                     when {
+                                        screen == "proxy" -> ProxyScreen(ui)
                                         screen == "signin" -> SignInScreen(ui)
                                         // From the picker, a file imported there goes to the picker's app or route, and the picker closes.
                                         screen == "add" -> picker.let { p ->
                                             val importFor = importTarget(p, liveSetup)
-                                            SignInScreen(ui, importFor, onImported = { adding = false; if (importFor.isNotEmpty()) picker = null }) { adding = false }
+                                            SignInScreen(ui, importFor, onImported = { adding = false; if (importFor.isNotEmpty()) picker = null }, proxies = p != "default") { adding = false }
                                         }
                                         // The route that was tapped grows into its picker (container transform).
                                         screen.startsWith("picker:") -> screen.removePrefix("picker:").let { target ->
@@ -324,7 +339,7 @@ class MainActivity : ComponentActivity() {
                                                 )
                                             }
                                         }
-                                        screen == Tab.Routes.name -> RoutesScreen(ui, ::connect, leakSetup = { sheet = "leak" }, quiet = tour < 0 && sheet == null && limit == null) { picker = it }
+                                        screen == Tab.Routes.name -> RoutesScreen(ui, ::connect, leakSetup = { sheet = "leak" }, quiet = tour < 0 && sheet == null && limit == null, openProxy = { settingsProxy(it); tab = Tab.Settings }) { picker = it }
                                         // Kept across tabs, as across a rotation: search, filter and system apps stay as left.
                                         screen == Tab.Apps.name -> appsState.SaveableStateProvider(Tab.Apps.name) { AppsScreen(ui, disclose = { sheet = "apps" }) { picker = it } }
                                         screen == Tab.Stats.name -> StatsScreen(ui)
@@ -338,7 +353,7 @@ class MainActivity : ComponentActivity() {
                     val unsaved by Unbraid.store.unsaved.collectAsStateWithLifecycle()
                     if (unsaved) Caption("Some of your changes couldn't be saved and would be lost when unbraid restarts. Tap to try saving again.",
                         Modifier.fillMaxWidth().tap({ kotlin.concurrent.thread { Unbraid.store.saveAgain() } }).padding(horizontal = 24.dp, vertical = 12.dp), color = Ink.bad)
-                    if (signedIn && picker == null && !adding) NavBar(tab) { pickerAfter = null; if (it == tab) reselected.tryEmit(it) else tab = it }
+                    if (signedIn && picker == null && !adding && !proxy) NavBar(tab) { pickerAfter = null; if (it == tab) reselected.tryEmit(it) else tab = it }
                 }
                 if (tour >= 0) TourOverlay(
                     tour, disclosed, back = { tour-- }, close = endTour,

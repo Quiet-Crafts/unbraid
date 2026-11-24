@@ -21,6 +21,24 @@ fun providerStatus(name: String, used: Boolean, refused: Boolean, settingUp: Boo
     else -> Tone.Good to "Server list up to date"
 }
 
+/** Proxy routes the running engine carries exactly as they are saved; null: not connected. */
+fun proxyRunning(s: app.unbraid.data.Setup, vpn: app.unbraid.vpn.VpnState): Set<String>? = if (vpn.phase != app.unbraid.vpn.VpnState.Phase.On) null
+    else vpn.servers.keys.filter { id -> s.route(id)?.socks5.let { it != null && it == app.unbraid.vpn.UnbraidVpn.running?.route(id)?.socks5 } }.toSet()
+
+/** How proxy server [sv] stands, from saved settings and, for [running] (null: not connected) routes of the engine, what their checks saw. */
+fun proxyStatus(s: app.unbraid.data.Setup, sv: app.unbraid.data.OwnServer, running: Set<String>?, notAnswering: Set<String>): Pair<Tone, String> {
+    val p = sv.socks5 ?: return Tone.Idle to "Not used"
+    val active = s.activeRoutes.filter { it.own == sv.id }.map { it.id }
+    return when {
+        sv.keyless || p.needsConfirmation -> Tone.Bad to "Confirm its app"
+        !s.outside(p.packageName) -> Tone.Warn to "Its app needs Direct"
+        s.routes.none { it.own == sv.id } -> Tone.Idle to "Not used"
+        running != null && active.any { it in notAnswering && it in running } -> Tone.Bad to "Not answering"
+        running != null && active.isNotEmpty() && running.containsAll(active) -> Tone.Good to "Connected"
+        else -> Tone.Idle to "Not connected"
+    }
+}
+
 /** A catalogue's publication date ([app.unbraid.data.Catalog.published], epoch seconds), e.g. "6 Aug 2026". */
 fun publishedOn(epochSeconds: Long): String = runCatching {
     java.time.Instant.ofEpochSecond(epochSeconds).atZone(java.time.ZoneOffset.UTC).toLocalDate().format(java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy", java.util.Locale.ENGLISH))

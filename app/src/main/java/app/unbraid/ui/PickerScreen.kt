@@ -373,6 +373,20 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     }
 
     val eligibleServers = setup.servers.filter { it.socks5 == null || setup.allowsLocalProxy(target, it.socks5.packageName) }
+    val (proxies, savedServers) = eligibleServers.partition { it.socks5 != null }
+    fun LazyListScope.proxies(list: List<OwnServer>, add: Boolean) {
+        if (!setup.allowsLocalProxy(target) || list.isEmpty() && !add) return
+        val running = proxyRunning(setup, vpn)
+        val n = list.size + if (add) 1 else 0
+        item(key = "proxyLabel") { SectionLabel("Proxy servers") }
+        itemsIndexed(list, key = { _, s -> "proxy:${s.id}" }) { i, s ->
+            val (tone, words) = proxyStatus(setup, s, running, vpn.notAnswering)
+            GroupRow(i, n, s.name, "SOCKS5 · $words", onClick = { if (ui.useServer(target, s).isNotEmpty()) once(close) },
+                leading = { ToneDot(tone) }, trailing = { if (route?.own == s.id) Icon(Icons.checkCircle, "Selected", tint = tint, modifier = Modifier.size(22.dp)) })
+        }
+        if (add) item(key = "proxyAdd") { GroupRow(n - 1, n, "Add a proxy server", titleColor = Ink.accent, onClick = { ui.openProxy(target) }, trailing = { Icon(Icons.add, null, Modifier.size(22.dp), tint = Ink.accent) }) }
+    }
+
     fun LazyListScope.saved(list: List<OwnServer>) {
         if (list.isEmpty()) return
         item(key = "savedLabel") { SectionLabel("Saved servers") }
@@ -393,7 +407,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                if (empty) "No servers yet. Add a WireGuard, OpenVPN, Shadowsocks or local SOCKS5 server, or turn on Tailscale, in Settings."
+                if (empty) "No servers yet. Add a WireGuard, OpenVPN or Shadowsocks server, or turn on Tailscale, in Settings."
                 else "Add or manage servers in Settings.",
                 style = Type.caption, color = Ink.dim, modifier = Modifier.weight(1f),
             )
@@ -403,8 +417,9 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
 
     fun LazyListScope.myServers() {
         tsNote?.let { item(key = "tsLockNote") { Caption(it, color = Ink.text) } }
+        proxies(proxies, add = true)
         tailscale(nodes)
-        saved(eligibleServers)
+        saved(savedServers)
         settingsNote(empty = !setup.tailscale && setup.servers.isEmpty())
     }
 
@@ -419,9 +434,11 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     fun LazyListScope.results() {
         if (mine) {
             val devices = nodes.filter { hit(it.name) || hit(it.ip) }
-            val own = eligibleServers.filter { hit(it.name) || hit(it.kind) }
+            val own = savedServers.filter { hit(it.name) || hit(it.kind) }
+            val proxy = proxies.filter { hit(it.name) || hit(it.kind) }
             val typed = query.takeIf { setup.tailscale && validNode(it) && vpn.tsExitNodes.none { n -> n.ip == it || n.name.equals(it, true) } }
-            if (devices.isEmpty() && own.isEmpty() && typed == null) item(key = "noMatches") { Text("No matches", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp)) }
+            if (devices.isEmpty() && own.isEmpty() && proxy.isEmpty() && typed == null) item(key = "noMatches") { Text("No matches", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp)) }
+            proxies(proxy, add = false)
             if (devices.isNotEmpty() || typed != null) tailscale(devices, searching = true, typed = typed)
             saved(own)
             return

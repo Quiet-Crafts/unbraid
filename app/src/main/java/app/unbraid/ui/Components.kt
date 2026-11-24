@@ -335,6 +335,10 @@ fun IconTap(icon: ImageVector, label: String, onClick: () -> Unit, size: Dp = 48
 ) { Icon(icon, label, tint = tint, modifier = Modifier.size(24.dp)) }
 
 /** App icon, loaded off the main thread and cached. Falls back to an initial on a tinted tile. */
+/** A status dot; always beside words that say the same. */
+@Composable
+fun ToneDot(tone: Tone) = Box(Modifier.size(10.dp).clip(androidx.compose.foundation.shape.CircleShape).background(when (tone) { Tone.Good -> Ink.good; Tone.Warn -> Ink.accent; Tone.Bad -> Ink.bad; Tone.Idle -> Ink.faint }))
+
 @Composable
 fun AppIcon(ui: Ui, pkg: String, label: String, size: Dp = 40.dp) {
     val bmp by produceState<android.graphics.Bitmap?>(null, pkg) { value = ui.icon(pkg) }

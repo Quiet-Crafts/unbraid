@@ -3,24 +3,6 @@ package app.unbraid.ui
 import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.selection.toggleable
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.semantics.Role
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import app.unbraid.data.AppIdentity
-import app.unbraid.data.Socks5Profile
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -59,11 +41,19 @@ class ImportDraft {
     var pass by mutableStateOf("")
     /** The Shadowsocks link being typed; null = no prompt. */
     var link by mutableStateOf<String?>(null)
+    /** The proxy server page ([ProxyScreen]) is open. */
     var socksOpen by mutableStateOf(false)
     internal var proxyApp by mutableStateOf<AppInfo?>(null)
     var port by mutableStateOf("")
-    var allowUdp by mutableStateOf(false)
     internal var proxyRefill: OwnServer? = null
+    /** Where the proxy server is used once saved (null: from Settings, nowhere yet) and the profile shown when it was opened. */
+    internal var proxyTarget: String? = null
+    internal var proxyProfile: String? = null
+    /** The profile in use when it was opened. */
+    internal var proxyLive: String? = null
+    /** The port is being tried; [proxySilent]: nothing accepted a connection on it. */
+    var proxyChecking by mutableStateOf(false)
+    var proxySilent by mutableStateOf(false)
     /** A valid WireGuard config waiting for its name; null = no prompt. */
     var wg by mutableStateOf<String?>(null)
     /** What the user calls this server, prefilled from the file name. */
@@ -81,21 +71,18 @@ class ImportDraft {
     var generation = 0
         private set
 
-    internal fun proxyPort(value: String) {
-        if (value != port) allowUdp = false
-        port = value
-    }
+    /** A proxy field changed: what was being checked for the old one no longer counts. */
+    internal fun proxyEdited() { generation++; proxyChecking = false; proxySilent = false; error = null }
 
     internal fun proxyChoice(item: AppInfo) {
-        val prior = proxyApp
-        val saved = proxyRefill?.socks5
-        val same = if (prior != null) item.pkg == prior.pkg && item.identity?.accepts(prior.identity?.current) == true
-            else saved != null && item.pkg == saved.packageName && item.identity?.accepts(saved.identity) == true
-        if (!same) allowUdp = false
+        // The login stays with the app it was saved or typed for.
+        val (pkg, pin) = proxyApp?.let { it.pkg to it.identity?.current } ?: proxyRefill?.socks5.let { it?.packageName to it?.identity }
+        if (pkg != item.pkg || item.identity?.accepts(pin) != true) { user = ""; pass = "" }
         proxyApp = item
+        proxyEdited()
     }
 
-    fun clear() { ovpn = null; user = ""; pass = ""; link = null; socksOpen = false; proxyApp = null; proxyRefill = null; port = ""; allowUdp = false; wg = null; name = ""; error = null; warning = null; generation++ }
+    fun clear() { ovpn = null; user = ""; pass = ""; link = null; socksOpen = false; proxyApp = null; proxyRefill = null; proxyTarget = null; proxyProfile = null; proxyChecking = false; proxySilent = false; port = ""; wg = null; name = ""; error = null; warning = null; generation++ }
 }
 
 /**
@@ -136,38 +123,8 @@ class Importer(
         draft.link = ""
     }
 
-    fun socks5(refill: String? = null) {
-        error = null
-        draft.clear()
-        draft.refill = refill
-        draft.proxyRefill = ui.setup.value.servers.firstOrNull { it.id == refill }
-        val previous = draft.proxyRefill?.socks5
-        draft.name = previous?.name.orEmpty()
-        draft.port = previous?.port?.toString().orEmpty()
-        draft.allowUdp = previous?.allowUdp == true && !previous.needsConfirmation && draft.proxyRefill?.keyless != true
-        draft.socksOpen = true
-        ui.refreshApps()
-    }
-
-    private fun importSocks() {
-        val app = draft.proxyApp ?: return
-        val port = draft.port.toIntOrNull() ?: 0
-        val name = named("SOCKS5")
-        val user = draft.user
-        val password = draft.pass
-        val prior = draft.proxyRefill?.socks5
-        val allowUdp = draft.allowUdp
-        attempt(listOf(password).filter { it.isNotEmpty() }, {
-            val signer = verifiedAppChoice(ui.disclosed.value, app.identity?.current) {
-                AppIdentity.read(context.packageManager, app.pkg)
-            } ?: throw IllegalStateException("The proxy app changed. Choose it again.")
-            require(prior?.needsConfirmation != true || !prior.authRequired || user.isNotEmpty()) { "Re-enter the username and password for this proxy." }
-            Socks5Profile(name, "127.0.0.1", port, app.pkg, signer.current, user, password, allowUdp = allowUdp).checked()
-        }) { profile -> save(OwnServer("", socks5 = profile)) }
-    }
-
     /** Saves [server]: as the config of the server being given its keys back ([ImportDraft.refill]), else as a new one. */
-    private fun save(server: OwnServer) = draft.refill?.let { ui.refillServer(it, server, draft.proxyRefill) } ?: ui.importServer(target, server)
+    private fun save(server: OwnServer) = draft.refill?.let { ui.refillServer(it, server) } ?: ui.importServer(target, server)
 
     /** The name typed in the open prompt, or [fallback] when it was left empty. */
     private fun named(fallback: String) = Manual.cleanName(draft.name, 40).ifEmpty { fallback }
@@ -264,67 +221,9 @@ class Importer(
         draft.error?.let { Text(it, style = Type.caption, color = Ink.bad) }
     }
 
-    @Composable
-    private fun SocksForm() {
-        SecureWindow()
-        val disclosed by ui.disclosed.collectAsStateWithLifecycle()
-        if (!disclosed) {
-            AppsDisclosure({ ui.acceptDisclosure() }, { dismiss() })
-            return
-        }
-        val apps by ui.apps.collectAsStateWithLifecycle()
-        var picking by remember { mutableStateOf(draft.proxyApp == null) }
-        if (picking) {
-            var search by remember { mutableStateOf("") }
-            val choices = remember(apps, search) {
-                val text = search.trim()
-                apps.filter { it.identity != null && (it.label.contains(text, true) || it.pkg.contains(text, true)) }
-            }
-            Prompt("Choose the proxy app", "Continue", { picking = false }, { dismiss() }, enabled = draft.proxyApp != null, secure = true) {
-                DialogField(search, { search = it }, "Find an installed app")
-                if (choices.isEmpty()) Text("No matching apps. Install the app that runs your proxy, then try again.", style = Type.caption)
-                LazyColumn(Modifier.heightIn(max = 280.dp)) {
-                    itemsIndexed(choices, key = { _, item -> item.pkg }) { i, item ->
-                        GroupRow(i, choices.size, item.label, item.pkg, selected = item == draft.proxyApp, onClick = {
-                            if (draft.proxyApp?.let { it.pkg == item.pkg && item.identity?.accepts(it.identity?.current) == true } != true) { draft.user = ""; draft.pass = "" }
-                            draft.proxyChoice(item)
-                            draft.error = null
-                        })
-                    }
-                }
-            }
-            return
-        }
-        val proxy = draft.proxyApp
-        val setup by ui.setup.collectAsStateWithLifecycle()
-        val accounts by ui.accounts.collectAsStateWithLifecycle()
-        Prompt("Local SOCKS5 proxy", "Save", { importSocks() }, { dismiss() }, enabled = proxy != null && draft.port.isNotEmpty(), secure = true) {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Start the proxy on 127.0.0.1 in this phone’s proxy app. Give that app its own Direct route with filtering off in Apps.", style = Type.sub)
-                Secondary(proxy?.label ?: "Choose proxy app", { picking = true })
-                DialogField(draft.name, { draft.name = it; draft.error = null }, "Name (optional)", "e.g. My proxy")
-                DialogField(draft.port, { draft.proxyPort(it); draft.error = null }, "Port", "e.g. 1080")
-                if (draft.proxyRefill != null) Text("Saving updates every route using this proxy. Re-enter the login if the proxy requires one.", style = Type.caption)
-                DialogField(draft.user, { draft.user = it; draft.error = null }, "Username (if required)")
-                DialogField(draft.pass, { draft.pass = it; draft.error = null }, "Password (if required)", secret = true)
-                Row(Modifier.fillMaxWidth().toggleable(draft.allowUdp, role = Role.Switch) { draft.allowUdp = it }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Allow UDP", style = Type.body)
-                        Text("Only turn this on if you trust other apps on this phone. unbraid checks which app owns the proxy’s separate UDP port. Another app could take it over between a check and delivery, receive your traffic or send fake replies.", style = Type.caption)
-                    }
-                    Toggle(draft.allowUdp)
-                }
-                if (setup.untouched && accounts.isEmpty()) Text("On a new setup, also choose a working default in Routes for your other apps before connecting.", style = Type.caption)
-                Text("Assign individual apps to this route. unbraid checks the proxy app before sending TCP. UDP is blocked unless you allow it above. Android’s “Block connections without VPN” keeps this route offline. Website and home-network rules still apply.", style = Type.caption)
-                Problems()
-            }
-        }
-    }
-
     /** Both prompts stay open on a bad input and show why, keeping what was typed. */
     @Composable
     fun Dialogs() {
-        if (draft.socksOpen) SocksForm()
         draft.wg?.let { text ->
             Prompt("Name this server", "Import", { wg(text) }, { dismiss() }) {
                 Text("Shown on your routes and in Apps. You can rename it later.", style = Type.sub)

@@ -52,27 +52,31 @@ class ImportDraftTest {
         assertFalse(s.copy(routes = listOf(route, other.copy(via = route.id))).allowsLocalProxy(route.id))
     }
 
-    @Test fun editingProxyDoesNotTransferUdpConsentToAnotherListener() {
+    @Test fun anotherProxyAppNeverGetsTheLoginTypedForTheFirst() {
         val pin = "aa".repeat(32)
-        val proxy = app.unbraid.data.Socks5Profile("Proxy", "127.0.0.1", 1080, "org.example.proxy", pin, allowUdp = true)
-        val d = ImportDraft().apply { proxyRefill = app.unbraid.data.OwnServer("p", socks5 = proxy); port = "1080"; allowUdp = true }
-        val same = app.unbraid.ui.AppInfo(proxy.packageName, "Proxy", false, 1, app.unbraid.data.AppIdentity(pin, emptySet()))
-        d.proxyChoice(same)
-        assertTrue(d.allowUdp)
-        d.proxyPort("1081")
-        assertFalse(d.allowUdp)
-        d.allowUdp = true
-        d.proxyChoice(same.copy(pkg = "org.example.other"))
-        assertFalse(d.allowUdp)
-        d.allowUdp = true
-        d.proxyChoice(same)
-        assertFalse(d.allowUdp) // changing back also needs fresh consent
-        d.allowUdp = true
-        d.proxyChoice(same.copy(identity = app.unbraid.data.AppIdentity("bb".repeat(32), emptySet())))
-        assertFalse(d.allowUdp)
-        d.allowUdp = true
-        d.clear()
-        assertFalse(d.allowUdp)
+        val first = app.unbraid.ui.AppInfo("org.example.proxy", "Proxy", false, 1, app.unbraid.data.AppIdentity(pin, emptySet()))
+        val d = ImportDraft().apply { proxyChoice(first); user = "local"; pass = "private" }
+        d.proxyChoice(first)
+        assertEquals("private", d.pass)
+        for (other in listOf(first.copy(pkg = "org.example.other"), first.copy(identity = app.unbraid.data.AppIdentity("bb".repeat(32), emptySet())))) {
+            d.user = "local"; d.pass = "private"
+            d.proxyChoice(other)
+            assertEquals("", d.user + d.pass)
+        }
+    }
+
+    @Test fun choosingTheSavedAppAgainKeepsItsLoginAndAnEditDropsACheck() {
+        val pin = "aa".repeat(32)
+        val saved = app.unbraid.data.Socks5Profile("Proxy", "127.0.0.1", 1080, "org.example.proxy", pin, "local", "private")
+        val item = app.unbraid.ui.AppInfo(saved.packageName, "Proxy", false, 1, app.unbraid.data.AppIdentity(pin, emptySet()))
+        val d = ImportDraft().apply { proxyRefill = app.unbraid.data.OwnServer("p", socks5 = saved); user = "local"; pass = "private" }
+        d.proxyChoice(item)
+        assertEquals("private", d.pass)
+        val started = d.generation
+        d.proxyChecking = true
+        d.proxyEdited()
+        assertFalse(d.proxyChecking)
+        assertTrue(d.generation > started)
     }
 
     @Test fun cancellingLocalProxyEntryDiscardsCredentialsAndSelection() {

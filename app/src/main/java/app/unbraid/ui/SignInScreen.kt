@@ -49,12 +49,12 @@ import app.unbraid.data.Providers
  * (by default [onClose]). Never in screenshots.
  */
 @Composable
-fun SignInScreen(ui: Ui, importFor: String = "", onImported: (() -> Unit)? = null, onClose: (() -> Unit)? = null) {
+fun SignInScreen(ui: Ui, importFor: String = "", onImported: (() -> Unit)? = null, proxies: Boolean = true, onClose: (() -> Unit)? = null) {
     var step by rememberSaveable { mutableStateOf<String?>(null) }
     val provider = Providers.get(step.orEmpty())
     SecureWindow()
     BackHandler(provider != null) { provider?.let { ui.discardForm(it.id) }; step = null }
-    if (provider == null) Choose(ui, importFor, onImported ?: onClose, onClose) { step = it.id } else Form(ui, provider, onClose, back = { ui.discardForm(provider.id); step = null })
+    if (provider == null) Choose(ui, importFor, proxies, onImported ?: onClose, onClose) { step = it.id } else Form(ui, provider, onClose, back = { ui.discardForm(provider.id); step = null })
 }
 
 /**
@@ -66,7 +66,7 @@ internal fun importTarget(picker: String?, s: app.unbraid.data.Setup) = picker?.
 private class Other(val title: String, val sub: String, val go: () -> Unit)
 
 @Composable
-private fun Choose(ui: Ui, importFor: String, onImported: (() -> Unit)?, onClose: (() -> Unit)?, pick: (Provider) -> Unit) {
+private fun Choose(ui: Ui, importFor: String, proxies: Boolean, onImported: (() -> Unit)?, onClose: (() -> Unit)?, pick: (Provider) -> Unit) {
     val importer = rememberImporter(ui, importFor) { onImported?.invoke() }
     val accounts by ui.accounts.collectAsStateWithLifecycle()
     val notice by ui.notice.collectAsStateWithLifecycle()
@@ -85,7 +85,7 @@ private fun Choose(ui: Ui, importFor: String, onImported: (() -> Unit)?, onClose
         val other = listOfNotNull(
             Other("Import a config file", "WireGuard .conf or OpenVPN .ovpn") { importer.file() },
             Other("Shadowsocks link", "Paste an ss:// access key") { importer.shadowsocks() },
-            Other("Local SOCKS5 proxy", "Use another app on this phone as a proxy") { importer.socks5() }.takeIf { ui.setup.value.allowsLocalProxy(importFor) },
+            Other("Proxy server", "SOCKS5, from a proxy app on this phone") { ui.openProxy(importFor) }.takeIf { proxies && setup.allowsLocalProxy(importFor) },
             Other("Tailscale only", "No VPN provider, just your tailnet") { ui.useTailscaleOnly() }.takeIf { onClose == null },
             Other("Restore a backup", "A file saved with Back up settings") { ui.backup.startRestore() }.takeIf { onClose == null },
         )

@@ -35,6 +35,8 @@ import app.unbraid.data.Location
 import app.unbraid.data.Manual
 import app.unbraid.data.OwnServer
 import app.unbraid.data.refilled
+import app.unbraid.data.setProxyUdp
+import app.unbraid.data.Socks5Profile
 import app.unbraid.data.favKey
 import app.unbraid.data.ident
 import app.unbraid.data.Nord
@@ -120,6 +122,38 @@ internal fun Setup.chooseAppRoute(profileName: String?, pkg: String, routeId: St
 /** A grant requires both the signer the user saw and a fresh package read. Before disclosure no package is queried. */
 internal fun verifiedAppChoice(disclosed: Boolean, displayedPin: String?, read: () -> AppIdentity?) =
     if (disclosed && displayedPin != null) read()?.takeIf { it.accepts(displayedPin) } else null
+
+internal sealed interface ProxyDirect {
+    data object Already : ProxyDirect
+    /** [from]: the route the app has now, its own or the default. */
+    data class Grant(val filterChanges: Boolean, val from: String) : ProxyDirect
+    data class Refuse(val reason: String) : ProxyDirect
+}
+
+/** The Direct change shown to the user and checked again when saving. */
+internal fun Setup.proxyDirect(profileName: String?, app: AppInfo, sharedUid: Boolean): ProxyDirect {
+    val inactive = profileName?.takeIf { it != profile }
+    val p = if (inactive == null) live else profiles.firstOrNull { it.name == inactive } ?: return ProxyDirect.Refuse("that profile was removed")
+    // The filter's exception for an app holds in every profile.
+    val others = profiles.filter { it.name != profile && it.name != inactive } + listOfNotNull(live.takeIf { inactive != null })
+    val route = p.apps[app.pkg]
+    if (route == BLOCK) return ProxyDirect.Refuse("it is on Block")
+    if (app.identity == null) return ProxyDirect.Refuse("Android couldn't verify it")
+    if (route != null && (deadline(p, app.pkg) != null || !app.identity.accepts(p.appSigners[app.pkg])))
+        return ProxyDirect.Refuse("its saved route is waiting for your choice in Apps")
+    if (sharedUid) return ProxyDirect.Refuse("it shares its Android user ID with another app")
+    val filterChanges = prefs.filter.through(app.pkg)
+    if (filterChanges && others.any { it.apps[app.pkg] == DIRECT })
+        return ProxyDirect.Refuse("another profile has it on Direct with the DNS filter")
+    return if (route == DIRECT && !filterChanges) ProxyDirect.Already else ProxyDirect.Grant(filterChanges, route ?: p.defaultRoute)
+}
+
+/** App [pkg] on Direct outside the filter, as [proxyDirect] allowed. */
+internal fun Setup.goingDirect(profileName: String?, pkg: String, identity: AppIdentity): Setup {
+    val filtered = prefs.filter.through(pkg)
+    return chooseAppRoute(profileName, pkg, DIRECT, identity)
+        .let { if (!filtered) it else it.copy(prefs = it.prefs.copy(filter = it.prefs.filter.copy(apps = it.prefs.filter.apps + (pkg to false)))) }
+}
 
 /** An existing route can change globally, including for inactive profiles. Local proxies serve app choices only. */
 internal fun Setup.allowsLocalProxy(target: String?, proxyPackage: String? = null): Boolean {
@@ -803,7 +837,6 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun importServer(target: String?, server: OwnServer): Boolean {
         val s = server.copy(id = newServerId(setup.value.servers))
-        require(s.socks5 == null || setup.value.allowsLocalProxy(target, s.socks5.packageName)) { "Choose an app route other than the proxy app’s own, a default, website route or Via." }
         val to = setup.value.importFor(target, alone = store.accounts.value.isEmpty() && draft == null)
         val saved = store.update { it.copy(servers = it.servers + s) }
         _signedIn.value = true
@@ -817,11 +850,16 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun useServer(target: String, s: OwnServer): String {
         if (s.socks5 != null && !setup.value.allowsLocalProxy(target, s.socks5.packageName)) {
-            notice.value = "Choose a separate app route for this proxy. Its own app needs Direct."
+            notice.value = "A proxy server can't be used there: not for its own app, a default, a website route or Via."
             return ""
         }
         val reuse = setup.value.takeIf { it.route(target) == null }?.serverRoute(s, draft)
-            ?: return addImported(target) { it.copy(wg = s.wg, ovpn = s.ovpn, ss = s.ss, socks5 = s.socks5, own = s.id, keyless = s.keyless) }
+            ?: return addImported(target) { setup, r ->
+                // As saved now: a proxy server edited or removed meanwhile never comes back from an older copy.
+                val now = if (s.socks5 == null) s else setup.servers.firstOrNull { it.id == s.id && it.socks5 != null }
+                now?.takeIf { it.socks5 == null || setup.allowsLocalProxy(target, it.socks5.packageName) }
+                    ?.let { r.copy(wg = it.wg, ovpn = it.ovpn, ss = it.ss, socks5 = it.socks5, own = it.id, keyless = it.keyless) }
+            }
         if (target.startsWith("app:")) assign(target.removePrefix("app:"), reuse) else if (target.isEmpty()) keep(reuse)
         return reuse
     }
@@ -830,15 +868,99 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      * Gives saved server [id], restored without keys, the config [server] the user imported again (named as the prompt left it), and
      * unblocks every route through it. False if it is gone, already has its config, or the write failed.
      */
-    fun refillServer(id: String, server: OwnServer, expected: OwnServer? = null): Boolean {
+    fun refillServer(id: String, server: OwnServer): Boolean {
         var done = false
-        val saved = store.update { s ->
-            if (server.socks5 != null && expected == null) s
-            else s.refilled(id, server, expected)?.also { done = true } ?: s
-        }
+        val saved = store.update { s -> s.refilled(id, server)?.also { done = true } ?: s }
         if (!done) throw IllegalStateException("That server changed or was removed. Open its settings again.")
         return saved
     }
+
+    /** Saved proxy servers: the page that adds, edits or confirms one. [target] as for [importServer]; [refill] an existing server's id. */
+    fun openProxy(target: String?, refill: String? = null) {
+        val d = importDraft
+        d.clear()
+        val server = refill?.let { id -> setup.value.servers.firstOrNull { it.id == id && it.socks5 != null } ?: return }
+        d.refill = refill; d.proxyRefill = server; d.proxyTarget = target; d.proxyProfile = if (target == null) null else draft; d.proxyLive = setup.value.profile
+        d.port = server?.socks5?.port?.toString().orEmpty()
+        server?.socks5?.takeIf { !server.keyless && !it.needsConfirmation }?.let { d.user = it.username; d.pass = it.password }
+        // The app confirmed before, while it is still the one installed; else it is chosen again.
+        d.proxyApp = server?.socks5?.let { p -> apps.value.firstOrNull { it.pkg == p.packageName && it.identity?.accepts(p.identity) == true } }
+        d.socksOpen = true
+        refreshApps()
+    }
+
+    /** Set once a proxy server is saved: where it was opened from and its id. */
+    internal val proxySaved = MutableStateFlow<Pair<String?, String>?>(null)
+
+    private fun sharesUid(pkg: String) = runCatching { pm.getPackagesForUid(pm.getPackageUid(pkg, 0))?.size }.getOrNull() != 1
+
+    /** What saving the open proxy page does to its app's own route. */
+    internal fun proxyDirect(app: AppInfo) = setup.value.proxyDirect(importDraft.proxyProfile, app, sharesUid(app.pkg))
+
+    /** Checks and saves the open proxy page; without [check] the port isn't tried first. */
+    internal fun submitProxy(shown: ProxyDirect, check: Boolean = true) {
+        val d = importDraft
+        val app = d.proxyApp ?: return
+        if (d.proxyChecking) return
+        d.proxyEdited()
+        d.proxyChecking = true
+        val old = d.proxyRefill; val target = d.proxyTarget; val profile = d.proxyProfile; val live = d.proxyLive
+        val port = d.port.toIntOrNull() ?: 0; val user = d.user; val pass = d.pass
+        val name = old?.name ?: Manual.cleanName(app.label, 40).ifEmpty { "Proxy server" }
+        viewModelScope.launch {
+            d.unlessReplaced({ withContext(Dispatchers.IO) {
+                val signer = verifiedAppChoice(disclosed.value, app.identity?.current) { AppIdentity.read(pm, app.pkg) }
+                    ?: throw IllegalStateException("The proxy app changed. Choose it again.")
+                require(old?.socks5?.let { (it.needsConfirmation || old.keyless) && it.authRequired } != true || user.isNotEmpty()) { "Enter this proxy server's username and password again." }
+                val proxy = Socks5Profile(name, "127.0.0.1", port, app.pkg, signer.current, user, pass).checked()
+                signer to proxy.takeIf { !check || accepts(port) }
+            } }) { r ->
+                d.proxyChecking = false
+                try {
+                    val (signer, proxy) = r.getOrThrow()
+                    if (proxy == null) { d.proxySilent = true; return@unlessReplaced }
+                    val moved = "Another profile is shown now. Open this page again."
+                    if (target != null && draft != profile) throw IllegalStateException(moved)
+                    // Before anything is written: the app this was opened for is still the one shown.
+                    target?.removePrefix("app:")?.takeIf { it != target }?.let { currentChoice(it, pickerPin(it)) ?: throw IllegalStateException("That app changed. Choose its route again.") }
+                    val id = old?.id ?: newServerId(setup.value.servers)
+                    val server = OwnServer(id, socks5 = proxy)
+                    var refused: String? = null
+                    val saved = store.update { s ->
+                        val next = if (s.profile != live) null else if (old != null) s.refilled(id, server, old) else if (target == null || s.allowsLocalProxy(target, app.pkg)) s.copy(servers = s.servers + server) else null
+                        refused = if (next != null) null else if (s.profile != live) moved else if (old != null) "That server changed or was removed. Open its settings again." else "A proxy server can't be used there any more."
+                        // Only what the page said: anything else leaves the app's route as it is.
+                        if (next == null) s else if (shown is ProxyDirect.Grant && s.proxyDirect(profile, app.copy(identity = signer), sharesUid(app.pkg)) == shown) next.goingDirect(profile, app.pkg, signer) else next
+                    }
+                    refused?.let { throw IllegalStateException(it) }
+                    _signedIn.value = true
+                    if (old == null) setup.value.importFor(target, alone = store.accounts.value.isEmpty() && draft == null)?.let { useServer(it, server) }
+                    if (saved && pass.isNotEmpty()) clearClipboardIf(pass)
+                    d.clear()
+                    proxySaved.value = target to id
+                } catch (e: Exception) { d.error = problem(e) }
+            }
+        }
+    }
+
+    /** Whether something on this phone accepts a connection on [port]; nothing is sent. */
+    private fun accepts(port: Int) = runCatching {
+        java.net.Socket().use { it.connect(java.net.InetSocketAddress(java.net.InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1)), port), 1_000) }
+    }.isSuccess
+
+    /** The app of proxy server [s] on Direct in the setup in use, as [shown] was confirmed. */
+    internal fun setProxyDirect(s: OwnServer, shown: ProxyDirect) {
+        val p = s.socks5 ?: return
+        val app = apps.value.firstOrNull { it.pkg == p.packageName } ?: return
+        val identity = currentChoice(app.pkg, p.identity) ?: return
+        store.update { now -> if (shown is ProxyDirect.Grant && now.proxyDirect(null, app.copy(identity = identity), sharesUid(app.pkg)) == shown) now.goingDirect(null, app.pkg, identity) else now }
+    }
+
+    internal fun proxyDirect(s: OwnServer): ProxyDirect = apps.value.firstOrNull { it.pkg == s.socks5?.packageName }
+        ?.let { setup.value.proxyDirect(null, it, sharesUid(it.pkg)) } ?: ProxyDirect.Refuse("it isn't in the app list")
+
+    /** Calls and other UDP traffic through proxy server [shown]: turned on only for exactly what was shown. */
+    fun setProxyUdp(shown: OwnServer, on: Boolean) { store.update { it.setProxyUdp(shown, on) } }
 
     /** Renames a saved server and every route using it. */
     /** Route [id] goes through route [via] first (null: straight to its server); the entry may add a tunnel, so the limit is checked. */
@@ -876,12 +998,19 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      * that app) or a route id (replace that route's source). [source] receives the blank route and sets wg/ovpn/ss/tsExit.
      * With no provider signed in, the unusable provider routes are dropped and the new route becomes the default.
      */
-    fun addImported(target: String, source: (Route) -> Route): String {
+    fun addImported(target: String, source: (Route) -> Route) = addImported(target) { _, r -> source(r) }
+
+    /** [source] null: refused, nothing is written and "" returned. */
+    private fun addImported(target: String, source: (Setup, Route) -> Route?): String {
         val id = target.takeIf { setup.value.route(it) != null } ?: newId()
+        var refused = false
         store.edit { s ->
             val blank = s.route(id)?.copy(loc = Location(), wg = null, ovpn = null, ss = null, socks5 = null, tsExit = null, tsName = null, own = null, keyless = false) ?: Route(id, hue = nextHue(s))
-            s.imported(id, source(blank), alone = store.accounts.value.isEmpty() && draft == null)
+            val made = source(s, blank)
+            refused = made == null
+            made?.let { s.imported(id, it, alone = store.accounts.value.isEmpty() && draft == null) } ?: s
         }
+        if (refused) return ""
         if (target.startsWith("app:")) assign(target.removePrefix("app:"), id)
         if (target.isEmpty()) keep(id) // a new route, added to the profile shown
         _signedIn.value = true

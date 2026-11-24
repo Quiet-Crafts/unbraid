@@ -214,7 +214,7 @@ private fun where(r: Route, live: Map<String, Server>) = when {
     r.wg != null -> "WireGuard"
     r.ovpn != null -> "OpenVPN"
     r.ss != null -> "Shadowsocks"
-    r.socks5 != null -> if (r.socks5.allowUdp) "Local SOCKS5 · TCP and UDP" else "Local SOCKS5 · TCP only"
+    r.socks5 != null -> if (r.socks5.allowUdp) "Proxy server" else "Proxy server · no UDP"
     r.tsExit != null -> "Tailscale exit node"
     else -> listOfNotNull(
         r.source,
@@ -232,7 +232,7 @@ private fun where(r: Route, live: Map<String, Server>) = when {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 /** [quiet]: no sheet, dialog or tour is open over the app (the support card waits for that). */
-fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Boolean = true, openPicker: (String) -> Unit) {
+fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Boolean = true, openProxy: (String) -> Unit = {}, openPicker: (String) -> Unit) {
     val reveal = firstShow("routes")
     val context = LocalContext.current
     val openSettings = { action: String -> runCatching { context.startActivity(Intent(action)) } }
@@ -564,6 +564,10 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     } else {
                         setup.route(id)?.takeIf { it.imported }?.let { r -> SheetAction("Rename") { act { newName = r.name; renaming = id } } }
                     }
+                    shown.route(id)?.let { r -> r.socks5?.let { p ->
+                        context.packageManager.getLaunchIntentForPackage(p.packageName)?.let { open -> SheetAction("Open its proxy app") { act { runCatching { context.startActivity(open) } } } }
+                        r.own?.let { own -> SheetAction("Proxy server settings") { act { openProxy(own) } } }
+                    } }
                     // A Shadowsocks plugin carries TCP only: the engine sends nothing else through it.
                     if (shown.route(id)?.let { it.ss?.plugin != null || it.socks5?.allowUdp == false } == true) SheetNote("Calls and other UDP traffic don't go through this server.", sub = true)
                     // An own server may not reach the internet by design (a home network only): its check is the user's call.

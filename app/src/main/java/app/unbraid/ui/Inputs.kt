@@ -128,7 +128,7 @@ fun Chevron(value: String? = null) = Row(verticalAlignment = Alignment.CenterVer
 @Composable
 fun PillField(
     value: String, onChange: (String) -> Unit, label: String, modifier: Modifier = Modifier, placeholder: String = label, secret: Boolean = false,
-    imeAction: ImeAction = ImeAction.Done, onDone: () -> Unit = {},
+    imeAction: ImeAction = ImeAction.Done, onDone: () -> Unit = {}, numeric: Boolean = false,
 ) {
     var focused by remember { mutableStateOf(false) }
     var visible by remember { mutableStateOf(false) }
@@ -144,7 +144,7 @@ fun PillField(
             BasicTextField(
                 value, onChange, singleLine = true, textStyle = style.copy(color = Ink.text), cursorBrush = SolidColor(Ink.accent),
                 visualTransformation = if (secret && !visible) PasswordVisualTransformation() else VisualTransformation.None,
-                keyboardOptions = KeyboardOptions(keyboardType = if (secret) KeyboardType.Password else KeyboardType.Text, autoCorrectEnabled = false, imeAction = imeAction),
+                keyboardOptions = KeyboardOptions(keyboardType = if (secret) KeyboardType.Password else if (numeric) KeyboardType.Number else KeyboardType.Text, autoCorrectEnabled = false, imeAction = imeAction),
                 keyboardActions = KeyboardActions(onDone = { onDone() }),
                 modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused }.semantics { contentDescription = label },
             )

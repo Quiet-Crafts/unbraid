@@ -581,9 +581,26 @@ fun Setup.refilled(id: String, server: OwnServer, expectedProxy: OwnServer? = nu
         val previous = saved.socks5 ?: return null
         if (confirmed.needsConfirmation || (saved.keyless || previous.needsConfirmation) && previous.authRequired && !confirmed.authRequired || runCatching { confirmed.checked() }.isFailure) return null
     }
-    val sv = server.copy(id = id, keyless = false)
+    // UDP is allowed on the server's own page only: an edit keeps it for the same app, port and login, and never turns it on.
+    val proxy = server.socks5?.let { next ->
+        val old = saved.socks5
+        next.copy(allowUdp = old != null && !saved.keyless && !old.needsConfirmation && old.allowUdp &&
+            old.packageName == next.packageName && old.identity == next.identity && old.port == next.port &&
+            old.username == next.username && old.password == next.password)
+    }
+    val sv = server.copy(id = id, keyless = false, socks5 = proxy)
     return copy(servers = servers.map { if (it.id == id) sv else it },
         routes = routes.map { r -> if (r.own != id) r else r.copy(wg = sv.wg, ovpn = sv.ovpn, ss = sv.ss, socks5 = sv.socks5, keyless = false) })
+}
+
+/** Changes UDP on the saved proxy and all its route copies. */
+fun Setup.setProxyUdp(expected: OwnServer, on: Boolean): Setup {
+    val saved = servers.firstOrNull { it.id == expected.id } ?: return this
+    val proxy = saved.socks5 ?: return this
+    if (on && (saved != expected || saved.keyless || proxy.needsConfirmation)) return this
+    val changed = proxy.copy(allowUdp = on)
+    return copy(servers = servers.map { if (it.id == saved.id) it.copy(socks5 = changed) else it },
+        routes = routes.map { if (it.own == saved.id) it.copy(socks5 = changed) else it })
 }
 
 /** Apps restored but not on this phone keep their route this long, to be installed meanwhile. */
