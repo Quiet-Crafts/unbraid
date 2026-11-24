@@ -942,7 +942,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                     _signedIn.value = true
                     var landed = target // not the default after all: its own page instead, with the reason
                     if (old == null) setup.value.importFor(target, alone = store.accounts.value.isEmpty() && draft == null)?.let { to ->
-                        useServer(to, server).let { route -> if (to == "default" && route.isNotEmpty() && !setDefault(route)) landed = null }
+                        useServer(to, server).let { route -> if (to == "default" && (route.isEmpty() || !setDefault(route))) landed = null }
                     }
                     if (saved && pass.isNotEmpty()) clearClipboardIf(pass)
                     d.clear()
@@ -1083,10 +1083,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun setDefault(id: String): Boolean {
         val s = setup.value
-        if (s.route(id)?.socks5 != null) {
-            if (draft == null && vpn.value.lockdown) { refusal.value = "Android's Block connections without VPN is on, and a proxy server can't be used with it."; return false }
-            if (strands(s, s.editing(draft) { it.copy(defaultRoute = id) })) return false
-        }
+        if (strands(s, s.editing(draft) { it.copy(defaultRoute = id) })) return false
         editRoutes { p -> p.copy(defaultRoute = id) }
         return true
     }
@@ -1097,9 +1094,14 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** Why a change wasn't made, shown over any screen. */
     val refusal = MutableStateFlow<String?>(null)
 
-    /** Whether [next] would leave a proxy default without its own app on Direct, every app on it offline, where [now] doesn't: says so ([refusal]). */
+    /** Whether [next] would leave a proxy default unusable, every app on it offline, where [now] doesn't: its own app not on Direct, or Android's blocking on. Says so ([refusal]). */
     private fun strands(now: Setup, next: Setup): Boolean {
-        val (name, pkg) = (next.stuckDefaults() - now.stuckDefaults().keys).entries.firstOrNull() ?: return false
+        if (vpn.value.lockdown && next.route(next.defaultRoute)?.socks5 != null && now.route(now.defaultRoute)?.socks5 == null) {
+            refusal.value = "Android's Block connections without VPN is on, and a proxy server can't be used with it."
+            return true
+        }
+        val was = now.stuckDefaults()
+        val (name, pkg) = next.stuckDefaults().entries.firstOrNull { was[it.key] != it.value } ?: return false
         refusal.value = needsDirect(pkg, name)
         return true
     }
@@ -1228,6 +1230,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         if (s.profile == name) { viewing.value = null; app.unbraid.vpn.AutoSwitch.pickedByHand(); then(); return true }
         // An empty profile can't be used yet: it is shown, to be given a default route.
         if (!p.ready) { viewing.value = name; return true }
+        if (strands(s, s.use(name, keepAs))) return true
         if (keepAs != null && s.loose && s.use(name, keepAs).profile != name) return false
         // Only once it switched: a switch confirmed later may find no room left to keep the setup, and then changes nothing.
         guarded({ if (setup.value.profile == name) { viewing.value = null; app.unbraid.vpn.AutoSwitch.pickedByHand(); Profiles.started(name); then() } }) { it.use(name, keepAs) }
@@ -1271,11 +1274,12 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val identity = if (routeId == BLOCK) null else currentChoice(pkg, displayedPin) ?: return
         val d = draft
         val change = { s: Setup -> s.chooseAppRoute(d, pkg, routeId, identity) }
-        if (strands(setup.value, change(setup.value))) return
         saveAppChoice(d, pkg, identity, change)
     }
 
-    private fun saveAppChoice(d: String?, pkg: String, identity: AppIdentity?, change: (Setup) -> Setup) {
+    private fun saveAppChoice(d: String?, pkg: String, identity: AppIdentity?, choice: (Setup) -> Setup) {
+        // Checked as it is saved: a connection-limit question may be answered later.
+        val change = { s: Setup -> choice(s).let { if (strands(s, it)) s else it } }
         val active = setup.value.profile
         if (d != null) store.edit(change) else guarded(stillValid = {
             appProfile() == active && (identity == null || currentChoice(pkg, identity.current) != null)
