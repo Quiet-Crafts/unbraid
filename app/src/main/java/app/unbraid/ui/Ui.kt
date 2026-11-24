@@ -155,14 +155,13 @@ internal fun Setup.goingDirect(profileName: String?, pkg: String, identity: AppI
         .let { if (!filtered) it else it.copy(prefs = it.prefs.copy(filter = it.prefs.filter.copy(apps = it.prefs.filter.apps + (pkg to false)))) }
 }
 
-/** An existing route can change globally, including for inactive profiles. Local proxies serve app choices only. */
+/** An existing route can change globally, including for inactive profiles. Local proxies serve apps and the default. */
 internal fun Setup.allowsLocalProxy(target: String?, proxyPackage: String? = null): Boolean {
     if (proxyPackage != null && target == "app:$proxyPackage") return false
-    if (target == null || target.isEmpty() || target.startsWith("app:")) return true
-    if (target == "default") return false
+    if (target == null || target.isEmpty() || target == "default" || target.startsWith("app:")) return true
     val current = route(target) ?: return false
     return current.via == null && routes.none { it.via == target } &&
-        (profiles + live).none { it.defaultRoute == target || target in it.sites.values }
+        (profiles + live).none { target in it.sites.values }
 }
 
 /** Removed routes' apps follow the default. The default itself never moves: check [Setup.refusesRemoving] first. */
@@ -850,7 +849,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      */
     fun useServer(target: String, s: OwnServer): String {
         if (s.socks5 != null && !setup.value.allowsLocalProxy(target, s.socks5.packageName)) {
-            notice.value = "A proxy server can't be used there: not for its own app, a default, a website route or Via."
+            notice.value = "A proxy server can't be used there: not for its own app, a website route or Via."
             return ""
         }
         val reuse = setup.value.takeIf { it.route(target) == null }?.serverRoute(s, draft)
@@ -934,7 +933,9 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
                     }
                     refused?.let { throw IllegalStateException(it) }
                     _signedIn.value = true
-                    if (old == null) setup.value.importFor(target, alone = store.accounts.value.isEmpty() && draft == null)?.let { useServer(it, server) }
+                    if (old == null) setup.value.importFor(target, alone = store.accounts.value.isEmpty() && draft == null)?.let { to ->
+                        useServer(to, server).let { route -> if (to == "default" && route.isNotEmpty()) setDefault(route) }
+                    }
                     if (saved && pass.isNotEmpty()) clearClipboardIf(pass)
                     d.clear()
                     proxySaved.value = target to id
@@ -1072,12 +1073,17 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
      * that chose a route keep it; returns how many installed apps follow the default and so move ([moving], asked first).
      */
     fun setDefault(id: String): Int {
-        if (setup.value.route(id)?.socks5 != null) return 0
+        if (setup.value.route(id)?.socks5?.let { !proxyReady(it.packageName) } == true) return 0
         return moving(id).also { editRoutes { p -> p.copy(defaultRoute = id) } }
     }
 
     /** How many installed apps would move if route [id] became the default of the profile being viewed: those that follow it. 0 for the same default, or before the app list is read. */
     fun moving(id: String) = setup.value.viewAs(draft).let { s -> if (id == s.defaultRoute) 0 else s.followers(apps.value.map { it.pkg }) }
+
+    /** Whether proxy app [pkg] is on Direct already, as a default needs: else every app on it would be offline. Says so if not. */
+    fun proxyReady(pkg: String) = setup.value.viewAs(draft).outside(pkg).also { ready ->
+        if (!ready) notice.value = "Set ${apps.value.firstOrNull { it.pkg == pkg }?.label ?: "its proxy app"} to Direct in Apps first, without the DNS filter."
+    }
 
     /** [f] on the profile being viewed when it isn't the one in use (nothing connects, no limit to check), else live and guarded. */
     private fun editRoutes(f: (app.unbraid.data.Profile) -> app.unbraid.data.Profile) {

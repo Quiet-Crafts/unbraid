@@ -289,7 +289,7 @@ fun String.takeGraphemes(n: Int): String = chars(this).let { b -> var end = 0; r
  * The newest [Setup.version]. 2: every value is written, defaults too (older files left out those equal to a default).
  * 3: website routes, which an older build would drop without a word; only a setup that has one is saved as 3 ([Setup.stamped]).
  */
-const val VERSION = 8
+const val VERSION = 9
 
 @Serializable
 data class Setup(
@@ -587,13 +587,14 @@ data class Setup(
     fun site(name: String?, site: String, routeId: String?) = editing(name) { it.copy(sites = if (routeId == null) it.sites - site else it.sites + (site to routeId)) }
 
     /**
-     * Format 8 protects the UDP opt-in from older readers. Format 7 protects local proxy settings from being read as a provider route. Format 6 keeps restore deadlines.
+     * Format 9 protects a local proxy as a default, which builds before it refuse to load. Format 8 protects the UDP opt-in from older readers. Format 7 protects local proxy settings from being read as a provider route. Format 6 keeps restore deadlines.
      * Format 5 for signer-gated app choices, including legacy grants awaiting approval. Format 4 with a
      * Via somewhere, format 3 with a website route or a Block, so a setup without
      * them still opens in a build from before them. An older build would drop them: send a Via route straight to its
      * server, drop the websites, and take a blocked app for one on a route that is gone.
      */
     val stamped get() = copy(version = when {
+        routes.filter { it.socks5 != null }.any { r -> (profiles + live).any { it.defaultRoute == r.id } } -> 9
         routes.any { it.socks5?.allowUdp == true } || servers.any { it.socks5?.allowUdp == true } -> 8
         routes.any { it.socks5 != null } || servers.any { it.socks5 != null } -> 7
         waiting.isNotEmpty() -> 6 // earlier readers cannot enforce restoration deadlines
@@ -603,12 +604,12 @@ data class Setup(
         else -> 3
     })
 
-    /** Local proxies currently carry only explicit app assignments, with no Via on either side. */
+    /** Local proxies carry apps and a default, never websites, with no Via on either side. */
     fun supportsSocks5Assignments(): Boolean {
         if (routes.none { it.socks5 != null }) return true
         val proxies = routes.filter { it.socks5 != null }.mapTo(HashSet()) { it.id }
         return routes.none { it.via in proxies || it.socks5 != null && it.via != null } &&
-            (profiles + live).none { it.defaultRoute in proxies || it.sites.values.any(proxies::contains) }
+            (profiles + live).none { it.sites.values.any(proxies::contains) }
     }
 
     /** [provider]'s page setting [key], or its default. */

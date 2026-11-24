@@ -147,7 +147,6 @@ class CompilerTest {
             socksInput(setup, bridge = false),
             socksInput(setup, lockdown = true),
             socksInput(setup.copy(apps = setup.apps - "com.proxy")),
-            socksInput(setup.copy(defaultRoute = socks.id)),
             socksInput(setup.copy(sites = mapOf("example.com" to socks.id))),
         )) {
             assertEquals(setOf(socks.id), input.unavailableSocks)
@@ -155,8 +154,7 @@ class CompilerTest {
             val raw = Compiler.compile(input)
             assertFalse(raw.contains("bridge-password"))
             val rules = Json.parseToJsonElement(raw).jsonObject.rules()
-            if (input.setup.defaultRoute != socks.id)
-                assertTrue(rules.any { it["package_name"] == JsonArray(listOf(JsonPrimitive("com.target"))) && it["action"] == JsonPrimitive("reject") })
+            assertTrue(rules.any { it["package_name"] == JsonArray(listOf(JsonPrimitive("com.target"))) && it["action"] == JsonPrimitive("reject") })
         }
     }
 
@@ -171,6 +169,53 @@ class CompilerTest {
         assertTrue("com.proxy" !in outside(down)!!.jsonArray.map { it.jsonPrimitive.content })
         assertTrue(down.rules().any { it["package_name"] == JsonArray(listOf(JsonPrimitive("com.target"))) && it["action"] == JsonPrimitive("reject") })
         assertTrue(down.rules().any { r -> r["package_name"] == JsonArray(listOf(JsonPrimitive("com.proxy"))) && r["outbound"]?.jsonPrimitive?.content == "direct" })
+    }
+
+    private fun JsonObject.final() = this["route"]!!.jsonObject["final"]!!.jsonPrimitive.content
+    private fun JsonObject.dnsRules() = this["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
+    private fun JsonObject.refuses() = this["action"] == JsonPrimitive("reject")
+    private fun JsonObject.unnamed() = this["type"] == JsonPrimitive("logical") && "package_name_regex" in toString() && "invert" in toString()
+
+    /** A proxy as the default, its own app the only exception: nothing without a name, no ping and no UDP gets past it. */
+    @Test fun aProxyDefaultCarriesOrRefusesEverythingItsAppIsTheOnlyWayOut() {
+        val setup = Setup(routes = listOf(socks), defaultRoute = socks.id, apps = mapOf("com.proxy" to DIRECT))
+        for (udp in listOf(false, true)) {
+            val input = socksInput(setup.copy(routes = listOf(socks.copy(socks5 = socks.socks5!!.copy(allowUdp = udp)))), bridgeUdp = udp)
+            val c = Json.parseToJsonElement(Compiler.compile(input)).jsonObject
+            val rules = c.rules()
+            assertEquals("r-socks", c.final())
+            assertEquals(setOf("com.proxy"), input.socksCompanions)
+            assertEquals(listOf("app.unbraid"), c.excluded()) // its app stays inside: no tunnel swap when it changes
+            val last = rules.indexOfFirst { it["action"] == JsonPrimitive("resolve") && "package_name" !in it }
+            val before = rules.take(last)
+            assertTrue(before.any { it.refuses() && it.unnamed() })
+            assertTrue(before.any { it.refuses() && it["network"] == JsonPrimitive("icmp") })
+            assertEquals(!udp, before.any { it.refuses() && it["network"] == JsonPrimitive("udp") && "package_name" !in it })
+            // Its own app first, straight out with the phone's DNS; the names of everything else through the proxy.
+            val own = rules.indexOfFirst { it["outbound"] == JsonPrimitive("direct") && it["package_name"] == JsonArray(listOf(JsonPrimitive("com.proxy"))) }
+            assertTrue(own in 0 until before.indexOfFirst { it.refuses() && it.unnamed() })
+            assertEquals(1, rules.count { it["outbound"] == JsonPrimitive("direct") && "ip_cidr" !in it })
+            assertEquals("dns-r-socks", rules[last]["server"]!!.jsonPrimitive.content)
+            assertEquals("dns-r-socks", c["dns"]!!.jsonObject["final"]!!.jsonPrimitive.content)
+            assertTrue(c.dnsRules().any { it.refuses() && it.unnamed() })
+            assertTrue(c.dnsRules().none { it["server"] == JsonPrimitive("local") && it["package_name"] != JsonArray(listOf(JsonPrimitive("com.proxy"))) && "domain_suffix" !in it })
+        }
+    }
+
+    /** A proxy default that can't be used leaves the apps on it offline, names included: no other way out, only its own app. */
+    @Test fun anUnusableProxyDefaultIsOffline() {
+        val setup = Setup(routes = listOf(socks), defaultRoute = socks.id, apps = mapOf("com.proxy" to DIRECT))
+        val noDirect = setup.copy(apps = emptyMap())
+        val unconfirmed = setup.copy(routes = listOf(socks.copy(socks5 = socks.socks5!!.copy(needsConfirmation = true))))
+        for (input in listOf(socksInput(setup, bridge = false), socksInput(setup, lockdown = true), socksInput(noDirect), socksInput(unconfirmed), socksInput(setup, bridgeUdp = true))) {
+            val c = Json.parseToJsonElement(Compiler.compile(input)).jsonObject
+            assertEquals(setOf(socks.id), input.unavailableSocks)
+            assertTrue(c.rules().last().let { it.refuses() && it.keys == setOf("action", "no_drop") })
+            assertTrue(c.dnsRules().last().let { it.refuses() && it.keys == setOf("action") })
+            assertFalse("bridge-password" in c.toString())
+            val direct = c.rules().filter { it["outbound"] == JsonPrimitive("direct") && "ip_cidr" !in it }
+            assertTrue(direct.all { it["package_name"] == JsonArray(listOf(JsonPrimitive("com.proxy"))) })
+        }
     }
 
     /** Each new domain table hands out fake IPs from its block of the pool and refuses the others, before any exit is chosen. */

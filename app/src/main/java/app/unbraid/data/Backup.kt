@@ -494,7 +494,7 @@ object Backup {
             if (r.socks5 != null || own?.socks5 != null) need(own != null && own.socks5 == r.socks5, "a local proxy and its route do not match")
             if (r.keyless) keyless(r.name, r.wg, r.ovpn, r.ss, r.socks5) else server(r.name, r.wg, r.ovpn, r.ss, r.socks5)
         }
-        need(s.supportsSocks5Assignments(), "a local proxy can only be assigned to apps")
+        need(s.supportsSocks5Assignments(), "a local proxy can't be used for a website or with Via")
         s.home.wg?.let { server(it.name, it, null, null, null) }
         // An app or a website may be on Block; a default route never is.
         val ok = { id: String -> builtIn(id) || id in routeIds }

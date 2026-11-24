@@ -124,7 +124,7 @@ object Compiler {
             route.keyless || profile.needsConfirmation || setup.servers.any { it.id == route.own && it.keyless } ->
                 "Confirm its proxy app in Settings, Providers & servers"
             runCatching(profile::checked).isFailure -> "Its proxy server settings are damaged"
-            route.id == setup.defaultRoute || route.id in setup.sites.values -> "A proxy server works for chosen apps only"
+            route.id in setup.sites.values -> "A proxy server can't be used for websites"
             route.via != null -> "A proxy server can't use Via"
             !setup.outside(profile.packageName) -> "Set its proxy app to Direct, without the DNS filter"
             else -> null
@@ -165,8 +165,9 @@ object Compiler {
     /** Platform owner label for an assigned app whose signing identity changed since the config was compiled. */
     internal const val UNVERIFIED_OWNER = "@unverified"
 
-    internal fun ownerNames(s: Setup, names: List<String>, identity: (String) -> app.unbraid.data.AppIdentity?): List<String> =
-        if (names.any { it in s.apps && s.apps[it] != BLOCK && !s.permitsApp(it, identity) }) listOf(UNVERIFIED_OWNER) else names
+    /** [alone]: proxy apps let straight out inside the tunnel: never for another app that came to share their user id. */
+    internal fun ownerNames(s: Setup, names: List<String>, alone: Set<String> = emptySet(), identity: (String) -> app.unbraid.data.AppIdentity?): List<String> =
+        if (names.size > 1 && names.any(alone::contains) || names.any { it in s.apps && s.apps[it] != BLOCK && !s.permitsApp(it, identity) }) listOf(UNVERIFIED_OWNER) else names
 
     /** Android excludes the entire UID. Every explicitly granted sibling must still own its grant. */
     internal fun mayExclude(s: Setup, pkg: String, kin: Set<String>?, identity: (String) -> app.unbraid.data.AppIdentity?): Boolean =
@@ -242,6 +243,8 @@ object Compiler {
             JsonArray(barred + JsonPrimitive(UNVERIFIED_OWNER)) else barred
         val active = activeRoutes.filter { it.id !in blocked }
         val defaultBlocked = s.defaultRoute in blocked
+        // Its own app is an exception inside the tunnel: what Android can't name the app of may be that app's, and would loop.
+        val socksDefault = s.defaultRoute in socksIds
         require(active.mapNotNull { it.tsExit }.distinct().size <= 1) { "Tailscale allows one exit node at a time. Use the same node for every Tailscale route." }
         // Tailscale-exit routes have no tunnel of their own: they ride the Tailscale endpoint, whose exit node is set below.
         // Routes that resolve to the same server with the same credentials share one tunnel: two with one key would fight over it.
@@ -297,7 +300,7 @@ object Compiler {
         // browser's), so addresses are answered with stand-ins as for every app, and their connections are decided by the
         // app they turn out to be from. Any other type would go where no app's rule sends it, so while an app has a rule
         // of its own: HTTPS and SVCB answered empty (only hints are lost), the rest refused.
-        val unnamedOdd = barred.isNotEmpty() || perApp.isNotEmpty()
+        val unnamedOdd = barred.isNotEmpty() || perApp.isNotEmpty() || socksDefault
         val unnamed = listOf(obj("inbound" to arr("tun")), obj("package_name_regex" to arr("."), "invert" to true))
         val unnamedLookups = listOf(
             obj("type" to "logical", "mode" to "and", "rules" to JsonArray(unnamed + obj("query_type" to arr("HTTPS", "SVCB"))), "action" to "predefined", "rcode" to "NOERROR"),
@@ -561,8 +564,13 @@ object Compiler {
                     if (defaultBlocked) { add(obj("action" to "reject", "no_drop" to true)); return@putJsonArray }
                     // A socket without an owner could belong to an app assigned another exit or one that's unavailable.
                     // Hold it before the default's sign-in exception and DNS. Ping follows the VPN default by design.
-                    if (s.defaultRoute != DIRECT && perApp.isNotEmpty() && barred.isEmpty())
+                    if (s.defaultRoute != DIRECT && (perApp.isNotEmpty() || socksDefault) && barred.isEmpty())
                         add(obj("type" to "logical", "mode" to "and", "rules" to JsonArray(unnamed + obj("network" to "icmp", "invert" to true)), "action" to "reject"))
+                    // A proxy carries no ping, and no UDP unless it is allowed: refused before anything is looked up for them.
+                    if (socksDefault) {
+                        add(obj("network" to "icmp", "action" to "reject"))
+                        if (tcpOnly(s.defaultRoute)) add(obj("network" to "udp", "action" to "reject", "no_drop" to true))
+                    }
                     if (onTs(s.defaultRoute)) tsLogin.forEach { add(obj(it, "outbound" to "direct")) }
                     // A connection Android can't name the app of matches no app rule. With Direct as the default it may
                     // be one of an app kept on a VPN, so it is refused rather than sent out on the phone's own connection.

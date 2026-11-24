@@ -249,6 +249,10 @@ class AppIdentityPolicyTest {
         val s = setup().checkedApps { current }
         assertEquals(listOf(pkg, other), Compiler.ownerNames(s, listOf(pkg, other)) { current })
         assertEquals(listOf(other), Compiler.ownerNames(s, listOf(other)) { error("unassigned") })
+        // A proxy app is let straight out only on its own: an app that came to share its user id never with it.
+        assertEquals(listOf(pkg), Compiler.ownerNames(s, listOf(pkg), setOf(pkg)) { current })
+        assertEquals(listOf(Compiler.UNVERIFIED_OWNER), Compiler.ownerNames(s, listOf(pkg, other), setOf(pkg)) { current })
+        assertEquals(listOf(pkg, other), Compiler.ownerNames(s, listOf(pkg, other), setOf("org.example.else")) { current })
         val refused = Compiler.ownerNames(s, listOf(other, pkg)) { replacement }
         assertEquals(listOf(Compiler.UNVERIFIED_OWNER), refused)
         val json = Json.parseToJsonElement(Compiler.compile(input(s))).jsonObject

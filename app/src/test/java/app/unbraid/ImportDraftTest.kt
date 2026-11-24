@@ -39,14 +39,14 @@ class ImportDraftTest {
         assertNull(d.wg)
     }
 
-    @Test fun importOffersLocalProxyOnlyForAppRoutesInEveryProfile() {
+    @Test fun importOffersLocalProxyForAppsAndTheDefaultButNeverWebsitesOrVia() {
         val route = Route("own")
         val other = Route("other")
         val s = Setup(routes = listOf(route, other), defaultRoute = other.id)
-        for (target in listOf(null, "", "app:org.example.browser", route.id)) assertTrue(s.allowsLocalProxy(target))
-        for (target in listOf("default", other.id, "gone")) assertFalse(s.allowsLocalProxy(target))
+        for (target in listOf(null, "", "default", "app:org.example.browser", route.id, other.id)) assertTrue(s.allowsLocalProxy(target))
+        for (target in listOf("gone")) assertFalse(s.allowsLocalProxy(target))
         assertFalse(s.allowsLocalProxy("app:org.example.proxy", "org.example.proxy"))
-        assertFalse(s.copy(profiles = listOf(Profile("Travel", route.id))).allowsLocalProxy(route.id))
+        assertTrue(s.copy(profiles = listOf(Profile("Travel", route.id))).allowsLocalProxy(route.id))
         assertFalse(s.copy(profiles = listOf(Profile("Travel", DIRECT, sites = mapOf("example.org" to route.id)))).allowsLocalProxy(route.id))
         assertFalse(s.copy(routes = listOf(route.copy(via = other.id), other)).allowsLocalProxy(route.id))
         assertFalse(s.copy(routes = listOf(route, other.copy(via = route.id))).allowsLocalProxy(route.id))

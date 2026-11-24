@@ -71,7 +71,7 @@ class Socks5StorageTest {
         for (keys in listOf(false, true)) {
             val bytes = Backup.export(enabled, "3.2", 0, keys)
             val saved = Backup.read(bytes).setup
-            assertEquals(8, saved.version)
+            assertEquals(app.unbraid.data.VERSION, saved.version)
             val restored = setup.restoredFrom(saved, null, 0, keys)!!
             assertFalse(restored.servers.single().socks5!!.allowUdp)
             assertFalse(restored.routes.single().socks5!!.allowUdp)
@@ -87,9 +87,14 @@ class Socks5StorageTest {
         assertEquals(fresh.defaultRoute, imported.defaultRoute)
         assertNotNull(imported.route(route.id))
         val nonProxy = Route("vpn")
-        val bad = listOf(setup.copy(defaultRoute = route.id),
+        // Chosen by the user, live or in a saved profile, it is a default; older builds then refuse the whole setup.
+        for (chosen in listOf(setup.copy(defaultRoute = route.id), setup.copy(profiles = listOf(Profile("Other", route.id))))) {
+            assertTrue(chosen.supportsSocks5Assignments())
+            assertEquals(9, chosen.stamped.version)
+        }
+        assertTrue(setup.stamped.version < 9)
+        val bad = listOf(
             setup.copy(sites = mapOf("test.example" to route.id)),
-            setup.copy(profiles = listOf(Profile("Other", route.id))),
             setup.copy(profiles = listOf(Profile("Other", DIRECT, sites = mapOf("test.example" to route.id)))),
             setup.copy(routes = listOf(nonProxy, route.copy(via = nonProxy.id))),
             setup.copy(routes = listOf(route, nonProxy.copy(via = route.id))))

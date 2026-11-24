@@ -557,7 +557,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     // Editing a profile not in use never reaches what is shared: no rename, no removal of the route itself.
                     if (draft != null) {
                         if (id != shown.defaultRoute) {
-                            if (shown.route(id)?.socks5 == null) SheetAction("Make default") { act { makeDefault(id) } }
+                            SheetAction("Make default") { act { makeDefault(id) } }
                             SheetAction(dropLabel(draft, ui.dropRemoves(id)), Ink.bad) { act { dropping = id } }
                             SheetNote("Its apps in $draft will use its default route.")
                         }
@@ -575,7 +575,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         SheetSwitch("Check internet access", "Shows Not answering when this server stops reaching the internet. Turn off for a server that only reaches a private network.", r.checksInternet) { ui.setCheckInternet(id, it) }
                     }
                     if (draft == null && id != setup.defaultRoute) {
-                        if (shown.route(id)?.socks5 == null) SheetAction("Make default") { act { makeDefault(id) } }
+                        SheetAction("Make default") { act { makeDefault(id) } }
                         SheetAction("Remove route", Ink.bad) { act { ui.removeRouteRefused(id)?.let(refuse) ?: run { removing = id } } }
                         val others = setup.saved.filter { p -> p.name != setup.profile && id in p.own }.map { it.name }
                         SheetNote("Its apps will use the default route." + if (others.isEmpty()) "" else " It also goes from ${others.joinToString()}.")
@@ -619,6 +619,9 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
         Prompt("Make ${name ?: "Direct"} the default?", "Make default", { ui.setDefault(id); confirmDefault = null }, { confirmDefault = null }) {
             Text(moveText(ui.moving(id), name), style = Type.sub)
             Text("Apps that chose a route keep it.", style = Type.sub)
+            shown.route(id)?.socks5?.let { p ->
+                Text("They are offline while the proxy isn't running." + if (p.allowUdp) "" else " Calls, video and other UDP don't work until you allow them in its settings.", style = Type.sub)
+            }
         }
     }
     renaming?.let { id ->
