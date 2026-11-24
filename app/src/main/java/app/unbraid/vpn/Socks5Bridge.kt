@@ -34,7 +34,7 @@ class Socks5Bridge private constructor(
 ) : Closeable {
     companion object {
         private const val HANDSHAKE_MS = 5_000
-        private const val HANDSHAKES = 256
+        private const val HANDSHAKES = 128
         private const val TCP_STREAMS = 256
         private const val UDP_ASSOCIATIONS = 128
         private const val UDP_EVICT_NANOS = 5_000_000_000L
@@ -162,6 +162,8 @@ class Socks5Bridge private constructor(
                 workers.execute {
                     try { serve(client) } catch (_: Exception) {
                         // Closing the client also signals a failed or incomplete handshake.
+                    } catch (_: OutOfMemoryError) {
+                        // No thread left for its other direction: only this stream ends.
                     } finally { drop(client) }
                 }
             } catch (_: RejectedExecutionException) { drop(client); handshakes.release(); return

@@ -439,7 +439,7 @@ class Socks5BridgeTest {
             tcpClients.forEach { it.close() }
         }
         CapacityProxy().use { proxy ->
-            val silent = (0 until 200).map {
+            val silent = (0 until 100).map {
                 client(proxy.bridge).also {
                     it.write(byteArrayOf(5, 1, 2))
                     assertArrayEquals(byteArrayOf(5, 2), it.read(2))
