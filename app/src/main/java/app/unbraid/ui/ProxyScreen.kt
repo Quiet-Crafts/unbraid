@@ -29,8 +29,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import app.unbraid.data.BLOCK
 import app.unbraid.data.DIRECT
+import androidx.compose.runtime.State
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import app.unbraid.data.OwnServer
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -90,6 +95,20 @@ private fun ChooseApp(ui: Ui, close: () -> Unit, pick: (AppInfo) -> Unit) {
     }
 }
 
+/** The proxy servers whose port nothing accepts a connection on, tried every few seconds while the screen is in front. */
+@Composable
+internal fun rememberSilentProxies(ui: Ui, servers: List<OwnServer>): State<Set<String>> {
+    val ports = servers.mapNotNull { s -> s.socks5?.takeIf { !s.keyless && !it.needsConfirmation }?.let { s.id to it.port } }
+    val life = LocalLifecycleOwner.current
+    return produceState(emptySet<String>(), ports) {
+        if (ports.isEmpty()) { value = emptySet(); return@produceState }
+        life.repeatOnLifecycle(Lifecycle.State.RESUMED) { while (true) {
+            value = withContext(Dispatchers.IO) { ports.filter { (_, port) -> !ui.accepts(port) }.map { it.first }.toSet() }
+            delay(4_000)
+        } }
+    }
+}
+
 /** The apps to choose from, those that can run a VPN first; system apps only when searched for. */
 internal fun proxyApps(apps: List<AppInfo>, vpns: Set<String>, query: String): Pair<List<AppInfo>, List<AppInfo>> = apps
     .filter { it.identity != null && (if (query.isEmpty()) !it.system else it.label.contains(query, true) || it.pkg.contains(query, true)) }
@@ -117,7 +136,7 @@ private fun Details(ui: Ui, draft: ImportDraft, back: () -> Unit, chooseApp: () 
                         PillField(value, { set(it); draft.proxyEdited() }, label, placeholder = hint, secret = secret, numeric = numeric,
                             imeAction = if (last) ImeAction.Done else ImeAction.Next, onDone = { if (ready) ui.submitProxy(direct) })
                     }
-                    field("SOCKS5 port", draft.port, "e.g. 1080", numeric = true) { draft.port = it.filter(Char::isDigit).take(5) }
+                    field("SOCKS5 port", draft.port, "From ${app.label}'s settings", numeric = true) { draft.port = it.filter(Char::isDigit).take(5) }
                     field("Username", draft.user, "Only if ${app.label} asks for one") { draft.user = it }
                     field("Password", draft.pass, "Only if ${app.label} asks for one", secret = true, last = true) { draft.pass = it }
                     draft.error?.let { Text(it, style = Type.caption, color = Ink.bad, modifier = Modifier.padding(horizontal = 8.dp)) }
@@ -146,9 +165,12 @@ internal fun directText(s: app.unbraid.data.Setup, pkg: String, label: String, d
     ProxyDirect.Already -> "$label goes Direct, so its traffic never loops."
     is ProxyDirect.Refuse -> "$label needs Direct to work, and isn't changed here because ${direct.reason}. Set it in Apps."
     is ProxyDirect.Grant -> {
-        val now = s.apps[pkg]
-        val via = { id: String? -> if (id == DIRECT) "Direct" else s.route(id.orEmpty())?.name ?: "a route that is gone" }
-        val before = if (now == DIRECT || now == BLOCK) "" else if (now == null) "$label now follows the default, ${via(s.defaultRoute)}. " else "$label now uses ${via(now)}. "
-        before + "It will go Direct, without a VPN" + (if (direct.filterChanges) " or the DNS filter" else "") + ", so its traffic never loops."
+        val via = s.route(direct.from)?.name
+        val filter = if (direct.filterChanges) " or the DNS filter" else ""
+        when {
+            pkg !in s.apps && direct.from == DIRECT -> "$label goes Direct like your other apps and will stay on Direct if the default changes${if (direct.filterChanges) ", without the DNS filter" else ""}. Its traffic never loops."
+            s.apps[pkg] == DIRECT -> "$label will go Direct without the DNS filter, so its traffic never loops."
+            else -> (if (via == null) "" else if (pkg in s.apps) "$label now uses $via. " else "$label now follows the default, $via. ") + "${if (via == null) label else "It"} will go Direct, without a VPN$filter, so its traffic never loops."
+        }
     }
 }

@@ -374,14 +374,14 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
 
     val eligibleServers = setup.servers.filter { it.socks5 == null || setup.allowsLocalProxy(target, it.socks5.packageName) }
     val (proxies, savedServers) = eligibleServers.partition { it.socks5 != null }
+    val silent by rememberSilentProxies(ui, if (mine) proxies else emptyList())
     fun LazyListScope.proxies(list: List<OwnServer>, add: Boolean) {
         if (!setup.allowsLocalProxy(target) || list.isEmpty() && !add) return
-        val running = proxyRunning(setup, vpn)
         val n = list.size + if (add) 1 else 0
         item(key = "proxyLabel") { SectionLabel("Proxy servers") }
         itemsIndexed(list, key = { _, s -> "proxy:${s.id}" }) { i, s ->
-            val (tone, words) = proxyStatus(setup, s, running, vpn.notAnswering)
-            GroupRow(i, n, s.name, "SOCKS5 · $words", onClick = { if (ui.useServer(target, s).isNotEmpty()) once(close) },
+            val (tone, words) = proxyStatus(setup, s, vpn, s.id in silent)
+            GroupRow(i, n, s.name, "SOCKS5 · $words", onClick = { if (!closed && ui.useServer(target, s).isNotEmpty()) once(close) },
                 leading = { ToneDot(tone) }, trailing = { if (route?.own == s.id) Icon(Icons.checkCircle, "Selected", tint = tint, modifier = Modifier.size(22.dp)) })
         }
         if (add) item(key = "proxyAdd") { GroupRow(n - 1, n, "Add a proxy server", titleColor = Ink.accent, onClick = { ui.openProxy(target) }, trailing = { Icon(Icons.add, null, Modifier.size(22.dp), tint = Ink.accent) }) }

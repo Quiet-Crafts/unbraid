@@ -943,8 +943,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         }
     }
 
-    /** Whether something on this phone accepts a connection on [port]; nothing is sent. */
-    private fun accepts(port: Int) = runCatching {
+    /** Whether something on this phone accepts a connection on [port]; nothing is sent. Not on the main thread. */
+    internal fun accepts(port: Int) = runCatching {
         java.net.Socket().use { it.connect(java.net.InetSocketAddress(java.net.InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1)), port), 1_000) }
     }.isSuccess
 

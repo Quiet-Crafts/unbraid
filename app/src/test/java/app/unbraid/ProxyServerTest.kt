@@ -9,6 +9,8 @@ import app.unbraid.ui.proxyApps
 import app.unbraid.ui.proxyDirect
 import app.unbraid.ui.proxyStatus
 import app.unbraid.vpn.Compiler
+import app.unbraid.vpn.Health
+import app.unbraid.vpn.VpnState
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -106,22 +108,37 @@ class ProxyServerTest {
 
     @Test fun textNamesTheRouteTheAppLeaves() {
         val s = setup.copy(routes = setup.routes + Route("n", wg = null, tsExit = "100.64.0.1", tsName = "Netherlands"), defaultRoute = "n")
-        assertTrue(directText(s, app.pkg, "Harbor", ProxyDirect.Grant(false, DIRECT)).startsWith("Harbor now follows the default, Netherlands. It will go Direct, without a VPN,"))
-        assertTrue("or the DNS filter" in directText(s.copy(apps = mapOf(app.pkg to "n")), app.pkg, "Harbor", ProxyDirect.Grant(true, DIRECT)))
+        assertTrue(directText(s, app.pkg, "Harbor", s.proxyDirect(null, app, false)).startsWith("Harbor now follows the default, Netherlands. It will go Direct, without a VPN,"))
+        assertTrue("or the DNS filter" in directText(s.copy(apps = mapOf(app.pkg to "n")), app.pkg, "Harbor", ProxyDirect.Grant(true, "n")))
         assertTrue("isn't changed here because it is on Block" in directText(s, app.pkg, "Harbor", s.copy(apps = mapOf(app.pkg to BLOCK)).proxyDirect(null, app, false)))
     }
 
     @Test fun statusSaysNoMoreThanIsKnown() {
         val ok = setup.copy(apps = mapOf(app.pkg to DIRECT, "org.example.browser" to "r"))
-        fun words(s: Setup, running: Set<String>?, failing: Set<String> = emptySet()) = proxyStatus(s, s.servers.single(), running, failing).second
-        assertEquals("Not connected", words(ok, null))
-        assertEquals("Not connected", words(ok, emptySet()))
-        assertEquals("Connected", words(ok, setOf("r")))
-        assertEquals("Not answering", words(ok, setOf("r"), setOf("r")))
-        assertEquals("Not connected", words(ok, emptySet(), setOf("r"))) // an earlier route's check says nothing of this one
-        assertEquals("Its app needs Direct", words(ok.copy(apps = ok.apps - app.pkg), setOf("r")))
-        assertEquals("Not used", words(ok.copy(routes = emptyList(), apps = mapOf(app.pkg to DIRECT)), null))
-        assertEquals("Confirm its app", words(ok.copy(servers = listOf(server.copy(socks5 = proxy.copy(needsConfirmation = true)))), setOf("r")))
+        val on = VpnState(VpnState.Phase.On, engine = 3)
+        val answered = on.copy(passed = Health.Passed(3, 1, mapOf("r" to Health.checkedAs(ok.route("r")!!))))
+        fun words(s: Setup, vpn: VpnState, running: Set<String>? = setOf("r"), silent: Boolean = false) = proxyStatus(s, s.servers.single(), vpn, silent, running).second
+        assertEquals("Not connected", words(ok, VpnState(), null))
+        assertEquals("Not connected", words(ok, answered, emptySet()))
+        assertEquals("Checking", words(ok, on)) // a wrong login looks like this until its first check fails
+        assertEquals("Connected", words(ok, answered))
+        assertEquals("Checking", words(ok, answered.copy(engine = 4)))
+        assertEquals("Not answering", words(ok, answered.copy(notAnswering = setOf("r"))))
+        assertEquals("Its proxy isn't running", words(ok, answered, silent = true))
+        assertEquals("Its proxy isn't running", words(ok, VpnState(), null, silent = true))
+        val unchecked = ok.copy(routes = ok.routes.map { it.copy(checkInternet = false) })
+        assertEquals("Running, checks off", words(unchecked, answered))
+        assertTrue(words(ok, on.copy(lockdown = true), emptySet()).startsWith("Offline: Block connections"))
+        assertEquals("Its app needs Direct", words(ok.copy(apps = ok.apps - app.pkg), answered))
+        assertEquals("Not used", words(ok.copy(routes = emptyList(), apps = mapOf(app.pkg to DIRECT)), VpnState(), null))
+        assertEquals("Confirm its app", words(ok.copy(servers = listOf(server.copy(socks5 = proxy.copy(needsConfirmation = true)))), answered))
+    }
+
+    @Test fun textNeverSaysThatAnAppOnDirectWillMove() {
+        val text = directText(setup, app.pkg, "Harbor", setup.proxyDirect(null, app, false))
+        assertTrue(text, text.startsWith("Harbor goes Direct like your other apps"))
+        val none = setup.copy(defaultRoute = "")
+        assertTrue(directText(none, app.pkg, "Harbor", none.proxyDirect(null, app, false)).startsWith("Harbor will go Direct, without a VPN,"))
     }
 
     @Test fun likelyAppsComeFirstAndSystemAppsOnlyWhenSearched() {

@@ -121,11 +121,11 @@ object Compiler {
         val profile = route.socks5 ?: return null
         return when {
             route.keyless || profile.needsConfirmation || setup.servers.any { it.id == route.own && it.keyless } ->
-                "Confirm the SOCKS5 companion again"
-            runCatching(profile::checked).isFailure -> "The local SOCKS5 configuration is invalid"
-            route.id == setup.defaultRoute || route.id in setup.sites.values -> "SOCKS5 works for selected apps only"
-            route.via != null -> "SOCKS5 cannot use Via"
-            !setup.outside(profile.packageName) -> "Set the SOCKS5 companion to unfiltered Direct"
+                "Confirm its proxy app in Settings, Providers & servers"
+            runCatching(profile::checked).isFailure -> "Its proxy server settings are damaged"
+            route.id == setup.defaultRoute || route.id in setup.sites.values -> "A proxy server works for chosen apps only"
+            route.via != null -> "A proxy server can't use Via"
+            !setup.outside(profile.packageName) -> "Set its proxy app to Direct, without the DNS filter"
             else -> null
         }
     }
@@ -134,10 +134,10 @@ object Compiler {
         blockedKin: Set<String>, tsSuffix: String? = null): String? {
         val profile = route.socks5 ?: return null
         return socksRouteProblem(setup, route) ?: when {
-            lockdown -> "Turn off Android VPN lockdown to use SOCKS5"
-            profile.packageName == selfPackage || profile.packageName in blockedKin -> "The SOCKS5 companion cannot go Direct on its own"
+            lockdown -> "Android's Block connections without VPN is on, and a proxy server can't be used with it"
+            profile.packageName == selfPackage || profile.packageName in blockedKin -> "Its proxy app can't go Direct on its own, as it shares its Android user ID"
             setup.prefs.filter.routes && setup.prefs.filter.server()?.let { homeVia(setup, it, tsDomains(setup.home, tsSuffix)) } != null ->
-                "The SOCKS5 route needs DNS through its own connection"
+                "A proxy server can't use a DNS filter in your home network"
             else -> null
         }
     }

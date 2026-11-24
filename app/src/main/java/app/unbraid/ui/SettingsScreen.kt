@@ -304,7 +304,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
     val filter = prefs.filter
     val filterDns = filter.server()
     // unbraid's filter on VPN routes replaces each provider's own blocking: those switches show off, their choice kept.
-    val proxyRunning = proxyRunning(setup, vpn)
+    val silentProxies by rememberSilentProxies(ui, setup.servers.takeIf { page == "providers" || page?.startsWith("proxy:") == true }.orEmpty())
     val customDns = filterDns != null && filter.routes
     val setFilter = { f: (app.unbraid.data.Filter) -> app.unbraid.data.Filter -> ui.setPrefs { it.copy(filter = f(it.filter)) } }
     // The open provider page's settings and device slot: some come from the provider's server list, so read off the main thread.
@@ -400,7 +400,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 val (proxies, own) = setup.servers.partition { it.socks5 != null }
                 if (proxies.isNotEmpty()) group("Proxy servers", proxies.map { sv ->
                     val n = setup.routes.count { it.own == sv.id }
-                    val (tone, words) = proxyStatus(setup, sv, proxyRunning, vpn.notAnswering)
+                    val (tone, words) = proxyStatus(setup, sv, vpn, sv.id in silentProxies)
                     Item(sv.name, words + if (n > 0) " · used by $n ${if (n == 1) "route" else "routes"}" else "", { go("proxy:${sv.id}") }) {
                         Row(verticalAlignment = Alignment.CenterVertically) { ToneDot(tone); Gap(8.dp); Chevron() }
                     }
@@ -418,7 +418,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 val sv = setup.servers.firstOrNull { it.id == p.removePrefix("proxy:") }
                 val px = sv?.socks5
                 if (sv == null || px == null) { LaunchedEffect(Unit) { back() }; return@AnimatedContent }
-                val (tone, words) = proxyStatus(setup, sv, proxyRunning, vpn.notAnswering)
+                val (tone, words) = proxyStatus(setup, sv, vpn, sv.id in silentProxies)
                 val confirm = sv.keyless || px.needsConfirmation
                 val outside = setup.outside(px.packageName)
                 val edit = { ui.openProxy(null, sv.id) }

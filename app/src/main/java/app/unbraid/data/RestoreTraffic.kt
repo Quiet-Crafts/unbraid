@@ -733,10 +733,10 @@ object RestoreTraffic {
         val filterOff = was != null && now == null
         if (was != null && now != null && was != now) out += Note("The DNS filter changes to another server.")
         if (current.routes.any { it.socks5 != null } || next.routes.any { it.socks5 != null }) {
-            out += Note("This comparison treats local SOCKS5 routes as blocked because it cannot verify a running proxy app.")
+            out += Note("This comparison treats proxy server routes as blocked because it cannot verify a running proxy app.")
         }
         if (next.servers.any { it.socks5?.needsConfirmation == true }) {
-            out += Note("Restored local SOCKS5 routes stay blocked until you confirm the proxy app on this phone.")
+            out += Note("Restored proxy servers stay blocked until you confirm the proxy app on this phone.")
         }
         exitChanges(current, next).forEach { if (out.none { n -> n.text == it }) out += Note(it) }
         // A new install's placeholder isn't the user's: there is no traffic to compare.

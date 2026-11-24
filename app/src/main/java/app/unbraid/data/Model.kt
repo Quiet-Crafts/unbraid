@@ -561,7 +561,7 @@ data class Setup(
         val e = route(v) ?: return "${r.name} goes through a route that no longer exists. Choose another in its Via"
         return when {
             e.id == r.id || e.via != null -> "${r.name} can go through a route that goes straight to its server only"
-            e.socks5 != null -> "${r.name} can't go through a local SOCKS5 proxy"
+            e.socks5 != null -> "${r.name} can't go through a proxy server"
             e.tsExit != null -> "${r.name} can't go through a Tailscale exit node"
             r.viaNative && (r.imported || e.imported || e.loc.provider != r.loc.provider || Providers.get(r.loc.provider)?.nativeHop != true) -> "One-tunnel multi-hop needs two routes of the same provider that offers it"
             r.viaNative && e.loc.countryCode != null && e.loc.countryCode == r.loc.countryCode -> "${r.name} and its entry must be in different countries for ${Providers.get(r.loc.provider)?.name}'s multi-hop"

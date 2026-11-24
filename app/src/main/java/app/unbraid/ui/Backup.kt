@@ -438,7 +438,7 @@ class BackupFlow(private val ui: Ui) {
             if (saved) "Settings restored." else "Settings restored, but they couldn't be saved yet. Keep unbraid open and try again from the notice.",
             if (kept) "Your current setup is kept as the profile ${t.profiles.last().name}." else null,
             t.servers.filter { it.keyless && it.socks5 == null }.takeIf { it.isNotEmpty() }?.let { "Add the config again for ${it.joinToString { s -> Backup.label(s.name, "an own server") }} in Settings, Providers & servers. Until then, ${if (it.size == 1) "its" else "their"} apps stay offline." },
-            "Confirm the local proxy app in Settings, Providers & servers before using its SOCKS5 route.".takeIf { t.servers.any { it.socks5?.needsConfirmation == true } },
+            "Confirm the proxy app in Settings, Providers & servers before using its proxy server.".takeIf { t.servers.any { it.socks5?.needsConfirmation == true } },
             signIns(t)?.let { "Sign in to $it to use their routes." },
             "unbraid is reconnecting with them.".takeIf { UnbraidVpn.state.value.phase == VpnState.Phase.On },
         ).joinToString(" "))

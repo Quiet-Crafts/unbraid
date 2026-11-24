@@ -322,11 +322,11 @@ class MainActivity : ComponentActivity() {
                                 CompositionLocalProvider(LocalScreen provides this) {
                                     when {
                                         screen == "proxy" -> ProxyScreen(ui)
-                                        screen == "signin" -> SignInScreen(ui)
+                                        screen == "signin" -> SignInScreen(ui, proxy = { ui.openProxy("") })
                                         // From the picker, a file imported there goes to the picker's app or route, and the picker closes.
                                         screen == "add" -> picker.let { p ->
                                             val importFor = importTarget(p, liveSetup)
-                                            SignInScreen(ui, importFor, onImported = { adding = false; if (importFor.isNotEmpty()) picker = null }, proxies = p != "default") { adding = false }
+                                            SignInScreen(ui, importFor, onImported = { adding = false; if (importFor.isNotEmpty()) picker = null }, proxy = if (p == "default") null else { { ui.openProxy(importFor.takeIf { p != null }) } }) { adding = false }
                                         }
                                         // The route that was tapped grows into its picker (container transform).
                                         screen.startsWith("picker:") -> screen.removePrefix("picker:").let { target ->

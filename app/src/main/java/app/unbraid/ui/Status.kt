@@ -25,17 +25,26 @@ fun providerStatus(name: String, used: Boolean, refused: Boolean, settingUp: Boo
 fun proxyRunning(s: app.unbraid.data.Setup, vpn: app.unbraid.vpn.VpnState): Set<String>? = if (vpn.phase != app.unbraid.vpn.VpnState.Phase.On) null
     else vpn.servers.keys.filter { id -> s.route(id)?.socks5.let { it != null && it == app.unbraid.vpn.UnbraidVpn.running?.route(id)?.socks5 } }.toSet()
 
-/** How proxy server [sv] stands, from saved settings and, for [running] (null: not connected) routes of the engine, what their checks saw. */
-fun proxyStatus(s: app.unbraid.data.Setup, sv: app.unbraid.data.OwnServer, running: Set<String>?, notAnswering: Set<String>): Pair<Tone, String> {
+/**
+ * How proxy server [sv] stands: what is saved, whether anything accepts connections on its port now ([silent]: nothing
+ * does), and what the engine's own checks saw of the routes it runs as saved ([running], null: not connected).
+ * Connected only on an answered check.
+ */
+fun proxyStatus(s: app.unbraid.data.Setup, sv: app.unbraid.data.OwnServer, vpn: app.unbraid.vpn.VpnState, silent: Boolean, running: Set<String>? = proxyRunning(s, vpn)): Pair<Tone, String> {
     val p = sv.socks5 ?: return Tone.Idle to "Not used"
-    val active = s.activeRoutes.filter { it.own == sv.id }.map { it.id }
+    val active = s.activeRoutes.filter { it.own == sv.id }
+    val passed = vpn.passed?.takeIf { it.engine == vpn.engine }
     return when {
         sv.keyless || p.needsConfirmation -> Tone.Bad to "Confirm its app"
         !s.outside(p.packageName) -> Tone.Warn to "Its app needs Direct"
+        silent -> Tone.Bad to "Its proxy isn't running"
         s.routes.none { it.own == sv.id } -> Tone.Idle to "Not used"
-        running != null && active.any { it in notAnswering && it in running } -> Tone.Bad to "Not answering"
-        running != null && active.isNotEmpty() && running.containsAll(active) -> Tone.Good to "Connected"
-        else -> Tone.Idle to "Not connected"
+        vpn.lockdown && running != null -> Tone.Warn to "Offline: Block connections without VPN is on in Android"
+        running == null || active.isEmpty() || !running.containsAll(active.map { it.id }) -> Tone.Idle to "Not connected"
+        active.any { it.id in vpn.notAnswering } -> Tone.Bad to "Not answering"
+        active.none { it.checksInternet } -> Tone.Idle to "Running, checks off"
+        active.all { !it.checksInternet || passed != null && app.unbraid.vpn.Health.answered(passed, it) } -> Tone.Good to "Connected"
+        else -> Tone.Idle to "Checking"
     }
 }
 
