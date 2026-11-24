@@ -122,6 +122,7 @@ private fun Details(ui: Ui, draft: ImportDraft, back: () -> Unit, chooseApp: () 
     SecureWindow()
     val app = draft.proxyApp ?: return
     val setup by ui.setup.collectAsStateWithLifecycle()
+    val accounts by ui.accounts.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val direct = remember(setup, app) { ui.proxyDirect(app) }
     val ready = draft.port.isNotEmpty() && !draft.proxyChecking
@@ -150,7 +151,7 @@ private fun Details(ui: Ui, draft: ImportDraft, back: () -> Unit, chooseApp: () 
                     }
                     Text(
                         "Start the SOCKS5 proxy in ${app.label}; its settings show the port. ${directText(setup.viewAs(draft.proxyProfile), app.pkg, app.label, direct)} " +
-                            (if (setup.untouched && ui.accounts.value.isEmpty()) "On a new setup, also choose a default in Routes for your other apps. " else "") + "Stored encrypted on this phone.",
+                            (if (setup.untouched && accounts.isEmpty()) "On a new setup, also choose a default in Routes for your other apps. " else "") + "Stored encrypted on this phone.",
                         style = Type.caption, color = Ink.dim, modifier = Modifier.padding(horizontal = 8.dp),
                     )
                 }
