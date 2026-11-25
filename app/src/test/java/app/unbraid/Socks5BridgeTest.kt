@@ -367,6 +367,26 @@ class Socks5BridgeTest {
         }
     }
 
+    /** A proxy that needs longer than the local handshake to reach the other side still connects. */
+    @Test fun aSlowConnectIsWaitedFor() {
+        server().use { target ->
+            Socks5Bridge.start("127.0.0.1", target.localPort, null, null) { true }.use { bridge ->
+                client(bridge).use { control ->
+                    control.soTimeout = 15_000
+                    assertEquals(0, authenticate(control, bridge))
+                    control.write(byteArrayOf(5, 1, 0, 1, 192.toByte(), 0, 2, 9) + portBytes(443))
+                    target.accept().use { peer ->
+                        peer.soTimeout = 2_000
+                        assertArrayEquals(byteArrayOf(5, 1, 0), peer.read(3)); peer.write(byteArrayOf(5, 0)); peer.read(10)
+                        Thread.sleep(6_000)
+                        peer.write(ok)
+                        assertArrayEquals(ok, control.read(10))
+                    }
+                }
+            }
+        }
+    }
+
     @Test fun udpFailsClosedWhenCompanionIsOffline() {
         server().use { target ->
             val port = target.localPort

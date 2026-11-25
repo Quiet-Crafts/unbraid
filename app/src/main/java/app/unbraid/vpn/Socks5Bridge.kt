@@ -34,6 +34,7 @@ class Socks5Bridge private constructor(
 ) : Closeable {
     companion object {
         private const val HANDSHAKE_MS = 5_000
+        private const val CONNECT_MS = 20_000 // a proxy may take a while to reach the other side the first time
         private const val HANDSHAKES = 128
         private const val TCP_STREAMS = 256
         private const val UDP_ASSOCIATIONS = 128
@@ -461,11 +462,13 @@ class Socks5Bridge private constructor(
         }
         if (!peerOwnerVerified(socket)) throw IOException("Unverified local proxy")
         output.write(destination)
-        val version = input.readUnsignedByte()
-        val status = input.readUnsignedByte()
-        if (version != 5 || status !in 0..8 || input.readUnsignedByte() != 0) throw IOException("Invalid SOCKS response")
-        val type = input.readUnsignedByte()
-        return byteArrayOf(5, status.toByte(), 0, type.toByte()) + address(input, type)
+        // The login above is local; only the answer to this waits for the network.
+        val answer = handshakeInput(socket, System.nanoTime() + CONNECT_MS * 1_000_000L)
+        val version = answer.readUnsignedByte()
+        val status = answer.readUnsignedByte()
+        if (version != 5 || status !in 0..8 || answer.readUnsignedByte() != 0) throw IOException("Invalid SOCKS response")
+        val type = answer.readUnsignedByte()
+        return byteArrayOf(5, status.toByte(), 0, type.toByte()) + address(answer, type)
     }
 
     private fun pump(from: Socket, to: Socket) {

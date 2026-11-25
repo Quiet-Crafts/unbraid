@@ -491,7 +491,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (store.unreadable.value && !store.reopen()) { hold(); return }
             store.refreshWaiting(System.currentTimeMillis(), ::installation)
             store.refreshAppSigners(::identity)
-            val (setup, seen) = store.policySnapshot()
+            var (setup, seen) = store.policySnapshot()
             from = seen
             // Refused before any provider is asked for a server: the engine would refuse it anyway.
             if (setup.defaultMissing) throw Compiler.MissingDefault()
@@ -499,12 +499,19 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             if (setup.tailscale && store.tsStored) store.tsState
             // Due keys are replaced before any tunnel is built with them.
             // Not after a lost engine: no provider is asked then, so an edit, Pause or Disconnect never waits for one; [reload] asks right after.
-            val again = lost != null
+            var again = lost != null
             if (!again) Rotation.run(setup, { store.accounts.value }, store::replaceAccount)
-            val accounts = store.accounts.value
+            var accounts = store.accounts.value
             // The app's own tests get a fresh way in with each engine start (see apply); none until it runs.
             probe = null
-            val picked = prepareSocks(setup, pickLinks(setup, emptyMap(), accounts, offline = again))
+            var picked = prepareSocks(setup, pickLinks(setup, emptyMap(), accounts, offline = again))
+            // Edited or switched while providers were asked: started as it is now, what is missing asked for right after.
+            while (!destroyed && store.setup.value != setup) {
+                val (now, restores) = store.policySnapshot()
+                if (now.defaultMissing) throw Compiler.MissingDefault()
+                setup = now; seen = restores; from = restores; accounts = store.accounts.value; again = true
+                picked = prepareSocks(setup, pickLinks(setup, picked.links, accounts, offline = true))
+            }
             if (destroyed) return // the service went away during the provider calls: start no engine for it
             forgetLookups(this)
             val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
