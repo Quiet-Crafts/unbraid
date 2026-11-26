@@ -200,7 +200,8 @@ servers, Add connection, Proxy server, and choose the app, its port and its logi
 proxy for single apps or make it the default route. Before it sends a connection or a password, unbraid checks that
 the port belongs to the app you chose. Calls and video (UDP) are off until you turn them on in the proxy server's
 settings. The proxy app itself stays on Direct, and unbraid refuses changes that would break that. If the proxy app
-stops, the apps that use it are offline rather than going around it. Android's "Block connections without VPN"
+stops while unbraid runs, the apps whose route is the proxy are offline rather than going around it (website,
+home network and local network rules still come first). Android's "Block connections without VPN"
 can't be used together with a proxy server, so turn on Always-on VPN only. A proxy server can't be used for website
 routes.
 
