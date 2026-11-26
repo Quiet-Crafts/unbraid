@@ -58,6 +58,8 @@ providers. It needs macOS 26 or later.
 - IVPN sign-ins add a Kyber key that protects recorded traffic against future quantum computers, and by default
   unbraid asks for a new key when it connects and the key is a week old.
 - Reach your home network through Tailscale or Headscale, or send chosen apps out through a Tailscale exit node.
+- Send apps through a SOCKS5 proxy that another app runs on this phone, such as v2RayTun, for chosen apps or as
+  the default route.
 - A low-load server is picked for you when the provider publishes load, or you can pin one server yourself.
 - Ad and tracker blocking per route with the provider's own blocking DNS, where it has one.
 - Saved profiles that can switch by themselves on Wi-Fi and on mobile data, home-screen widgets, a quick-settings
@@ -75,7 +77,8 @@ You can sign in with NordVPN (NordLynx, OpenVPN, Double VPN and Onion over VPN),
 IVPN, AirVPN (with an API key) or ExpressVPN. For Surfshark you add your WireGuard key once, and for Windscribe (or AirVPN without an API key) you paste one WireGuard config from their website. After that you choose from the servers
 your plan includes. For Proton VPN (Free included), use the whole WireGuard config for the server you want.
 Unbraid checks its peer key and endpoint against the config. For additional Proton servers, import their configs under Your own servers. You can also import your own WireGuard or OpenVPN config, paste a Shadowsocks
-key, or join a Tailscale tailnet (a self-hosted Headscale works as well).
+key, add a SOCKS5 proxy that another app runs on the phone, or join a Tailscale tailnet (a self-hosted Headscale
+works as well).
 
 Routes can mix providers. One app can use Mullvad in Sweden while another uses NordVPN in Japan.
 
@@ -189,6 +192,17 @@ to Direct still use your normal connection while unbraid is connected. unbraid's
 (see Privacy). Apps in a work profile are outside this VPN. If unbraid can't open its saved settings, it keeps apps
 offline until you retry or start fresh, and an app whose chosen route no longer exists is blocked rather than sent
 out over your normal connection.
+
+### Can I use a proxy app like v2RayTun?
+
+Yes, if it offers a SOCKS5 proxy on the phone. Start its proxy mode, then in unbraid open Settings, Providers &
+servers, Add connection, Proxy server, and choose the app, its port and its login if it has one. You can pick the
+proxy for single apps or make it the default route. Before it sends a connection or a password, unbraid checks that
+the port belongs to the app you chose. Calls and video (UDP) are off until you turn them on in the proxy server's
+settings. The proxy app itself stays on Direct, and unbraid refuses changes that would break that. If the proxy app
+stops, the apps that use it are offline rather than going around it. Android's "Block connections without VPN"
+can't be used together with a proxy server, so turn on Always-on VPN only. A proxy server can't be used for website
+routes.
 
 ### Does it get around my provider's device limit?
 
