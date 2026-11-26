@@ -41,6 +41,19 @@ class ImportDraft {
     var pass by mutableStateOf("")
     /** The Shadowsocks link being typed; null = no prompt. */
     var link by mutableStateOf<String?>(null)
+    /** The proxy server page ([ProxyScreen]) is open. */
+    var socksOpen by mutableStateOf(false)
+    internal var proxyApp by mutableStateOf<AppInfo?>(null)
+    var port by mutableStateOf("")
+    internal var proxyRefill: OwnServer? = null
+    /** Where the proxy server is used once saved (null: from Settings, nowhere yet) and the profile shown when it was opened. */
+    internal var proxyTarget: String? = null
+    internal var proxyProfile: String? = null
+    /** The profile in use when it was opened. */
+    internal var proxyLive: String? = null
+    /** The port is being tried; [proxySilent]: nothing accepted a connection on it. */
+    var proxyChecking by mutableStateOf(false)
+    var proxySilent by mutableStateOf(false)
     /** A valid WireGuard config waiting for its name; null = no prompt. */
     var wg by mutableStateOf<String?>(null)
     /** What the user calls this server, prefilled from the file name. */
@@ -58,7 +71,18 @@ class ImportDraft {
     var generation = 0
         private set
 
-    fun clear() { ovpn = null; user = ""; pass = ""; link = null; wg = null; name = ""; error = null; warning = null; generation++ }
+    /** A proxy field changed: what was being checked for the old one no longer counts. */
+    internal fun proxyEdited() { generation++; proxyChecking = false; proxySilent = false; error = null }
+
+    internal fun proxyChoice(item: AppInfo) {
+        // The login stays with the app it was saved or typed for.
+        val (pkg, pin) = proxyApp?.let { it.pkg to it.identity?.current } ?: proxyRefill?.socks5.let { it?.packageName to it?.identity }
+        if (pkg != item.pkg || item.identity?.accepts(pin) != true) { user = ""; pass = "" }
+        proxyApp = item
+        proxyEdited()
+    }
+
+    fun clear() { ovpn = null; user = ""; pass = ""; link = null; socksOpen = false; proxyApp = null; proxyRefill = null; proxyTarget = null; proxyProfile = null; proxyChecking = false; proxySilent = false; port = ""; wg = null; name = ""; error = null; warning = null; generation++ }
 }
 
 /**

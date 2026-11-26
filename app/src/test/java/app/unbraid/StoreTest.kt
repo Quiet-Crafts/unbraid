@@ -1,5 +1,10 @@
 package app.unbraid
 
+import app.unbraid.data.AppIdentity
+import app.unbraid.data.BLOCK
+import app.unbraid.data.DIRECT
+import app.unbraid.data.InstallState
+import app.unbraid.data.checkedApps
 import app.unbraid.data.Filter
 import app.unbraid.data.Home
 import app.unbraid.data.Location
@@ -31,6 +36,210 @@ import javax.crypto.spec.GCMParameterSpec
 class StoreTest {
     @get:Rule val tmp = TemporaryFolder()
     private val key: SecretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+
+    private val installedSigner = AppIdentity("ab".repeat(32), emptySet())
+
+    private fun legacy(dir: File, setup: Setup): Store {
+        val file = File(dir, "setup.bin")
+        file.writeBytes(sealed(NordApi.json.encodeToString(Setup.serializer(), setup)))
+        assertTrue(file.setLastModified(100_000))
+        return Store(dir) { key }
+    }
+
+    @Test fun openingAnOldLocalGrantAuthorizesNothingByItself() {
+        val dir = tmp.newFolder()
+        File(dir, "setup.bin").writeBytes(sealed("""{"version":2,"apps":{"local.mail":"direct"}}"""))
+        val old = Store(dir) { key }
+        assertFalse(File(dir, "local-app-upgrade.done").exists())
+        assertEquals("direct", old.setup.value.apps["local.mail"])
+        assertTrue(old.setup.value.appSigners.isEmpty())
+    }
+
+    @Test fun installedLocalGrantsKeepTheirRoutesAcrossTheUpgrade() {
+        val dir = tmp.newFolder()
+        val original = Setup(version = 2, apps = mapOf("local.mail" to DIRECT, "local.blocked" to BLOCK,
+            "local.absent" to DIRECT, "local.unsigned" to "nl", "local.later" to "nl", "local.gone" to "missing"),
+            profiles = listOf(Profile("Work", "nl", mapOf("local.mail" to "nl", "local.work" to "nl"))),
+            prefs = Prefs(filter = Filter("adguard", apps = mapOf("local.mail" to false))))
+        val store = legacy(dir, original)
+        val looked = mutableListOf<String>()
+        store.bindLocalAppChoices({ 110_000 }) { pkg ->
+            looked += pkg
+            when (pkg) {
+                "local.absent" -> InstallState.Absent
+                "local.unsigned" -> InstallState.Present(70_000, null)
+                "local.later" -> InstallState.Present(105_000, installedSigner)
+                else -> InstallState.Present(70_000, installedSigner)
+            }
+        }
+        val saved = store.setup.value
+        assertEquals(listOf("local.absent", "local.later", "local.mail", "local.unsigned", "local.work"), looked.sorted())
+        assertEquals(mapOf("local.mail" to installedSigner.current), saved.appSigners)
+        assertEquals(setOf("local.mail", "local.work"), saved.profiles.single().appSigners.keys)
+        assertEquals(DIRECT, saved.checkedApps { installedSigner }.apps["local.mail"])
+        assertEquals("nl", saved.profiles.single().checkedApps { installedSigner }.apps["local.work"])
+        assertEquals(BLOCK, saved.checkedApps { AppIdentity("cd".repeat(32), emptySet()) }.apps["local.mail"])
+        assertEquals(original.prefs.filter, saved.prefs.filter)
+        val reopened = Store(dir) { key }
+        reopened.bindLocalAppChoices({ error("no second opportunity") }) { error("no signer read") }
+        assertEquals(saved, reopened.setup.value)
+        assertEquals(BLOCK, saved.checkedApps { installedSigner }.apps["local.absent"])
+    }
+
+    @Test fun anUpgradeCannotAdoptRestoredRowsOrKnownConflicts() {
+        val pkg = "local.mail"
+        val other = "local.other"
+        val old = Setup(version = 4, apps = mapOf(pkg to DIRECT, other to "nl"), waiting = setOf(pkg), waitingUntil = 50_000,
+            profiles = listOf(Profile("Work", "nl", mapOf(other to DIRECT), appSigners = mapOf(other to "cd".repeat(32)))))
+        val s = legacy(tmp.newFolder(), old)
+        s.bindLocalAppChoices({ 110_000 }) { assertEquals(other, it); InstallState.Present(40_000, installedSigner) }
+        assertTrue(s.setup.value.appSigners.isEmpty())
+        assertEquals(old.profiles.single().appSigners, s.setup.value.profiles.single().appSigners)
+        assertEquals(old.waiting, s.setup.value.waiting)
+        val restored = legacy(tmp.newFolder(), old.copy(waiting = emptySet()))
+        restored.bindLocalAppChoices({ 110_000 }) {
+            val expected = restored.setup.value
+            restored.restore(expected, expected.copy(defaultRoute = DIRECT)) { ok -> assertTrue(ok) }
+            InstallState.Present(40_000, installedSigner)
+        }
+        assertTrue(restored.setup.value.appSigners.isEmpty())
+        assertEquals(DIRECT, restored.setup.value.defaultRoute)
+        val clean = Store(tmp.newFolder()) { key }
+        clean.restore(clean.setup.value, old.copy(version = VERSION)) { ok -> assertTrue(ok) }
+        clean.bindLocalAppChoices({ error("fresh restore has no local legacy evidence") }) { error("no signer read") }
+        assertTrue(clean.setup.value.appSigners.isEmpty())
+    }
+
+    @Test fun anUpgradeInterruptedBeforeItsSaveRunsAgainAtTheNextStart() {
+        val dir = tmp.newFolder()
+        legacy(dir, Setup(version = 3, apps = mapOf("local.mail" to DIRECT))) // the process ends before any signer is read
+        val next = Store(dir) { key }
+        assertTrue(next.setup.value.appSigners.isEmpty())
+        next.bindLocalAppChoices({ 110_000 }) { InstallState.Present(40_000, installedSigner) }
+        assertEquals(mapOf("local.mail" to installedSigner.current), next.setup.value.appSigners)
+        assertEquals(next.setup.value, Store(dir) { key }.setup.value)
+    }
+
+    @Test fun anUnwritableUpgradeGrantsNothingAndIsTriedAgain() {
+        val dir = tmp.newFolder()
+        val s = legacy(dir, Setup(version = 3, apps = mapOf("local.mail" to DIRECT)))
+        val file = File(dir, "setup.bin")
+        val backup = file.readBytes()
+        s.bindLocalAppChoices({ 110_000 }) {
+            assertTrue(file.delete()); assertTrue(file.mkdir())
+            InstallState.Present(40_000, installedSigner)
+        }
+        assertTrue(s.setup.value.appSigners.isEmpty())
+        assertTrue(file.delete()); file.writeBytes(backup)
+        // In the same run, a user's edit in between is kept.
+        s.update { it.copy(defaultRoute = DIRECT) }
+        s.bindLocalAppChoices({ 110_000 }) { InstallState.Present(40_000, installedSigner) }
+        assertEquals(mapOf("local.mail" to installedSigner.current), s.setup.value.appSigners)
+        assertEquals(DIRECT, s.setup.value.defaultRoute)
+        assertEquals(s.setup.value, Store(dir) { key }.setup.value)
+    }
+
+    @Test fun anAppAndroidDoesNotAnswerForIsAskedAgainInTheSameLook() {
+        val dir = tmp.newFolder()
+        val s = legacy(dir, Setup(version = 4, apps = mapOf("local.mail" to DIRECT, "local.chat" to DIRECT, "local.gone" to DIRECT)))
+        val asked = mutableListOf<String>()
+        s.bindLocalAppChoices({ 110_000 }) { pkg ->
+            asked += pkg
+            when {
+                pkg == "local.gone" -> InstallState.Absent
+                pkg == "local.chat" && asked.count { it == pkg } < 3 -> InstallState.Unknown
+                else -> InstallState.Present(40_000, installedSigner)
+            }
+        }
+        assertEquals(setOf("local.mail", "local.chat"), s.setup.value.appSigners.keys)
+        assertEquals(1, asked.count { it == "local.gone" })
+        s.bindLocalAppChoices({ error("settled") }) { error("no second look") }
+        Store(dir) { key }.bindLocalAppChoices({ error("settled") }) { error("no second look") }
+    }
+
+    @Test fun aFailedSaveNeverLooksAtTheAppsTwice() {
+        val dir = tmp.newFolder()
+        val s = legacy(dir, Setup(version = 4, apps = mapOf("local.mail" to DIRECT, "local.later" to DIRECT)))
+        val file = File(dir, "setup.bin")
+        s.bindLocalAppChoices({ 110_000 }) {
+            file.delete(); file.mkdir()
+            if (it == "local.later") InstallState.Absent else InstallState.Present(40_000, installedSigner)
+        }
+        assertTrue(file.delete())
+        s.bindLocalAppChoices({ error("dates are known") }) { error("no second look") }
+        assertEquals(setOf("local.mail"), s.setup.value.appSigners.keys)
+    }
+
+    @Test fun aRetriedUpgradeKeepsTheFirstInstallationDateLimit() {
+        val dir = tmp.newFolder()
+        val s = legacy(dir, Setup(version = 4, apps = mapOf("local.mail" to DIRECT, "local.old" to DIRECT)))
+        val file = File(dir, "setup.bin")
+        val backup = file.readBytes()
+        fun state(pkg: String) = InstallState.Present(if (pkg == "local.old") 40_000 else 95_000, installedSigner)
+        s.bindLocalAppChoices({ 90_000 }) { if (file.isFile) { file.delete(); file.mkdir() }; state(it) } // the save fails, the process ends
+        assertTrue(file.delete()); file.writeBytes(backup); assertTrue(file.setLastModified(200_000))
+        val next = Store(dir) { key }
+        next.bindLocalAppChoices({ 300_000 }, ::state) // unbraid updated again, the old file's date moved
+        assertEquals(setOf("local.old"), next.setup.value.appSigners.keys)
+    }
+
+    @Test fun anUpgradeInterruptedInItsFirstLookStillKeepsThatLimit() {
+        val dir = tmp.newFolder()
+        val s = legacy(dir, Setup(version = 4, apps = mapOf("local.mail" to DIRECT)))
+        runCatching { s.bindLocalAppChoices({ 90_000 }) { error("the process ends") } }
+        val next = Store(dir) { key }
+        next.bindLocalAppChoices({ 300_000 }) { InstallState.Present(95_000, installedSigner) }
+        assertTrue(next.setup.value.appSigners.isEmpty())
+        Store(dir) { key }.bindLocalAppChoices({ error("settled") }) { error("no signer read") }
+    }
+
+    @Test fun anAcceptedRestoreEndsTheUpgradeEvenUnsaved() {
+        val dir = tmp.newFolder()
+        val s = legacy(dir, Setup(version = 4, apps = mapOf("local.mail" to DIRECT)))
+        val file = File(dir, "setup.bin")
+        val backup = file.readBytes()
+        assertTrue(file.delete()); assertTrue(file.mkdir())
+        val before = s.setup.value
+        assertFalse(s.restore(before, before.copy(apps = mapOf("local.mail" to BLOCK))) { assertTrue(it) })
+        assertTrue(file.delete()); file.writeBytes(backup); assertTrue(file.setLastModified(100_000))
+        val next = Store(dir) { key }
+        next.bindLocalAppChoices({ error("over") }) { error("no signer read") }
+        assertTrue(next.setup.value.appSigners.isEmpty())
+    }
+
+    @Test fun unreliableInstallAndUpdateDatesCannotAuthorizeAnUnsignedGrant() {
+        val old = Setup(version = 4, apps = mapOf("local.mail" to DIRECT))
+        for ((updated, first, observed) in listOf(Triple(null, 10L, 200_000L), Triple(80_000L, 85_000L, 200_000L),
+            Triple(Long.MAX_VALUE, 10L, 200_000L), Triple(80_000L, 10L, 70_000L), Triple(80_000L, null, 200_000L))) {
+            val s = legacy(tmp.newFolder(), old)
+            s.bindLocalAppChoices({ updated }) { InstallState.Present(first, installedSigner, observed) }
+            assertEquals(BLOCK, s.setup.value.checkedApps { installedSigner }.apps["local.mail"])
+        }
+        // Android reports milliseconds. A tie at either cutoff still identifies an installed copy for this upgrade.
+        for ((updated, first) in listOf(110_000L to 100_000L, 80_000L to 80_000L)) {
+            val s = legacy(tmp.newFolder(), old)
+            s.bindLocalAppChoices({ updated }) { InstallState.Present(first, installedSigner, 200_000L) }
+            assertEquals(DIRECT, s.setup.value.checkedApps { installedSigner }.apps["local.mail"])
+        }
+    }
+
+    @Test fun onlyAnAcceptedChangedRestorePublishesANewPolicyGeneration() {
+        val store = Store(tmp.newFolder()) { key }
+        val (initial, epoch) = store.policySnapshot()
+        assertTrue(store.update { it.copy(defaultRoute = "first") })
+        val edited = store.setup.value
+        assertEquals(edited to epoch, store.policySnapshot())
+        val other = edited.copy(defaultRoute = "restored")
+        assertFalse(store.restore(initial, other) { assertFalse(it) })
+        assertTrue(store.restore(edited, edited) { assertTrue(it) })
+        assertEquals(edited to epoch, store.policySnapshot())
+        assertTrue(store.restore(edited, other) { assertTrue(it) })
+        assertEquals(store.setup.value to epoch + 1, store.policySnapshot())
+        val back = store.setup.value
+        assertTrue(store.restore(back, edited) { assertTrue(it) })
+        assertEquals(edited to epoch + 2, store.policySnapshot())
+        assertEquals(epoch + 2, store.restores.value)
+    }
 
     @Test fun unreadableLinkCacheIsEmpty() {
         val dir = tmp.newFolder()
@@ -412,7 +621,7 @@ class StoreTest {
         assertEquals(expected, s.setup.value)
         assertTrue(s.update { it })
         val text = opened(File(dir, "setup.bin"))
-        for (k in listOf("\"provider\":\"nord\"", "\"defaultRoute\":\"nl\"", "\"lan\":true", "\"threatProtection\":true", "\"hue\":0", "\"stats\":false", "\"version\":2")) // without a website route it is saved as the format before them
+        for (k in listOf("\"provider\":\"nord\"", "\"defaultRoute\":\"nl\"", "\"lan\":true", "\"threatProtection\":true", "\"hue\":0", "\"stats\":false", "\"version\":5")) // the legacy app grant stays held on downgrade
             assertTrue(k, k in text)
         assertEquals(expected, Store(dir) { key }.setup.value)
 

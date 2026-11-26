@@ -258,6 +258,7 @@ class SitesTest {
 
     /** Saved as format 3 only with a website somewhere, so a setup without one still opens in a build from before them. */
     @Test fun onlyASetupWithWebsitesIsSavedInTheNewFormat() {
+        val setup = this.setup.copy(apps = emptyMap()) // isolate the older website format from signer-gated app choices
         assertEquals(3, setup.stamped.version)
         assertEquals(2, setup.copy(sites = emptyMap()).stamped.version)
         assertEquals(3, setup.copy(sites = emptyMap(), profiles = listOf(Profile("P", "nl", sites = mapOf("a.com" to "nl")))).stamped.version)
@@ -343,7 +344,7 @@ class SitesTest {
         assertEquals("example.com", appLabel(Stats.SITE + "example.com", null, null))
         assertEquals("2 apps and 1 website into 3 routes · Direct traffic not shown", flowsSub(listOf("a", "b", Stats.SITE + "example.com"), 3))
         assertEquals("1 app into 1 route · Direct traffic not shown", flowsSub(listOf("a"), 1))
-        assertEquals(2, setup.copy(sites = emptyMap()).stamped.version)
+        assertEquals(2, setup.copy(sites = emptyMap(), apps = emptyMap()).stamped.version)
         assertEquals("1 app · 2 websites", laneCount(listOf("a", Stats.SITE + "x.com", Stats.SITE + "y.com"))); assertEquals("1 website", laneCount(listOf(Stats.SITE + "x.com"))); assertEquals("0 apps", laneCount(emptyList()))
     }
 }

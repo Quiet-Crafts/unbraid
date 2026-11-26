@@ -149,7 +149,7 @@ private fun providerOf(id: String, ex: Ex?): String = when {
     id == DIRECT -> "Direct, no VPN" // apps following a Direct default, and Direct apps under lockdown
     id == Stats.HOME -> "Home network"
     ex == null || ex.via.isEmpty() -> "Other"
-    ex.via in setOf("WireGuard", "OpenVPN", "Shadowsocks") -> "Own servers"
+    ex.via in setOf("WireGuard", "OpenVPN", "Shadowsocks", "SOCKS5") -> "Own servers"
     else -> app.unbraid.data.Providers.all.firstOrNull { app.unbraid.data.Providers.short(it.id) == ex.via }?.name ?: ex.via
 }
 

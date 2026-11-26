@@ -18,7 +18,7 @@ abstract class KeyProvider : Provider {
         val port: Int,
         val mtu: Int,
         val presharedKey: String? = null,
-        /** The [Peer] key of a pasted .conf; only meaningful for providers whose servers all share one key. */
+        /** The [Peer] key of a pasted .conf; authenticates the server named by that config. */
         val publicKey: String? = null,
         /** Settings the provider wrote into a pasted .conf as comments ([configFacts]); null when only a key was pasted. */
         val facts: Map<String, String>? = null,
@@ -35,6 +35,9 @@ abstract class KeyProvider : Provider {
         val keyAt: Long = 0,
         /** When a new key was asked for (ms), until it is saved: the provider may already have dropped the old one. 0 = none. */
         val renewing: Long = 0,
+        /** Proton config identity. Older full configs kept the peer key but omitted its endpoint and label. */
+        val configIp: String? = null,
+        val configName: String? = null,
     )
 
     /** Comment lines ("# NetShield = 0") a provider writes into its configs that say how the key was made, to show them. */
@@ -82,7 +85,7 @@ abstract class KeyProvider : Provider {
 
     override fun signIn(input: Map<String, String>): String {
         val text = input["key"].orEmpty().trim()
-        val a = if ('[' in text) fromConf(text) else fromKey(text.filterNot(Char::isWhitespace))
+        val a = if ('[' in text) fromConf(text, WgConf.parse(text, name)) else fromKey(text.filterNot(Char::isWhitespace))
         return NordApi.json.encodeToString(Account.serializer(), a)
     }
 
@@ -92,8 +95,7 @@ abstract class KeyProvider : Provider {
         return Account(key, address, defaultDns, defaultPort, defaultMtu)
     }
 
-    private fun fromConf(text: String): Account {
-        val p = WgConf.parse(text, name)
+    protected open fun fromConf(text: String, p: WgPeer): Account {
         require(!presharedRequired || p.presharedKey != null) { "That $name config has no PresharedKey line" }
         return Account(
             privateKey = p.privateKey,
@@ -137,7 +139,7 @@ abstract class KeyProvider : Provider {
         return Catalog.server(live, p.name) to live
     }
 
-    internal fun link(loc: Location, a: Account, entries: () -> List<Catalog.Entry>): WgLink {
+    internal open fun link(loc: Location, a: Account, entries: () -> List<Catalog.Entry>): WgLink {
         val (sv, e) = loc.pinned?.let { refreshed(it, loc, a, entries) } ?: usable(entries(), loc).firstOrNull()?.let { Catalog.server(it) to it }
             ?: throw IOException("No $name server for ${loc.label}")
         Addr.usable(sv)

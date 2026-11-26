@@ -20,6 +20,114 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+/** Android verifies the rotation lineage for a single signer. Multiple signers identify the app as one exact set. */
+internal data class AppIdentity(val current: String, val ancestors: Set<String>) {
+    fun accepts(pin: String?) = !pin.isNullOrEmpty() &&
+        (pin == current || ',' !in current && ',' !in pin && pin in ancestors)
+
+    companion object {
+        fun read(pm: android.content.pm.PackageManager, pkg: String): AppIdentity? = runCatching {
+            from(pm.getPackageInfo(pkg, android.content.pm.PackageManager.PackageInfoFlags.of(
+                android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES.toLong())))
+        }.getOrNull()
+
+        fun from(info: android.content.pm.PackageInfo): AppIdentity? {
+            val signing = info.signingInfo ?: return null
+            fun digest(cert: android.content.pm.Signature) = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(cert.toByteArray()).toHexString()
+            val current = signing.apkContentsSigners.orEmpty().map(::digest).distinct().sorted()
+            if (current.isEmpty()) return null
+            val history = if (current.size == 1 && !signing.hasMultipleSigners())
+                signing.signingCertificateHistory.orEmpty().mapTo(HashSet(), ::digest) else emptySet()
+            return AppIdentity(current.joinToString(","), history)
+        }
+    }
+}
+
+/** Evidence for a restored app. Missing, unreadable, and an installed app of unknown age are different. */
+internal sealed interface InstallState {
+    data class Present(val firstInstallTime: Long?, val identity: AppIdentity? = null, val observedAt: Long? = null) : InstallState
+    data object Absent : InstallState
+    data object Unknown : InstallState
+
+    companion object {
+        fun read(pm: android.content.pm.PackageManager, pkg: String, includeArchived: Boolean = false): InstallState {
+            val flags = android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES.toLong() or
+                if (includeArchived && android.os.Build.VERSION.SDK_INT >= 35) android.content.pm.PackageManager.MATCH_ARCHIVED_PACKAGES else 0L
+            return try {
+                val info = pm.getPackageInfo(pkg, android.content.pm.PackageManager.PackageInfoFlags.of(flags))
+                val app = info.applicationInfo ?: return Unknown
+                val archived = android.os.Build.VERSION.SDK_INT >= 35 && app.isArchived
+                if (archived && !includeArchived || !archived && app.flags and android.content.pm.ApplicationInfo.FLAG_INSTALLED == 0) Absent
+                else Present(info.firstInstallTime.takeIf { it > 0 }, runCatching { AppIdentity.from(info) }.getOrNull(), System.currentTimeMillis())
+            } catch (_: android.content.pm.PackageManager.NameNotFoundException) { Absent }
+            catch (_: RuntimeException) { Unknown }
+        }
+    }
+}
+
+/** Only app rules in the current profile run. Retain the user's original choice separately for reauthorization. */
+internal fun Setup.checkedApps(identity: (String) -> AppIdentity?): Setup {
+    val checked = live.checkedApps(identity)
+    return copy(apps = checked.apps, appSigners = checked.appSigners)
+}
+
+internal fun Profile.checkedApps(identity: (String) -> AppIdentity?): Profile {
+    val pins = appSigners.toMutableMap()
+    val checked = apps.mapValues { (pkg, route) ->
+        val verified = if (route == BLOCK) null else appSigners[pkg]?.let { pin -> identity(pkg)?.takeIf { it.accepts(pin) } }
+        if (verified == null) BLOCK else { pins[pkg] = verified.current; route }
+    }
+    return copy(apps = checked, appSigners = pins)
+}
+
+internal fun Setup.permitsApp(pkg: String, identity: (String) -> AppIdentity?): Boolean =
+    appSigners[pkg]?.let { identity(pkg)?.accepts(it) } == true
+
+/** Advance a verified signing lineage so reinstalling its previous key cannot recover a grant. Never adopt an unsigned choice. */
+internal fun Setup.advancedAppSigners(identity: (String) -> AppIdentity?): Setup {
+    val seen = HashMap<String, AppIdentity?>()
+    fun advance(pins: Map<String, String>) = pins.mapValues { (pkg, pin) ->
+        if (pkg !in seen) seen[pkg] = identity(pkg)
+        seen[pkg]?.takeIf { it.accepts(pin) }?.current ?: pin
+    }
+    return copy(appSigners = advance(appSigners), profiles = profiles.map { it.copy(appSigners = advance(it.appSigners)) })
+}
+
+/** The private setup as written by an older installation, before app choices could carry signer pins. */
+private class LocalAppChoices(val setup: Setup, val savedAt: Long) {
+    var started = false
+    var identities: Map<String, AppIdentity>? = null // what the one look at the apps found, for a write to try again
+    private val routeIds = setup.routes.mapTo(HashSet()) { it.id }
+    private fun eligible(p: Profile, pkg: String, route: String) =
+        pkg !in p.appSigners && setup.deadline(p, pkg) == null && (route == DIRECT || route in routeIds)
+
+    val packages = (setup.profiles + setup.live).flatMapTo(mutableSetOf()) { p ->
+        p.apps.filter { (pkg, route) -> eligible(p, pkg, route) }.keys
+    }
+
+    fun bind(current: Setup, identities: Map<String, AppIdentity>): Setup {
+        val saved = setup.profiles.associateBy { it.name }
+        val currentRoutes = current.routes.mapTo(HashSet()) { it.id }
+        // A pin already known in another profile, including a previously edited one, is also evidence of identity.
+        val incompatible = (setup.profiles + setup.live + current.profiles + current.live).flatMapTo(mutableSetOf()) { p ->
+            p.appSigners.filter { (pkg, pin) -> identities[pkg]?.accepts(pin) == false }.keys
+        }
+        fun bind(p: Profile, original: Profile?): Profile {
+            if (original == null) return p
+            val pins = p.apps.mapNotNull { (pkg, route) ->
+                val identity = identities[pkg] ?: return@mapNotNull null
+                if (pkg in incompatible || pkg in p.appSigners || current.deadline(p, pkg) != null ||
+                    original.apps[pkg] != route || !eligible(original, pkg, route) ||
+                    route != DIRECT && route !in currentRoutes) null else pkg to identity.current
+            }
+            return if (pins.isEmpty()) p else p.copy(appSigners = p.appSigners + pins)
+        }
+        val live = bind(current.live, if (current.profile == setup.profile) setup.live else saved[current.profile])
+        return current.copy(appSigners = live.appSigners, profiles = current.profiles.map { bind(it, saved[it.name]) })
+    }
+}
+
 /**
  * A provider account signed out of whose device slot isn't released yet ([Store.signOut]). [blob] holds its keys: sealed.
  * [since] is when it was signed out (0: not known, counted from the first failed try), [tries] the failed tries so far,
@@ -104,20 +212,152 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
         private set
 
     // Sealed: it can hold imported WireGuard private keys and a Tailscale auth key.
+    @Volatile private var localChoices: LocalAppChoices? = null
     private val _setup = MutableStateFlow(readSetup() ?: newSetup())
     val setup: StateFlow<Setup> = _setup.asStateFlow()
     private fun readSetup(): Setup? {
         newer = false
-        return marked(SETUP) { explicit.decodeFromString(Setup.serializer(), it).also { s -> newer = s.version > VERSION; check(!newer) { "newer format" } }.migrated() }
+        val local = marked(SETUP) { explicit.decodeFromString(Setup.serializer(), it).also { s -> newer = s.version > VERSION; check(!newer) { "newer format" } } }
+        val setup = local?.migrated()
+        val claimed = File(dir, LOCAL_APP_UPGRADE)
+        if (local != null && local.version in 0..4 && setup != null && !claimed.exists()) {
+            val choices = LocalAppChoices(setup, File(dir, SETUP).lastModified())
+            if (choices.packages.isNotEmpty()) localChoices = choices
+        }
+        return setup
+    }
+
+    /**
+     * The old installation recorded package names only. Bind the signer observed now, provided Android's
+     * installation date is no later than either the original file's save or the APK update. Run off the main thread.
+     * The apps are looked at once. That date is on disk first, so a start after an interruption can't use a later one.
+     * False while the dates or the disk have to be tried again: the old file is still as it was.
+     */
+    internal fun bindLocalAppChoices(updatedAt: () -> Long?, installed: (String) -> InstallState): Boolean {
+        val local = synchronized(changing) {
+            if (_unreadable.value) return false
+            (localChoices ?: return true).takeUnless { it.started }?.also { it.started = true }
+        } ?: return false
+        var done = false
+        try {
+            val identities = local.identities ?: run {
+                val updated = updatedAt() ?: return false
+                val now = System.currentTimeMillis()
+                if (updated !in 1..now || local.savedAt !in 1..now) return false
+                val begun = File(dir, LOCAL_APP_BEGUN)
+                val first = if (begun.exists()) runCatching { begun.readText().toLong() }.getOrDefault(0) else Long.MAX_VALUE
+                val cutoff = minOf(first, local.savedAt, updated)
+                if (cutoff != first && !safely { durable(LOCAL_APP_BEGUN, "$cutoff".toByteArray()) }) return false
+                val last = maxOf(local.savedAt, updated)
+                local.packages.mapNotNull { pkg ->
+                    if (localChoices !== local) return true
+                    var app = installed(pkg)
+                    repeat(2) { if (app == InstallState.Unknown) { Thread.sleep(250); app = installed(pkg) } }
+                    (app as? InstallState.Present)
+                        ?.takeIf { it.firstInstallTime in 1L..cutoff && last <= (it.observedAt ?: System.currentTimeMillis()) }
+                        ?.identity?.let { pkg to it }
+                }.toMap().also { local.identities = it }
+            }
+            done = saveLocalAppBindings(local, identities)
+        } finally {
+            val settled = synchronized(changing) {
+                local.started = false
+                (done && localChoices === local).also { if (it) localChoices = null }
+            }
+            if (settled) settleLocalAppChoices()
+        }
+        return done
+    }
+
+    /** No later start migrates the old choices again. */
+    private fun settleLocalAppChoices() = safely {
+        val done = File(dir, LOCAL_APP_UPGRADE)
+        File(dir, LOCAL_APP_BEGUN).renameTo(done) || durable(LOCAL_APP_UPGRADE, byteArrayOf(1))
+    }
+
+    /** Prepare on the worker. Only the rename and publication hold the edit lock; an edit during preparation wins. False when not written. */
+    private fun saveLocalAppBindings(local: LocalAppChoices, identities: Map<String, AppIdentity>): Boolean {
+        while (localChoices === local && !unreadable.value) {
+            val before = setup.value
+            val next = local.bind(before, identities)
+            if (next == before) return true
+            var changed = false
+            val saved = safely {
+                val bytes = encrypted(explicit.encodeToString(Setup.serializer(), next.stamped))
+                val tmp = File.createTempFile("setup-upgrade-", ".tmp", dir)
+                try {
+                    FileOutputStream(tmp).use { it.write(bytes); it.fd.sync() }
+                    synchronized(this) { synchronized(changing) {
+                        changed = _setup.value !== before
+                        if (changed || _unreadable.value || localChoices !== local || !tmp.renameTo(File(dir, SETUP))) false
+                        else { _setup.value = next; true }
+                    } }
+                } finally { tmp.delete() }
+            }
+            if (!changed) return saved
+        }
+        return false
+    }
+
+    /** Settle proven restored choices across all profiles. Re-evaluate if another edit won the race. */
+    internal fun refreshWaiting(now: Long, installed: (String) -> InstallState) {
+        while (!unreadable.value) {
+            val before = setup.value
+            if (before.waiting.isEmpty()) return
+            val after = before.resolveWaiting(now, installed)
+            if (before == after) return
+            // A package query can block. Never do it under the store lock; only apply the snapshot it observed.
+            var unchanged = false
+            update { current ->
+                unchanged = current === before
+                if (unchanged) after else current
+            }
+            if (unchanged) return
+        }
+    }
+
+    /** Called off the main thread on start, package events and app-list refresh. Persist only a proven rotation. */
+    internal fun refreshAppSigners(identity: (String) -> AppIdentity?) {
+        val before = setup.value
+        val after = before.advancedAppSigners(identity)
+        if (before != after) update { current ->
+            if (current === before) after else current.advancedAppSigners(identity)
+        } else synchronized(this) {
+            if (setupFailed && !unreadable.value) saveSetup()
+        }
     }
 
     /** Applies [f]; false when it couldn't be written (see [unsaved]), so callers keep a pasted secret on the clipboard. */
     @Synchronized
     fun update(f: (Setup) -> Setup): Boolean = change(f) && saveSetup()
 
-    /** As [update]; [taken] hears whether [f]'s setup was taken or the store kept the old one ([reserve]). */
+    private val publishingRestore = Any()
+    private val _restores = MutableStateFlow(0L)
+    internal val restores = _restores.asStateFlow()
+    internal val restoreGeneration get() = restores.value
+
+    /** A service start uses the setup and the restore generation published together. */
+    internal fun policySnapshot(): Pair<Setup, Long> = synchronized(publishingRestore) { _setup.value to restoreGeneration }
+
+    /** Replace exactly the reviewed setup. Report acceptance separately from writing it to disk. */
     @Synchronized
-    fun update(taken: (Boolean) -> Unit, f: (Setup) -> Setup): Boolean = change(f, taken) && saveSetup()
+    internal fun restore(expected: Setup, target: Setup, taken: (Boolean) -> Unit): Boolean {
+        var migrating = false
+        val accepted = synchronized(changing) {
+            if (_unreadable.value || _setup.value !== expected) return@synchronized false
+            val next = acceptedSetup(expected, target) ?: return@synchronized false
+            if (next != expected) synchronized(publishingRestore) {
+                _restores.value++
+                _setup.value = next
+            }
+            migrating = localChoices != null
+            localChoices = null // an accepted backup supplies its own authority, even if its contents are identical
+            true
+        }
+        if (migrating) settleLocalAppChoices() // also if the save below fails
+        taken(accepted)
+        return accepted && saveSetup()
+    }
 
     /**
      * Applies [f] at once and writes it on [writer], so a tap never waits for the Keystore and the disk. Each write
@@ -139,15 +379,17 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     // Wherever a route is removed, what used it is mended here: only the routes this change removed, so a setup read with a
     // missing route keeps naming it (the screens say so; the engine refuses or blocks it).
     // False while [unreadable]: nothing changes then. A change that makes a [reserve]d route a default is dropped.
-    private fun change(f: (Setup) -> Setup, taken: (Boolean) -> Unit = {}) = synchronized(changing) {
+    private fun change(f: (Setup) -> Setup) = synchronized(changing) {
         if (_unreadable.value) false else {
-            _setup.update { old ->
-                f(old).let { new -> new.tidy(old.routes.map { it.id }.toSet() - new.routes.map { it.id }.toSet()).after(old) }
-                    .takeIf { new -> reserved.none { g -> new.refusesRemoving(g(new), "") != null } }.also { taken(it != null) } ?: old
-            }
+            _setup.update { old -> acceptedSetup(old, f(old)) ?: old }
             true
         }
     }
+
+    /** Apply the same route cleanup, signer cleanup and reservations to an edit or restore. Caller holds [changing]. */
+    private fun acceptedSetup(old: Setup, new: Setup): Setup? =
+        new.tidy(old.routes.map { it.id }.toSet() - new.routes.map { it.id }.toSet()).after(old).tidyAppSigners()
+            .takeIf { next -> next.supportsSocks5Assignments() && reserved.none { g -> next.refusesRemoving(g(next), "") != null } }
 
     /** Routes about to be removed, each set as [reserve] named it: no change makes one of them a default meanwhile. */
     private val reserved = java.util.concurrent.CopyOnWriteArrayList<(Setup) -> Set<String>>()
@@ -341,6 +583,7 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
         runCatching(dropKey).onFailure { Log.w("Unbraid", "store: old key not deleted") }
         synchronized(keyLock) { cachedKey = null }
         // Memory as a new install whatever comes next, so nothing read before the reset comes back with a later reopen.
+        localChoices = null
         _setup.value = newSetup(); _accounts.value = emptyMap(); failed(false, false, false); asideTried = false; newer = false
         // No key that works: the screen stays, and the next try asks the Keystore again.
         if (!sealWorks()) { synchronized(keyLock) { cachedKey = null }; return false }
@@ -509,8 +752,12 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     private fun seal(name: String, value: String?): Boolean {
         if (_unreadable.value && (name == SETUP || name == ACCOUNTS)) return false
         if (value == null) return File(dir, name).delete()
+        return durable(name, encrypted(value))
+    }
+
+    private fun encrypted(value: String): ByteArray {
         val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key) }
-        return durable(name, c.iv + c.doFinal(value.toByteArray()))
+        return c.iv + c.doFinal(value.toByteArray())
     }
 
     /** True when the key seals a value and opens it again. */
@@ -531,6 +778,8 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
     private companion object {
         const val ALIAS = "unbraid"
         const val SETUP = "setup.bin"
+        const val LOCAL_APP_UPGRADE = "local-app-upgrade.done"
+        const val LOCAL_APP_BEGUN = "local-app-upgrade.begun"
         const val ACCOUNTS = "accounts.bin"
         const val RELEASES = "releases.bin"
         const val RELEASES_BAD = "releases.bin.bad"

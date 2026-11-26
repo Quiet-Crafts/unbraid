@@ -30,9 +30,8 @@ object AutoSwitch {
     const val SETTLE_MS = 5_000L
 
     /**
-     * A network the phone is on: its [kind] ([app.unbraid.data.WIFI] or [app.unbraid.data.MOBILE]; null until Android
-     * reports it) and [id], Android's handle for this one connection to it. Joining another network, or the same one
-     * again, gives a new [id].
+     * [id] is Android's handle for this connection. Joining another network, or rejoining the same one, gives a new [id].
+     * [kind] is [app.unbraid.data.WIFI] or [app.unbraid.data.MOBILE] for a matching transport, otherwise null.
      */
     data class Net(val kind: String?, val id: Long)
 
@@ -87,7 +86,7 @@ object AutoSwitch {
      * - The network now (kind and id) is [State.here], set only by the network monitor, in the step that moves the
      *   monitor (and with it the engine and the health checks) to it ([Event.Seen]), or at once when Android says it is
      *   lost ([Event.Lost]; the engine alone waits a moment for it to come back). [net] is published from it.
-     * - A network whose kind isn't reported yet is a state of its own: picks made on it hold, and no rule applies to it.
+     * - A connected network without a recognised kind is a state of its own: picks made on it hold, and no rule applies to it.
      * - Every input is an [Event], applied one at a time by [step] ([Run] holds the lock).
      * - A decision is made only once a network lasted [SETTLE_MS] ([Event.Settled]) and is [State.pending] until saved.
      *   It is void as soon as the phone leaves that network (even to come back to it), a pick or the VPN going off comes,
@@ -189,7 +188,7 @@ object AutoSwitch {
             val kind = here?.kind
             val rule = kind?.let { e.rules[it] }
             when {
-                // Settled on a network already left (or left and joined again since), or whose kind isn't known yet.
+                // Settled on a network already left (or left and joined again since), or with no recognised kind.
                 !s.watched || here != e.net || e.stay != s.stay || kind == null -> Out(s)
                 // Acted on already, or a pick holds: only a new rule for this network applies over it.
                 s.acted?.let { it.first == here.id && it.second[kind] == rule } == true -> Out(s)

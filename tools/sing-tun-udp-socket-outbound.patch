@@ -1,0 +1,84 @@
+diff --git a/flow.go b/flow.go
+index bdd86c2..c4f6426 100644
+--- a/flow.go
++++ b/flow.go
+@@ -7,6 +7,8 @@ import (
+ )
+ 
+ type FlowVerdict struct {
++	// UDPSocketTag distinguishes unmodified routes when a socket can serve multiple peers.
++	UDPSocketTag string
+ 	// Transient failures apply to the current packet only.
+ 	Transient        bool
+ 	DestinationBound bool
+@@ -19,6 +21,14 @@ type FlowVerdict struct {
+ 	NewTracker   func() FlowTracker
+ }
+ 
++type udpSocketTagKey struct{}
++
++// UDPSocketTag is the outbound selected for this shared UDP socket at admission.
++func UDPSocketTag(ctx context.Context) string {
++	tag, _ := ctx.Value(udpSocketTagKey{}).(string)
++	return tag
++}
++
+ type FlowAction uint8
+ 
+ const (
+diff --git a/stack_gvisor_udp.go b/stack_gvisor_udp.go
+index 807221b..07e341b 100644
+--- a/stack_gvisor_udp.go
++++ b/stack_gvisor_udp.go
+@@ -92,8 +92,11 @@ type udpFlowPacket struct {
+ 	generation context.Context
+ }
+ 
+-func (p *udpFlowPacket) bindUDPDestination() bool {
+-	return p.verdict.DestinationBound || p.verdict.RouteContext != nil
++func (p *udpFlowPacket) udpSessionPolicy() (string, bool) {
++	if p.verdict.DestinationBound || p.verdict.RouteContext != nil {
++		return "", true
++	}
++	return p.verdict.UDPSocketTag, false
+ }
+ 
+ func udpPayload(packet *stack.PacketBuffer) []byte {
+@@ -118,6 +121,9 @@ func (f *UDPForwarder) PreparePacketConnection(source M.Socksaddr, destination M
+ 			return false, nil, nil, nil
+ 		}
+ 		ctx, writer.lease = newFlowHandshakeLease(ctx, admitted.generation)
++		if tag, bound := admitted.udpSessionPolicy(); !bound && tag != "" {
++			ctx = context.WithValue(ctx, udpSocketTagKey{}, tag)
++		}
+ 		if bind := admitted.verdict.RouteContext; bind != nil {
+ 			ctx = bind(ctx)
+ 		}
+diff --git a/udp_nat.go b/udp_nat.go
+index d15201a..7c49656 100644
+--- a/udp_nat.go
++++ b/udp_nat.go
+@@ -57,6 +57,7 @@ type UDPNatOptions struct {
+ }
+ 
+ type udpNatSessionKey struct {
++	outboundTag      string
+ 	destinationBound bool
+ 	sourceAddr       netip.Addr
+ 	destinationAddr  netip.Addr
+@@ -365,8 +366,13 @@ func (s *UDPNat) getOrCreateConn(source M.Socksaddr, destination M.Socksaddr, us
+ 	if s.state.Load() != udpNatStateStarted {
+ 		return nil, false
+ 	}
+-	scope, scoped := userData.(interface{ bindUDPDestination() bool })
+-	key := s.sessionKey(source, destination, scoped && scope.bindUDPDestination())
++	var tag string
++	var bound bool
++	if policy, ok := userData.(interface{ udpSessionPolicy() (string, bool) }); ok {
++		tag, bound = policy.udpSessionPolicy()
++	}
++	key := s.sessionKey(source, destination, bound)
++	key.outboundTag = tag
+ 	var (
+ 		newContext context.Context
+ 		newOnClose N.CloseHandlerFunc

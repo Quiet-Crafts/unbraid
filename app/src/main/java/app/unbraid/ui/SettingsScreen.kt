@@ -228,6 +228,9 @@ fun settingsHub() { path = emptyList() }
 /** The next time Settings opens, it opens on Providers & servers (own servers, Tailscale). */
 fun settingsProviders() { path = listOf("providers") }
 
+/** The next time Settings opens, it opens on proxy server [id]'s page. */
+fun settingsProxy(id: String) { path = listOf("providers", "proxy:$id") }
+
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefault: () -> Unit) {
@@ -301,6 +304,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
     val filter = prefs.filter
     val filterDns = filter.server()
     // unbraid's filter on VPN routes replaces each provider's own blocking: those switches show off, their choice kept.
+    val silentProxies by rememberSilentProxies(ui, setup.servers.filter { page == "providers" || page == "proxy:${it.id}" })
     val customDns = filterDns != null && filter.routes
     val setFilter = { f: (app.unbraid.data.Filter) -> app.unbraid.data.Filter -> ui.setPrefs { it.copy(filter = f(it.filter)) } }
     // The open provider page's settings and device slot: some come from the provider's server list, so read off the main thread.
@@ -388,18 +392,54 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                     )
                     Item(pr.name, words + if (n > 0) " · used by $n ${if (n == 1) "route" else "routes"}" else "", { go("provider:${pr.id}") }) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(10.dp).clip(androidx.compose.foundation.shape.CircleShape).background(when (tone) { Tone.Good -> Ink.good; Tone.Warn -> Ink.accent; Tone.Bad -> Ink.bad; Tone.Idle -> Ink.faint }))
+                            ToneDot(tone)
                             Gap(8.dp); Chevron()
                         }
                     }
                 }.ifEmpty { listOf(Item("No provider yet", "Sign in to one with Add connection", null)) })
-                if (setup.servers.isNotEmpty()) group("Own servers", setup.servers.map { sv ->
+                val (proxies, own) = setup.servers.partition { it.socks5 != null }
+                if (proxies.isNotEmpty()) group("Proxy servers", proxies.map { sv ->
+                    val n = setup.routes.count { it.own == sv.id }
+                    val (tone, words) = proxyStatus(setup, sv, vpn, sv.id in silentProxies)
+                    Item(sv.name, words + if (n > 0) " · used by $n ${if (n == 1) "route" else "routes"}" else "", { go("proxy:${sv.id}") }) {
+                        Row(verticalAlignment = Alignment.CenterVertically) { ToneDot(tone); Gap(8.dp); Chevron() }
+                    }
+                })
+                if (own.isNotEmpty()) group("Own servers", own.map { sv ->
                     val n = setup.routes.count { it.own == sv.id }
                     Item(sv.name, if (sv.keyless) "${sv.kind} · needs its config again" else "${sv.kind} · ${if (n == 0) "not used" else "used by $n ${if (n == 1) "route" else "routes"}"}", { dialog = "server:${sv.id}" }) { Chevron() }
                 })
                 item { Box(Modifier.padding(horizontal = Gutter, vertical = 16.dp)) { Tonal("Add connection", Icons.add) { importer.error = null; dialog = "add" } } }
                 importer.error?.let { e -> item { Text(e, style = Type.caption, color = Ink.bad, modifier = Modifier.padding(start = 24.dp, end = Gutter)) } }
-                caption("A provider sign-in, a WireGuard or OpenVPN file, or a Shadowsocks link. Tailscale exit nodes are under Tailscale.")
+                caption("A provider sign-in, a proxy server, a WireGuard or OpenVPN file, or a Shadowsocks link. Tailscale exit nodes are under Tailscale.")
+            }
+
+            p.startsWith("proxy:") -> {
+                val sv = setup.servers.firstOrNull { it.id == p.removePrefix("proxy:") }
+                val px = sv?.socks5
+                if (sv == null || px == null) { LaunchedEffect(Unit) { back() }; return@AnimatedContent }
+                val (tone, words) = proxyStatus(setup, sv, vpn, sv.id in silentProxies)
+                val confirm = sv.keyless || px.needsConfirmation
+                val outside = setup.outside(px.packageName)
+                val edit = { ui.openProxy(null, sv.id) }
+                val app = ui.apps.collectAsStateWithLifecycle().value.firstOrNull { it.pkg == px.packageName }?.label ?: px.packageName
+                Page(sv.name, back, over = "Providers & servers") {
+                    notice(ui, notice)
+                    group(null, listOfNotNull(
+                        Item("Status", words, edit.takeIf { confirm }, icon = Icons.info) { ToneDot(tone) },
+                        Item("Proxy app", "$app · " + if (outside) "set to Direct" else "needs Direct, tap to set it", { dialog = "direct:${sv.id}" }.takeUnless { outside }, icon = Icons.apps) { if (!outside) Chevron() },
+                        Item("App, port and login", if (confirm) "Confirm them on this phone" else "${px.port} · ${if (px.username.isEmpty()) "no login" else "with a login"}", edit, icon = Icons.vpnKey) { Chevron() },
+                    ))
+                    group("Options", listOf(Item("Calls and video (UDP)", if (confirm) "Confirm the proxy app first" else if (px.allowUdp) "On · other apps on this phone could interfere" else "Off · websites and messages still work",
+                        { if (px.allowUdp) ui.setProxyUdp(sv, false) else dialog = "udp:${sv.id}" }.takeUnless { confirm }, checked = px.allowUdp, icon = Icons.phone) { Toggle(px.allowUdp, enabled = !confirm) }))
+                    val routes = setup.routes.filter { it.own == sv.id }
+                    if (routes.isEmpty()) caption("Not used yet. In Routes, add a route and choose it under Own servers.")
+                    else group("Used by", routes.map { r -> val n = setup.apps.count { it.value == r.id }; Item(r.name, listOfNotNull("Default route".takeIf { r.id == setup.defaultRoute }, "$n ${if (n == 1) "app" else "apps"}".takeIf { n > 0 || r.id != setup.defaultRoute }).joinToString(" · ")) })
+                    group(null, listOf(
+                        Item("Rename", null, { dialog = "rename:${sv.id}" }, icon = Icons.edit) { Chevron() },
+                        Item("Remove proxy server", "Its routes go too", { dialog = "remove:${sv.id}" }, danger = true),
+                    ))
+                }
             }
 
             p.startsWith("provider:") -> {
@@ -528,7 +568,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                             Text("LEAK-PROOF", style = Type.overline, color = Ink.dim, modifier = Modifier.weight(1f))
                             Text(if (!running) "CONNECT TO CHECK" else "$done OF 2", style = Type.code, color = if (!running) Ink.dim else if (done == 2) Ink.good else Ink.accent)
                         }
-                        Text("Two switches in Android keep apps offline whenever $APP isn't running. Android decides both; $APP can only open its page.", style = Type.body.copy(fontWeight = FontWeight.Normal), color = Ink.text)
+                        Text("Two switches in Android keep apps offline whenever $APP isn't running. Android decides both; $APP can only open its page." + if (setup.usesProxy) " A proxy server can't be used with the second one." else "", style = Type.body.copy(fontWeight = FontWeight.Normal), color = Ink.text)
                         FlagRow(Icons.power, "Always-on VPN", "Starts $APP when the phone starts", vpn.alwaysOn.takeIf { running })
                         FlagRow(Icons.block, "Block connections without VPN", "Apps can't go online without $APP", vpn.lockdown.takeIf { running })
                         Primary("Open Android VPN settings", vpnSettings)
@@ -713,9 +753,10 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 Text("Add connection", style = Type.title, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
                 val opts = listOf(
                     Triple("Sign in to a provider", Providers.all.filter { it.id !in accounts }.take(4).joinToString(", ") { it.name } + " and more") { dialog = null; addProvider() },
+                    Triple("Proxy server", "SOCKS5, from a proxy app on this phone") { dialog = null; ui.openProxy(null) },
                     Triple("WireGuard or OpenVPN file", ".conf or .ovpn, from any provider or your own server") { dialog = null; importer.file("any") },
                     Triple("Shadowsocks link", "Paste an ss:// access key") { dialog = null; importer.shadowsocks() },
-                    Triple("Provider without an app here?", Providers.imports.joinToString(", ") { it.name } + ": download, then import") { dialog = "guides" },
+                                        Triple("Provider without an app here?", Providers.imports.joinToString(", ") { it.name } + ": download, then import") { dialog = "guides" },
                 )
                 opts.forEachIndexed { i, (t, sub, go) -> GroupRow(i, opts.size, t, sub, onClick = go, trailing = { Chevron() }) }
             }
@@ -799,6 +840,26 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                         }
                     }
                 }
+                d.startsWith("rename:") -> setup.servers.firstOrNull { it.id == arg }?.let { s ->
+                    var name by rememberSaveable(s.id) { mutableStateOf(s.name) }
+                    Prompt("Rename", "Save", { ui.renameServer(s.id, name); dialog = null }, { dialog = null }, enabled = name.isNotBlank()) { DialogField(name, { name = it.take(40) }, "Name") }
+                }
+                d.startsWith("direct:") -> setup.servers.firstOrNull { it.id == arg }?.let { s ->
+                    val direct = remember(setup, s) { ui.proxyDirect(s) }
+                    val grant = direct is ProxyDirect.Grant
+                    Prompt("Proxy app on Direct", if (grant) "Set to Direct" else "OK", { dialog = null; ui.setProxyDirect(s, direct) }, { dialog = null }) {
+                        Text(directText(setup, s.socks5?.packageName.orEmpty(), s.name, direct), style = Type.sub)
+                    }
+                }
+                d.startsWith("udp:") -> {
+                    // What is shown is what is allowed: a server changed while this is open stays off.
+                    val shown = remember { setup.servers.firstOrNull { it.id == arg } }
+                    if (shown != null) InfoSheet(Icons.phone, "UDP", "Allow calls and video?", "Allow", { dialog = null; ui.setProxyUdp(shown, true) }, { dialog = null }, later = "Keep off",
+                        foot = "The proxy app must support SOCKS5 UDP. Changing its app, port or login turns this off again.") {
+                        SheetLine(Icons.apps, "Apps on ${shown.name} can then send UDP: calls, video and some games.")
+                        SheetLine(Icons.error, "Another app on this phone could take over the proxy's UDP port, read that traffic or fake replies. $APP checks, but can't rule it out.")
+                    }
+                }
                 d.startsWith("remove:") -> setup.servers.firstOrNull { it.id == arg }?.let { s ->
                     val used = setup.routes.count { it.own == s.id }
                     val refused = ui.removeServerRefused(s.id)
@@ -806,7 +867,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                     if (refused != null) Prompt("Choose another default first", "Choose default", { dialog = null; pickDefault(refused) }, { dialog = null }) {
                         Text(refused.text, style = Type.sub)
                     } else Prompt("Remove ${s.name}?", "Remove", { dialog = null; ui.removeServer(s.id)?.let { ui.notice.value = it.text } }, { dialog = null }, danger = true) {
-                        Text(removeServerText(used, null), style = Type.sub)
+                        Text(removeServerText(used, null) + if (s.socks5 != null) " Its proxy app keeps its own route." else "", style = Type.sub)
                     }
                 }
             }

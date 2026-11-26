@@ -10,6 +10,8 @@ import android.os.CancellationSignal
 import android.os.Handler
 import android.os.HandlerThread
 import android.system.ErrnoException
+import app.unbraid.data.MOBILE
+import app.unbraid.data.WIFI
 import io.nekohasekai.libbox.ExchangeContext
 import io.nekohasekai.libbox.InterfaceUpdateListener
 import io.nekohasekai.libbox.LocalDNSTransport
@@ -66,7 +68,7 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     // The switch by network learns of a new network in the same step as everything else here, so a pick made meanwhile
     // can't be noted for the network the phone just left. Without its capabilities yet, it is this network of a kind not
     // known yet (they follow in onCapabilitiesChanged).
-    override fun onAvailable(n: Network) { handler.removeCallbacks(lose); val was = network; network = n; AutoSwitch.seen(net(n, cm.getNetworkCapabilities(n))); push(was = was?.networkHandle, now = n.networkHandle) }
+    override fun onAvailable(n: Network) { handler.removeCallbacks(lose); val was = network; network = n; AutoSwitch.seen(profileNet(n.networkHandle)); push(was = was?.networkHandle, now = n.networkHandle) }
     override fun onLinkPropertiesChanged(n: Network, lp: LinkProperties) { if (n == network) push() }
     // Only the engine waits for a lost network to come back; for the switch by network the phone has left it.
     override fun onLost(n: Network) { if (n == network) { lost = n; AutoSwitch.lost(n.networkHandle); handler.postDelayed(lose, 3_000) } }
@@ -74,7 +76,7 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     override fun onCapabilitiesChanged(n: Network, caps: NetworkCapabilities) {
         if (n != network) return
         UnbraidVpn.metered = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
-        AutoSwitch.seen(net(n, caps))
+        AutoSwitch.seen(link(n, caps).net)
     }
 
     /** Not [force]d: a real move to another network ([was] → [now], by Android's handle, when known), which may fix blocked routes ([onChange]). */
@@ -85,16 +87,22 @@ class NetMonitor(private val cm: ConnectivityManager) : ConnectivityManager.Netw
     }
 }
 
-/**
- * Network [n] for the profile set to follow it: Wi-Fi or mobile data (a cable counts as Wi-Fi; no [caps] yet: not
- * known), and this connection to it; null for handle 0, which names none.
- */
-private fun net(n: Network, caps: NetworkCapabilities?) = n.networkHandle.takeIf { it != 0L }?.let {
-    AutoSwitch.Net(caps?.let { c -> if (c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) app.unbraid.data.MOBILE else app.unbraid.data.WIFI }, it)
+/** A connection stays identifiable until it is lost, including while it has no matching profile rule. */
+internal fun profileNet(handle: Long, kind: String? = null) = handle.takeIf { it != 0L }?.let { AutoSwitch.Net(kind, it) }
+
+internal data class Link(val handle: Long, val vpn: Boolean, val internet: Boolean, val unrestricted: Boolean,
+                         val mobile: Boolean, val wifiOrEthernet: Boolean = false) {
+    val net get() = profileNet(handle, when { mobile -> MOBILE; wifiOrEthernet -> WIFI; else -> null })
 }
 
-/** What choosing the phone's own network needs of one network: Android's handle, whether it is a VPN, has internet, is unrestricted, and is mobile data. */
-internal data class Link(val handle: Long, val vpn: Boolean, val internet: Boolean, val unrestricted: Boolean, val mobile: Boolean)
+/** Both the live callback and the synchronous snapshot read these same Android transport flags. */
+internal fun profileLink(handle: Long, internet: Boolean, unrestricted: Boolean, hasTransport: (Int) -> Boolean) =
+    Link(handle, hasTransport(NetworkCapabilities.TRANSPORT_VPN), internet, unrestricted,
+        hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
+        hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+
+private fun link(n: Network, c: NetworkCapabilities) = profileLink(n.networkHandle,
+    c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET), c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED), c::hasTransport)
 
 /**
  * The network under the phone's default one, never a VPN: the default itself unless it is a VPN (another one, with unbraid
@@ -108,10 +116,7 @@ internal fun choose(default: Link?, all: List<Link>): Link? =
 /** The phone's own network now ([net], never a VPN; null with none), and [unknown]: a default network is there but the one under it can't be told. */
 data class Own(val net: AutoSwitch.Net?, val unknown: Boolean)
 
-private fun link(cm: ConnectivityManager, n: Network) = cm.getNetworkCapabilities(n)?.let { c ->
-    Link(n.networkHandle, c.hasTransport(NetworkCapabilities.TRANSPORT_VPN), c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET),
-        c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED), c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))
-}
+private fun link(cm: ConnectivityManager, n: Network) = cm.getNetworkCapabilities(n)?.let { link(n, it) }
 
 /** The phone's own network now. unbraid itself is left outside its VPN, so this holds while connected too. */
 @Suppress("DEPRECATION")
@@ -123,7 +128,7 @@ fun underlying(cm: ConnectivityManager): Own = runCatching {
 
 /** [Own] from [choose]: unknown when a default network is there ([active], even one whose capabilities can't be read) but none is chosen. */
 internal fun own(active: Boolean, default: Link?, all: List<Link>) = choose(default, all).let { o ->
-    Own(o?.takeIf { it.handle != 0L }?.let { AutoSwitch.Net(if (it.mobile) app.unbraid.data.MOBILE else app.unbraid.data.WIFI, it.handle) }, active && o == null)
+    Own(o?.net, active && o == null)
 }
 
 /**

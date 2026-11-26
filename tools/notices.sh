@@ -29,7 +29,7 @@ deps '{{.Dir}}' > "$PKGS" # folders of the packages actually linked
       show "$d/$(licence "$d")"
       # NOTICE/COPYRIGHT files, and the licences in subfolders that hold (or sit above) linked code.
       { find "$d" -maxdepth 1 -type f \( -iname 'NOTICE*' -o -iname 'COPYRIGHT*' \)
-        find "$d" -mindepth 2 -type f \( -iname 'LICEN[CS]E*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) ! -name '*.go' ! -path '*/.github/*' ! -path '*/testdata/*'
+        find "$d" -mindepth 2 -type f \( -iname 'LICEN[CS]E*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) ! -name '*.go' ! -path '*/.github/*' ! -path '*/testdata/*' ! -path "$d/.unbraid-src/*"
       } | sort | while read -r n; do grep -q "^${n%/*}\(/\|$\)" "$PKGS" || continue; echo; echo "--- ${n#$d/}"; show "$n"; done
     done
   echo; echo "=== Apache License 2.0"; cat "$ROOT/tools/notices/apache-2.0.txt"

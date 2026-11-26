@@ -72,9 +72,9 @@ providers. It needs macOS 26 or later.
 You bring the VPN. unbraid has no servers of its own and works with the accounts and servers you already have.
 
 You can sign in with NordVPN (NordLynx, OpenVPN, Double VPN and Onion over VPN), Mullvad, Private Internet Access,
-IVPN, AirVPN (with an API key) or ExpressVPN. For Proton VPN (Free included) and Surfshark you add your WireGuard key
-once, and for Windscribe (or AirVPN without an API key) you paste one WireGuard config from their website. After that you choose from the servers
-your plan includes. You can also import your own WireGuard or OpenVPN config, paste a Shadowsocks
+IVPN, AirVPN (with an API key) or ExpressVPN. For Surfshark you add your WireGuard key once, and for Windscribe (or AirVPN without an API key) you paste one WireGuard config from their website. After that you choose from the servers
+your plan includes. For Proton VPN (Free included), use the whole WireGuard config for the server you want.
+Unbraid checks its peer key and endpoint against the config. For additional Proton servers, import their configs under Your own servers. You can also import your own WireGuard or OpenVPN config, paste a Shadowsocks
 key, or join a Tailscale tailnet (a self-hosted Headscale works as well).
 
 Routes can mix providers. One app can use Mullvad in Sweden while another uses NordVPN in Japan.
@@ -152,7 +152,8 @@ would cover every website that ends in it; add the website itself.
 An app on Block gets no internet connection while unbraid is connected: not through a route, not Direct, and no
 names are looked up for it. A switch decides whether it can still reach devices on your local network. While any
 app is blocked, unbraid refuses pings and connections that Android can't tie to an app; a name lookup Android can't
-tie to an app still gets a stand-in address, and other kinds of such lookups get an empty answer. A blocked website can't be
+tie to an app is refused for tailnet names. Local names use the local resolver if the switch allows it. For other
+permitted names, address lookups get a stand-in, HTTPS and SVCB lookups get an empty answer, and other record types are refused. A blocked website can't be
 looked up in the apps that go through unbraid, unless a more specific website under it has a route of its own. Block works only while unbraid is connected; for the time it is
 off, use Android's "Block connections without VPN".
 
@@ -206,7 +207,9 @@ apps -> TUN -> sing-box -> rules: block, DNS, home, LAN, website routes, the app
 ```
 
 Each TCP and UDP connection is routed by the app that owns it, which Android reports through
-`ConnectivityManager.getConnectionOwnerUid`. When an app hands a connection to another app or system service, such as
+`ConnectivityManager.getConnectionOwnerUid`. If Android cannot identify the owner of a TCP or UDP connection and an app in the tunnel has its own route,
+unbraid refuses the connection before it can use the default route. Website and network rules still run first.
+When an app hands a connection to another app or system service, such as
 for a download, a browser tab or a push message, that connection follows the other app or service's route. Ping has no owning app, so it follows the default route (when Direct is the default and other apps use VPN routes, internet ping is blocked instead). DNS is answered with fake addresses and looked up again on the exit
 the app really uses, so a site sees the country you picked for that app, or for that website when it has a route of its own. Apps you set to Direct are left out of the
 VPN by Android itself, unless you turn on "Block connections without VPN" or set the DNS filter to cover Direct
@@ -216,6 +219,10 @@ one with an app that uses a VPN route or Block goes as that app does, filtered o
 (while connected, unbraid applies your setup again when an app with a saved choice is installed or an install or
 removal changes which apps share a user id). Apps that only follow a Direct default route always go through unbraid. Only the default route, the routes your apps and websites use, and the routes those go *Via* with two tunnels are
 connected.
+
+A restored app assignment waits up to 30 days for the matching signed app to be installed. An app installed later
+follows the default until you choose a route for it in Apps. With a Direct default, its traffic still passes through
+unbraid. An expired Direct assignment cannot put it outside the VPN.
 
 A website rule matches the name unbraid itself answered with a fake address, never a name read from the connection,
 so an app can't claim another site's route. When a local network or home rule takes a connection, unbraid dials only the addresses that rule covers, even
@@ -247,7 +254,11 @@ the tunnel being checked, release every network part a tunnel built when it stop
 that the local network or home rules take to only the addresses those rules cover, and never
 hand a stand-in (fake) address to a second name while its table lives: a used-up block of them answers new names
 with a failure, and the app moves to the next of eight blocks, with a new table, when less than a quarter of the block
-is left, at most once every 10 minutes (a block that runs low sooner moves at the first check after those 10 minutes). That promise holds across crashes and across any error the engine's cache reports (a
+is left, at most once every 10 minutes (a block that runs low sooner moves at the first check after those 10 minutes).
+While a block is low, each app Android can identify has a limited share of new addresses. Lookups from shared or
+unidentified callers draw from one larger share. A caller that uses its share can still look up names already in the
+table. While the table has free addresses, other callers can resolve new names up to their own limits.
+The no-reuse guarantee holds across crashes and across any error the engine's cache reports (a
 failed read or write, a damaged file): the table then hands out no more addresses, as if used up. After such an error
 within 10 minutes of the last block change, new names fail until those 10 minutes are up; then the app moves to a new
 block. A fresh connect is not affected: it always starts on the next block. A cache file changed without any error is

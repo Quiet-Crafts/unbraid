@@ -1,7 +1,8 @@
-@file:OptIn(SavedSites::class)
+@file:OptIn(SavedSites::class, kotlinx.serialization.ExperimentalSerializationApi::class)
 
 package app.unbraid.data
 
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.Serializable
 
 const val DIRECT = "direct"
@@ -29,7 +30,9 @@ data class Location(
     val protocol: String? = null,
     val pinned: Server? = null,
 ) {
-    val label get() = pinned?.name ?: city?.let { "$country · $it" } ?: country ?: "Fastest"
+    internal val automaticLabel get() = if ((provider == "proton" || provider == "proton-free") && pinned == null &&
+        country == null && countryCode == null && countryId == null && city == null && cityId == null && region == null) "Configured server" else "Fastest"
+    val label get() = pinned?.name ?: city?.let { "$country · $it" } ?: country ?: automaticLabel
     val code get() = countryCode ?: "··"
 }
 
@@ -63,6 +66,12 @@ data class WgPeer(
     val junk: Int = 0,
 )
 
+/** A WireGuard server label a backup can share. It contains no client configuration. */
+@Serializable
+data class WgIdentity(val name: String, val endpoint: String, val publicKey: String) {
+    fun waiting() = WgPeer(name, "", emptyList(), publicKey, endpoint = endpoint, allowedIps = emptyList())
+}
+
 /** A provider's V2Ray server for a disguised WireGuard tunnel: address, TCP port and the account-wide user id. */
 @Serializable
 data class Vmess(val server: String, val port: Int, val uuid: String)
@@ -75,8 +84,43 @@ data class OvpnProfile(val name: String, val config: String, val username: Strin
 @Serializable
 data class SsProfile(val name: String, val server: String, val port: Int, val method: String, val password: String, val plugin: String? = null, val pluginOpts: String? = null)
 
+/** A TCP proxy owned by a signed Android app on this phone. Trust in the local listener never transfers in a backup. */
+@Serializable
+data class Socks5Profile(
+    val name: String, val host: String, val port: Int, val packageName: String, val identity: String,
+    val username: String = "", val password: String = "",
+    val needsConfirmation: Boolean = false, val authRequired: Boolean = username.isNotEmpty(),
+    val allowUdp: Boolean = false,
+) {
+    /** Display-only renames leave active sockets on the same verified companion. */
+    fun sameConnection(other: Socks5Profile?) = other != null && (this == other || copy(name = other.name) == other)
+
+    override fun toString() = "Socks5Profile($host:$port, confirmation=$needsConfirmation)"
+
+    fun checked(): Socks5Profile {
+        require(name.isNotBlank() && name.length <= 256 && Manual.cleanName(name, 40) == name) { "Choose a short name for the proxy." }
+        require(host == "127.0.0.1") { "The proxy must listen on 127.0.0.1 on this phone." }
+        require(port in 1..65535) { "Choose a port from 1 to 65535." }
+        require(packageName.length <= 255 && PACKAGE.matches(packageName)) { "Choose the installed proxy app." }
+        require(identity.length <= 64 * 65 && identity.split(',').let { pins ->
+            pins == pins.distinct().sorted() && pins.all(CERTIFICATE::matches)
+        }) { "The proxy app has no valid signing identity." }
+        val authenticated = username.isNotEmpty() && password.isNotEmpty()
+        require((authenticated && authRequired || username.isEmpty() && password.isEmpty() && (!authRequired || needsConfirmation)) &&
+            username.toByteArray(Charsets.UTF_8).size <= 255 && password.toByteArray(Charsets.UTF_8).size <= 255) {
+            "Enter both a username and a password of up to 255 bytes each, or leave both empty."
+        }
+        return this
+    }
+
+    companion object {
+        private val PACKAGE = Regex("""[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+""")
+        private val CERTIFICATE = Regex("[0-9a-f]{64}")
+    }
+}
+
 /**
- * One exit. Exactly one source: a provider [loc], an imported [wg]/[ovpn]/[ss] server, or [tsExit] — a Tailscale
+ * One exit. Exactly one source: a provider [loc], an imported [wg]/[ovpn]/[ss]/[socks5] server, or [tsExit] — a Tailscale
  * exit node (name or 100.x address) reached through the built-in Tailscale client.
  */
 @Serializable
@@ -95,7 +139,7 @@ data class Route(
      * the provider's page ([Setup.protects]).
      */
     val filter: Boolean? = null,
-    /** The saved [OwnServer] whose config [wg]/[ovpn]/[ss] is a copy of, so renaming or removing it reaches this route. */
+    /** The saved [OwnServer] whose config [wg]/[ovpn]/[ss]/[socks5] is a copy of, so renaming or removing it reaches this route. */
     val own: String? = null,
     /** Whether unbraid checks that this own server still reaches the internet; null follows the config. */
     val checkInternet: Boolean? = null,
@@ -111,20 +155,23 @@ data class Route(
      * of two tunnels. The entry route then needs no tunnel of its own.
      */
     val viaNative: Boolean = false,
+    /** Backup wire form only. [Backup.read] converts it to a blocked peer before restoring. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val wgIdentity: WgIdentity? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val socks5: Socks5Profile? = null,
 ) {
-    val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: tsName ?: tsExit ?: loc.country ?: "Fastest"
-    val code get() = when { wg != null -> "WG"; ovpn != null -> "OV"; ss != null -> "SS"; tsExit != null -> "TS"; else -> loc.code }
+    val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: socks5?.name ?: tsName ?: tsExit ?: loc.country ?: loc.automaticLabel
+    val code get() = when { wg != null -> "WG"; ovpn != null -> "OV"; ss != null -> "SS"; socks5 != null -> "S5"; tsExit != null -> "TS"; else -> loc.code }
     /** Not tied to a provider account. */
-    val imported get() = wg != null || ovpn != null || ss != null || tsExit != null
+    val imported get() = wg != null || ovpn != null || ss != null || socks5 != null || tsExit != null
     val checksInternet: Boolean get() = when {
         tsExit != null || !imported -> false
         checkInternet != null -> checkInternet
-        ss != null -> true
+        ss != null || socks5 != null -> true
         wg != null -> wg.allowedIps.any { it == "0.0.0.0/0" || it == "::/0" }
         else -> ovpn?.config?.lineSequence()?.any { it.trim().startsWith("redirect-gateway", ignoreCase = true) } == true
     }
     /** Who carries this route: the provider, or the kind of own server. */
-    val source get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; ss != null -> "Shadowsocks"; tsExit != null -> "Tailscale"; else -> Providers.short(loc.provider) }
+    val source get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; ss != null -> "Shadowsocks"; socks5 != null -> "SOCKS5"; tsExit != null -> "Tailscale"; else -> Providers.short(loc.provider) }
 }
 
 @Serializable
@@ -161,21 +208,31 @@ data class OwnServer(
     val id: String, val wg: WgPeer? = null, val ovpn: OvpnProfile? = null, val ss: SsProfile? = null,
     /** Restored from a backup saved without keys ([withoutSecrets]): its routes are blocked until the config is added again. */
     val keyless: Boolean = false,
+    /** Backup wire form only, as on [Route.wgIdentity]. */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val wgIdentity: WgIdentity? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val socks5: Socks5Profile? = null,
 ) {
-    val name get() = wg?.name ?: ovpn?.name ?: ss?.name.orEmpty()
-    val kind get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; else -> "Shadowsocks" }
-    val code get() = when { wg != null -> "WG"; ovpn != null -> "OVPN"; else -> "SS" }
-    /** The same server as [o] by everything a file saved without keys keeps of it ([withoutSecrets]): a Shadowsocks plugin and WireGuard's allowed addresses too. */
-    fun sameAs(o: OwnServer) = withoutSecrets() == o.withoutSecrets()
+    val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: socks5?.name.orEmpty()
+    val kind get() = when { wg != null -> "WireGuard"; ovpn != null -> "OpenVPN"; socks5 != null -> "SOCKS5"; else -> "Shadowsocks" }
+    val code get() = when { wg != null -> "WG"; ovpn != null -> "OVPN"; socks5 != null -> "S5"; else -> "SS" }
+    /** Only a complete historical WireGuard descriptor can identify a local config for automatic refill. */
+    fun sameAs(o: OwnServer): Boolean {
+        val peer = wg ?: return withoutSecrets() == o.withoutSecrets()
+        val local = o.wg ?: return false
+        return peer.address.isNotEmpty() && peer.allowedIps.isNotEmpty() &&
+            copy(wg = peer.copy(privateKey = "", presharedKey = null), keyless = true) ==
+            o.copy(wg = local.copy(privateKey = "", presharedKey = null), keyless = true)
+    }
 }
 
-/** [wg]'s private and preshared keys left out. */
-fun WgPeer.withoutSecrets() = copy(privateKey = "", presharedKey = null)
+fun WgPeer.identity() = WgIdentity(name, endpoint, publicKey)
+fun WgPeer.withoutSecrets() = identity().waiting()
 /** An OpenVPN profile holds its keys inside the config: only the name stays. */
 fun OvpnProfile.withoutSecrets() = OvpnProfile(name, "")
 fun SsProfile.withoutSecrets() = copy(password = "", pluginOpts = null)
-fun OwnServer.withoutSecrets() = copy(wg = wg?.withoutSecrets(), ovpn = ovpn?.withoutSecrets(), ss = ss?.withoutSecrets(), keyless = true)
-fun Route.withoutSecrets() = if (!imported || tsExit != null) this else copy(wg = wg?.withoutSecrets(), ovpn = ovpn?.withoutSecrets(), ss = ss?.withoutSecrets(), keyless = true)
+fun Socks5Profile.withoutSecrets() = copy(username = "", password = "", needsConfirmation = true)
+fun OwnServer.withoutSecrets() = copy(wg = wg?.withoutSecrets(), ovpn = ovpn?.withoutSecrets(), ss = ss?.withoutSecrets(), socks5 = socks5?.withoutSecrets(), keyless = true)
+fun Route.withoutSecrets() = if (!imported || tsExit != null) this else copy(wg = wg?.withoutSecrets(), ovpn = ovpn?.withoutSecrets(), ss = ss?.withoutSecrets(), socks5 = socks5?.withoutSecrets(), keyless = true)
 
 /**
  * A saved setup: a default exit and the apps' chosen routes. An app with an entry in [apps] chose that route, also when it
@@ -189,10 +246,17 @@ data class Profile(
     val added: List<String> = emptyList(),
     /** Websites with a route of their own ([Sites]): address → route id or [DIRECT]. A website's route beats its app's. */
     @SavedSites val sites: Map<String, String> = emptyMap(),
+    /** SHA-256 of the Android signing certificate(s) when each app route was chosen. */
+    val appSigners: Map<String, String> = emptyMap(),
+    /** Local wait overrides only when profiles disagree about the same package and route. */
+    val waitOverrides: Map<String, Long> = emptyMap(),
 ) {
     val ready get() = defaultRoute.isNotEmpty()
     /** App [pkg] on route [routeId], its default included: a choice that stays when the default changes. Null = it follows the default. */
-    fun assigned(pkg: String, routeId: String?) = copy(apps = if (routeId == null) apps - pkg else apps + (pkg to routeId))
+    fun assigned(pkg: String, routeId: String?, signer: String? = null) = copy(
+        apps = if (routeId == null) apps - pkg else apps + (pkg to routeId),
+        appSigners = if (routeId == null || routeId == BLOCK || signer == null) appSigners - pkg else appSigners + (pkg to signer),
+    )
     /** The routes this profile lists: its default, those its apps and websites use, and those added to it. */
     val own get() = setOf(defaultRoute) + apps.values + sites.values + added
 }
@@ -225,7 +289,7 @@ fun String.takeGraphemes(n: Int): String = chars(this).let { b -> var end = 0; r
  * The newest [Setup.version]. 2: every value is written, defaults too (older files left out those equal to a default).
  * 3: website routes, which an older build would drop without a word; only a setup that has one is saved as 3 ([Setup.stamped]).
  */
-const val VERSION = 4
+const val VERSION = 9
 
 @Serializable
 data class Setup(
@@ -259,11 +323,14 @@ data class Setup(
      * import replace its placeholder route. A file without it (older versions) reads as false: set up by its user.
      */
     val pristine: Boolean = false,
+    /** Signers of the live app choices. A saved profile holds its own bindings. */
+    val appSigners: Map<String, String> = emptyMap(),
     /** Apps a restore brought that weren't on this phone yet: they keep their route until [waitingUntil] (epoch ms), to be installed. */
     val waiting: Set<String> = emptySet(),
     val waitingUntil: Long = 0,
     /** Choices of waiting apps a later restore kept ([restoredFrom]), app → route → deadline: each until its own instead of [waitingUntil]. */
     val waitingEach: Map<String, Map<String, Long>> = emptyMap(),
+    val waitOverrides: Map<String, Long> = emptyMap(),
     /** Routes without apps connected only for a combined speed test; never saved. */
     @kotlinx.serialization.Transient val testing: Set<String> = emptySet(),
 ) {
@@ -273,10 +340,17 @@ data class Setup(
     val saved get() = profiles.map { if (it.name == profile) live else it }
 
     /** This setup routing as [p] does. */
-    private fun routedAs(p: Profile) = copy(defaultRoute = p.defaultRoute, apps = p.apps, added = p.added, sites = p.sites)
+    private fun routedAs(p: Profile) = copy(defaultRoute = p.defaultRoute, apps = p.apps, added = p.added, sites = p.sites, appSigners = p.appSigners, waitOverrides = p.waitOverrides)
+
+    /** Discard identities whose app rule was removed, on every store change and before exporting. */
+    internal fun tidyAppSigners(): Setup {
+        if (appSigners.keys.all { it in apps && apps[it] != BLOCK } && profiles.all { p -> p.appSigners.keys.all { it in p.apps && p.apps[it] != BLOCK } }) return this
+        fun pins(rules: Map<String, String>, signers: Map<String, String>) = signers.filterKeys { it in rules && rules[it] != BLOCK }
+        return copy(appSigners = pins(apps, appSigners), profiles = profiles.map { it.copy(appSigners = pins(it.apps, it.appSigners)) })
+    }
 
     /** The live setup as a profile: what is in use. */
-    private val live get() = Profile(profile.orEmpty(), defaultRoute, apps, added, sites)
+    internal val live get() = Profile(profile.orEmpty(), defaultRoute, apps, added, sites, appSigners, waitOverrides)
 
     /** No profile is in use and none holds the setup in use: switching to another would lose it, unless [use] keeps it. */
     val loose get() = profile == null && profiles.none { it.copy(name = "") == live.copy(name = "") }
@@ -326,7 +400,7 @@ data class Setup(
 
     /** A route already exiting through saved server [s], to reuse rather than add another; one profile [name] shows comes first. */
     fun serverRoute(s: OwnServer, name: String?): String? {
-        val rs = routes.filter { it.own == s.id && it.wg == s.wg && it.ovpn == s.ovpn && it.ss == s.ss }
+        val rs = routes.filter { it.own == s.id && it.wg == s.wg && it.ovpn == s.ovpn && it.ss == s.ss && it.socks5 == s.socks5 }
         val hidden = hiddenRoutes(name)
         return (rs.firstOrNull { it.id !in hidden } ?: rs.firstOrNull())?.id
     }
@@ -360,9 +434,22 @@ data class Setup(
     fun back(ran: Setup): Setup {
         val ok = { id: String -> builtIn(id) || route(id) != null }
         // Its profile again only if still as it ran: one edited meanwhile keeps those edits, the routes run unprofiled.
-        val same = profiles.firstOrNull { it.name == ran.profile }?.takeIf { it == ran.live }
+        val previous = profiles.firstOrNull { it.name == ran.profile }
+        val same = previous?.takeIf { it == ran.live }
+        val pins = ran.appSigners.mapNotNull { (pkg, pin) ->
+            val route = ran.apps[pkg] ?: return@mapNotNull null
+            if (!ok(route) || route == BLOCK) return@mapNotNull null
+            // A switch can fail after this profile observed a rotation. Keep its newer pin only for the same grant.
+            val saved = when {
+                previous == null || previous.appSigners[pkg] == pin -> pin
+                previous.apps[pkg] == route -> previous.appSigners[pkg]
+                else -> null
+            }
+            saved?.let { pkg to it }
+        }.toMap()
         return copy(profiles = saved, profile = same?.name,
-            defaultRoute = ran.defaultRoute.takeIf(ok) ?: defaultRoute, apps = ran.apps.filterValues(ok), added = ran.added.filter(ok), sites = ran.sites.filterValues(ok))
+            defaultRoute = ran.defaultRoute.takeIf(ok) ?: defaultRoute, apps = ran.apps.filterValues(ok),
+            appSigners = pins, added = ran.added.filter(ok), sites = ran.sites.filterValues(ok)).rollbackWaits(this, ran)
     }
 
     /** Moves profile [name] [by] places (negative = earlier). */
@@ -433,11 +520,11 @@ data class Setup(
 
     /**
      * Route [r] (id [id], new or replacing one) given an imported source. With no provider signed in ([alone]) a new
-     * install's placeholder goes and [r] is the default; anything set up before stays, its default too.
+     * install's placeholder goes and [r] is the default. Local proxies always keep the existing default.
      */
     fun imported(id: String, r: Route, alone: Boolean): Setup {
         val next = copy(routes = if (route(id) != null) routes.map { if (it.id == id) r else it } else routes + r)
-        if (!alone || !untouched) return next
+        if (r.socks5 != null || !alone || !untouched) return next
         val gone = routes.map { it.id }.toSet() - id
         return next.copy(routes = next.routes.filter { it.id !in gone }, apps = next.apps.filterValues { it !in gone }, defaultRoute = id, pristine = false)
     }
@@ -447,6 +534,8 @@ data class Setup(
      * wherever it was imported from: a reset with the VPN running lands on Routes, not on the first-run list.
      */
     fun importFor(target: String?, alone: Boolean) = target ?: "".takeIf { alone && untouched }
+    /** A proxy server carries something: Android's Block connections without VPN can't be used with it. */
+    val usesProxy get() = activeRoutes.any { it.socks5 != null }
     fun routeOf(pkg: String) = apps[pkg] ?: defaultRoute
     /** App [pkg] has no route of its own: it goes where the default goes. */
     fun follows(pkg: String) = pkg !in apps
@@ -474,11 +563,12 @@ data class Setup(
         val e = route(v) ?: return "${r.name} goes through a route that no longer exists. Choose another in its Via"
         return when {
             e.id == r.id || e.via != null -> "${r.name} can go through a route that goes straight to its server only"
+            e.socks5 != null -> "${r.name} can't go through a proxy server"
             e.tsExit != null -> "${r.name} can't go through a Tailscale exit node"
             r.viaNative && (r.imported || e.imported || e.loc.provider != r.loc.provider || Providers.get(r.loc.provider)?.nativeHop != true) -> "One-tunnel multi-hop needs two routes of the same provider that offers it"
             r.viaNative && e.loc.countryCode != null && e.loc.countryCode == r.loc.countryCode -> "${r.name} and its entry must be in different countries for ${Providers.get(r.loc.provider)?.name}'s multi-hop"
             e.ss?.plugin != null -> "${r.name} can't go through a Shadowsocks server with a plugin"
-            r.ovpn != null || r.ss != null || r.tsExit != null || r.loc.protocol?.startsWith("openvpn") == true -> "Via works for WireGuard routes only"
+            r.ovpn != null || r.ss != null || r.socks5 != null || r.tsExit != null || r.loc.protocol?.startsWith("openvpn") == true -> "Via works for WireGuard routes only"
             // Its sign-up talks to the exit server itself, which would see the phone's address.
             !r.imported && Providers.get(r.loc.provider)?.viaUnsafe == true -> "${Providers.get(r.loc.provider)?.name} routes can't use Via: setting one up contacts its server directly"
             // A name would be looked up outside the entry, telling the local network where the tunnel goes.
@@ -499,15 +589,36 @@ data class Setup(
     fun site(name: String?, site: String, routeId: String?) = editing(name) { it.copy(sites = if (routeId == null) it.sites - site else it.sites + (site to routeId)) }
 
     /**
-     * As saved: format 4 only with a Via somewhere, format 3 only with a website route or a Block, so a setup without
+     * Format 9 protects a local proxy as a default, which builds before it refuse to load. Format 8 protects the UDP opt-in from older readers. Format 7 protects local proxy settings from being read as a provider route. Format 6 keeps restore deadlines.
+     * Format 5 for signer-gated app choices, including legacy grants awaiting approval. Format 4 with a
+     * Via somewhere, format 3 with a website route or a Block, so a setup without
      * them still opens in a build from before them. An older build would drop them: send a Via route straight to its
      * server, drop the websites, and take a blocked app for one on a route that is gone.
      */
     val stamped get() = copy(version = when {
+        routes.filter { it.socks5 != null }.any { r -> (profiles + live).any { it.defaultRoute == r.id } } -> 9
+        routes.any { it.socks5?.allowUdp == true } || servers.any { it.socks5?.allowUdp == true } -> 8
+        routes.any { it.socks5 != null } || servers.any { it.socks5 != null } -> 7
+        waiting.isNotEmpty() -> 6 // earlier readers cannot enforce restoration deadlines
+        (profiles + live).any { p -> p.apps.values.any { it != BLOCK } } -> 5
         routes.any { it.via != null } -> 4
         (profiles + live).all { it.sites.isEmpty() && BLOCK !in it.apps.values } -> minOf(version, 2)
         else -> 3
     })
+
+    /** The profiles (null: none) whose default is a proxy that can't work there, its app ([packageName]) not on Direct without the filter. */
+    fun stuckDefaults(): Map<String?, String> = (listOf(profile) + profiles.map { it.name }).distinct().mapNotNull { name ->
+        val s = viewAs(name)
+        s.route(s.defaultRoute)?.socks5?.packageName?.takeIf { !s.outside(it) }?.let { name to it }
+    }.toMap()
+
+    /** Local proxies carry apps and a default, never websites, with no Via on either side. */
+    fun supportsSocks5Assignments(): Boolean {
+        if (routes.none { it.socks5 != null }) return true
+        val proxies = routes.filter { it.socks5 != null }.mapTo(HashSet()) { it.id }
+        return routes.none { it.via in proxies || it.socks5 != null && it.via != null } &&
+            (profiles + live).none { it.sites.values.any(proxies::contains) }
+    }
 
     /** [provider]'s page setting [key], or its default. */
     fun opt(provider: String, key: String) = opts[provider]?.get(key) ?: Providers.get(provider)?.defaults?.get(key) ?: app.unbraid.data.COMMON_DEFAULTS[key]

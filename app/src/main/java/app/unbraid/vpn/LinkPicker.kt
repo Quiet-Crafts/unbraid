@@ -11,6 +11,7 @@ import app.unbraid.data.Route
 import app.unbraid.data.Server
 import app.unbraid.data.Setup
 import app.unbraid.data.Sites
+import app.unbraid.data.Socks5Link
 import app.unbraid.data.SsLink
 import app.unbraid.data.TsLink
 import app.unbraid.data.WgLink
@@ -62,7 +63,7 @@ object LinkPicker {
     private fun pinId(s: Server) = if (s.ip.isEmpty()) "${s.host}|${s.name}" else s.ip
 
     /** A pinned server as its provider finds it again: by host name, and on AirVPN, whose servers share one per country, by name too. */
-    fun pinKey(provider: String, s: Server) = "$provider|${s.host}" + if (provider == "airvpn") "|${s.name}" else ""
+    fun pinKey(provider: String, s: Server) = "$provider|${s.host}" + if (provider in setOf("airvpn", "proton", "proton-free")) "|${s.name}" else ""
 
     /** A pinned server no longer offered, for its protocol: Nord's lists differ by protocol, so one list without it rules out only routes on it. */
     fun goneKey(l: app.unbraid.data.Location) = l.pinned?.let { pinKey(l.provider, it) + "|" + if (l.provider == "nord") app.unbraid.data.Nord.tech(l) else l.protocol.orEmpty() }
@@ -110,8 +111,9 @@ object LinkPicker {
             // Also a route given a server still waiting for its config, however it got there.
             if (r.keyless || setup.servers.any { it.id == r.own && it.keyless }) { blocked[r.id] = KeyLeftOut(r.name); continue }
             // A Via that can't be used stops the route before its provider is asked anything (PIA's set-up would reach the exit).
-            setup.viaProblem(r)?.let { blocked[r.id] = Fail(it); continue }
+            (Compiler.socksRouteProblem(setup, r) ?: setup.viaProblem(r))?.let { blocked[r.id] = Fail(it); continue }
             val link = try { when {
+                r.socks5 != null -> Socks5Link(Server(r.socks5.name, "", "", "", 0))
                 r.wg != null -> WgLink(Server(r.wg.name, r.wg.endpoint.substringBeforeLast(':'), "", r.wg.publicKey, 0), r.wg)
                 r.ovpn != null -> OvpnLink(Server(r.ovpn.name, r.ovpn.name, "", "", 0), r.ovpn)
                 r.ss != null -> SsLink(Server(r.ss.name, r.ss.server, r.ss.server, "", 0), r.ss)
@@ -218,6 +220,8 @@ object LinkPicker {
         l.disguise?.takeIf { setup.opt(p, app.unbraid.data.DISGUISE_OPT) == "v2ray" }?.let { d ->
             return l.copy(peer = l.peer.copy(endpoint = "${l.peer.endpoint.substringBeforeLast(':')}:${d.wgPort}", vmess = d.vmess, mtu = app.unbraid.data.MTU_MIN))
         }
+        // Proton's imported config fixes the endpoint port too, including after a settings restore.
+        if (p == "proton" || p == "proton-free") return l.copy(peer = l.peer.copy(mtu = app.unbraid.data.mtu(setup.opt(p, app.unbraid.data.MTU_OPT)), junk = junk(setup, p)))
         val picked = setup.opt(p, app.unbraid.data.PORT_OPT)?.toIntOrNull()?.takeIf { it in 1..65535 }
             ?: lists[p]?.takeIf { it.isNotEmpty() }?.let { it[step % it.size] }
         val one = only[p].orEmpty()
@@ -259,7 +263,8 @@ object LinkPicker {
         val p = providers(r.loc.provider) ?: return true
         // A page setting can rule out the server of an unpinned route: it is picked again, or blocked, never kept.
         if (!suits(l, r, providers)) return false
-        val acc = accounts[p.id] ?: return true
+        val acc = accounts[p.id] ?: return p !is app.unbraid.data.ProtonVpn
+        if (p is app.unbraid.data.ProtonVpn) return p.trustsRoute(l, acc, r.loc)
         return p.trusts(l, acc)
     }
 
@@ -280,7 +285,7 @@ object LinkPicker {
         val acc = accounts[p.id] ?: throw AuthException("Sign in to ${p.name} for ${r.name}")
         val pinned = r.loc.pinned
         // A pinned server starts from its last refreshed copy, so going offline never brings back older details.
-        val loc = (pinned?.let { saved(r, last)?.server?.let { r.loc.copy(pinned = it) } } ?: r.loc)
+        val loc = (pinned?.takeUnless { p is app.unbraid.data.ProtonVpn }?.let { saved(r, last)?.server?.let { r.loc.copy(pinned = it) } } ?: r.loc)
             .let { it.copy(protocol = app.unbraid.data.AutoProtocol.of(r)) }
         val l = try {
             again(p, r, acc, last, used) ?: p.connect(loc, acc)
@@ -289,7 +294,7 @@ object LinkPicker {
             val cached = saved(r, last)?.takeIf { trusted(it, r, accounts, providers) && app.unbraid.data.AutoProtocol.matches(r, it) && (it as? WgLink)?.hopEntry == null }
             // A cached tunnel at an address that can't be used is no fallback: the user is told to pick the server again.
             if (cached != null && !Addr.usable(cached)) throw Addr.refused(cached.server.name)
-            cached ?: throw if (pinned != null) Fail("${r.name}: ${pinned.name} is unreachable") else e
+            cached ?: throw if (p is app.unbraid.data.ProtonVpn) e else if (pinned != null) Fail("${r.name}: ${pinned.name} is unreachable") else e
         }
         if (pinned != null) return l
         if ("${p.id}|${serverId(l.server)}" !in used) return suited(p, r, l)

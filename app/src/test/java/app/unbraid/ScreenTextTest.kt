@@ -1,6 +1,11 @@
 package app.unbraid
 
 import app.unbraid.data.DIRECT
+import app.unbraid.data.Ivpn
+import app.unbraid.data.NordApi
+import app.unbraid.ui.ivpnKeyNote
+import app.unbraid.ui.ivpnKeyPending
+import app.unbraid.vpn.VpnState
 import app.unbraid.data.Location
 import app.unbraid.data.Route
 import app.unbraid.data.Setup
@@ -167,8 +172,51 @@ class ScreenTextTest {
         assertEquals(null, toSave(Location("nord", 81, "DE", "Germany", pinned = restoredPin.copy(ip = "89.187.175.235", load = 3))).pinned)
     }
 
+    @Test fun pendingIvpnKeyHasItsOwnRouteMessage() {
+        val route = Route("managed", Location("ivpn"))
+        val vpn = app.unbraid.vpn.VpnState(phase = app.unbraid.vpn.VpnState.Phase.On)
+        // Compare the pending caption to what older builds displayed for the same route: only a health warning.
+        val presenter = Class.forName("app.unbraid.ui.RoutesScreenKt").declaredMethods
+            .firstOrNull { it.name == "ivpnKeyNote" }
+        val note = presenter?.invoke(null, route, true, true, vpn) ?: routeWarning(false, false)
+        assertEquals("IVPN key change pending. unbraid will retry if needed.", note)
+    }
+
+    @Test fun pendingKeyNoteFollowsOnlyActiveManagedIvpnRoutes() {
+        val managed = Route("managed", Location("ivpn"))
+        val server = Server("one", "one.example", "", "", 0)
+        val on = VpnState(phase = VpnState.Phase.On, servers = mapOf(managed.id to server))
+        fun note(route: Route? = managed, active: Boolean = true, pending: Boolean = true, vpn: VpnState = on) =
+            ivpnKeyNote(route, active, pending, vpn)
+        assertEquals("IVPN key change pending. unbraid will retry if needed.", note())
+        assertEquals(note(), note(vpn = on.copy(stuck = mapOf("ivpn" to false))))
+        assertEquals(null, note(vpn = on.copy(stuck = mapOf("ivpn" to false), servers = emptyMap())))
+        assertEquals(null, note(vpn = on.copy(stuck = mapOf("ivpn" to true))))
+        assertEquals(null, note(vpn = on.copy(stalled = setOf(managed.id))))
+        assertEquals(null, note(vpn = on.copy(notAnswering = setOf(managed.id))))
+        assertEquals(null, note(vpn = on.copy(phase = VpnState.Phase.Paused)))
+        assertEquals(null, note(active = false))
+        assertEquals(null, note(pending = false))
+        assertEquals(null, note(route = null))
+        assertEquals(null, note(route = managed.copy(loc = Location("mullvad"))))
+        assertEquals(null, note(route = managed.copy(tsExit = "100.64.0.1")))
+        assertEquals(null, note(route = managed.copy(wg = WgPeer("import", "private", listOf("10.0.0.1/32"), "peer", endpoint = "localhost:1", allowedIps = listOf("0.0.0.0/0")))))
+    }
+
+    @Test fun keyStatusReadsOnlyAnUnfinishedSavedIvpnChange() {
+        val pending = Ivpn.Pending("new", "public", "kemPub", "kemPriv")
+        val account = Ivpn.Account("account", "token", "old", "10.0.0.1", psk = "current")
+        fun encoded(a: Ivpn.Account) = NordApi.json.encodeToString(Ivpn.Account.serializer(), a)
+        assertTrue(ivpnKeyPending(encoded(account.copy(pending = pending))))
+        assertFalse(ivpnKeyPending(encoded(account)))
+        assertFalse(ivpnKeyPending(encoded(account.copy(psk = null, keyAt = 0))))
+        assertFalse(ivpnKeyPending("""{"pending":true}"""))
+        assertFalse(ivpnKeyPending(null))
+    }
+
     @Test fun routeCardWarnings() {
         assertEquals("Doesn't work on this network", routeWarning(stalled = true, notAnswering = true))
+        assertEquals("Not answering. Check that its proxy app is running.", routeWarning(stalled = false, notAnswering = true, proxy = true))
         assertEquals("Not answering. If this file came from a provider, it may have expired: download a new one.", routeWarning(stalled = false, notAnswering = true))
         assertEquals(null, routeWarning(stalled = false, notAnswering = false))
         assertEquals("home-mac is offline: its apps have no internet. Tap to choose another exit.", routeWarning(stalled = false, notAnswering = false, offline = "home-mac"))

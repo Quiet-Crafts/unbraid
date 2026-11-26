@@ -21,6 +21,14 @@ import android.util.Log
 import app.unbraid.MainActivity
 import app.unbraid.R
 import app.unbraid.Unbraid
+import app.unbraid.data.Socks5Profile
+import app.unbraid.data.AppIdentity
+import app.unbraid.data.permitsApp
+import app.unbraid.data.InstallState
+import app.unbraid.data.deadline
+import app.unbraid.data.waitAdmits
+import app.unbraid.data.resolveWaiting
+import app.unbraid.data.checkedApps
 import app.unbraid.data.AuthException
 import app.unbraid.data.Link
 import app.unbraid.data.Providers
@@ -117,18 +125,16 @@ data class VpnState(
     fun restarted(engine: Int) = copy(engine = engine, passed = null, notAnswering = emptySet())
 }
 
+/** An app gets its own DNS allocation budget only when its OS owner is unambiguous. */
+internal fun individualDnsOwner(isApp: Boolean, uid: Int, serviceUid: Int, names: List<String>, routingNames: List<String>): Boolean =
+    isApp && uid != serviceUid && names.size == 1 && names[0].isNotEmpty() && routingNames == names
+
 class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     companion object {
         val state = MutableStateFlow(VpnState())
-        /**
-         * Restores so far: each replaces the whole setup, and is counted before the store changes. An engine still running
-         * a setup read before the latest one ([ranRestores]) runs one that exists nowhere else, so a refused reload stops
-         * the VPN instead of keeping it ([install]). Kept by the process, whatever screen is open.
-         */
-        val restores = java.util.concurrent.atomic.AtomicLong()
         /** Runs [block] under the running service's lifecycle lock, so no engine starts meanwhile; null when none runs. Blocks: never on the main thread nor under that lock. */
         fun <T> underLock(block: () -> T): T? = kotlinx.coroutines.runBlocking { lock.withLock { current?.takeIf { !it.destroyed }?.let { block() } } }
-        const val RESTORE_REFUSED = "The restored setup couldn't start, so unbraid is off. Check your routes, then connect again."
+        const val RESTORE_REFUSED = "The restored setup couldn't start. Check your routes."
         /** Route id → engine tunnel tag of the running setup (speed tests dial through it). */
         @Volatile var tags: Map<String, String> = emptyMap()
         /** Tunnel tag → the DNS server that tunnel's own lookups use (health checks look their servers up there). */
@@ -336,15 +342,19 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      */
     private val installed = object : android.content.BroadcastReceiver() {
         override fun onReceive(c: Context, intent: Intent) {
-            if (destroyed || intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return // an update keeps its user id
+            if (destroyed) return
             val pkg = intent.data?.schemeSpecificPart ?: return
             val uid = intent.getIntExtra(Intent.EXTRA_UID, -1)
             val added = intent.action == Intent.ACTION_PACKAGE_ADDED
+            if (!added && intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return // recheck the completed update
             scope.launch {
                 // Removed: the apps left in its user id may now go otherwise (a Direct one no longer kept inside by it).
                 val others = runCatching { packageManager.getPackagesForUid(uid)?.size ?: 0 }.getOrDefault(-1)
                 val shared = uid < 0 || others < 0 || if (added) others > 1 else others > 0
-                if (!shared && !(added && pkg in store.setup.value.apps)) return@launch
+                val setup = store.setup.value
+                if (pkg in setup.waiting) store.refreshWaiting(System.currentTimeMillis(), ::installation)
+                if (added && (pkg in setup.appSigners || setup.profiles.any { pkg in it.appSigners })) store.refreshAppSigners(::identity)
+                if (!shared && pkg !in setup.apps && pkg !in tunInput?.setup?.apps.orEmpty() && pkg !in knownIds.keys) return@launch
                 installs.incrementAndGet()
                 if (state.value.phase == VpnState.Phase.On) reload()
             }
@@ -426,7 +436,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 val p = intent?.getIntExtra(EXTRA_PAUSE, 0) ?: 0
                 if (p != 0 && pauses != 0 && (p != pauses || state.value.phase != VpnState.Phase.Paused)) {
                     // Its start put up "Connecting…" if the pause had already ended: put the running notice back.
-                    if (state.value.phase == VpnState.Phase.On) { if (holding) notice(UNREADABLE) else notify(store.setup.value) } else stopWanted = state.value.phase == VpnState.Phase.Off
+                    if (state.value.phase == VpnState.Phase.On) { if (holding) notice(heldNotice) else notify(store.setup.value) } else stopWanted = state.value.phase == VpnState.Phase.Off
                     return
                 }
                 // Android's own start (after it killed the app, or Always-on) during a pause the user set: paused on until its end.
@@ -454,7 +464,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** What [lastGood] was compiled from, so a failed reload can bring exactly that back with a new probe pair. */
     @Volatile private var lastInput: Compiler.Input? = null
     /** The input the engine is being started with, which [openTun] builds Android's tunnel for; none while on hold. */
-    @Volatile private var tunInput: Compiler.Input? = null
+    private class TunPolicy(val input: Compiler.Input?, val restore: Long?)
+    @Volatile private var tunPolicy: TunPolicy? = null
+    private val tunInput get() = tunPolicy?.input
 
     @OptIn(FlowPreview::class)
     private fun connect(updated: Boolean = false) {
@@ -462,7 +474,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (state.value.phase == VpnState.Phase.On) { // a repeated start (Always-on, tile)
             readFlags()
             if (state.value.phase == VpnState.Phase.On) { // a failed reload may have ended it
-                if (holding) notice(UNREADABLE) else notify(store.setup.value)
+                if (holding) notice(heldNotice) else notify(store.setup.value)
                 AfterUpdate.on(this) // still on: a start after an update may have cleared the note meanwhile
             }
             return
@@ -471,28 +483,42 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // Automatic routes start on WireGuard again with every connection.
         app.unbraid.data.AutoProtocol.reset()
         state.value = VpnState(VpnState.Phase.Connecting)
+        var from = -1L // the restores the setup being started was read after
         try {
             net.start()
             // Saved settings that won't open would start on defaults, another routing policy: the app offers to recover
             // them. Meanwhile no app goes online at all, rather than on the normal connection.
             if (store.unreadable.value && !store.reopen()) { hold(); return }
-            val seen = restores.get() // before the setup: a restore between the two reads errs on the side of stopping
-            val setup = store.setup.value
+            store.refreshWaiting(System.currentTimeMillis(), ::installation)
+            store.refreshAppSigners(::identity)
+            var (setup, seen) = store.policySnapshot()
+            from = seen
             // Refused before any provider is asked for a server: the engine would refuse it anyway.
             if (setup.defaultMissing) throw Compiler.MissingDefault()
             // A saved Tailscale node that won't open fails here with its own message, not as an engine error.
             if (setup.tailscale && store.tsStored) store.tsState
             // Due keys are replaced before any tunnel is built with them.
-            Rotation.run(setup, { store.accounts.value }, store::replaceAccount)
-            val accounts = store.accounts.value
+            // Not after a lost engine: no provider is asked then, so an edit, Pause or Disconnect never waits for one; [reload] asks right after.
+            var again = lost != null
+            if (!again) Rotation.run(setup, { store.accounts.value }, store::replaceAccount)
+            var accounts = store.accounts.value
             // The app's own tests get a fresh way in with each engine start (see apply); none until it runs.
             probe = null
-            val picked = pickLinks(setup, emptyMap(), accounts)
+            var picked = prepareSocks(setup, pickLinks(setup, emptyMap(), accounts, offline = again))
+            // Edited or switched while providers were asked: started as it is now, what is missing asked for right after.
+            while (!destroyed && store.setup.value != setup) {
+                val (now, restores) = store.policySnapshot()
+                if (now.defaultMissing) throw Compiler.MissingDefault()
+                setup = now; seen = restores; from = restores; accounts = store.accounts.value; again = true
+                picked = prepareSocks(setup, pickLinks(setup, picked.links, accounts, offline = true))
+            }
             if (destroyed) return // the service went away during the provider calls: start no engine for it
             forgetLookups(this)
             val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
-            apply(srv, setup, picked, accounts)
+            apply(srv, setup, picked, accounts, seen)
+            requireCurrent(seen)
             ranRestores = seen
+            lost = null; losses = 0
             // With the tailnet domain the engine was just compiled with: a reload that changes nothing never sets it again.
             state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), picked.links.mapValues { it.value.server }, blockedText(setup, picked.blocked), tsSuffix = lastInput?.tsSuffix, lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, stuck = stuck(setup, picked.blocked), engine = starts,
                 applied = if (picked.blocked.values.none { it is LinkPicker.Waiting }) setup.hashCode() else 0)
@@ -507,14 +533,17 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val built = startingLockdown(lastInput, isLockdownEnabled)
             health = scope.launch { watchHealth(built) }
             pool = scope.launch { watchPool() }
-            watch = combine(store.setup, store.accounts) { s, a -> s to a }.debounce(400).onEach { (s, a) ->
+            watch = combine(store.setup, store.accounts, store.restores) { s, a, _ -> s to a }.debounce { (s, _) ->
+                // Edits in a row are taken together, but one that moves apps off Direct doesn't wait.
+                if (LinkPicker.leavesDirect(applied, s, s.activeRoutes.mapTo(HashSet()) { it.id }, lastInput?.tsSuffix, store.tsSuffix)) 0L else 400L
+            }.onEach { (s, a) ->
                 val allowed = s.activeRoutes.filter { it.imported && Health.eligible(it) }.map { it.id }.toSet()
                 state.update { it.copy(notAnswering = it.notAnswering intersect allowed) }
                 // Not awaited: a slow provider must never hold up the next edit (which may have to block an app at once).
                 if (lock.withLock {
                     // Moved on from a refused setup (a switch put back): trying that one again later is a fresh attempt.
                     if (rejected != null && rejected?.first != s) { rejected = null; state.update { it.copy(refused = 0) } }
-                    (s != applied || a != appliedAccounts) && (s to a) != rejected
+                    ranRestores != store.restoreGeneration || (s != applied || a != appliedAccounts) && (s to a) != rejected
                 }) scope.launch { reload() }
             }.launchIn(scope)
             // A Mullvad list read anywhere (a server picker too) that changes which relays it owns: routes checked again.
@@ -522,19 +551,100 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // One that came while this was starting (before the hook was set) is checked now.
             if (app.unbraid.data.Mullvad.listVersion != startList) scope.launch { reload() }
             // An app installed while this was starting: judged now, with the VPN on.
-            if (installs.get() != builtInstalls) scope.launch { reload() }
+            if (installs.get() != builtInstalls || again || store.setup.value != setup || store.restoreGeneration != seen) scope.launch { reload() } // changed meanwhile: at once
         } catch (e: Exception) {
             Log.e(TAG, "connect: ${logLine(e)}")
             // After an update the notice offers the reconnect; a tap shows what fails, in the app.
-            if (updated) { teardown(null); AfterUpdate.tell(this) } else teardown(Redact.message(e, "Could not connect"))
+            // A setup restored meanwhile refused this one: Android may have the VPN up already, so apps wait for the restored one.
+            if (FakePool.waits(lost != null, from, store.restoreGeneration)) lose(Redact.message(e, "Could not connect")) else if (updated) { teardown(null); AfterUpdate.tell(this) } else teardown(Redact.message(e, "Could not connect"))
         }
     }
 
     /** The engine runs [Compiler.blockAll] because the saved settings won't open ([hold]); nothing else is applied then. */
     private var holding = false
 
-    /** [restores] as it was when the setup the engine runs was read. */
+    /**
+     * Why no engine runs although the VPN was on ([lose]), until one runs again or the user stops it; with [losses], how
+     * many tries failed. [holding] too while waiting for the next try.
+     */
+    private var lost: String? = null
+    private var losses = 0
+    /** The [session] the blocking tunnel took over from. */
+    private var lostFrom = -1
+    // Android kept the old tunnel and let no other be built: apps it leaves out may be online, and it is tried again soon.
+    private val heldNotice get() = lost?.let { if (blocks) "Apps are offline: $it" else "Some apps may be online: $it" } ?: UNREADABLE
+
+    /**
+     * The apps the tunnel in place leaves out, in the order Android got them. Android swaps two tunnels without a gap only
+     * when this list is the same; else it ends one before the next starts, and apps are outside for an instant.
+     */
+    @Volatile private var leftOut: List<String> = emptyList()
+    /** Whether the tunnel in place is the blocking one, not one an engine was given. */
+    @Volatile private var blocks = false
+
+    /** Android's tunnel with no engine behind it: every app inside is offline, only [out] stays out. */
+    private fun blockingTun(out: List<String>) = Builder().setSession("$APP").setMetered(false).addAddress("172.19.0.1", 30).addAddress("fdfe:dcba:9876::1", 126)
+        .addRoute("0.0.0.0", 0).addRoute("::", 0).addDnsServer("172.19.0.2")
+        .also { b -> out.forEach { runCatching { b.addDisallowedApplication(it) } } }.establish()
+
+    /** Puts the blocking tunnel in place, leaving out those left out before that still may be. False: Android lets no tunnel block any more. */
+    private fun block(): Boolean {
+        fun may(): List<String> = store.setup.value.let { s ->
+            val direct = Compiler.mayStayOut(verifiedSetup(s), isLockdownEnabled, ::packagesSharing) { verifiedIdentity(s, it) }
+            leftOut.filter { it == packageName || it in direct && it !in unsure && knownIds[it] == uidOf(it) }.ifEmpty { listOf(packageName) }
+        }
+        fun put(out: List<String>): Boolean = blockingTun(out)?.let { b -> runCatching { tun?.close() }; tun = b; leftOut = out; blocks = true; true } ?: false
+        return runCatching {
+            if (blocks && tun != null && may() == leftOut) true // the one there already does
+            // Checked again with it up: an app changed meanwhile comes inside.
+            else put(may()) && (may() == leftOut || put(may()))
+        }.onFailure { Log.e(TAG, "block: ${logLine(it)}") }.getOrNull()
+            ?: runCatching { put(listOf(packageName)) }.getOrNull()
+            ?: (tun != null && runCatching { prepare(this) == null }.getOrDefault(false)) // the one there stays, with nothing behind it
+    }
+
+    /**
+     * The engine is gone and what ran before didn't come back: apps stay offline behind a tunnel of its own, never on
+     * the normal connection, while connecting is tried again: after a while, or at once when something is changed.
+     * Disconnect and Pause work as always. Caller holds [lock].
+     */
+    private fun lose(why: String) {
+        // Taken before the tunnel is built: what changes from here on starts the next try.
+        fun now() = listOf(store.setup.value, store.accounts.value, store.restoreGeneration, installs.get(), runCatching { cm.activeNetwork }.getOrNull())
+        val seen = now()
+        if (destroyed || !block()) { teardown(why); return }
+        val tries = losses
+        lostFrom = session
+        stopEngine(keepTun = true)
+        lost = why; losses = tries + 1; holding = true
+        state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), error = heldNotice, lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
+        stopWanted = false
+        notice(heldNotice)
+        if (tries == 0) problem(this, heldNotice, APP, 2) // not "is off": it is on, and keeps apps offline
+        val mine = session
+        watch = scope.launch {
+            kotlinx.coroutines.withTimeoutOrNull(if (blocks) FakePool.lostWait(tries) else 2_000L) {
+                while (now() == seen) kotlinx.coroutines.delay(1_000)
+            }
+            lock.withLock {
+                if (session != mine || lost == null || destroyed) return@withLock
+                // First the apps that may stay out, as saved now: an app just moved off Direct doesn't wait for the engine.
+                if (!block()) { teardown(lost); return@withLock }
+                holding = false
+                watch = null
+                state.value = VpnState(VpnState.Phase.Connecting)
+                connect()
+            }
+        }
+    }
+
+    /** Accepted restore generation of the last successful install. */
     private var ranRestores = 0L
+
+    private fun requireCurrent(seen: Long) {
+        if (destroyed) error("VPN service is stopping")
+        if (store.restoreGeneration != seen) throw Fail(RESTORE_REFUSED)
+    }
 
     /**
      * Runs the engine with every app's connections refused, until the saved settings open (the app's Try again) or the
@@ -544,6 +654,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var lastNoted = true
 
     private fun hold() {
+        retireSocksExcept(emptySet())
         forgetLookups(this)
         val srv = server ?: CommandServer(this, this).also { it.start(); server = it }
         generation++
@@ -557,10 +668,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         if (block != lastBlock) blockSince = SystemClock.elapsedRealtime()
         lastBlock = block
         openTable(true)
-        tunInput = null
+        tunPolicy = TunPolicy(null, null) // the unreadable-store hold only refuses traffic
         engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
         starts++
+        releaseRetiredSocks()
         holding = true
+        lost = null; losses = 0
         state.value = VpnState(VpnState.Phase.On, System.currentTimeMillis(), lockdown = isLockdownEnabled, alwaysOn = isAlwaysOn, engine = starts)
         stopWanted = false
         AfterUpdate.on(this)
@@ -580,6 +693,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 forgetLookups(this@UnbraidVpn)
                 net.stop()
                 state.value = VpnState(VpnState.Phase.Connecting)
+                lost = "Could not connect" // offline until now: a start that fails leaves apps so
                 connect()
             }
         }
@@ -587,7 +701,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     /** Validates first, so a bad config never replaces a working engine. */
     /** [accounts] is the snapshot [links] were picked with: a sign-out after it differs, so the watcher reloads again. */
-    private fun apply(srv: CommandServer, setup: Setup, picked: LinkPicker.Result, accounts: Map<String, String>) {
+    private fun apply(srv: CommandServer, setup: Setup, picked: LinkPicker.Result, accounts: Map<String, String>, seen: Long) {
+        requireCurrent(seen)
         generation++
         val counted = installs.get() // before the user ids are read for the setup: one installed after is counted after
         val links = picked.links
@@ -607,6 +722,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // The block is spent before the engine can hand out any of it, also if the start fails or the app dies now:
             // a new table that couldn't be noted down doesn't start, or the next process would hand it out again.
             // A new block starts from a deleted table: never an old file, which a missing or bad one would follow into it.
+            requireCurrent(seen)
             if (engine("$APP couldn't save its state. Try again.") { FakePool.spend(input.fakeBlock, lastBlock, filesDir) { store.fakeBlock = it } })
                 blockSince = SystemClock.elapsedRealtime()
             lastBlock = input.fakeBlock; lastNoted = true
@@ -619,15 +735,20 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // one already open through a tunnel that turns TCP-only is closed first.
             val udpless = Compiler.tcpOnly(json)
             Health.stun.udpless(udpless) { tcpOnly = tcpOnly + udpless }
-            tunInput = input
+            tunPolicy = TunPolicy(input, seen)
+            requireCurrent(seen)
             engine("The connection engine couldn't start.") { srv.startOrReloadService(json, OverrideOptions()) }
+            requireCurrent(seen)
             tcpOnly = udpless
             restarting = false
             starts++
             probe = next
             state.update { it.copy(tsSuffix = input.tsSuffix) }
         }
+        requireCurrent(seen)
+        if (!fresh) tunPolicy = TunPolicy(input, seen)
         lastGood = json
+        releaseRetiredSocks()
         builtInstalls = counted
         lastInput = input // also when nothing restarted: a move restarts what is applied now
         tunnelDns = runCatching { Compiler.probeDns(json) }.getOrDefault(emptyMap())
@@ -707,26 +828,39 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
      */
     private fun restoreLastGood(srv: CommandServer, block: Int? = null, gone: Boolean = true, move: Boolean = false): FakePool.Outcome = FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->
         runCatching {
-            // A move runs what runs: saved settings aren't read for it.
+            // A move keeps the routes that ran. An observed restored app may have settled while this engine was active.
+            store.refreshWaiting(System.currentTimeMillis(), ::installation)
             val input = FakePool.restoreInput(lastInput ?: error("nothing ran"), block, spent, newProbe(),
-                if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move) { blockedKin(it) }
+                if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix, isLockdownEnabled, tsLoginPending, move, ::verifiedSetup, socksEndpoints()) { blockedKin(it) }
             input to Compiler.compile(input).also(Libbox::checkConfig)
         }.onFailure { Log.e(TAG, "restore: ${logLine(it)}") }.getOrThrow()
-    }, note = { store.fakeBlock = it }, commit = { input ->
+    }, note = { blockSpent ->
+        store.fakeBlock = blockSpent
+        lastBlock = blockSpent
+        blockSince = SystemClock.elapsedRealtime()
+        lastNoted = true
+    }, commit = { input ->
         probe = null // the old engine's way in goes with it
         lastGood = null
-        if (input.fakeBlock != lastBlock) blockSince = SystemClock.elapsedRealtime()
         lastBlock = input.fakeBlock; lastNoted = true
         lastInput = input
         state.update { it.copy(tsSuffix = input.tsSuffix) }
         openTable(true)
-    }) { input, json ->
+    }, current = { store.restoreGeneration == ranRestores }) { input, json ->
         Compiler.tcpOnly(json).let { u -> Health.stun.udpless(u) { tcpOnly = tcpOnly + u } }
-        tunInput = input
+        tunPolicy = TunPolicy(input, ranRestores)
+        requireCurrent(ranRestores)
         srv.startOrReloadService(json, OverrideOptions())
+        requireCurrent(ranRestores)
         tcpOnly = Compiler.tcpOnly(json)
         starts++
-        state.update { it.restarted(starts) }
+        // The restored engine has now released the failed candidate. Its revoked ports can be freed.
+        retireSocksExcept(input.socksBridges.keys - input.unavailableSocks)
+        releaseRetiredSocks()
+        val offline = input.unavailableSocks
+        links = links - offline
+        tags = tags - offline
+        state.update { it.restarted(starts).copy(servers = it.servers - offline) }
         probe = input.probe
         lastGood = json
     }
@@ -757,9 +891,12 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     FakePool.Step.Nothing, FakePool.Step.Wait -> {}
                     FakePool.Step.Exhausted -> if (!exhaustedSaid) { exhaustedSaid = true; Log.w(TAG, "fake IPs: block used up before the next move is due, new lookups fail until then") }
                     FakePool.Step.Rotate -> when (FakePool.move { gone -> restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone, move = true) }) {
-                        FakePool.Outcome.Ran -> { exhaustedSaid = false; Log.i(TAG, "fake IPs: moved to the next block"); retime() }
+                        FakePool.Outcome.Ran -> if (ranRestores != store.restoreGeneration) lose(RESTORE_REFUSED) else {
+                            exhaustedSaid = false; Log.i(TAG, "fake IPs: moved to the next block"); retime()
+                        }
                         FakePool.Outcome.Kept -> Log.w(TAG, "fake IPs: move not started, tried again at the next check")
-                        FakePool.Outcome.Failed -> teardown("Connection lost")
+                        FakePool.Outcome.Failed -> lose("Connection lost")
+                        FakePool.Outcome.Superseded -> lose(RESTORE_REFUSED)
                     }
                 }
             }
@@ -804,8 +941,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // An install retry that another reload caught up with, or that the VPN stopping cancelled, does nothing.
             if (forInstall && (installs.get() == builtInstalls || !kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]!!.isActive)) return
             val srv = server ?: return
-            val seen = restores.get()
-            val setup = store.setup.value
+            store.refreshWaiting(System.currentTimeMillis(), ::installation)
+            val (setup, seen) = store.policySnapshot()
             val accounts = store.accounts.value
             // [keep] was taken without the lock: only valid if nothing was installed since ([keepFrom]).
             val ready = pickLinks(setup, keep?.takeIf { keepFrom == generation } ?: links, accounts, avoid, offline = true)
@@ -818,7 +955,9 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // So does a running tunnel that now has to go through another route (Via): never straight while the entry is fetched.
             // And an app or the default moved onto a Via route still waiting: blocked meanwhile, not left on its old route.
             // And a running tunnel without the disguise its provider now asks for: never plain while a disguised one is fetched.
-            val stopNow = ready.blocked.any { (id, e) -> (e is AuthException || e is LinkPicker.Unsuited) && id in links } ||
+            val socksChanged = setup.activeRoutes.any { r -> r.socks5 != null && r != applied?.route(r.id) } ||
+                localExits.keys.any { it !in ready.links }
+            val stopNow = socksChanged || ready.blocked.any { (id, e) -> (e is AuthException || e is LinkPicker.Unsuited) && id in links } ||
                 ready.blocked.keys.any { id -> setup.route(id)?.via != null && (id in links || applied?.let { LinkPicker.movedOnto(it, setup, id) } == true) } ||
                 links.keys.any { id -> setup.route(id)?.via != applied?.route(id)?.via || plain(setup, id) } ||
                 !LinkPicker.stillSuits(setup, links, Providers::get) // also a running tunnel left out of [keep] by a health move
@@ -833,7 +972,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             // Stopped, reloaded or edited during the provider calls: the newer state wins (the watcher reloads an edit).
             if (destroyed || state.value.phase != VpnState.Phase.On || generation != ask.generation || store.setup.value != ask.setup || store.accounts.value != ask.accounts) return
             // A provider list read meanwhile may rule out a server picked from an older one (Mullvad-owned only): picked again.
-            if (!LinkPicker.stillSuits(ask.setup, picked.links, Providers::get)) { scope.launch { reload() }; return }
+            if (store.restoreGeneration != ask.seen || !LinkPicker.stillSuits(ask.setup, picked.links, Providers::get)) { scope.launch { reload() }; return }
             noteRefusals(ask.setup, ask.accounts, picked)
             runCatching { store.rememberLinks(picked.remember) }.onFailure { Log.w(TAG, "last servers not saved") }
             install(ask.srv, ask.setup, picked, ask.accounts, ask.seen)
@@ -841,8 +980,10 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     /** Runs [picked] on the engine and shows it; on failure brings back what ran. False if it didn't apply. Caller holds [lock]. */
-    private fun install(srv: CommandServer, setup: Setup, picked: LinkPicker.Result, accounts: Map<String, String>, seen: Long): Boolean = try {
-        apply(srv, setup, picked, accounts)
+    private fun install(srv: CommandServer, setup: Setup, selection: LinkPicker.Result, accounts: Map<String, String>, seen: Long): Boolean = try {
+        val picked = prepareSocks(setup, selection)
+        apply(srv, setup, picked, accounts, seen)
+        requireCurrent(seen)
         ranRestores = seen
         state.update { it.copy(servers = picked.links.mapValues { l -> l.value.server }, error = blockedText(setup, picked.blocked), stuck = stuck(setup, picked.blocked)) }
         notify(setup)
@@ -854,19 +995,24 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         // libbox stops the old engine before starting the new one: only then bring the last good config back. It comes
         // back with a new probe pair too: the old password may have been seen while the old engine's port was free.
         val restarted = restarting
-        val restored = !restarted || restoreLastGood(srv) == FakePool.Outcome.Ran
+        // A failed candidate can already own live listeners. Revoke those that never belonged to the last good input.
+        retireSocksExcept(FakePool.retainedBridges(lastInput?.socksBridges.orEmpty(), socksEndpoints()).keys)
+        val outcome = FakePool.afterFailure(restarted, { ranRestores == store.restoreGeneration }) { restoreLastGood(srv) }
         restarting = false
-        // A retry of the running setup that failed before any engine restart is tried again later; one that restarted
-        // every tunnel isn't, so a failing server never takes all apps offline every few minutes (a network change
-        // still tries again). A refused edit is never retried this way: it waits for the next edit.
-        if (restored && restarted) { retry?.cancel(); retry = null; retryTicket++ }
-        else if (restored && setup == applied && accounts == appliedAccounts) retryBlocked(retrying)
-        // An install that may change what Android leaves out ([installs]) is not left to the next edit: tried once more.
-        val pending = installs.get()
-        if (pending != builtInstalls && pending != retriedInstalls) { retriedInstalls = pending; installRetry?.cancel(); installRetry = scope.launch { kotlinx.coroutines.delay(30_000); reload(forInstall = true) } }
-        if (restored) retime() // a new engine, numbered afresh
-        if (restored && ranRestores != restores.get()) teardown(RESTORE_REFUSED)
-        else if (restored) state.update { it.copy(error = Redact.message(e, "Change not applied"), refused = setup.hashCode()) } else teardown(Redact.message(e, "Connection lost"))
+        if (outcome == FakePool.Outcome.Superseded || ranRestores != store.restoreGeneration) lose(RESTORE_REFUSED)
+        else if (outcome == FakePool.Outcome.Failed) lose(Redact.message(e, "Connection lost"))
+        else {
+            // A retry of the running setup that failed before any engine restart is tried again later; one that restarted
+            // every tunnel isn't, so a failing server never takes all apps offline every few minutes (a network change
+            // still tries again). A refused edit is never retried this way: it waits for the next edit.
+            if (restarted) { retry?.cancel(); retry = null; retryTicket++ }
+            else if (setup == applied && accounts == appliedAccounts) retryBlocked(retrying)
+            // An install that may change what Android leaves out ([installs]) is not left to the next edit: tried once more.
+            val pending = installs.get()
+            if (pending != builtInstalls && pending != retriedInstalls) { retriedInstalls = pending; installRetry?.cancel(); installRetry = scope.launch { kotlinx.coroutines.delay(30_000); reload(forInstall = true) } }
+            retime()
+            state.update { it.copy(error = Redact.message(e, "Change not applied"), refused = setup.hashCode()) }
+        }
         false
     }
 
@@ -941,6 +1087,16 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             val regular = now >= round
             // A new key whose reply got lost may already be the only one IVPN takes: finish it as soon as it can be.
             if (regular) Rotation.run(store.setup.value, { store.accounts.value }, store::replaceAccount, finishOnly = true)
+            if (regular) {
+                // An unreadable signing identity can recover without a package broadcast.
+                store.refreshWaiting(System.currentTimeMillis(), ::installation)
+                val saved = store.setup.value
+                val held = lastInput?.setup?.apps.orEmpty()
+                if (saved == applied && saved.appSigners.any { (pkg, pin) -> held[pkg] == app.unbraid.data.BLOCK && saved.deadline(saved.live, pkg) == null && identity(pkg)?.accepts(pin) == true }) {
+                    store.refreshAppSigners(::identity)
+                    reload()
+                }
+            }
             if (regular) scope.launch { runCatching { announceUpdate(this@UnbraidVpn, store) } }
             // A provider whose new key is still reaching its servers isn't judged yet.
             val settingUp = Providers.settingUp()
@@ -1099,7 +1255,132 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     private var portNet: android.net.Network? = null
 
     private fun input(setup: Setup, links: Map<String, Link>, blocked: Set<String>, p: Pair<Int, String>? = probe) =
-        Compiler.Input(setup, LinkPicker.ported(setup, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(setup))
+        verifiedSetup(setup).let { checked ->
+            Compiler.Input(checked, LinkPicker.ported(checked, links, portStep), packageName, isLockdownEnabled, File(filesDir, "tailscale").path, File(filesDir, "cache.db").path, store.tsSuffix, p, fakeBlock(), blocked, tsLoginPending, blockedKin(checked), socksBridges = socksEndpoints())
+        }
+
+    // Access to the registry is serialized with engine installs. Verification runs on the bridge's
+    // I/O threads and reads the live policy and package identity afresh on the connected socket.
+    private class LocalExit(val profile: Socks5Profile, val uid: Int, val restore: Long, val bridge: Socks5Bridge)
+    private val localExits = mutableMapOf<String, LocalExit>()
+    private val retiredExits = mutableListOf<Socks5Bridge>()
+
+    private fun retireSocksExcept(keep: Set<String>) {
+        for (id in localExits.keys - keep) {
+            val bridge = localExits.remove(id)!!.bridge
+            bridge.revoke()
+            val published = lastInput?.socksBridges?.get(id)?.port == bridge.port ||
+                tunInput?.socksBridges?.get(id)?.port == bridge.port
+            if (published) retiredExits += bridge else bridge.close()
+        }
+    }
+
+    private fun releaseRetiredSocks() {
+        retiredExits.forEach { it.close() }
+        retiredExits.clear()
+    }
+
+    private fun closeSocks() {
+        retireSocksExcept(emptySet())
+        releaseRetiredSocks()
+    }
+
+    private fun socksEndpoints() = localExits.mapValues { (_, exit) ->
+        Compiler.SocksBridge(exit.bridge.port, exit.bridge.username, exit.bridge.password, exit.profile.allowUdp)
+    }
+
+    private fun companionUid(profile: Socks5Profile): Int? = runCatching {
+        val uid = packageManager.getPackageUid(profile.packageName, 0)
+        uid.takeIf { soleOwner(profile, identity(profile.packageName), uid) }
+    }.getOrNull()
+
+    /** Whether the proxy app, still with its signer, is the only one with [uid]: looked up now, for each check. */
+    private fun soleOwner(profile: Socks5Profile, signer: AppIdentity?, uid: Int) = signer?.accepts(profile.identity) == true &&
+        runCatching { packageManager.getPackagesForUid(uid)?.toSet() == setOf(profile.packageName) }.getOrDefault(false)
+
+    /** Look up the peer's socket, with that socket's endpoint first. UDP ownership is only a snapshot. */
+    private fun socksOwner(protocol: Int, peer: InetSocketAddress, local: InetSocketAddress, uid: Int): Boolean =
+        runCatching { cm.getConnectionOwnerUid(protocol, peer, local) == uid }.getOrDefault(false)
+
+    private fun prepareSocks(setup: Setup, picked: LinkPicker.Result): LinkPicker.Result {
+        val routes = setup.activeRoutes.filter { it.socks5 != null && it.id in picked.links }
+        if (routes.isEmpty() && localExits.isEmpty()) return picked
+        val blocked = picked.blocked.toMutableMap()
+        val restore = store.restoreGeneration
+        val checked = verifiedSetup(setup)
+        val kin = blockedKin(checked)
+        val keep = mutableSetOf<String>()
+        for (route in routes) {
+            val profile = route.socks5!!
+            val uid = companionUid(profile)
+            val reason = Compiler.socksPolicyProblem(checked, route, packageName, isLockdownEnabled, kin, store.tsSuffix)
+                ?: if (uid == null) "The proxy app could not be verified on this phone" else null
+            if (reason != null || uid == null) {
+                blocked[route.id] = Fail(reason ?: "Proxy app unavailable")
+                continue
+            }
+            val current = localExits[route.id]
+            if (current == null || !profile.sameConnection(current.profile) || current.uid != uid || current.restore != restore) {
+                retireSocksExcept(localExits.keys - route.id)
+                fun companionStillAllowed(): Boolean {
+                    val saved = store.setup.value
+                    val pkg = profile.packageName
+                    if (destroyed || store.restoreGeneration != restore || isLockdownEnabled || !saved.outside(pkg) ||
+                        saved.route(route.id)?.let { profile.sameConnection(it.socks5) && !it.keyless } != true) return false
+                    val signer = verifiedIdentity(saved, pkg)
+                    return saved.permitsApp(pkg) { signer } && soleOwner(profile, signer, uid) // the only app with that id, so no second lookup of its id
+                }
+                val bridge = runCatching {
+                    Socks5Bridge.start(profile.host, profile.port, profile.username, profile.password, socksPorts(setup),
+                        udpEnabled = profile.allowUdp,
+                        udpRelayOwnerVerified = { local, remote ->
+                            companionStillAllowed() && socksOwner(android.system.OsConstants.IPPROTO_UDP, remote, local, uid)
+                        },
+                    ) { socket ->
+                        companionStillAllowed() && socksOwner(android.system.OsConstants.IPPROTO_TCP,
+                            socket.remoteSocketAddress as InetSocketAddress, socket.localSocketAddress as InetSocketAddress, uid)
+                    }
+                }.getOrNull()
+                if (bridge == null || bridge.port == profile.port) {
+                    bridge?.close()
+                    blocked[route.id] = Fail("Could not open the local proxy connection")
+                    continue
+                }
+                localExits[route.id] = LocalExit(profile, uid, restore, bridge)
+            }
+            keep += route.id
+        }
+        retireSocksExcept(keep)
+        return LinkPicker.Result(picked.links - blocked.keys, picked.remember, blocked)
+    }
+
+    private fun identity(pkg: String) = AppIdentity.read(packageManager, pkg)
+
+    /** An earlier running profile also respects a newer signer observed for one of its grants. */
+    private fun verifiedIdentity(setup: Setup, pkg: String, observed: InstallState? = null): AppIdentity? {
+        val saved = store.setup.value
+        val previous = if (saved.profile == setup.profile) null else saved.profiles.firstOrNull { it.name == setup.profile }
+        val pin = if (saved.profile == setup.profile) saved.appSigners[pkg] else previous?.appSigners?.get(pkg)
+        val installed = if (pkg in saved.waiting || pkg in setup.waiting) {
+            val p = if (setup.profile == saved.profile) saved.live else previous
+            val state = observed ?: installation(pkg)
+            val now = System.currentTimeMillis()
+            if (p != null && !saved.waitAdmits(p, pkg, now, state) || !setup.waitAdmits(setup.live, pkg, now, state)) return null
+            (state as? InstallState.Present)?.identity
+        } else if (observed != null) (observed as? InstallState.Present)?.identity else identity(pkg)
+        return installed?.takeIf { pin == null || it.accepts(pin) }
+    }
+
+    private fun installation(pkg: String) = InstallState.read(packageManager, pkg, includeArchived = true)
+
+    private fun verifiedSetup(setup: Setup): Setup {
+        val observed = HashMap<String, InstallState>()
+        val resolved = setup.resolveWaiting(System.currentTimeMillis(), { pkg -> installation(pkg).also { observed[pkg] = it } }, effective = true)
+        return resolved.checkedApps { pkg -> verifiedIdentity(setup, pkg, observed[pkg]) }
+    }
+
+    private fun packagesSharing(pkg: String): Set<String>? =
+        runCatching { packageManager.getPackagesForUid(packageManager.getPackageUid(pkg, 0))?.toSet() }.getOrNull()
 
     /**
      * The apps on Direct that another app of their Android user id keeps inside ([Compiler.Input.blockedKin]). An app that
@@ -1120,9 +1401,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
 
     /** The app's own way into each exit ([Compiler.PROBE]): a free loopback port and a 24-byte random password. */
-    private fun newProbe(): Pair<Int, String> =
-        java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress()).use { it.localPort } to
-            java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(24).also { java.security.SecureRandom().nextBytes(it) })
+    private fun socksPorts(setup: Setup): Set<Int> =
+        (setup.servers.mapNotNull { it.socks5?.port } + setup.routes.mapNotNull { it.socks5?.port }).toSet()
+
+    private fun newProbe(): Pair<Int, String> {
+        val excluded = socksPorts(store.setup.value)
+        repeat(16) {
+            val port = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
+            if (port !in excluded) return port to java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(ByteArray(24).also { java.security.SecureRandom().nextBytes(it) })
+        }
+        throw Fail("Could not allocate a local check port")
+    }
 
     private fun watchTailscale() {
         ts = runCatching {
@@ -1166,13 +1456,16 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     /** Counts connections ended ([stopEngine]): a stop from outside applies only to the one it was sent for. */
     @Volatile private var session = 0
     /** Android or the engine ended the connection: said, like a failed connect, unless that one had already ended. */
-    private fun stoppedOutside(why: String) {
+    private fun stoppedOutside(why: String, revoked: Boolean = false) {
         val mine = session // taken now: a stop and a new connect may be handled before this gets the lock
-        scope.launch { lock.withLock { if (session == mine && state.value.phase != VpnState.Phase.Off) teardown(why) } }
+        // A revoke also ends the blocking tunnel that took over meanwhile ([lose]); the engine stopping for it doesn't.
+        scope.launch { lock.withLock { if ((session == mine || revoked && lost != null && lostFrom == mine) && state.value.phase != VpnState.Phase.Off) teardown(why) } }
     }
 
     /** Stops the engine and the tunnel; the service itself stays. Caller holds [lock]. */
-    private fun stopEngine() {
+    private fun stopEngine(keepTun: Boolean = false) {
+        if (lost != null && !keepTun) getSystemService(NotificationManager::class.java).cancel(2) // its alert is over too
+        lost = null; losses = 0
         watch?.cancel(); watch = null
         health?.cancel(); health = null
         pool?.cancel(); pool = null; exhaustedSaid = false
@@ -1183,8 +1476,11 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         runCatching { ts?.close() }; ts = null
         tsLoginPending = false
         holding = false
+        tunPolicy = null
+        restarting = false
         runCatching { server?.closeService() }
-        runCatching { tun?.close() }; tun = null
+        closeSocks()
+        if (!keepTun) { runCatching { tun?.close() }; tun = null; blocks = false }
         openTable(false)
         forgetLookups(this)
         net.stop()
@@ -1276,7 +1572,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
         return notification(if (p.pausedUntil <= 0) "Paused" else if (!p.pausedAbout) "Paused until $at" else "Paused until about $at", paused = true)
     }
 
-    override fun onRevoke() = stoppedOutside("Android turned off $APP's VPN: another VPN app took over, or it was disconnected in Android's settings.")
+    override fun onRevoke() = stoppedOutside("Android turned off $APP's VPN: another VPN app took over, or it was disconnected in Android's settings.", revoked = true)
 
     override fun onDestroy() {
         // Killed without teardown: never leave a tunnel or an "On" state behind. Cleanup waits for whatever holds the
@@ -1297,6 +1593,7 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 // Closing the command server alone leaves a running engine (and its own copy of the tunnel) alive.
                 runCatching { server?.closeService() }
                 runCatching { server?.close() }
+                closeSocks()
                 server = null
                 runCatching { tun?.close() }; tun = null
                 net.quit()
@@ -1355,14 +1652,24 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
 
     override fun openTun(o: TunOptions): Int {
         if (prepare(this) != null) error("VPN permission missing")
-        val out = buildList { if (o.autoRoute) o.excludePackage.forEachString { add(it) } }
+        val policy = tunPolicy ?: error("VPN service is stopping")
+        fun checkPolicy() {
+            if (destroyed || tunPolicy !== policy) error("VPN service changed")
+            policy.restore?.let(::requireCurrent)
+        }
+        checkPolicy()
+        val requested = buildList { if (o.autoRoute) o.excludePackage.forEachString { add(it) } }
+        val setup = policy.input?.setup
+        fun allowed(pkg: String) = pkg == packageName || setup != null && pkg !in policy.input?.socksCompanions.orEmpty() &&
+            Compiler.mayExclude(setup, pkg, packagesSharing(pkg)) { verifiedIdentity(setup, it) }
+        val out = requested.filter(::allowed)
         fun builder(leaveOut: List<String>) = Builder().setSession("$APP").setMtu(o.mtu).setMetered(false).also { b ->
             o.inet4Address.forEach { b.addAddress(it.address(), it.prefix()) }
             o.inet6Address.forEach { b.addAddress(it.address(), it.prefix()) }
             if (o.autoRoute) {
                 o.dnsServerAddress.forEachString { b.addDnsServer(it) }
                 // From the input being started, not saved settings: a DNS permission the engine refused stays refused here too.
-                Compiler.searchDomain(tunInput)?.let { b.addSearchDomain(it) }
+                Compiler.searchDomain(policy.input)?.let { b.addSearchDomain(it) }
                 val r4 = o.inet4RouteAddress.toList()
                 if (r4.isEmpty()) b.addRoute("0.0.0.0", 0) else r4.forEach { b.addRoute(it.ipPrefix()) }
                 o.inet6RouteAddress.forEach { b.addRoute(it.ipPrefix()) }
@@ -1372,28 +1679,57 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                 leaveOut.forEach { runCatching { b.addDisallowedApplication(it) } }
             }
         }
+        // The user id each has before the tunnel is built: what Android is about to leave out.
+        val ids = out.associateWith(::uidOf).filterValues { it >= 0 }
+        fun establish(excluded: List<String>): android.os.ParcelFileDescriptor {
+            val builder = builder(excluded)
+            checkPolicy()
+            blocks = false // Android may already have replaced it when a check below fails
+            val pfd = builder.establish() ?: error("VPN permission revoked")
+            try { checkPolicy() } catch (e: Exception) {
+                // Android has replaced the old tunnel with this one: closed now, apps would be outside until the next. Kept,
+                // with no engine behind it, until [lose] or a new start replaces it; closed only when stopping.
+                if (destroyed || tunPolicy !== policy) pfd.close() else {
+                    runCatching { tun?.close() }; tun = pfd; leftOut = excluded
+                    // So the blocking tunnel can leave out the same ones, checked again there: else Android swaps with a gap.
+                    knownIds.putAll(ids.filterKeys { it in excluded })
+                }
+                throw e
+            }
+            return pfd
+        }
         // Android turns the apps to leave out into user ids only when that list changes: with the same names it keeps the
         // old ids, so an app installed again (with a new user id) would stay inside. Then the tunnel is first built with
         // those apps inside (the safe side, for an instant), so the real list is a change and is read afresh.
         // Each app's user id is remembered from every tunnel built, also while it was away: one back with another id is
         // moved, whatever else changed in the list.
-        val uidOf = { n: String -> runCatching { packageManager.getPackageUid(n, 0) }.getOrDefault(-1) }
-        val ids = out.associateWith(uidOf).filterValues { it >= 0 }
         val moved = ids.filter { (n, id) -> knownIds[n]?.let { it != id } == true || n in unsure }.keys
-        val interim = if (tun != null && moved.isNotEmpty()) builder(out - moved).establish()?.also { tun?.close(); tun = it } else null
-        val pfd = builder(out).establish() ?: error("VPN permission revoked")
+        val interim = if (tun != null && moved.isNotEmpty()) establish(out - moved).also { tun?.close(); tun = it; leftOut = out - moved } else null
+        var pfd = establish(out)
         tun?.close()
         tun = pfd
+        leftOut = out
         // Looked up again: an app installed or removed while the tunnel was built may have met the builder with another id.
-        val after = out.associateWith(uidOf).filterValues { it >= 0 }
+        val after = out.associateWith(::uidOf).filterValues { it >= 0 }
         // One whose id changed in between may have met Android with the old one: not taken as known, built in two steps next.
         val changed = (after.keys + ids.keys).filterTo(HashSet()) { after[it] != ids[it] }
+        changed += out.filterNot(::allowed)
+        if (changed.isNotEmpty()) {
+            val safe = establish(out - changed)
+            pfd.close()
+            tun = safe
+            leftOut = out - changed
+            pfd = safe
+        }
+        knownIds.keys.retainAll(out.toSet() - changed)
         knownIds.putAll(after - changed)
         unsure = if (changed.isEmpty()) emptySet() else unsure + changed
         if (changed.isNotEmpty()) installs.incrementAndGet().also { scope.launch { reload() } }
         if (interim != null) Log.i(TAG, "tunnel built again: user ids of apps left out changed")
+        checkPolicy()
         return pfd.fd
     }
+    private fun uidOf(pkg: String) = runCatching { packageManager.getPackageUid(pkg, 0) }.getOrDefault(-1)
     /** The user id each app left out had when a tunnel was last built with it installed. */
     private val knownIds = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /** Apps whose user id changed while a tunnel was built: the next one leaves them out in two steps. */
@@ -1402,12 +1738,18 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     override fun autoDetectInterfaceControl(fd: Int) { protect(fd) }
     override fun usePlatformAutoDetectInterfaceControl() = true
 
+    /** The proxy apps of the setup being started and of the one it replaces: either engine may be asking. */
+    private fun proxyApps() = tunInput?.socksCompanions.orEmpty() + lastInput?.socksCompanions.orEmpty()
+
     override fun findConnectionOwner(proto: Int, src: String, sport: Int, dst: String, dport: Int): ConnectionOwner {
         val uid = cm.getConnectionOwnerUid(proto, InetSocketAddress(src, sport), InetSocketAddress(dst, dport))
         if (uid == Process.INVALID_UID) error("owner not found")
-        val pkgs = packageManager.getPackagesForUid(uid).orEmpty().toList()
+        val names = packageManager.getPackagesForUid(uid).orEmpty().toList()
+        val pkgs = tunInput?.setup?.let { setup -> Compiler.ownerNames(setup, names, if (names.size > 1) proxyApps() else emptySet()) { verifiedIdentity(setup, it) } } ?: names
         return ConnectionOwner().apply {
             userId = uid
+            // Use the kernel UID and the original package list, before routing can substitute a marker.
+            individualApp = individualDnsOwner(Process.isApplicationUid(uid), uid, Process.myUid(), names, pkgs)
             userName = pkgs.firstOrNull().orEmpty()
             setAndroidPackageNames(Strings(pkgs))
         }

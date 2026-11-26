@@ -1,0 +1,2170 @@
+diff --git a/flow.go b/flow.go
+index c735fc9..bdd86c2 100644
+--- a/flow.go
++++ b/flow.go
+@@ -1,16 +1,22 @@
+ package tun
+ 
+ import (
++	"context"
+ 	"net/netip"
+ 	"time"
+ )
+ 
+ type FlowVerdict struct {
+-	Action      FlowAction
+-	Port        Port
+-	Destination netip.AddrPort
+-	UDPTimeout  time.Duration
+-	NewTracker  func() FlowTracker
++	// Transient failures apply to the current packet only.
++	Transient        bool
++	DestinationBound bool
++	// RouteContext transfers the decision to its own socket when the stack is needed.
++	RouteContext func(context.Context) context.Context
++	Action       FlowAction
++	Port         Port
++	Destination  netip.AddrPort
++	UDPTimeout   time.Duration
++	NewTracker   func() FlowTracker
+ }
+ 
+ type FlowAction uint8
+diff --git a/flow_decision.go b/flow_decision.go
+new file mode 100644
+index 0000000..576f64a
+--- /dev/null
++++ b/flow_decision.go
+@@ -0,0 +1,205 @@
++package tun
++
++import (
++	"context"
++	"net/netip"
++	"sync"
++	"time"
++)
++
++// DeferredFlowHandler identifies the resolver before the packet owner admits work.
++// The continuation owns any policy inputs it retains after BeginFlow returns.
++type DeferredFlowHandler interface {
++	BeginFlow(network uint8, source, destination netip.AddrPort, firstPacket []byte) (FlowVerdict, *PendingFlowDecision)
++}
++
++type PendingFlowDecision struct {
++	Resolver string
++	Resolve  func(context.Context) FlowVerdict
++	Valid    func() bool
++}
++
++// One queue per ingress stage. All commits and retries are serialized with both
++// ordinary packets at that stage and retirement of the owning generation.
++type flowDecisionQueue struct {
++	origin   *ForwardDispatcher
++	lifetime context.Context
++	retire   context.CancelFunc
++
++	workers        sync.WaitGroup
++	mu             sync.Mutex
++	closed         bool
++	pauses         int
++	pending        map[flowKey]*pendingPackets
++	byResolver     map[string]int
++	groupBytes     map[string]int
++	recentFailures [32]struct {
++		key      flowKey
++		resolver string
++		until    time.Time
++	}
++	nextFailure int
++	active      int
++	bytes       int
++}
++
++const (
++	maxPendingPerResolver = 8
++	maxPendingDecisions   = 128
++	maxPacketsPerDecision = 8
++	maxBytesPerDecision   = 128 * 1024
++	maxDecisionBytes      = 4 * 1024 * 1024
++	maxResolverBytes      = 512 * 1024
++)
++
++type flowDecisionPacket struct {
++	commit  func(FlowVerdict)
++	replay  func()
++	release func()
++}
++
++type pendingPackets struct {
++	resolver string
++	tcpSeq   uint32
++	cancel   context.CancelFunc
++	packets  []flowDecisionPacket
++	bytes    int
++}
++
++func (q *flowDecisionQueue) queueIfPendingLocked(key flowKey, size int, retain func() flowDecisionPacket) bool {
++	if q.closed || q.pauses != 0 {
++		return true
++	}
++	p := q.pending[key]
++	if p == nil {
++		return false
++	}
++	q.retainLocked(p, size, retain)
++	return true
++}
++
++func (q *flowDecisionQueue) retainLocked(p *pendingPackets, size int, retain func() flowDecisionPacket) bool {
++	if size < 0 || len(p.packets) >= maxPacketsPerDecision || size > maxBytesPerDecision-p.bytes || size > maxDecisionBytes-q.bytes || size > maxResolverBytes-q.groupBytes[p.resolver] {
++		return false
++	}
++	p.packets = append(p.packets, retain())
++	p.bytes += size
++	q.bytes += size
++	q.groupBytes[p.resolver] += size
++	return true
++}
++
++func (q *flowDecisionQueue) deferLocked(key flowKey, size int, retain func() flowDecisionPacket, decision *PendingFlowDecision) {
++	if q.closed || q.pauses != 0 || decision.Resolve == nil || q.active >= maxPendingDecisions || q.byResolver[decision.Resolver] >= maxPendingPerResolver {
++		return
++	}
++	if q.pending == nil {
++		q.pending = make(map[flowKey]*pendingPackets)
++		q.byResolver = make(map[string]int)
++		q.groupBytes = make(map[string]int)
++	}
++	// A resolver can fail immediately. A short per-flow hold prevents a
++	// retransmission burst from starting a fresh exchange for each datagram.
++	// Only misses reach this point, so an independently warmed answer still wins.
++	now := time.Now()
++	for i := range q.recentFailures {
++		failure := &q.recentFailures[i]
++		if failure.key == key && failure.resolver == decision.Resolver && now.Before(failure.until) {
++			return
++		}
++	}
++	p := &pendingPackets{resolver: decision.Resolver}
++	if !q.retainLocked(p, size, retain) {
++		return
++	}
++	var ctx context.Context
++	ctx, p.cancel = context.WithCancel(context.Background())
++	q.pending[key] = p
++	q.byResolver[decision.Resolver]++
++	q.active++
++	q.workers.Add(1)
++	go func() {
++		defer q.workers.Done()
++		verdict := decision.Resolve(ctx)
++		valid := decision.Valid == nil || ctx.Err() == nil && decision.Valid()
++		p.cancel()
++		q.mu.Lock()
++		defer q.mu.Unlock()
++		q.active--
++		q.byResolver[decision.Resolver]--
++		if q.byResolver[decision.Resolver] == 0 {
++			delete(q.byResolver, decision.Resolver)
++		}
++		if q.pending[key] != p {
++			return
++		}
++		q.removeLocked(key, p)
++		if valid && verdict.Transient {
++			failure := &q.recentFailures[q.nextFailure]
++			failure.key, failure.resolver, failure.until = key, decision.Resolver, time.Now().Add(250*time.Millisecond)
++			q.nextFailure = (q.nextFailure + 1) % len(q.recentFailures)
++		}
++		for i, packet := range p.packets {
++			if valid {
++				if i == 0 {
++					packet.commit(verdict)
++				} else {
++					packet.replay()
++				}
++			}
++			packet.release()
++		}
++	}()
++}
++
++func (q *flowDecisionQueue) generationContextLocked() context.Context {
++	if q.lifetime == nil {
++		q.lifetime, q.retire = context.WithCancel(context.Background())
++		if q.closed {
++			q.retire()
++		}
++	}
++	return q.lifetime
++}
++
++func (q *flowDecisionQueue) invalidate(closing bool) {
++	if q == nil {
++		return
++	}
++	q.mu.Lock()
++	defer q.mu.Unlock()
++	q.invalidateLocked(closing)
++}
++
++func (q *flowDecisionQueue) invalidateLocked(closing bool) {
++	clear(q.recentFailures[:])
++	if closing {
++		q.closed = true
++	}
++	if q.retire != nil {
++		q.retire()
++		q.retire = nil
++		q.lifetime = nil
++	}
++	for key, p := range q.pending {
++		q.discardLocked(key, p)
++	}
++}
++
++func (q *flowDecisionQueue) removeLocked(key flowKey, p *pendingPackets) {
++	delete(q.pending, key)
++	q.bytes -= p.bytes
++	q.groupBytes[p.resolver] -= p.bytes
++	if q.groupBytes[p.resolver] == 0 {
++		delete(q.groupBytes, p.resolver)
++	}
++}
++
++func (q *flowDecisionQueue) discardLocked(key flowKey, p *pendingPackets) {
++	q.removeLocked(key, p)
++	p.cancel()
++	for _, packet := range p.packets {
++		packet.release()
++	}
++	p.packets = nil
++}
+diff --git a/flow_dispatch.go b/flow_dispatch.go
+index 56b72f5..aa03dba 100644
+--- a/flow_dispatch.go
++++ b/flow_dispatch.go
+@@ -110,6 +110,8 @@ func (f *forwardFlow) observeReverse(packet *forwardPacket, now int64) {
+ }
+ 
+ type ForwardDispatcher struct {
++	deferred    DeferredFlowHandler
++	decisions   flowDecisionQueue
+ 	epoch       time.Time
+ 	handler     Handler
+ 	writeback   ForwardWriteback
+@@ -153,6 +155,7 @@ func NewForwardDispatcher(handler Handler, writeback ForwardWriteback, logger lo
+ 		table:       make(map[flowKey]*flowEntry),
+ 		ports:       make(map[Port]*portNAT),
+ 	}
++	dispatcher.deferred, _ = handler.(DeferredFlowHandler)
+ 	if dispatcher.udpTimeout <= 0 {
+ 		dispatcher.udpTimeout = defaultUDPTimeout
+ 	}
+@@ -171,6 +174,9 @@ func (d *ForwardDispatcher) Close() {
+ 	if d == nil {
+ 		return
+ 	}
++	d.decisions.mu.Lock()
++	defer d.decisions.mu.Unlock()
++	d.decisions.invalidateLocked(true)
+ 	d.returnPath.closed.Store(true)
+ 	d.access.Lock()
+ 	flows := make([]*forwardFlow, 0, len(d.table))
+@@ -194,6 +200,8 @@ func (d *ForwardDispatcher) Close() {
+ 	}
+ }
+ 
++type judgeMiss func(flowKey, *forwardPacket, []byte) bool
++
+ func (d *ForwardDispatcher) Dispatch(packet []byte) bool {
+ 	if d == nil || d.returnPath.closed.Load() {
+ 		return false
+@@ -202,6 +210,10 @@ func (d *ForwardDispatcher) Dispatch(packet []byte) bool {
+ 	if !ok || parsed.fragment || !parsed.hasFlow {
+ 		return false
+ 	}
++	return d.dispatchParsed(packet, parsed, nil)
++}
++
++func (d *ForwardDispatcher) dispatchParsed(packet []byte, parsed forwardPacket, miss judgeMiss) bool {
+ 	d.access.RLock()
+ 	if d.returnPath.closed.Load() {
+ 		d.access.RUnlock()
+@@ -224,6 +236,9 @@ func (d *ForwardDispatcher) Dispatch(packet []byte) bool {
+ 		(parsed.tcpFlags&header.TCPFlagSyn == 0 || parsed.tcpFlags&header.TCPFlagAck != 0) {
+ 		return false
+ 	}
++	if miss != nil {
++		return miss(key, &parsed, packet)
++	}
+ 	return d.judgeAndInstall(key, &parsed, packet)
+ }
+ 
+@@ -279,6 +294,16 @@ func (d *ForwardDispatcher) judgeAndInstall(key flowKey, packet *forwardPacket,
+ 		firstPacket = header.UDP(packet.transport).Payload()
+ 	}
+ 	verdict := d.handler.JudgeFlow(packet.protocol, packet.source, packet.destination, firstPacket)
++	return d.installVerdict(key, packet, raw, verdict)
++}
++
++func (d *ForwardDispatcher) installVerdict(key flowKey, packet *forwardPacket, raw []byte, verdict FlowVerdict) bool {
++	if verdict.Transient {
++		if verdict.Action == ActionReject {
++			d.stageReject(packet)
++		}
++		return true
++	}
+ 	if verdict.Action == ActionBypass && verdict.Port != nil {
+ 		verdict.Action = ActionFlow
+ 	}
+@@ -578,6 +603,9 @@ func (d *ForwardDispatcher) ResetNetwork() {
+ 	if d == nil {
+ 		return
+ 	}
++	d.decisions.mu.Lock()
++	defer d.decisions.mu.Unlock()
++	d.decisions.invalidateLocked(false)
+ 	d.resetPending.Store(true)
+ }
+ 
+diff --git a/flow_pending_test.go b/flow_pending_test.go
+new file mode 100644
+index 0000000..f5117e5
+--- /dev/null
++++ b/flow_pending_test.go
+@@ -0,0 +1,389 @@
++//go:build with_gvisor
++
++package tun
++
++import (
++	"context"
++	"net/netip"
++	"slices"
++	"sync/atomic"
++	"testing"
++	"testing/synctest"
++	"time"
++
++	"github.com/sagernet/gvisor/pkg/buffer"
++	"github.com/sagernet/gvisor/pkg/tcpip"
++	"github.com/sagernet/gvisor/pkg/tcpip/header"
++	"github.com/sagernet/gvisor/pkg/tcpip/stack"
++)
++
++type pendingTestPolicy struct {
++	Handler
++	begin func(netip.AddrPort) (FlowVerdict, *PendingFlowDecision)
++}
++
++func (p pendingTestPolicy) BeginFlow(_ uint8, _, dst netip.AddrPort, _ []byte) (FlowVerdict, *PendingFlowDecision) {
++	return p.begin(dst)
++}
++
++func (pendingTestPolicy) JudgeFlow(uint8, netip.AddrPort, netip.AddrPort, []byte) FlowVerdict {
++	// A synchronous fallback must not accidentally satisfy a deferred decision.
++	return FlowVerdict{Action: ActionDrop}
++}
++
++type pendingTestDownstream struct {
++	stack.NetworkDispatcher
++	ids []uint16
++}
++
++func (s *pendingTestDownstream) DeliverNetworkPacket(_ tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
++	data, ok := pkt.Data().PullUp(header.IPv4MinimumSize)
++	if !ok {
++		panic("missing test IPv4 header")
++	}
++	s.ids = append(s.ids, header.IPv4(data).ID())
++}
++
++type pendingTestWriteback struct{ ids []uint16 }
++
++func (*pendingTestWriteback) ReturnHeadroom() int { return 0 }
++
++func (w *pendingTestWriteback) WriteReturnPackets(packets [][]byte) error {
++	for _, packet := range packets {
++		ip := header.IPv4(packet)
++		icmp := header.ICMPv4(ip.Payload())
++		if ip.TransportProtocol() != header.ICMPv4ProtocolNumber || icmp.Type() != header.ICMPv4DstUnreachable {
++			panic("expected an ICMP destination-unreachable reply")
++		}
++		quoted := header.IPv4(icmp.Payload())
++		w.ids = append(w.ids, quoted.ID())
++	}
++	return nil
++}
++
++type pendingTestFilter struct {
++	filter     networkDispatcherFilter
++	downstream pendingTestDownstream
++	writeback  pendingTestWriteback
++	released   atomic.Int32
++}
++
++func newPendingTestFilter(begin func(netip.AddrPort) (FlowVerdict, *PendingFlowDecision)) *pendingTestFilter {
++	f := new(pendingTestFilter)
++	f.filter = networkDispatcherFilter{
++		NetworkDispatcher: &f.downstream,
++		dispatcher:        NewForwardDispatcher(pendingTestPolicy{begin: begin}, &f.writeback, nil, 0, 0),
++	}
++	return f
++}
++
++// Each ordinary datagram carries an IPv4 identification value that is also
++// quoted in its ICMP rejection. The caller surrenders its reference on return.
++func (f *pendingTestFilter) deliver(dstPort, id uint16) {
++	udp := header.UDP(make([]byte, header.UDPMinimumSize+1))
++	udp.Encode(&header.UDPFields{SrcPort: 40000, DstPort: dstPort, Length: uint16(len(udp))})
++	udp.Payload()[0] = 42
++	f.deliverIPv4(id, header.UDPProtocolNumber, udp)
++}
++
++func (f *pendingTestFilter) deliverIPv4(id uint16, protocol tcpip.TransportProtocolNumber, transport []byte) {
++	packet := make([]byte, header.IPv4MinimumSize+len(transport))
++	ip := header.IPv4(packet)
++	ip.Encode(&header.IPv4Fields{
++		TotalLength: uint16(len(packet)), TTL: 64, ID: id, Protocol: uint8(protocol),
++		SrcAddr: tcpip.AddrFrom4([4]byte{192, 0, 2, 1}), DstAddr: tcpip.AddrFrom4([4]byte{198, 51, 100, 1}),
++	})
++	ip.SetChecksum(^ip.CalculateChecksum())
++	copy(ip.Payload(), transport)
++	if protocol == header.TCPProtocolNumber {
++		tcp := header.TCP(ip.Payload())
++		pseudo := header.PseudoHeaderChecksum(protocol, ip.SourceAddress(), ip.DestinationAddress(), uint16(len(transport)))
++		tcp.SetChecksum(^tcp.CalculateChecksum(pseudo))
++	}
++	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
++		Payload:   buffer.MakeWithData(packet),
++		OnRelease: func() { f.released.Add(1) },
++	})
++	defer pkt.DecRef()
++	f.filter.DeliverNetworkPacket(header.IPv4ProtocolNumber, pkt)
++}
++
++func TestPendingFilterWakesAndDrainsInOrder(t *testing.T) {
++	for _, test := range []struct {
++		name                string
++		action              FlowAction
++		downstream, replies []uint16
++	}{
++		{"accept", ActionAccept, []uint16{3, 1, 2}, []uint16{4}},
++		{"reject", ActionReject, []uint16{3}, []uint16{4, 1, 2}},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			synctest.Test(t, func(t *testing.T) {
++				release := make(chan struct{})
++				var started, timedOut atomic.Int32
++				f := newPendingTestFilter(func(dst netip.AddrPort) (FlowVerdict, *PendingFlowDecision) {
++					switch dst.Port() {
++					case 9000:
++						return FlowVerdict{}, &PendingFlowDecision{Resolver: "slow", Resolve: func(ctx context.Context) FlowVerdict {
++							started.Add(1)
++							select {
++							case <-release:
++							case <-ctx.Done():
++							case <-time.After(time.Minute):
++								timedOut.Add(1)
++							}
++							return FlowVerdict{Action: test.action}
++						}}
++					case 9001:
++						return FlowVerdict{}, &PendingFlowDecision{Resolver: "healthy", Resolve: func(context.Context) FlowVerdict {
++							return FlowVerdict{Action: ActionReject}
++						}}
++					default:
++						return FlowVerdict{Action: ActionAccept}, nil
++					}
++				})
++				defer f.filter.dispatcher.Close()
++				f.deliver(9000, 1)
++				synctest.Wait()
++				if started.Load() != 1 || timedOut.Load() != 0 {
++					t.Fatal("initial delivery must return with one decision outstanding")
++				}
++				f.deliver(9000, 2)
++				f.deliver(9002, 3)
++				f.deliver(9001, 4)
++				synctest.Wait()
++				if !slices.Equal(f.downstream.ids, []uint16{3}) || !slices.Equal(f.writeback.ids, []uint16{4}) {
++					t.Fatalf("while held: downstream=%v replies=%v", f.downstream.ids, f.writeback.ids)
++				}
++				close(release)
++				synctest.Wait() // No new packet arrives to wake the dispatcher.
++				if !slices.Equal(f.downstream.ids, test.downstream) || !slices.Equal(f.writeback.ids, test.replies) {
++					t.Fatalf("after completion: downstream=%v replies=%v", f.downstream.ids, f.writeback.ids)
++				}
++				if started.Load() != 1 || timedOut.Load() != 0 || f.released.Load() != 4 {
++					t.Fatalf("starts=%d watchdogs=%d released=%d", started.Load(), timedOut.Load(), f.released.Load())
++				}
++			})
++		})
++	}
++}
++
++func TestPendingFilterRetiresHeldDecision(t *testing.T) {
++	for _, operation := range []string{"reset", "close"} {
++		t.Run(operation, func(t *testing.T) {
++			synctest.Test(t, func(t *testing.T) {
++				retiredAnswer := make(chan struct{})
++				var attempts, canceled, staleReturns, watchdogs atomic.Int32
++				f := newPendingTestFilter(func(netip.AddrPort) (FlowVerdict, *PendingFlowDecision) {
++					if attempts.Add(1) > 1 {
++						return FlowVerdict{Action: ActionAccept}, nil
++					}
++					return FlowVerdict{}, &PendingFlowDecision{Resolver: "old", Resolve: func(ctx context.Context) FlowVerdict {
++						select {
++						case <-ctx.Done():
++							canceled.Add(1)
++						case <-time.After(time.Minute):
++							watchdogs.Add(1)
++						}
++						select {
++						case <-retiredAnswer:
++						case <-time.After(time.Minute):
++							watchdogs.Add(1)
++						}
++						staleReturns.Add(1)
++						// Even if the resolver produces an answer while retiring, it is obsolete.
++						return FlowVerdict{Action: ActionReject}
++					}}
++				})
++				f.deliver(9000, 1)
++				synctest.Wait()
++				if operation == "reset" {
++					defer f.filter.dispatcher.Close()
++					f.filter.dispatcher.ResetNetwork()
++				} else {
++					f.filter.dispatcher.Close()
++				}
++				synctest.Wait()
++				if canceled.Load() != 1 || len(f.writeback.ids) != 0 || len(f.downstream.ids) != 0 || f.released.Load() != 1 {
++					t.Fatalf("%s: canceled=%d replies=%v downstream=%v released=%d", operation, canceled.Load(), f.writeback.ids, f.downstream.ids, f.released.Load())
++				}
++				if operation == "reset" {
++					f.deliver(9000, 2)
++					synctest.Wait()
++					if attempts.Load() != 2 || !slices.Equal(f.downstream.ids, []uint16{2}) || len(f.writeback.ids) != 0 || f.released.Load() != 2 {
++						t.Fatalf("same key after reset: calls=%d downstream=%v replies=%v released=%d", attempts.Load(), f.downstream.ids, f.writeback.ids, f.released.Load())
++					}
++				}
++				close(retiredAnswer)
++				synctest.Wait()
++				if staleReturns.Load() != 1 || watchdogs.Load() != 0 || len(f.writeback.ids) != 0 {
++					t.Fatalf("retired answer: returns=%d watchdogs=%d replies=%v", staleReturns.Load(), watchdogs.Load(), f.writeback.ids)
++				}
++				if operation == "reset" {
++					f.deliver(9000, 3)
++					synctest.Wait()
++					if attempts.Load() != 2 || !slices.Equal(f.downstream.ids, []uint16{2, 3}) || len(f.writeback.ids) != 0 || f.released.Load() != 3 {
++						t.Fatalf("replacement flow after old answer: calls=%d downstream=%v replies=%v released=%d", attempts.Load(), f.downstream.ids, f.writeback.ids, f.released.Load())
++					}
++				}
++			})
++		})
++	}
++}
++
++func TestPendingFilterReservesAnotherResolversCapacity(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		release := make(chan struct{})
++		var held, completed atomic.Int32
++		const healthyPort uint16 = 7000
++		f := newPendingTestFilter(func(dst netip.AddrPort) (FlowVerdict, *PendingFlowDecision) {
++			if dst.Port() == healthyPort {
++				return FlowVerdict{}, &PendingFlowDecision{Resolver: "independent", Resolve: func(context.Context) FlowVerdict {
++					completed.Add(1)
++					return FlowVerdict{Action: ActionAccept}
++				}}
++			}
++			return FlowVerdict{}, &PendingFlowDecision{Resolver: "occupied", Resolve: func(ctx context.Context) FlowVerdict {
++				held.Add(1)
++				select {
++				case <-release:
++				case <-ctx.Done():
++				case <-time.After(time.Minute):
++				}
++				return FlowVerdict{Action: ActionDrop}
++			}}
++		})
++		defer f.filter.dispatcher.Close()
++		for i := 0; i <= maxPendingPerResolver; i++ {
++			f.deliver(9000+uint16(i), uint16(i+1))
++		}
++		f.deliver(healthyPort, 80)
++		synctest.Wait()
++		if held.Load() != maxPendingPerResolver || completed.Load() != 1 || !slices.Equal(f.downstream.ids, []uint16{80}) {
++			t.Fatalf("other resolver's admission: held=%d completed=%d delivered=%v", held.Load(), completed.Load(), f.downstream.ids)
++		}
++		close(release)
++		synctest.Wait()
++		if !slices.Equal(f.downstream.ids, []uint16{80}) || len(f.writeback.ids) != 0 || f.released.Load() != maxPendingPerResolver+2 {
++			t.Fatalf("drain: delivered=%v replies=%v released=%d", f.downstream.ids, f.writeback.ids, f.released.Load())
++		}
++	})
++}
++
++func TestPendingFilterReusedTCPAddressStartsANewDecision(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		oldMayReturn := make(chan struct{})
++		var begins, canceled, watchdogs atomic.Int32
++		f := newPendingTestFilter(func(netip.AddrPort) (FlowVerdict, *PendingFlowDecision) {
++			if begins.Add(1) > 1 {
++				return FlowVerdict{Action: ActionAccept}, nil
++			}
++			return FlowVerdict{}, &PendingFlowDecision{Resolver: "first", Resolve: func(ctx context.Context) FlowVerdict {
++				select {
++				case <-ctx.Done():
++					canceled.Add(1)
++				case <-time.After(time.Minute):
++					watchdogs.Add(1)
++				}
++				select {
++				case <-oldMayReturn:
++				case <-time.After(time.Minute):
++					watchdogs.Add(1)
++				}
++				return FlowVerdict{Action: ActionAccept}
++			}}
++		})
++		defer f.filter.dispatcher.Close()
++		sendSYN := func(id uint16, seq uint32) {
++			tcp := header.TCP(make([]byte, header.TCPMinimumSize))
++			tcp.Encode(&header.TCPFields{SrcPort: 40000, DstPort: 9000, SeqNum: seq, Flags: header.TCPFlagSyn, DataOffset: header.TCPMinimumSize, WindowSize: 65535})
++			f.deliverIPv4(id, header.TCPProtocolNumber, tcp)
++		}
++		sendSYN(1, 100)
++		sendSYN(2, 100)
++		synctest.Wait()
++		if begins.Load() != 1 || canceled.Load() != 0 || len(f.downstream.ids) != 0 {
++			t.Fatalf("retransmitted opening: calls=%d canceled=%d delivered=%v", begins.Load(), canceled.Load(), f.downstream.ids)
++		}
++		sendSYN(3, 1000)
++		synctest.Wait()
++		if begins.Load() != 2 || canceled.Load() != 1 || !slices.Equal(f.downstream.ids, []uint16{3}) {
++			t.Fatalf("replacement opening: calls=%d canceled=%d delivered=%v", begins.Load(), canceled.Load(), f.downstream.ids)
++		}
++		close(oldMayReturn)
++		synctest.Wait()
++		if watchdogs.Load() != 0 || !slices.Equal(f.downstream.ids, []uint16{3}) || len(f.writeback.ids) != 0 || f.released.Load() != 3 {
++			t.Fatalf("late opening: watchdogs=%d delivered=%v replies=%v released=%d", watchdogs.Load(), f.downstream.ids, f.writeback.ids, f.released.Load())
++		}
++	})
++}
++
++func TestPendingFilterTransientFailureExpiresPerFlow(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		var lookups atomic.Int32
++		f := newPendingTestFilter(func(dst netip.AddrPort) (FlowVerdict, *PendingFlowDecision) {
++			if dst.Port() != 9000 {
++				return FlowVerdict{Action: ActionAccept}, nil
++			}
++			return FlowVerdict{}, &PendingFlowDecision{Resolver: "a", Resolve: func(context.Context) FlowVerdict {
++				if lookups.Add(1) == 1 {
++					return FlowVerdict{Action: ActionReject, Transient: true}
++				}
++				return FlowVerdict{Action: ActionAccept}
++			}}
++		})
++		defer f.filter.dispatcher.Close()
++		f.deliver(9000, 1)
++		synctest.Wait()
++		f.deliver(9000, 2)
++		f.deliver(9001, 3)
++		synctest.Wait()
++		if lookups.Load() != 1 || !slices.Equal(f.writeback.ids, []uint16{1}) || !slices.Equal(f.downstream.ids, []uint16{3}) {
++			t.Fatalf("during hold: lookups=%d replies=%v delivered=%v", lookups.Load(), f.writeback.ids, f.downstream.ids)
++		}
++		time.Sleep(251 * time.Millisecond) // Virtual time inside synctest.
++		f.deliver(9000, 4)
++		synctest.Wait()
++		if lookups.Load() != 2 || !slices.Equal(f.downstream.ids, []uint16{3, 4}) || !slices.Equal(f.writeback.ids, []uint16{1}) || f.released.Load() != 4 {
++			t.Fatalf("after recovery: lookups=%d replies=%v delivered=%v released=%d", lookups.Load(), f.writeback.ids, f.downstream.ids, f.released.Load())
++		}
++	})
++}
++
++func TestPendingFilterDiscardsQueuedPacketsWhenOwnerChanges(t *testing.T) {
++	synctest.Test(t, func(t *testing.T) {
++		var current atomic.Int32
++		current.Store(1)
++		release := make(chan struct{})
++		f := newPendingTestFilter(func(netip.AddrPort) (FlowVerdict, *PendingFlowDecision) {
++			owner := current.Load()
++			return FlowVerdict{}, &PendingFlowDecision{
++				Resolver: "a",
++				Valid:    func() bool { return current.Load() == owner },
++				Resolve: func(ctx context.Context) FlowVerdict {
++					select {
++					case <-release:
++					case <-ctx.Done():
++					case <-time.After(time.Minute):
++					}
++					return FlowVerdict{Action: ActionAccept}
++				},
++			}
++		})
++		defer f.filter.dispatcher.Close()
++		f.deliver(9000, 1)
++		f.deliver(9000, 2)
++		synctest.Wait()
++		current.Store(2)
++		close(release)
++		synctest.Wait()
++		if len(f.downstream.ids) != 0 || len(f.writeback.ids) != 0 || f.released.Load() != 2 {
++			t.Fatalf("retired owner: delivered=%v replies=%v released=%d", f.downstream.ids, f.writeback.ids, f.released.Load())
++		}
++		f.deliver(9000, 3)
++		synctest.Wait()
++		if !slices.Equal(f.downstream.ids, []uint16{3}) || f.released.Load() != 3 {
++			t.Fatalf("current owner: delivered=%v released=%d", f.downstream.ids, f.released.Load())
++		}
++	})
++}
+diff --git a/stack_gvisor.go b/stack_gvisor.go
+index c226d05..2248f61 100644
+--- a/stack_gvisor.go
++++ b/stack_gvisor.go
+@@ -43,6 +43,7 @@ type GVisor struct {
+ 	stack                *stack.Stack
+ 	endpoint             stack.LinkEndpoint
+ 	dispatcher           *ForwardDispatcher
++	transportDecisions   [3]flowDecisionQueue
+ 	icmpForwarder        *ICMPForwarder
+ 	udpForwarder         *UDPForwarder
+ }
+@@ -117,8 +118,18 @@ func (t *GVisor) Start() error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	ipStack.SetTransportProtocolHandler(tcp.ProtocolNumber, NewTCPForwarderWithLoopback(t.ctx, ipStack, t.handler, t.inet4LoopbackAddress, t.inet6LoopbackAddress, t.tun).HandlePacket)
++	tcpForwarder := NewTCPForwarderWithLoopback(t.ctx, ipStack, t.handler, t.inet4LoopbackAddress, t.inet6LoopbackAddress, t.tun)
++	if t.dispatcher != nil && t.dispatcher.deferred != nil {
++		for i := range t.transportDecisions {
++			t.transportDecisions[i].origin = t.dispatcher
++		}
++		tcpForwarder.decisions = &t.transportDecisions[0]
++	}
++	ipStack.SetTransportProtocolHandler(tcp.ProtocolNumber, tcpForwarder.HandlePacket)
+ 	udpForwarder := NewUDPForwarder(t.ctx, ipStack, t.handler, t.udpNATOptions)
++	if tcpForwarder.decisions != nil {
++		udpForwarder.decisions = &t.transportDecisions[1]
++	}
+ 	err = udpForwarder.Start()
+ 	if err != nil {
+ 		return err
+@@ -126,6 +137,9 @@ func (t *GVisor) Start() error {
+ 	ipStack.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
+ 	t.udpForwarder = udpForwarder
+ 	icmpForwarder := NewICMPForwarder(ipStack, t.handler, t.logger)
++	if tcpForwarder.decisions != nil {
++		icmpForwarder.decisions = &t.transportDecisions[2]
++	}
+ 	ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber4, icmpForwarder.HandlePacket)
+ 	ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber6, icmpForwarder.HandlePacket)
+ 	t.icmpForwarder = icmpForwarder
+@@ -134,17 +148,79 @@ func (t *GVisor) Start() error {
+ 	return nil
+ }
+ 
++// The network manager brackets its entire reset so a new socket cannot race
++// its CloseAll call while outbounds and DNS are swapping network state.
++func (t *GVisor) SuspendFlowDecisions() {
++	t.withDecisionGates(func(queues []*flowDecisionQueue) {
++		for _, q := range queues {
++			q.pauses++
++			q.invalidateLocked(false)
++		}
++	})
++}
++
++func (t *GVisor) ResumeFlowDecisions() {
++	t.withDecisionGates(func(queues []*flowDecisionQueue) {
++		for _, q := range queues {
++			if q.pauses > 0 {
++				q.pauses--
++			}
++		}
++	})
++}
++
++func (t *GVisor) InvalidatePendingFlows() { t.retireDecisions(false, false) }
++
+ func (t *GVisor) ResetNetwork() {
+-	if t.udpForwarder != nil {
+-		t.udpForwarder.udpNat.Purge()
++	t.retireDecisions(false, true)
++}
++
++func (t *GVisor) withDecisionGates(action func([]*flowDecisionQueue)) {
++	d := t.dispatcher
++	if d == nil || d.deferred == nil {
++		action(nil)
++		return
+ 	}
+-	if t.icmpForwarder != nil {
+-		t.icmpForwarder.Purge()
++	// Normal delivery nests a transport gate under the link gate.
++	queues := []*flowDecisionQueue{&d.decisions, &t.transportDecisions[0], &t.transportDecisions[1], &t.transportDecisions[2]}
++	for _, q := range queues {
++		q.mu.Lock()
++		defer q.mu.Unlock()
+ 	}
+-	t.dispatcher.ResetNetwork()
++	action(queues)
++}
++
++func (t *GVisor) retireDecisions(closing, network bool) {
++	t.withDecisionGates(func(queues []*flowDecisionQueue) {
++		for _, q := range queues {
++			q.invalidateLocked(closing)
++		}
++		if !network {
++			return
++		}
++		if len(queues) != 0 {
++			t.dispatcher.resetPending.Store(true)
++			t.dispatcher.Flush()
++		} else {
++			t.dispatcher.ResetNetwork()
++		}
++		if t.udpForwarder != nil {
++			t.udpForwarder.udpNat.Purge()
++		}
++		if t.icmpForwarder != nil {
++			t.icmpForwarder.Purge()
++		}
++	})
+ }
+ 
+ func (t *GVisor) Close() error {
++	t.retireDecisions(true, false)
++	if t.dispatcher != nil {
++		t.dispatcher.decisions.workers.Wait()
++		for i := range t.transportDecisions {
++			t.transportDecisions[i].workers.Wait()
++		}
++	}
+ 	t.dispatcher.Close()
+ 	if t.icmpForwarder != nil {
+ 		t.icmpForwarder.Close()
+diff --git a/stack_gvisor_filter.go b/stack_gvisor_filter.go
+index 6f889ed..36faf05 100644
+--- a/stack_gvisor_filter.go
++++ b/stack_gvisor_filter.go
+@@ -3,11 +3,14 @@
+ package tun
+ 
+ import (
++	"github.com/sagernet/gvisor/pkg/buffer"
+ 	"net/netip"
++	"sync/atomic"
+ 
+ 	"github.com/sagernet/gvisor/pkg/tcpip"
+ 	"github.com/sagernet/gvisor/pkg/tcpip/header"
+ 	"github.com/sagernet/gvisor/pkg/tcpip/stack"
++	tunheader "github.com/sagernet/sing-tun/gtcpip/header"
+ )
+ 
+ var _ stack.LinkEndpoint = (*LinkEndpointFilter)(nil)
+@@ -54,6 +57,17 @@ type networkDispatcherFilter struct {
+ }
+ 
+ func (w *networkDispatcherFilter) DeliverNetworkPacket(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
++	if w.dispatcher != nil && w.dispatcher.deferred != nil {
++		w.dispatcher.decisions.mu.Lock()
++		defer w.dispatcher.decisions.mu.Unlock()
++		if w.dispatcher.decisions.closed || w.dispatcher.decisions.pauses != 0 {
++			return
++		}
++	}
++	w.deliverLocked(protocol, pkt)
++}
++
++func (w *networkDispatcherFilter) deliverLocked(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+ 	var network header.Network
+ 	if protocol == header.IPv4ProtocolNumber {
+ 		if headerPackets, loaded := pkt.Data().PullUp(header.IPv4MinimumSize); loaded {
+@@ -75,7 +89,12 @@ func (w *networkDispatcherFilter) DeliverNetworkPacket(protocol tcpip.NetworkPro
+ 	}
+ 	if w.dispatcher != nil && pkt.GSOOptions.Type == stack.GSONone && !pkt.GSOOptions.NeedsCsum {
+ 		if view, loaded := pkt.Data().PullUp(pkt.Data().Size()); loaded {
+-			consumed := w.dispatch(protocol, destination, view)
++			eligible := w.canDispatch(protocol, destination, view)
++			if eligible && w.dispatcher.deferred != nil {
++				w.dispatchOwned(protocol, pkt, view)
++				return
++			}
++			consumed := eligible && w.dispatcher.Dispatch(view)
+ 			w.dispatcher.Flush()
+ 			if consumed {
+ 				return
+@@ -85,7 +104,7 @@ func (w *networkDispatcherFilter) DeliverNetworkPacket(protocol tcpip.NetworkPro
+ 	w.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
+ }
+ 
+-func (w *networkDispatcherFilter) dispatch(protocol tcpip.NetworkProtocolNumber, destination netip.Addr, view []byte) bool {
++func (w *networkDispatcherFilter) canDispatch(protocol tcpip.NetworkProtocolNumber, destination netip.Addr, view []byte) bool {
+ 	if protocol == header.IPv4ProtocolNumber {
+ 		switch header.IPv4(view).TransportProtocol() {
+ 		case header.TCPProtocolNumber:
+@@ -113,5 +132,105 @@ func (w *networkDispatcherFilter) dispatch(protocol tcpip.NetworkProtocolNumber,
+ 			}
+ 		}
+ 	}
+-	return w.dispatcher.Dispatch(view)
++	return true
++}
++
++type packetFlowDecision struct {
++	origin  *ForwardDispatcher
++	key     flowKey
++	verdict FlowVerdict
++	live    atomic.Bool
++}
++
++func (q *flowDecisionQueue) takeVerdict(pkt *stack.PacketBuffer, key flowKey) (FlowVerdict, bool) {
++	if pkt.IngressDecision == nil {
++		return FlowVerdict{}, false
++	}
++	decision, ok := pkt.IngressDecision.(*packetFlowDecision)
++	if !ok || decision.origin != q.origin || decision.key != key || !decision.live.CompareAndSwap(true, false) {
++		return FlowVerdict{Action: ActionDrop}, true
++	}
++	return decision.verdict, true
++}
++
++func (w *networkDispatcherFilter) passDecision(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer, key flowKey, verdict FlowVerdict) {
++	decision := &packetFlowDecision{origin: w.dispatcher, key: key, verdict: verdict}
++	decision.live.Store(true)
++	pkt.IngressDecision = decision
++	defer func() { decision.live.Store(false); pkt.IngressDecision = nil }()
++	w.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
++}
++
++func (w *networkDispatcherFilter) dispatchOwned(protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer, raw []byte) {
++	d := w.dispatcher
++	if d.resetPending.Load() {
++		d.Flush()
++	}
++	parsed, ok := parseForwardPacket(raw)
++	if !ok || parsed.fragment || !parsed.hasFlow {
++		d.Flush()
++		w.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
++		return
++	}
++	key := parsed.flowKey()
++	if old := d.decisions.pending[key]; old != nil && parsed.protocol == uint8(header.TCPProtocolNumber) {
++		if parsed.tcpFlags&tunheader.TCPFlagRst != 0 {
++			d.decisions.discardLocked(key, old)
++			return
++		}
++		if parsed.tcpFlags&(tunheader.TCPFlagSyn|tunheader.TCPFlagAck) == tunheader.TCPFlagSyn && header.TCP(parsed.transport).SequenceNumber() != old.tcpSeq {
++			d.decisions.discardLocked(key, old)
++		}
++	}
++	retain := func() flowDecisionPacket {
++		// Forwarding may rewrite headers in place, so retain independent backing
++		// bytes, even when the upstream buffer has other references.
++		owned := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(raw), IsForwardedPacket: pkt.NetworkPacketInfo.IsForwardedPacket})
++		owned.Mark = pkt.Mark
++		owned.Hash = pkt.Hash
++		owned.GSOOptions = pkt.GSOOptions
++		owned.RXChecksumValidated = pkt.RXChecksumValidated
++		data, _ := owned.Data().PullUp(owned.Data().Size())
++		return flowDecisionPacket{
++			commit: func(verdict FlowVerdict) {
++				packet, _ := parseForwardPacket(data)
++				consumed := d.installVerdict(key, &packet, data, verdict)
++				d.Flush()
++				if !consumed {
++					w.passDecision(protocol, owned, key, verdict)
++				}
++			},
++			replay:  func() { w.deliverLocked(protocol, owned) },
++			release: func() { owned.DecRef() },
++		}
++	}
++	if d.decisions.queueIfPendingLocked(key, len(raw), retain) {
++		return
++	}
++	var verdict FlowVerdict
++	var judged bool
++	consumed := d.dispatchParsed(raw, parsed, func(k flowKey, packet *forwardPacket, bytes []byte) bool {
++		var payload []byte
++		if packet.protocol == uint8(header.UDPProtocolNumber) {
++			payload = header.UDP(packet.transport).Payload()
++		}
++		result, pending := d.deferred.BeginFlow(packet.protocol, packet.source, packet.destination, payload)
++		if pending != nil {
++			d.decisions.deferLocked(k, len(bytes), retain, pending)
++			if p := d.decisions.pending[k]; p != nil && packet.protocol == uint8(header.TCPProtocolNumber) {
++				p.tcpSeq = header.TCP(packet.transport).SequenceNumber()
++			}
++			return true
++		}
++		verdict, judged = result, true
++		return d.installVerdict(k, packet, bytes, result)
++	})
++	d.Flush()
++	if !consumed {
++		if judged {
++			w.passDecision(protocol, pkt, key, verdict)
++		} else {
++			w.NetworkDispatcher.DeliverNetworkPacket(protocol, pkt)
++		}
++	}
+ }
+diff --git a/stack_gvisor_icmp.go b/stack_gvisor_icmp.go
+index 360f600..d17263c 100644
+--- a/stack_gvisor_icmp.go
++++ b/stack_gvisor_icmp.go
+@@ -21,9 +21,10 @@ import (
+ )
+ 
+ type ICMPForwarder struct {
+-	stack   *stack.Stack
+-	handler Handler
+-	logger  logger.Logger
++	decisions *flowDecisionQueue
++	stack     *stack.Stack
++	handler   Handler
++	logger    logger.Logger
+ 
+ 	returnPath icmpForwarderReturn
+ 
+@@ -97,35 +98,61 @@ func (f *ICMPForwarder) Close() error {
+ }
+ 
+ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
+-	if pkt.NetworkProtocolNumber == header.IPv4ProtocolNumber {
+-		ipHdr := header.IPv4(pkt.NetworkHeader().Slice())
+-		icmpHdr := header.ICMPv4(pkt.TransportHeader().Slice())
+-		if icmpHdr.Type() != header.ICMPv4Echo || icmpHdr.Code() != 0 {
++	key := icmpFlowKey{
++		source:      AddrFromAddress(id.RemoteAddress),
++		destination: AddrFromAddress(id.LocalAddress),
++		v6:          pkt.NetworkProtocolNumber == header.IPv6ProtocolNumber,
++	}
++	protocol := header.ICMPv4ProtocolNumber
++	if key.v6 {
++		h := header.ICMPv6(pkt.TransportHeader().Slice())
++		if h.Type() != header.ICMPv6EchoRequest {
+ 			return false
+ 		}
+-		identifier := icmpHdr.Ident()
+-		key := icmpFlowKey{
+-			source:      AddrFromAddress(ipHdr.SourceAddress()),
+-			destination: AddrFromAddress(ipHdr.DestinationAddress()),
+-			identifier:  identifier,
+-		}
+-		if f.forwardCached(key, pkt) {
++		if h.Code() != 0 {
++			// Returning false permits the IPv6 stack to answer on behalf of the destination.
+ 			return true
+ 		}
+-		verdict := f.handler.JudgeFlow(
+-			uint8(header.ICMPv4ProtocolNumber),
+-			netip.AddrPortFrom(key.source, identifier),
+-			netip.AddrPortFrom(key.destination, identifier),
+-			nil,
+-		)
+-		switch verdict.Action {
+-		case ActionReject, ActionDrop:
+-			return true
+-		case ActionFlow, ActionBypass:
+-			if f.installFlow(key, verdict, pkt) {
+-				return true
+-			}
++		key.identifier = h.Ident()
++		protocol = header.ICMPv6ProtocolNumber
++	} else {
++		h := header.ICMPv4(pkt.TransportHeader().Slice())
++		if h.Type() != header.ICMPv4Echo || h.Code() != 0 {
++			return false
+ 		}
++		key.identifier = h.Ident()
++	}
++	source := netip.AddrPortFrom(key.source, key.identifier)
++	destination := netip.AddrPortFrom(key.destination, key.identifier)
++	if handler, ok := f.handler.(DeferredFlowHandler); ok && f.decisions != nil {
++		admission := transportAdmission{
++			key: flowKey{uint8(protocol), source, destination}, handle: handler,
++			cached: func(p *stack.PacketBuffer) bool { return f.forwardCached(key, p) },
++			commit: func(p *stack.PacketBuffer, v FlowVerdict) { f.completeEcho(id, key, p, v) },
++		}
++		admission.admit(f.decisions, pkt)
++		return true
++	}
++	if f.forwardCached(key, pkt) {
++		return true
++	}
++	verdict := f.handler.JudgeFlow(uint8(protocol), source, destination, nil)
++	f.completeEcho(id, key, pkt, verdict)
++	return true
++}
++
++func (f *ICMPForwarder) completeEcho(id stack.TransportEndpointID, key icmpFlowKey, pkt *stack.PacketBuffer, verdict FlowVerdict) {
++	switch verdict.Action {
++	case ActionReject, ActionDrop:
++		return
++	case ActionFlow, ActionBypass:
++		if f.installFlow(key, verdict, pkt) {
++			return
++		}
++	}
++	if !key.v6 {
++		ipHdr := header.IPv4(pkt.NetworkHeader().Slice())
++		icmpHdr := header.ICMPv4(pkt.TransportHeader().Slice())
+ 		icmpHdr.SetType(header.ICMPv4EchoReply)
+ 		sourceAddress := ipHdr.SourceAddress()
+ 		ipHdr.SetSourceAddress(ipHdr.DestinationAddress())
+@@ -136,7 +163,7 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
+ 		outgoingEP, gErr := f.stack.GetNetworkEndpoint(DefaultNIC, header.IPv4ProtocolNumber)
+ 		if gErr != nil {
+ 			f.logger.Error(E.Cause(gonet.TranslateNetstackError(gErr), "get IPv4 network endpoint"))
+-			return true
++			return
+ 		}
+ 		route, gErr := f.stack.FindRoute(
+ 			DefaultNIC,
+@@ -147,47 +174,14 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
+ 		)
+ 		if gErr != nil {
+ 			f.logger.Error(E.Cause(gonet.TranslateNetstackError(gErr), "find IPv4 route"))
+-			return true
++			return
+ 		}
+ 		defer route.Release()
+ 		outgoingEP.(ipv4.ExportedEndpoint).WritePacketDirect(route, pkt)
+-		return true
++		return
+ 	} else {
+ 		ipHdr := header.IPv6(pkt.NetworkHeader().Slice())
+ 		icmpHdr := header.ICMPv6(pkt.TransportHeader().Slice())
+-		if icmpHdr.Type() != header.ICMPv6EchoRequest {
+-			return false
+-		}
+-		if icmpHdr.Code() != 0 {
+-			// The IPv6 built-in echo reply path lacks the LocalAddressTemporary
+-			// check its IPv4 sibling has, so returning false would make the stack
+-			// reply on behalf of arbitrary forwarded destinations.
+-			return true
+-		}
+-		identifier := icmpHdr.Ident()
+-		key := icmpFlowKey{
+-			v6:          true,
+-			source:      AddrFromAddress(ipHdr.SourceAddress()),
+-			destination: AddrFromAddress(ipHdr.DestinationAddress()),
+-			identifier:  identifier,
+-		}
+-		if f.forwardCached(key, pkt) {
+-			return true
+-		}
+-		verdict := f.handler.JudgeFlow(
+-			uint8(header.ICMPv6ProtocolNumber),
+-			netip.AddrPortFrom(key.source, identifier),
+-			netip.AddrPortFrom(key.destination, identifier),
+-			nil,
+-		)
+-		switch verdict.Action {
+-		case ActionReject, ActionDrop:
+-			return true
+-		case ActionFlow, ActionBypass:
+-			if f.installFlow(key, verdict, pkt) {
+-				return true
+-			}
+-		}
+ 		icmpHdr.SetType(header.ICMPv6EchoReply)
+ 		sourceAddress := ipHdr.SourceAddress()
+ 		ipHdr.SetSourceAddress(ipHdr.DestinationAddress())
+@@ -202,7 +196,7 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
+ 		outgoingEP, gErr := f.stack.GetNetworkEndpoint(DefaultNIC, header.IPv6ProtocolNumber)
+ 		if gErr != nil {
+ 			f.logger.Error(E.Cause(gonet.TranslateNetstackError(gErr), "get IPv6 network endpoint"))
+-			return true
++			return
+ 		}
+ 		route, gErr := f.stack.FindRoute(
+ 			DefaultNIC,
+@@ -213,11 +207,11 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
+ 		)
+ 		if gErr != nil {
+ 			f.logger.Error(E.Cause(gonet.TranslateNetstackError(gErr), "find IPv6 route"))
+-			return true
++			return
+ 		}
+ 		defer route.Release()
+ 		outgoingEP.(ipv6.ExportedEndpoint).WritePacketDirect(route, pkt)
+-		return true
++		return
+ 	}
+ }
+ 
+diff --git a/stack_gvisor_lazy.go b/stack_gvisor_lazy.go
+index 34df1f2..8d91fdb 100644
+--- a/stack_gvisor_lazy.go
++++ b/stack_gvisor_lazy.go
+@@ -17,6 +17,7 @@ import (
+ )
+ 
+ type gLazyConn struct {
++	lease           *flowHandshakeLease
+ 	tcpConn         *gTCPConn
+ 	parentCtx       context.Context
+ 	stack           *stack.Stack
+@@ -37,6 +38,11 @@ func (c *gLazyConn) HandshakeContext(ctx context.Context) error {
+ 	defer func() {
+ 		c.handshakeDone = true
+ 	}()
++	if !c.lease.claim() {
++		c.request.Complete(false)
++		c.handshakeErr = context.Canceled
++		return c.handshakeErr
++	}
+ 	var (
+ 		wq       waiter.Queue
+ 		endpoint tcpip.Endpoint
+@@ -76,7 +82,8 @@ func (c *gLazyConn) HandshakeFailure(err error) error {
+ 	if c.handshakeDone {
+ 		return os.ErrInvalid
+ 	}
+-	c.request.Complete(true)
++	c.request.Complete(c.lease.claim())
++	c.lease.close()
+ 	c.handshakeDone = true
+ 	c.handshakeErr = err
+ 	return nil
+@@ -147,6 +154,7 @@ func (c *gLazyConn) SetWriteDeadline(t time.Time) error {
+ }
+ 
+ func (c *gLazyConn) Close() error {
++	defer c.lease.close()
+ 	if c.closeBeforeHandshake() {
+ 		return nil
+ 	}
+@@ -172,7 +180,8 @@ func (c *gLazyConn) closeBeforeHandshake() bool {
+ 	defer c.handshakeAccess.Unlock()
+ 	if !c.handshakeDone {
+ 		if c.request != nil {
+-			c.request.Complete(true)
++			c.request.Complete(c.lease.claim())
++			c.lease.close()
+ 		}
+ 		c.handshakeErr = net.ErrClosed
+ 		c.handshakeDone = true
+diff --git a/stack_gvisor_tcp.go b/stack_gvisor_tcp.go
+index f432e28..2a721b3 100644
+--- a/stack_gvisor_tcp.go
++++ b/stack_gvisor_tcp.go
+@@ -16,6 +16,7 @@ import (
+ )
+ 
+ type TCPForwarder struct {
++	decisions            *flowDecisionQueue
+ 	ctx                  context.Context
+ 	stack                *stack.Stack
+ 	handler              Handler
+@@ -71,26 +72,73 @@ func (f *TCPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pac
+ 			return true
+ 		}
+ 	}
+-	return f.forwarder.HandlePacket(id, pkt)
++	handler, optIn := f.handler.(DeferredFlowHandler)
++	if !optIn || f.decisions == nil {
++		return f.forwarder.HandlePacket(id, pkt)
++	}
++	tcpHdr := header.TCP(pkt.TransportHeader().Slice())
++	if len(tcpHdr) < header.TCPMinimumSize || !tcpHdr.Flags().Contains(header.TCPFlagSyn) || tcpHdr.Flags().Contains(header.TCPFlagAck) {
++		return false
++	}
++	ip := pkt.Network()
++	_, csumValid, ok := header.TCPValid(tcpHdr, func() uint16 { return pkt.Data().Checksum() }, uint16(pkt.Data().Size()), ip.SourceAddress(), ip.DestinationAddress(), pkt.RXChecksumValidated)
++	if !ok || !csumValid {
++		return false
++	}
++	source := M.SocksaddrFrom(AddrFromAddress(id.RemoteAddress), id.RemotePort)
++	destination := M.SocksaddrFrom(AddrFromAddress(id.LocalAddress), id.LocalPort)
++	admission := transportAdmission{
++		key: flowKey{uint8(header.TCPProtocolNumber), source.AddrPort(), destination.AddrPort()}, handle: handler,
++		commit: func(p *stack.PacketBuffer, v FlowVerdict) {
++			generation := f.decisions.generationContextLocked()
++			f.forwarder.HandlePacketWithHandler(id, p, func(r *tcp.ForwarderRequest) {
++				f.forward(r, source, destination, v, generation)
++			})
++		},
++	}
++	admission.admit(f.decisions, pkt)
++	return true
+ }
+ 
+ func (f *TCPForwarder) Forward(r *tcp.ForwarderRequest) {
+ 	source := M.SocksaddrFrom(AddrFromAddress(r.ID().RemoteAddress), r.ID().RemotePort)
+ 	destination := M.SocksaddrFrom(AddrFromAddress(r.ID().LocalAddress), r.ID().LocalPort)
+-	switch f.handler.JudgeFlow(uint8(header.TCPProtocolNumber), source.AddrPort(), destination.AddrPort(), nil).Action {
+-	case ActionReject:
+-		r.Complete(true)
+-		return
+-	case ActionDrop:
+-		r.Complete(false)
++	f.forward(r, source, destination, f.handler.JudgeFlow(uint8(header.TCPProtocolNumber), source.AddrPort(), destination.AddrPort(), nil), nil)
++}
++
++func (f *TCPForwarder) forward(r *tcp.ForwarderRequest, source, destination M.Socksaddr, verdict FlowVerdict, generation context.Context) {
++	if verdict.Action == ActionReject || verdict.Action == ActionDrop {
++		sendReset := verdict.Action == ActionReject
++		if generation != nil {
++			// Complete can send a RST. Retire the request under the same gate
++			// as reset and close so no old reply is written after retirement.
++			f.decisions.mu.Lock()
++			defer f.decisions.mu.Unlock()
++			sendReset = sendReset && generation == f.decisions.lifetime && generation.Err() == nil
++		}
++		r.Complete(sendReset)
+ 		return
+ 	}
++	ctx := f.ctx
++	var lease *flowHandshakeLease
++	if generation != nil {
++		ctx, lease = newFlowHandshakeLease(ctx, generation)
++		if ctx.Err() != nil {
++			lease.close()
++			r.Complete(false)
++			return
++		}
++	}
++	if bind := verdict.RouteContext; bind != nil {
++		ctx = bind(ctx)
++	}
+ 	conn := &gLazyConn{
+-		parentCtx:  f.ctx,
++		parentCtx:  ctx,
++		lease:      lease,
+ 		stack:      f.stack,
+ 		request:    r,
+ 		localAddr:  source.TCPAddr(),
+ 		remoteAddr: destination.TCPAddr(),
+ 	}
+-	go f.handler.NewConnectionEx(f.ctx, conn, source, destination, nil)
++	f.handler.NewConnectionEx(ctx, conn, source, destination, nil)
+ }
+diff --git a/stack_gvisor_transport_decision.go b/stack_gvisor_transport_decision.go
+new file mode 100644
+index 0000000..477fd1b
+--- /dev/null
++++ b/stack_gvisor_transport_decision.go
+@@ -0,0 +1,120 @@
++//go:build with_gvisor
++
++package tun
++
++import (
++	"context"
++	"sync/atomic"
++
++	"github.com/sagernet/gvisor/pkg/tcpip/header"
++	"github.com/sagernet/gvisor/pkg/tcpip/stack"
++)
++
++// The transport owns an already parsed packet. Never re-inject a reassembled
++// datagram as a raw packet, or allow a pending request to send a local reply.
++type transportAdmission struct {
++	key    flowKey
++	handle DeferredFlowHandler
++	cached func(*stack.PacketBuffer) bool
++	commit func(*stack.PacketBuffer, FlowVerdict)
++}
++
++func (a transportAdmission) admit(q *flowDecisionQueue, pkt *stack.PacketBuffer) {
++	q.mu.Lock()
++	defer q.mu.Unlock()
++	verdict, prepared := q.takeVerdict(pkt, a.key)
++	a.admitLocked(q, pkt, verdict, prepared)
++}
++
++func (a transportAdmission) admitLocked(q *flowDecisionQueue, pkt *stack.PacketBuffer, verdict FlowVerdict, prepared bool) {
++	retain := func() flowDecisionPacket {
++		// Clone shares backing storage. ICMP may rewrite headers, and the TUN
++		// reader can recycle its input as soon as the stack callback returns.
++		owned := pkt.DeepCopyForForwarding(0)
++		owned.NetworkPacketInfo = pkt.NetworkPacketInfo
++		owned.RXChecksumValidated = pkt.RXChecksumValidated
++		owned.GSOOptions = pkt.GSOOptions
++		owned.NICID = pkt.NICID
++		owned.PktType = pkt.PktType
++		return flowDecisionPacket{
++			commit:  func(v FlowVerdict) { a.commit(owned, v) },
++			replay:  func() { a.admitLocked(q, owned, verdict, prepared) },
++			release: owned.DecRef,
++		}
++	}
++	var sequence uint32
++	if a.key.protocol == uint8(header.TCPProtocolNumber) {
++		sequence = header.TCP(pkt.TransportHeader().Slice()).SequenceNumber()
++		if prior := q.pending[a.key]; prior != nil {
++			if prior.tcpSeq == sequence {
++				return // the original validated SYN owns this attempt
++			}
++			q.discardLocked(a.key, prior)
++		}
++	}
++	if q.queueIfPendingLocked(a.key, pkt.Size(), retain) {
++		return
++	}
++	if prepared {
++		a.commit(pkt, verdict)
++		return
++	}
++	if a.cached != nil && a.cached(pkt) {
++		return
++	}
++	var payload []byte
++	if a.key.protocol == uint8(header.UDPProtocolNumber) {
++		data := pkt.Data()
++		payload, _ = data.PullUp(data.Size())
++	}
++	v, pending := a.handle.BeginFlow(a.key.protocol, a.key.source, a.key.destination, payload)
++	if pending != nil {
++		q.deferLocked(a.key, pkt.Size(), retain, pending)
++		if started := q.pending[a.key]; started != nil {
++			started.tcpSeq = sequence
++		}
++		return
++	}
++	a.commit(pkt, v)
++}
++
++// Routing uses the parent socket context. Retirement can cancel it until the
++// socket begins its handshake. Established connections keep their normal lifetime.
++type flowHandshakeLease struct {
++	committed  atomic.Bool
++	generation context.Context
++	cancel     context.CancelFunc
++	stop       func() bool
++}
++
++func newFlowHandshakeLease(parent, generation context.Context) (context.Context, *flowHandshakeLease) {
++	ctx, cancel := context.WithCancel(parent)
++	l := &flowHandshakeLease{generation: generation, cancel: cancel, stop: context.AfterFunc(generation, cancel)}
++	if generation.Err() != nil {
++		cancel()
++	}
++	return ctx, l
++}
++
++// Called once by the socket under its handshake lock.
++func (l *flowHandshakeLease) claim() bool {
++	if l == nil {
++		return true
++	}
++	if l.committed.Load() {
++		return true
++	}
++	l.stop()
++	if l.generation.Err() != nil {
++		return false
++	}
++	l.committed.Store(true)
++	return true
++}
++
++func (l *flowHandshakeLease) close() {
++	if l != nil {
++		l.stop()
++		l.cancel()
++	}
++}
+diff --git a/stack_gvisor_transport_policy_test.go b/stack_gvisor_transport_policy_test.go
+new file mode 100644
+index 0000000..3ab21b7
+--- /dev/null
++++ b/stack_gvisor_transport_policy_test.go
+@@ -0,0 +1,362 @@
++//go:build with_gvisor
++
++package tun
++
++import (
++	"context"
++	"net"
++	"net/netip"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/sagernet/gvisor/pkg/buffer"
++	"github.com/sagernet/gvisor/pkg/tcpip"
++	"github.com/sagernet/gvisor/pkg/tcpip/header"
++	"github.com/sagernet/gvisor/pkg/tcpip/link/channel"
++	"github.com/sagernet/gvisor/pkg/tcpip/stack"
++	"github.com/sagernet/gvisor/pkg/tcpip/transport/tcp"
++	"github.com/sagernet/sing/common/buf"
++	M "github.com/sagernet/sing/common/metadata"
++	N "github.com/sagernet/sing/common/network"
++)
++
++type transportTestPolicy struct {
++	Handler
++	decide  func(uint8, netip.AddrPort, []byte) (FlowVerdict, *PendingFlowDecision)
++	sockets chan transportTestSocket
++	streams chan netip.AddrPort
++}
++
++type transportTestSocket struct {
++	ctx  context.Context
++	conn N.PacketConn
++}
++
++func (h *transportTestPolicy) BeginFlow(network uint8, _, destination netip.AddrPort, payload []byte) (FlowVerdict, *PendingFlowDecision) {
++	return h.decide(network, destination, payload)
++}
++
++func (h *transportTestPolicy) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, _, _ M.Socksaddr, _ N.CloseHandlerFunc) {
++	h.sockets <- transportTestSocket{ctx, conn}
++}
++
++func (h *transportTestPolicy) NewConnectionEx(_ context.Context, conn net.Conn, _ M.Socksaddr, dst M.Socksaddr, _ N.CloseHandlerFunc) {
++	h.streams <- dst.AddrPort()
++	conn.Close()
++}
++
++func testReceive[T any](t *testing.T, ch <-chan T) T {
++	t.Helper()
++	select {
++	case v := <-ch:
++		return v
++	case <-time.After(3 * time.Second):
++		t.Fatal("timed out waiting for the transport")
++		var zero T
++		return zero
++	}
++}
++
++func checkTransportError(t *testing.T, err error) {
++	t.Helper()
++	if err != nil {
++		t.Fatal(err)
++	}
++}
++
++func checkTransportEqual[T comparable](t *testing.T, want, got T) {
++	t.Helper()
++	if got != want {
++		t.Fatalf("got %v, want %v", got, want)
++	}
++}
++
++type transportTestKey struct{}
++
++func TestReassembledUDPPolicyAndBindings(t *testing.T) {
++	started, release := make(chan struct{}), make(chan struct{})
++	var queries, phase atomic.Int32
++	observedPhase := make(chan int32, 1)
++	healthy := make(chan []byte, 1)
++	h := &transportTestPolicy{sockets: make(chan transportTestSocket, 8)}
++	h.decide = func(network uint8, dst netip.AddrPort, input []byte) (FlowVerdict, *PendingFlowDecision) {
++		queries.Add(1)
++		if dst.Port() == 105 {
++			observedPhase <- phase.Load()
++			return FlowVerdict{Action: ActionDrop}, nil
++		}
++		if dst.Port() == 101 {
++			healthy <- append([]byte(nil), input...)
++			return FlowVerdict{Action: ActionDrop}, nil
++		}
++		if dst.Port() == 102 {
++			if phase.Load() != 0 {
++				// Destination binding must survive a missing optional replay receipt.
++				return FlowVerdict{Action: ActionAccept, DestinationBound: true}, nil
++			}
++			return FlowVerdict{}, &PendingFlowDecision{Resolver: "test", Resolve: func(ctx context.Context) FlowVerdict {
++				close(started)
++				select {
++				case <-release:
++				case <-ctx.Done():
++					return FlowVerdict{Action: ActionDrop}
++				}
++				return FlowVerdict{Action: ActionAccept, DestinationBound: true, RouteContext: func(ctx context.Context) context.Context {
++					return context.WithValue(ctx, transportTestKey{}, dst)
++				}}
++			}}
++		}
++		return FlowVerdict{Action: ActionAccept}, nil
++	}
++	ep := channel.New(16, 1500, "")
++	ip, err := NewGVisorStack(ep)
++	checkTransportError(t, err)
++	defer func() { ip.Close(); ip.Wait(); ep.Close() }()
++	f := NewUDPForwarder(context.Background(), ip, h, UDPNatOptions{Timeout: time.Minute, Shared: true})
++	f.decisions = new(flowDecisionQueue)
++	checkTransportError(t, f.Start())
++	defer func() { f.decisions.invalidate(true); f.Close() }()
++	ip.SetTransportProtocolHandler(header.UDPProtocolNumber, f.HandlePacket)
++	src := tcpip.AddrFrom4([4]byte{192, 0, 2, 2})
++	dst := tcpip.AddrFrom4([4]byte{198, 51, 100, 3})
++	inject := func(id, offset uint16, more bool, data []byte) {
++		raw := make([]byte, header.IPv4MinimumSize+len(data))
++		ip4 := header.IPv4(raw)
++		var flags uint8
++		if more {
++			flags = header.IPv4FlagMoreFragments
++		}
++		ip4.Encode(&header.IPv4Fields{ID: id, TotalLength: uint16(len(raw)), Flags: flags, FragmentOffset: offset, TTL: 64, Protocol: uint8(header.UDPProtocolNumber), SrcAddr: src, DstAddr: dst})
++		ip4.SetChecksum(^ip4.CalculateChecksum())
++		copy(ip4.Payload(), data)
++		p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(raw)})
++		ep.InjectInbound(header.IPv4ProtocolNumber, p)
++		p.DecRef()
++	}
++	body := func(port uint16) []byte {
++		raw := make([]byte, header.UDPMinimumSize+16)
++		header.UDP(raw).Encode(&header.UDPFields{SrcPort: 40000, DstPort: port, Length: uint16(len(raw))})
++		copy(raw[8:], []byte("abcdefghijklmnop"))
++		return raw
++	}
++	send := func(id, port uint16, split bool) {
++		raw := body(port)
++		if split {
++			inject(id, 0, true, raw[:16])
++			inject(id, 16, false, raw[16:])
++		} else {
++			inject(id, 0, false, raw)
++		}
++	}
++	read := func(s transportTestSocket, port uint16) {
++		b := buf.New()
++		defer b.Release()
++		checkTransportError(t, s.conn.SetReadDeadline(time.Now().Add(3*time.Second)))
++		address, e := s.conn.ReadPacket(b)
++		checkTransportError(t, e)
++		checkTransportEqual(t, port, address.Port)
++		checkTransportEqual(t, "abcdefghijklmnop", string(b.Bytes()))
++	}
++	send(1, 102, true)
++	testReceive(t, started)
++	send(2, 101, false)
++	checkTransportEqual(t, "abcdefghijklmnop", string(testReceive(t, healthy)))
++	send(3, 103, false)
++	ordinary := testReceive(t, h.sockets)
++	read(ordinary, 103)
++	checkTransportEqual(t, true, ordinary.ctx.Value(transportTestKey{}) == nil)
++	send(4, 104, false)
++	read(ordinary, 104) // ordinary endpoint-independent mapping still shares the socket
++	close(release)
++	bound := testReceive(t, h.sockets)
++	read(bound, 102)
++	checkTransportEqual(t, uint16(102), bound.ctx.Value(transportTestKey{}).(netip.AddrPort).Port())
++	before := queries.Load()
++	send(5, 102, false)
++	read(bound, 102)
++	checkTransportEqual(t, before, queries.Load())
++	// Fragments have no policy authority. A partially assembled packet that
++	// survives retirement must first be judged in the new generation.
++	partial := body(105)
++	inject(8, 0, true, partial[:16])
++	checkTransportEqual(t, 0, len(observedPhase))
++	checkTransportError(t, N.ReportHandshakeSuccess(ordinary.conn))
++	f.decisions.invalidate(false)
++	testReceive(t, bound.ctx.Done())
++	checkTransportEqual(t, context.Canceled, N.ReportHandshakeSuccess(bound.conn))
++	checkTransportError(t, ordinary.ctx.Err())
++	phase.Store(1)
++	inject(8, 16, false, partial[16:])
++	checkTransportEqual(t, 1, testReceive(t, observedPhase))
++	send(9, 102, false)
++	replacement := testReceive(t, h.sockets)
++	read(replacement, 102)
++	checkTransportEqual(t, false, replacement.conn == bound.conn || replacement.conn == ordinary.conn)
++	send(10, 104, false)
++	read(ordinary, 104)
++}
++
++func TestTransportPendingSYNUsesNoHandshakeSlot(t *testing.T) {
++	started, retired := make(chan struct{}), make(chan struct{})
++	var attempts atomic.Int32
++	h := &transportTestPolicy{streams: make(chan netip.AddrPort, 3)}
++	h.decide = func(_ uint8, dst netip.AddrPort, _ []byte) (FlowVerdict, *PendingFlowDecision) {
++		if dst.Port() == 210 && attempts.Add(1) == 1 {
++			return FlowVerdict{}, &PendingFlowDecision{Resolver: "test", Resolve: func(ctx context.Context) FlowVerdict {
++				close(started)
++				<-ctx.Done()
++				close(retired)
++				return FlowVerdict{Action: ActionAccept}
++			}}
++		}
++		return FlowVerdict{Action: ActionAccept}, nil
++	}
++	ep := channel.New(16, 1500, "")
++	ip, err := NewGVisorStack(ep)
++	checkTransportError(t, err)
++	defer func() { ip.Close(); ip.Wait(); ep.Close() }()
++	f := NewTCPForwarder(context.Background(), ip, h)
++	f.forwarder = tcp.NewForwarder(ip, 0, 1, f.Forward)
++	f.decisions = new(flowDecisionQueue)
++	defer f.decisions.invalidate(true)
++	send := func(port uint16, seq uint32) {
++		id, p := testTransportSYN(port, seq)
++		checkTransportEqual(t, true, f.HandlePacket(id, p))
++		p.DecRef()
++	}
++	send(210, 1)
++	testReceive(t, started)
++	send(210, 1)
++	send(211, 1)
++	checkTransportEqual(t, uint16(211), testReceive(t, h.streams).Port())
++	send(210, 2)
++	testReceive(t, retired)
++	checkTransportEqual(t, uint16(210), testReceive(t, h.streams).Port())
++	f.decisions.workers.Wait()
++	checkTransportEqual(t, 2, attempts.Load())
++	checkTransportEqual(t, 0, len(h.streams))
++}
++
++func TestTransportHandshakeLeaseRetiresOnlyPending(t *testing.T) {
++	generation, retire := context.WithCancel(context.Background())
++	pending, later := newFlowHandshakeLease(context.Background(), generation)
++	established, first := newFlowHandshakeLease(context.Background(), generation)
++	checkTransportEqual(t, true, first.claim())
++	retire()
++	testReceive(t, pending.Done())
++	checkTransportEqual(t, false, later.claim())
++	checkTransportError(t, established.Err())
++	first.close()
++	later.close()
++}
++
++func TestTransportPendingEchoWaitsForAuthorization(t *testing.T) {
++	started, release := make(chan struct{}), make(chan struct{})
++	h := &transportTestPolicy{}
++	h.decide = func(_ uint8, dst netip.AddrPort, _ []byte) (FlowVerdict, *PendingFlowDecision) {
++		if dst.Port() == 11 {
++			return FlowVerdict{}, &PendingFlowDecision{Resolver: "test", Resolve: func(ctx context.Context) FlowVerdict {
++				close(started)
++				select {
++				case <-release:
++					return FlowVerdict{Action: ActionAccept}
++				case <-ctx.Done():
++					return FlowVerdict{Action: ActionDrop}
++				}
++			}}
++		}
++		return FlowVerdict{Action: ActionAccept}, nil
++	}
++	ep := channel.New(16, 1500, "")
++	ip, err := NewGVisorStack(ep)
++	checkTransportError(t, err)
++	defer func() { ip.Close(); ip.Wait(); ep.Close() }()
++	f := NewICMPForwarder(ip, h, nil)
++	f.decisions = new(flowDecisionQueue)
++	defer func() { f.decisions.invalidate(true); f.Close() }()
++	ip.SetTransportProtocolHandler(header.ICMPv4ProtocolNumber, f.HandlePacket)
++	request := func(identifier uint16) {
++		raw := make([]byte, header.IPv4MinimumSize+header.ICMPv4MinimumSize)
++		iph := header.IPv4(raw)
++		iph.Encode(&header.IPv4Fields{TotalLength: uint16(len(raw)), TTL: 64, Protocol: uint8(header.ICMPv4ProtocolNumber), SrcAddr: tcpip.AddrFrom4([4]byte{192, 0, 2, 2}), DstAddr: tcpip.AddrFrom4([4]byte{198, 51, 100, 5})})
++		iph.SetChecksum(^iph.CalculateChecksum())
++		icmp := header.ICMPv4(iph.Payload())
++		icmp.SetType(header.ICMPv4Echo)
++		icmp.SetIdent(identifier)
++		icmp.SetChecksum(header.ICMPv4Checksum(icmp, 0))
++		p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(raw)})
++		ep.InjectInbound(header.IPv4ProtocolNumber, p)
++		p.DecRef()
++	}
++	reply := func(id uint16) {
++		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++		defer cancel()
++		p := ep.ReadContext(ctx)
++		if p == nil {
++			t.Fatal("no ICMP packet before deadline")
++		}
++		defer p.DecRef()
++		bytes := p.ToView()
++		defer bytes.Release()
++		echo := header.ICMPv4(header.IPv4(bytes.AsSlice()).Payload())
++		checkTransportEqual(t, header.ICMPv4EchoReply, echo.Type())
++		checkTransportEqual(t, id, echo.Ident())
++	}
++	request(11)
++	testReceive(t, started)
++	checkTransportEqual(t, 0, ep.NumQueued())
++	request(12)
++	reply(12)
++	close(release)
++	reply(11)
++}
++
++func testTransportSYN(port uint16, seq uint32) (stack.TransportEndpointID, *stack.PacketBuffer) {
++	source, dest := tcpip.AddrFrom4([4]byte{192, 0, 2, 2}), tcpip.AddrFrom4([4]byte{198, 51, 100, 4})
++	raw := make([]byte, header.IPv4MinimumSize+header.TCPMinimumSize)
++	iph := header.IPv4(raw)
++	iph.Encode(&header.IPv4Fields{TotalLength: uint16(len(raw)), TTL: 64, Protocol: uint8(header.TCPProtocolNumber), SrcAddr: source, DstAddr: dest})
++	header.TCP(iph.Payload()).Encode(&header.TCPFields{SrcPort: 40000, DstPort: port, SeqNum: seq, DataOffset: header.TCPMinimumSize, Flags: header.TCPFlagSyn})
++	p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(raw)})
++	p.NetworkHeader().Consume(header.IPv4MinimumSize)
++	p.TransportHeader().Consume(header.TCPMinimumSize)
++	p.NetworkProtocolNumber, p.TransportProtocolNumber = header.IPv4ProtocolNumber, header.TCPProtocolNumber
++	p.RXChecksumValidated = true
++	return stack.TransportEndpointID{LocalAddress: dest, RemoteAddress: source, LocalPort: port, RemotePort: 40000}, p
++}
++
++func TestTCPRejectedRequestStopsAtGenerationRetirement(t *testing.T) {
++	for _, mode := range []string{"current", "reset", "close"} {
++		t.Run(mode, func(t *testing.T) {
++			ep := channel.New(4, 1500, "")
++			ip, err := NewGVisorStack(ep)
++			checkTransportError(t, err)
++			defer func() { ip.Close(); ip.Wait(); ep.Close() }()
++			f := NewTCPForwarder(context.Background(), ip, &transportTestPolicy{})
++			f.decisions = new(flowDecisionQueue)
++			generation := f.decisions.generationContextLocked()
++			defer f.decisions.invalidate(true)
++			id, p := testTransportSYN(210, 1)
++			entered, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
++			checkTransportEqual(t, true, f.forwarder.HandlePacketWithHandler(id, p, func(r *tcp.ForwarderRequest) {
++				close(entered)
++				<-resume
++				f.forward(r, M.Socksaddr{}, M.Socksaddr{}, FlowVerdict{Action: ActionReject}, generation)
++				close(done)
++			}))
++			p.DecRef()
++			testReceive(t, entered)
++			if mode != "current" {
++				f.decisions.invalidate(mode == "close")
++			}
++			close(resume)
++			testReceive(t, done)
++			want := 0
++			if mode == "current" {
++				want = 1
++			}
++			checkTransportEqual(t, want, ep.NumQueued())
++		})
++	}
++}
+diff --git a/stack_gvisor_udp.go b/stack_gvisor_udp.go
+index 5cd0c93..807221b 100644
+--- a/stack_gvisor_udp.go
++++ b/stack_gvisor_udp.go
+@@ -8,7 +8,7 @@ import (
+ 	"net/netip"
+ 	"os"
+ 	"sync"
+-	_ "unsafe"
++	"sync/atomic"
+ 
+ 	"github.com/sagernet/gvisor/pkg/buffer"
+ 	"github.com/sagernet/gvisor/pkg/tcpip"
+@@ -23,10 +23,11 @@ import (
+ )
+ 
+ type UDPForwarder struct {
+-	ctx     context.Context
+-	stack   *stack.Stack
+-	handler Handler
+-	udpNat  *UDPNat
++	decisions *flowDecisionQueue
++	ctx       context.Context
++	stack     *stack.Stack
++	handler   Handler
++	udpNat    *UDPNat
+ }
+ 
+ func NewUDPForwarder(ctx context.Context, stack *stack.Stack, handler Handler, options UDPNatOptions) *UDPForwarder {
+@@ -52,57 +53,96 @@ func (f *UDPForwarder) Close() error {
+ func (f *UDPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
+ 	source := M.SocksaddrFrom(AddrFromAddress(id.RemoteAddress), id.RemotePort)
+ 	destination := M.SocksaddrFrom(AddrFromAddress(id.LocalAddress), id.LocalPort)
+-	data := pkt.Data()
+-	payload, _ := data.PullUp(data.Size())
+-	f.udpNat.NewPacket([][]byte{payload}, source, destination, pkt)
++	if handler, ok := f.handler.(DeferredFlowHandler); ok && f.decisions != nil {
++		admission := transportAdmission{
++			key: flowKey{uint8(header.UDPProtocolNumber), source.AddrPort(), destination.AddrPort()}, handle: handler,
++			cached: func(p *stack.PacketBuffer) bool {
++				key := f.udpNat.sessionKey(source, destination, true)
++				conn, ok := f.udpNat.cache.GetAndRefresh(key)
++				if !ok || conn.isClosed() || f.udpNat.state.Load() != udpNatStateStarted {
++					return false
++				}
++				conn.addFilterPeer(destination)
++				conn.enqueueSlices([][]byte{udpPayload(p)}, destination)
++				return true
++			},
++			commit: func(p *stack.PacketBuffer, v FlowVerdict) {
++				writer := f.responseWriter(source)
++				switch v.Action {
++				case ActionReject:
++					gWriteUnreachable(f.stack, p)
++				case ActionDrop:
++				case ActionHijackDNS:
++					f.handler.NewDNSPacket(udpPayload(p), source, destination, writer)
++				default:
++					f.udpNat.NewPacket([][]byte{udpPayload(p)}, source, destination, &udpFlowPacket{p, v, f.decisions.generationContextLocked()})
++				}
++			},
++		}
++		admission.admit(f.decisions, pkt)
++	} else {
++		f.udpNat.NewPacket([][]byte{udpPayload(pkt)}, source, destination, pkt)
++	}
+ 	return true
+ }
+ 
+-//go:linkname rangeIterate github.com/sagernet/gvisor/pkg/tcpip/stack.Range.iterate
+-func rangeIterate(r stack.Range, fn func(*buffer.View))
++type udpFlowPacket struct {
++	packet     *stack.PacketBuffer
++	verdict    FlowVerdict
++	generation context.Context
++}
++
++func (p *udpFlowPacket) bindUDPDestination() bool {
++	return p.verdict.DestinationBound || p.verdict.RouteContext != nil
++}
++
++func udpPayload(packet *stack.PacketBuffer) []byte {
++	data := packet.Data()
++	payload, _ := data.PullUp(data.Size())
++	return payload
++}
++
++func (f *UDPForwarder) responseWriter(source M.Socksaddr) *UDPBackWriter {
++	network := header.IPv4ProtocolNumber
++	if source.Addr.Is6() {
++		network = header.IPv6ProtocolNumber
++	}
++	return &UDPBackWriter{stack: f.stack, source: AddressFromAddr(source.Addr), sourcePort: source.Port, sourceNetwork: network}
++}
+ 
+ func (f *UDPForwarder) PreparePacketConnection(source M.Socksaddr, destination M.Socksaddr, userData any) (bool, context.Context, N.PacketWriter, N.CloseHandlerFunc) {
+-	firstPacketBuffer := userData.(*stack.PacketBuffer)
+-	var firstPacket []byte
+-	rangeIterate(firstPacketBuffer.Data().AsRange(), func(view *buffer.View) {
+-		if firstPacket == nil {
+-			firstPacket = view.AsSlice()
+-		} else {
+-			firstPacket = append(firstPacket[:len(firstPacket):len(firstPacket)], view.AsSlice()...)
++	writer := f.responseWriter(source)
++	ctx := f.ctx
++	if admitted, ok := userData.(*udpFlowPacket); ok {
++		if admitted.generation.Err() != nil {
++			return false, nil, nil, nil
+ 		}
+-	})
+-	var sourceNetwork tcpip.NetworkProtocolNumber
+-	if source.Addr.Is4() {
+-		sourceNetwork = header.IPv4ProtocolNumber
++		ctx, writer.lease = newFlowHandshakeLease(ctx, admitted.generation)
++		if bind := admitted.verdict.RouteContext; bind != nil {
++			ctx = bind(ctx)
++		}
++		writer.packet = admitted.packet.IncRef()
+ 	} else {
+-		sourceNetwork = header.IPv6ProtocolNumber
+-	}
+-	switch f.handler.JudgeFlow(uint8(header.UDPProtocolNumber), source.AddrPort(), destination.AddrPort(), firstPacket).Action {
+-	case ActionReject:
+-		gWriteUnreachable(f.stack, userData.(*stack.PacketBuffer))
+-		return false, nil, nil, nil
+-	case ActionDrop:
+-		return false, nil, nil, nil
+-	case ActionHijackDNS:
+-		f.handler.NewDNSPacket(firstPacket, source, destination, &UDPBackWriter{
+-			stack:         f.stack,
+-			source:        AddressFromAddr(source.Addr),
+-			sourcePort:    source.Port,
+-			sourceNetwork: sourceNetwork,
+-		})
+-		return false, nil, nil, nil
+-	}
+-	writer := &UDPBackWriter{
+-		stack:         f.stack,
+-		packet:        userData.(*stack.PacketBuffer).IncRef(),
+-		source:        AddressFromAddr(source.Addr),
+-		sourcePort:    source.Port,
+-		sourceNetwork: sourceNetwork,
++		packet := userData.(*stack.PacketBuffer)
++		firstPacket := udpPayload(packet)
++		switch f.handler.JudgeFlow(uint8(header.UDPProtocolNumber), source.AddrPort(), destination.AddrPort(), firstPacket).Action {
++		case ActionReject:
++			gWriteUnreachable(f.stack, packet)
++			return false, nil, nil, nil
++		case ActionDrop:
++			return false, nil, nil, nil
++		case ActionHijackDNS:
++			f.handler.NewDNSPacket(firstPacket, source, destination, writer)
++			return false, nil, nil, nil
++		}
++		writer.packet = packet.IncRef()
+ 	}
+-	return true, f.ctx, writer, nil
++	return true, ctx, writer, nil
+ }
+ 
+ type UDPBackWriter struct {
++	closed        atomic.Bool
++	lease         *flowHandshakeLease
+ 	access        sync.Mutex
+ 	stack         *stack.Stack
+ 	packet        *stack.PacketBuffer
+@@ -118,6 +158,9 @@ func (w *UDPBackWriter) HandshakeSuccess() error {
+ 		w.packet.DecRef()
+ 		w.packet = nil
+ 	}
++	if w.closed.Load() || !w.lease.claim() {
++		return context.Canceled
++	}
+ 	return nil
+ }
+ 
+@@ -127,13 +170,37 @@ func (w *UDPBackWriter) HandshakeFailure(err error) error {
+ 	if w.packet == nil {
+ 		return os.ErrInvalid
+ 	}
+-	wErr := gWriteUnreachable(w.stack, w.packet)
++	var wErr error = context.Canceled
++	if w.lease.claim() {
++		wErr = gWriteUnreachable(w.stack, w.packet)
++	}
++	w.closed.Store(true)
++	w.lease.close()
+ 	w.packet.DecRef()
+ 	w.packet = nil
+ 	return wErr
+ }
+ 
++func (w *UDPBackWriter) socketRetired() bool {
++	return w.closed.Load() || w.lease != nil && !w.lease.committed.Load() && w.lease.generation.Err() != nil
++}
++
++func (w *UDPBackWriter) releaseSocket() {
++	w.closed.Store(true)
++	w.access.Lock()
++	defer w.access.Unlock()
++	w.lease.close()
++	if w.packet != nil {
++		w.packet.DecRef()
++		w.packet = nil
++	}
++}
++
+ func (w *UDPBackWriter) WritePacket(packetBuffer *buf.Buffer, destination M.Socksaddr) error {
++	if w.socketRetired() {
++		packetBuffer.Release()
++		return context.Canceled
++	}
+ 	if !destination.IsIP() {
+ 		return E.Cause(os.ErrInvalid, "invalid destination")
+ 	} else if destination.IsIPv4() && w.sourceNetwork == header.IPv6ProtocolNumber {
+diff --git a/udp_nat.go b/udp_nat.go
+index 6d5dd94..d15201a 100644
+--- a/udp_nat.go
++++ b/udp_nat.go
+@@ -57,11 +57,12 @@ type UDPNatOptions struct {
+ }
+ 
+ type udpNatSessionKey struct {
+-	sourceAddr      netip.Addr
+-	destinationAddr netip.Addr
+-	sourcePort      uint16
+-	destinationPort uint16
+-	interfaceIndex  uint32
++	destinationBound bool
++	sourceAddr       netip.Addr
++	destinationAddr  netip.Addr
++	sourcePort       uint16
++	destinationPort  uint16
++	interfaceIndex   uint32
+ }
+ 
+ type udpNatFilterKey struct {
+@@ -146,12 +147,7 @@ func NewUDPNat(options UDPNatOptions) *UDPNat {
+ 	service.cleanup = newUDPNatCleanupQueue(service)
+ 	cache.SetLifetime(options.Timeout)
+ 	cache.SetHealthCheck(func(_ udpNatSessionKey, conn *udpNatConn) bool {
+-		select {
+-		case <-conn.doneChan:
+-			return false
+-		default:
+-			return true
+-		}
++		return !conn.isClosed()
+ 	})
+ 	cache.SetOnEvict(func(_ udpNatSessionKey, conn *udpNatConn) {
+ 		conn.closeFromCache()
+@@ -323,6 +319,10 @@ func (s *UDPNat) NewPacket(bufferSlices [][]byte, source M.Socksaddr, destinatio
+ 	if !ok {
+ 		return
+ 	}
++	conn.enqueueSlices(bufferSlices, destination)
++}
++
++func (conn *udpNatConn) enqueueSlices(bufferSlices [][]byte, destination M.Socksaddr) {
+ 	readWaitOptions := conn.loadReadWaitOptions()
+ 	var dataLen int
+ 	for _, bufferSlice := range bufferSlices {
+@@ -336,13 +336,14 @@ func (s *UDPNat) NewPacket(bufferSlices [][]byte, source M.Socksaddr, destinatio
+ 	conn.enqueue(buffer, destination)
+ }
+ 
+-func (s *UDPNat) getOrCreateConn(source M.Socksaddr, destination M.Socksaddr, userData any) (*udpNatConn, bool) {
+-	if s.state.Load() != udpNatStateStarted {
+-		return nil, false
+-	}
++// A socket whose resolver answer is bound to a destination cannot carry a
++// second peer, even under endpoint-independent NAT. Ordinary sessions keep
++// the configured mapping and filtering behavior.
++func (s *UDPNat) sessionKey(source, destination M.Socksaddr, bound bool) udpNatSessionKey {
+ 	key := udpNatSessionKey{
+-		sourceAddr: source.Addr.Unmap(),
+-		sourcePort: source.Port,
++		destinationBound: bound,
++		sourceAddr:       source.Addr.Unmap(),
++		sourcePort:       source.Port,
+ 	}
+ 	switch s.mapping {
+ 	case NATMappingEndpointIndependent:
+@@ -353,6 +354,19 @@ func (s *UDPNat) getOrCreateConn(source M.Socksaddr, destination M.Socksaddr, us
+ 		key.destinationAddr = destination.Addr.Unmap()
+ 		key.destinationPort = destination.Port
+ 	}
++	if bound {
++		key.destinationAddr = destination.Addr.Unmap()
++		key.destinationPort = destination.Port
++	}
++	return key
++}
++
++func (s *UDPNat) getOrCreateConn(source M.Socksaddr, destination M.Socksaddr, userData any) (*udpNatConn, bool) {
++	if s.state.Load() != udpNatStateStarted {
++		return nil, false
++	}
++	scope, scoped := userData.(interface{ bindUDPDestination() bool })
++	key := s.sessionKey(source, destination, scoped && scope.bindUDPDestination())
+ 	var (
+ 		newContext context.Context
+ 		newOnClose N.CloseHandlerFunc
+@@ -729,6 +743,9 @@ func (c *udpNatConn) Close() error {
+ 
+ func (c *udpNatConn) close() {
+ 	c.closeOnce.Do(func() {
++		if writer, ok := c.writer.(interface{ releaseSocket() }); ok {
++			writer.releaseSocket()
++		}
+ 		c.packetAccess.Lock()
+ 		close(c.doneChan)
+ 		drained := false
+@@ -755,6 +772,9 @@ func (c *udpNatConn) closeFromCache() {
+ }
+ 
+ func (c *udpNatConn) isClosed() bool {
++	if writer, ok := c.writer.(interface{ socketRetired() bool }); ok && writer.socketRetired() {
++		return true
++	}
+ 	select {
+ 	case <-c.doneChan:
+ 		return true

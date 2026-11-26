@@ -167,6 +167,8 @@ class RestoreOracleTest {
             }
             if (defaultBlocked) return Step(Outcome(REJECT), By.None, By.None)
             if (s.defaultRoute == DIRECT && vpnApps && app == null) return Step(Outcome(RestoreTraffic.HELD), By.App, By.App)
+            if (s.defaultRoute != DIRECT && p == OWNERLESS && s.apps.keys.any { group(it) != null })
+                return Step(Outcome(RestoreTraffic.HELD), By.App, By.App)
             resolve(answer(s.defaultRoute, defaultKind), By.None)
             network(ip)?.let { return out(it, By.Address) }
             if (p == PING && s.defaultRoute == DIRECT && anyGroupNotDirect) return Step(Outcome(RestoreTraffic.HELD), By.Address, By.Address)

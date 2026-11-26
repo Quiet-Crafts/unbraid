@@ -171,6 +171,51 @@ object Backup {
     /** Passwords everyone tries first: each counts as one character wherever it appears. */
     private val COMMON = listOf("password", "passw0rd", "qwerty", "azerty", "letmein", "welcome", "iloveyou", "admin", "unbraid", "monkey", "dragon", "123456")
 
+    /** Only format 2 carries compact labels. Earlier readers can deserialize it and ask the user to update. */
+    private fun expandWgLabels(c: Contents): Setup {
+        val s = c.setup
+        need(s.routes.size <= MAX_EACH && s.servers.size <= MAX_EACH, "it holds more than unbraid keeps")
+        val labels = s.servers.any { it.wgIdentity != null } || s.routes.any { it.wgIdentity != null }
+        need(labels == (c.format == WG_LABELS), "its WireGuard labels don't match the backup format")
+        if (!labels) return s
+        val waitingWg = s.servers.filter { it.wgIdentity != null }.mapTo(HashSet()) { it.id }
+        need(s.routes.all { (it.wgIdentity != null) == (it.own in waitingWg) }, "a WireGuard label has no matching own server")
+        if (!c.keys) need(s.home.wg == null && s.servers.all { it.keyless }, "a backup without keys holds a server config")
+        fun peer(label: WgIdentity?, wg: WgPeer?, keyless: Boolean, other: Boolean): WgPeer? {
+            if (label == null) {
+                need(wg == null || (!keyless && c.keys), "a saved WireGuard peer needs a label")
+                return wg
+            }
+            need(keyless && wg == null && !other, "a WireGuard label conflicts with its configuration")
+            return label.waiting()
+        }
+        return s.copy(
+            servers = s.servers.map { it.copy(wg = peer(it.wgIdentity, it.wg, it.keyless, it.ovpn != null || it.ss != null || it.socks5 != null), wgIdentity = null) },
+            routes = s.routes.map { it.copy(wg = peer(it.wgIdentity, it.wg, it.keyless, it.ovpn != null || it.ss != null || it.socks5 != null || it.tsExit != null), wgIdentity = null) },
+        )
+    }
+
+    // The first keyless writer emitted all four of these defaults, even empty DNS and null keys.
+    // A sparse historical input still restores its routes, but deserializer defaults cannot prove an exact match.
+    @Serializable private class OldWgFields(val dns: List<String>? = null, val mtu: Int? = null,
+        val keepalive: Int? = -1, val presharedKey: String? = "missing") {
+        val complete get() = dns != null && mtu != null && keepalive != -1 && presharedKey == null
+    }
+    @Serializable private class OldRecord(val id: String, val wg: OldWgFields? = null)
+    @Serializable private class OldRecords(val servers: List<OldRecord> = emptyList(), val routes: List<OldRecord> = emptyList())
+    @Serializable private class OldContents(val setup: OldRecords)
+
+    private fun checkLegacyWgFields(s: Setup, text: String): Setup {
+        if (s.servers.none { it.keyless && it.wg != null } && s.routes.none { it.keyless && it.wg != null }) return s
+        // The typed reader skips unrelated configuration, including large app maps. Validation already bounded the records and DNS lists.
+        val records = json.decodeFromString(OldContents.serializer(), text).setup
+        fun incomplete(items: List<OldRecord>) = items.filter { it.wg?.complete == false }.mapTo(HashSet()) { it.id }
+        val servers = incomplete(records.servers)
+        val routes = incomplete(records.routes)
+        return s.copy(servers = s.servers.map { if (it.keyless && it.id in servers) it.withoutSecrets() else it },
+            routes = s.routes.map { if (it.keyless && it.id in routes) it.withoutSecrets() else it })
+    }
+
     /** The characters people see in [s]. */
     private fun clusters(s: String): List<String> = java.text.BreakIterator.getCharacterInstance().run {
         setText(s); var a = first(); generateSequence { next().takeIf { it != java.text.BreakIterator.DONE }?.let { b -> s.substring(a, b).also { a = b } } }.toList()
@@ -274,6 +319,7 @@ object Backup {
     )
 
     const val CONTENTS = 1
+    private const val WG_LABELS = 2
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     /**
@@ -283,20 +329,22 @@ object Backup {
      * servers and the routes through them keep only what isn't secret ([withoutSecrets]), and the home peer is left out.
      */
     fun contents(s: Setup, keys: Boolean = true): Setup {
-        val c = s.copy(home = Home(wg = s.home.wg), prefs = s.prefs.copy(stats = false), pristine = false,
+        val clean = s.tidyAppSigners()
+        val c = clean.copy(home = Home(wg = s.home.wg), prefs = s.prefs.copy(stats = false), pristine = false,
+            waitOverrides = emptyMap(), profiles = clean.profiles.map { it.copy(waitOverrides = emptyMap()) },
             waiting = emptySet(), waitingUntil = 0, waitingEach = emptyMap(), version = VERSION, testing = emptySet())
-        if (keys) return c
+        if (keys) return if (c.routes.any { it.socks5 != null && c.servers.none { sv -> sv.id == it.own } }) linked(c, localOnly = true) else c
         val linked = linked(c)
         return linked.copy(home = Home(), servers = linked.servers.map { it.withoutSecrets() }, routes = linked.routes.map { it.withoutSecrets() })
     }
 
     /** [s] with every imported route tied to an own server, so a route saved without keys has one to get them back through. */
-    private fun linked(s: Setup): Setup {
+    private fun linked(s: Setup, localOnly: Boolean = false): Setup {
         var servers = s.servers
         val routes = s.routes.map { r ->
-            if (!r.imported || r.tsExit != null || servers.any { it.id == r.own }) return@map r
-            val o = servers.firstOrNull { it.wg == r.wg && it.ovpn == r.ovpn && it.ss == r.ss }
-                ?: OwnServer(generateSequence { "s" + java.util.UUID.randomUUID().toString().take(8) }.first { id -> servers.none { it.id == id } }, r.wg, r.ovpn, r.ss)
+            if (localOnly && r.socks5 == null || !r.imported || r.tsExit != null || servers.any { it.id == r.own }) return@map r
+            val o = servers.firstOrNull { it.wg == r.wg && it.ovpn == r.ovpn && it.ss == r.ss && it.socks5 == r.socks5 }
+                ?: OwnServer(generateSequence { "s" + java.util.UUID.randomUUID().toString().take(8) }.first { id -> servers.none { it.id == id } }, r.wg, r.ovpn, r.ss, socks5 = r.socks5)
                     .also { servers = servers + it }
             r.copy(own = o.id)
         }
@@ -306,19 +354,43 @@ object Backup {
     /** Whether [s] holds anything [contents] leaves out without keys: own servers, imported routes or a home peer. */
     fun hasSecrets(s: Setup) = s.servers.isNotEmpty() || s.home.wg != null || s.routes.any { it.imported && it.tsExit == null }
 
-    fun export(s: Setup, app: String, now: Long, keys: Boolean = true) =
-        json.encodeToString(Contents.serializer(), Contents(CONTENTS, app, now, contents(s, keys).stamped, keys)).toByteArray()
+    fun export(s: Setup, app: String, now: Long, keys: Boolean = true): ByteArray {
+        val setup = contents(s, keys).stamped
+        val compact = setup.servers.any { it.keyless && it.wg != null } || setup.routes.any { it.keyless && it.wg != null }
+        val saved = if (!compact) setup else setup.copy(
+            servers = setup.servers.map { if (it.keyless && it.wg != null) it.copy(wg = null, wgIdentity = it.wg.identity()) else it },
+            routes = setup.routes.map { if (it.keyless && it.wg != null) it.copy(wg = null, wgIdentity = it.wg.identity()) else it },
+        )
+        return json.encodeToString(Contents.serializer(), Contents(if (compact) WG_LABELS else CONTENTS, app, now, saved, keys)).toByteArray()
+    }
 
     /** [plain] read and checked whole ([valid]); throws [Failed] (Newer, Invalid, OtherPlatform) and changes nothing. */
     fun read(plain: ByteArray): Contents {
+        if (plain.size > MAX) fail(Reason.TooLarge)
         val text = String(plain, Charsets.UTF_8)
         val c = runCatching { json.decodeFromString(Contents.serializer(), text) }.getOrElse {
             // The Mac's backups hold their setup under "mac": the same container, another app's settings.
             if (runCatching { json.parseToJsonElement(text).let { it is JsonObject && "mac" in it && "setup" !in it } }.getOrDefault(false)) fail(Reason.OtherPlatform)
             fail(Reason.Invalid, "its contents can't be read")
         }
-        if (c.format > CONTENTS || c.setup.version > VERSION) fail(Reason.Newer)
-        return c.copy(app = c.app.takeIf { APP_VERSION.matches(it) }.orEmpty(), setup = valid(shown(named(c.setup.migrated()))))
+        if (c.format > WG_LABELS || c.setup.version > VERSION) fail(Reason.Newer)
+        need(c.format >= CONTENTS, "its backup format is invalid")
+        val setup = expandWgLabels(c)
+        if (setup.servers.any { it.socks5 != null } || setup.routes.any { it.socks5 != null }) {
+            need(setup.version >= 7, "a local proxy needs the newer setup format")
+        }
+        if (setup.servers.any { it.socks5?.allowUdp == true } || setup.routes.any { it.socks5?.allowUdp == true }) {
+            need(setup.version >= 8, "UDP consent needs the newer setup format")
+        }
+        val proxies = setup.routes.filter { it.socks5 != null }.mapTo(HashSet()) { it.id }
+        if ((setup.profiles + setup.live).any { it.defaultRoute in proxies }) need(setup.version >= 9, "a proxy default needs the newer setup format")
+        if (!c.keys) {
+            need(setup.servers.none { it.socks5 != null && !it.keyless } && setup.routes.none { it.socks5 != null && !it.keyless },
+                "a backup without keys holds a local proxy config")
+        }
+        val checked = valid(shown(named(setup.migrated())))
+        return c.copy(app = c.app.takeIf { APP_VERSION.matches(it) }.orEmpty(), setup =
+            if (c.format == CONTENTS) checkLegacyWgFields(checked, text) else checked)
     }
 
     /** The characters people see that a text from a file that is only shown keeps: no place or server a provider lists comes near it. */
@@ -409,21 +481,23 @@ object Backup {
         need(s.routes.all { ID.matches(it.id) && !builtIn(it.id) } && s.routes.map { it.id }.toSet().size == s.routes.size, "a route has a missing or repeated name")
         need(s.servers.all { ID.matches(it.id) } && s.servers.map { it.id }.toSet().size == s.servers.size, "an own server has a missing or repeated name")
         s.servers.forEach { sv ->
-            need(listOfNotNull(sv.wg, sv.ovpn, sv.ss).size == 1, "an own server has no configuration")
-            if (sv.keyless) keyless(sv.name, sv.wg, sv.ovpn, sv.ss) else server(sv.name, sv.wg, sv.ovpn, sv.ss)
+            need(sv.wgIdentity == null && listOfNotNull(sv.wg, sv.ovpn, sv.ss, sv.socks5).size == 1, "an own server has no configuration")
+            if (sv.keyless) keyless(sv.name, sv.wg, sv.ovpn, sv.ss, sv.socks5) else server(sv.name, sv.wg, sv.ovpn, sv.ss, sv.socks5)
         }
         s.routes.forEach { r ->
-            val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.tsExit).size
-            need(n <= 1, "a route has more than one exit")
+            val n = listOfNotNull(r.wg, r.ovpn, r.ss, r.socks5, r.tsExit).size
+            need(r.wgIdentity == null && n <= 1, "a route has more than one exit")
             if (n == 0) need(Providers.get(r.loc.provider) != null, "a route uses a provider this unbraid doesn't know")
             // Its node's name and its place are never refused, as older versions kept them unchecked; what is only shown is cleaned ([shown]).
             r.tsExit?.let { need(tsAddress(it), "a Tailscale route is damaged") }
             // A route saved without keys gets them back only through its own server, which must be saved without them too.
             val own = r.own?.let(serverById::get)
             need(r.keyless == (own?.keyless == true) && (!r.keyless || (n == 1 && r.tsExit == null)), "a route and its own server don't match")
-            if (r.keyless) keyless(r.name, r.wg, r.ovpn, r.ss) else server(r.name, r.wg, r.ovpn, r.ss)
+            if (r.socks5 != null || own?.socks5 != null) need(own != null && own.socks5 == r.socks5, "a local proxy and its route do not match")
+            if (r.keyless) keyless(r.name, r.wg, r.ovpn, r.ss, r.socks5) else server(r.name, r.wg, r.ovpn, r.ss, r.socks5)
         }
-        s.home.wg?.let { server(it.name, it, null, null) }
+        need(s.supportsSocks5Assignments(), "a local proxy can't be used for a website or with Via")
+        s.home.wg?.let { server(it.name, it, null, null, null) }
         // An app or a website may be on Block; a default route never is.
         val ok = { id: String -> builtIn(id) || id in routeIds }
         val pkgs = { m: Map<String, String> -> m.keys.all { it.length <= 255 && PKG.matches(it) } }
@@ -433,6 +507,13 @@ object Backup {
         need(s.defaultRoute.let(ok) && s.apps.values.all(ok) && s.added.all(ok) && pkgs(s.apps), "an app or the default route names a route that isn't there")
         // The filter's own choices per app are app choices too: as many at most, and package names.
         need(s.prefs.filter.apps.keys.all { it.length <= 255 && PKG.matches(it) }, "the Protection filter's app choices are damaged")
+        val fingerprint = Regex("[0-9a-f]{64}")
+        fun validPins(pins: Map<String, String>, rules: Map<String, String>) = pins.all { (pkg, pin) ->
+            pkg in rules && rules[pkg] != BLOCK && pkg.length <= 255 && PKG.matches(pkg) && pin.length <= 64 * 65 && pin.split(',').let { certs ->
+                certs.all(fingerprint::matches) && certs == certs.distinct().sorted()
+            }
+        }
+        need(validPins(s.appSigners, s.apps) && s.profiles.all { validPins(it.appSigners, it.apps) }, "an app signing identity is damaged")
         need(sites(s.sites), "a website's route is damaged")
         need(s.onNet.all { (kind, name) -> kind in NET_KINDS && s.profiles.any { it.name == name } }, "a profile to switch to isn't there")
         s.profiles.forEach { p ->
@@ -466,11 +547,12 @@ object Backup {
     }
 
     /** A server saved without keys holds nothing secret, and the rest of it is as an import would leave it. */
-    private fun keyless(name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?) {
+    private fun keyless(name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?, socks5: Socks5Profile?) {
         val ok = plainName(name) && when {
             wg != null -> wg.privateKey.isEmpty() && wg.presharedKey == null && wg.endpoint.length <= 300 && wg.publicKey.length <= 64 &&
                 wg.address.size <= 16 && wg.allowedIps.size <= 256 && wg.dns.size <= 16 && (wg.address + wg.allowedIps + wg.dns).all { it.length <= 64 && it.none(Char::isISOControl) }
             ovpn != null -> ovpn == OvpnProfile(ovpn.name, "")
+            socks5 != null -> socks5.username.isEmpty() && socks5.password.isEmpty() && socks5.needsConfirmation && runCatching { socks5.checked() }.isSuccess
             ss != null -> ss.password.isEmpty() && ss.pluginOpts == null && ss.server.length <= 253 && ss.method.length <= 64 && ss.port in 1..65535 &&
                 (ss.plugin?.length ?: 0) <= 64 && (ss.server + ss.method + ss.plugin.orEmpty()).none(Char::isISOControl)
             else -> false
@@ -479,26 +561,167 @@ object Backup {
     }
 
     /** Checks an own server's config as an import would; its reason names the server, never a key or a password. */
-    private fun server(name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?) {
+    private fun server(name: String, wg: WgPeer?, ovpn: OvpnProfile?, ss: SsProfile?, socks5: Socks5Profile?) {
         val why = runCatching {
             wg?.let { require(plainName(it.name) && WgConf.parse(WgConf.text(it), it.name) == it) { "its WireGuard settings are damaged" } }
             ovpn?.let { require(plainName(it.name) && it.config.length <= 256 * 1024 && it.username.length <= 1024 && it.password.length <= 1024) { "it is damaged" }; Manual.parseOvpn(it.config, it.name, it.username, it.password) }
+            socks5?.checked()
             ss?.let { require(plainName(it.name) && Manual.parseSs(Manual.ssLink(it), it.name) == it) { "its Shadowsocks settings are damaged" } }
         }.exceptionOrNull() ?: return
         bad("own server ${label(name, "with no visible name", 40)}:${(why.message ?: "it is damaged").replaceFirstChar(Char::lowercase).removeSuffix(".")}")
     }
 }
 
-/** Own server [id], restored without keys, with [server]'s config and name, and every route through it unblocked. */
-fun Setup.refilled(id: String, server: OwnServer): Setup? {
-    if (servers.none { it.id == id && it.keyless }) return null
-    val sv = server.copy(id = id, keyless = false)
+/** Refills a waiting server and all of its route copies. Editing a confirmed proxy also requires the exact record shown. */
+fun Setup.refilled(id: String, server: OwnServer, expectedProxy: OwnServer? = null): Setup? {
+    val saved = servers.firstOrNull { it.id == id } ?: return null
+    if (expectedProxy != null && (saved.socks5 == null || saved != expectedProxy)) return null
+    if (!saved.keyless && saved.socks5?.needsConfirmation != true && expectedProxy == null) return null
+    if (saved.socks5 != null || server.socks5 != null) {
+        if (expectedProxy == null) return null
+        val confirmed = server.socks5 ?: return null
+        val previous = saved.socks5 ?: return null
+        if (confirmed.needsConfirmation || (saved.keyless || previous.needsConfirmation) && previous.authRequired && !confirmed.authRequired || runCatching { confirmed.checked() }.isFailure) return null
+    }
+    // UDP is allowed on the server's own page only: an edit keeps it for the same app, port and login, and never turns it on.
+    val proxy = server.socks5?.let { next ->
+        val old = saved.socks5
+        next.copy(allowUdp = old != null && !saved.keyless && !old.needsConfirmation && old.allowUdp &&
+            old.packageName == next.packageName && old.identity == next.identity && old.port == next.port &&
+            old.username == next.username && old.password == next.password)
+    }
+    val sv = server.copy(id = id, keyless = false, socks5 = proxy)
     return copy(servers = servers.map { if (it.id == id) sv else it },
-        routes = routes.map { r -> if (r.own != id) r else r.copy(wg = sv.wg, ovpn = sv.ovpn, ss = sv.ss, keyless = false) })
+        routes = routes.map { r -> if (r.own != id) r else r.copy(wg = sv.wg, ovpn = sv.ovpn, ss = sv.ss, socks5 = sv.socks5, keyless = false) })
+}
+
+/** Changes UDP on the saved proxy and all its route copies. */
+fun Setup.setProxyUdp(expected: OwnServer, on: Boolean): Setup {
+    val saved = servers.firstOrNull { it.id == expected.id } ?: return this
+    val proxy = saved.socks5 ?: return this
+    if (on && (saved != expected || saved.keyless || proxy.needsConfirmation)) return this
+    val changed = proxy.copy(allowUdp = on)
+    return copy(servers = servers.map { if (it.id == saved.id) it.copy(socks5 = changed) else it },
+        routes = routes.map { if (it.own == saved.id) it.copy(socks5 = changed) else it })
 }
 
 /** Apps restored but not on this phone keep their route this long, to be installed meanwhile. */
 const val WAIT_MS = 30 * 86_400_000L
+
+/** An already active choice when another profile is still waiting for the same package. */
+private const val ACTIVE_CHOICE = Long.MIN_VALUE
+
+internal fun Setup.deadline(p: Profile, pkg: String): Long? {
+    if (pkg !in waiting) return null
+    val route = p.apps[pkg] ?: return null
+    return (p.waitOverrides[pkg] ?: waitingEach[pkg]?.get(route) ?: waitingUntil).takeUnless { it == ACTIVE_CHOICE }
+}
+
+private data class PendingProfile(val profile: Profile, val due: Map<String, Long>)
+
+private fun Setup.pending(p: Profile) = PendingProfile(p, p.apps.keys.mapNotNull { pkg -> deadline(p, pkg)?.let { pkg to it } }.toMap())
+
+/** Prefer the original global and per-route encoding. Only differing choices in separate profiles need an override. */
+private fun Setup.withWaits(active: PendingProfile, saved: List<PendingProfile>): Setup {
+    val byPackage = mutableMapOf<String, MutableMap<String, Long>>()
+    for ((profile, due) in listOf(active) + saved) for ((pkg, date) in due) {
+        val route = profile.apps[pkg] ?: continue
+        byPackage.getOrPut(pkg) { mutableMapOf() }.merge(route, date, ::minOf)
+    }
+    val until = (listOf(active) + saved).maxOf { it.due.values.maxOrNull() ?: 0 }
+    val each = byPackage.mapValues { (_, dates) -> dates.filterValues { it != until } }.filterValues { it.isNotEmpty() }
+    fun encoded(row: PendingProfile): Profile {
+        val overrides = row.profile.apps.mapNotNull { (pkg, route) ->
+            val fallback = byPackage[pkg]?.get(route) ?: until.takeIf { pkg in byPackage }
+            val date = row.due[pkg]
+            if (date == fallback) null else pkg to (date ?: ACTIVE_CHOICE)
+        }.toMap()
+        return row.profile.copy(waitOverrides = overrides)
+    }
+    val live = encoded(active)
+    return copy(apps = live.apps, appSigners = live.appSigners, waitOverrides = live.waitOverrides, profiles = saved.map(::encoded),
+        waiting = byPackage.keys.toSet(), waitingUntil = until, waitingEach = each)
+}
+
+private enum class WaitDecision { Active, Pending, Expired }
+
+private fun InstallState.decision(due: Long, now: Long, expected: String?): WaitDecision {
+    if (this == InstallState.Absent) return if (now >= due) WaitDecision.Expired else WaitDecision.Pending
+    val present = this as? InstallState.Present ?: return WaitDecision.Pending
+    val observed = maxOf(now, present.observedAt ?: now)
+    val first = present.firstInstallTime?.takeIf { it in 1..observed }
+    if (first != null && first >= due) return WaitDecision.Expired
+    val authorized = expected == null || present.identity?.accepts(expected) == true
+    return if (authorized && (first != null || observed < due)) WaitDecision.Active else WaitDecision.Pending
+}
+
+/** Recheck a single grant right at Android's owner or TUN boundary when a saved restore is still pending. */
+internal fun Setup.waitAdmits(p: Profile, pkg: String, now: Long, state: InstallState): Boolean =
+    deadline(p, pkg)?.let { state.decision(it, now, p.appSigners[pkg]) == WaitDecision.Active } ?: true
+
+/** Consume a proven timely installation, forget a proven late choice, retain unresolved provenance for a later retry. */
+internal fun Setup.resolveWaiting(now: Long, installed: (String) -> InstallState, effective: Boolean = false): Setup {
+    if (waiting.isEmpty()) return this
+    val observations = HashMap<String, InstallState>()
+    val expiredDirect = mutableSetOf<String>()
+    val remainingDirect = mutableSetOf<String>()
+    fun resolve(p: Profile): PendingProfile {
+        val remaining = mutableMapOf<String, Long>()
+        val apps = p.apps.toMutableMap()
+        val pins = p.appSigners.toMutableMap()
+        for (pkg in p.apps.keys) {
+            val due = deadline(p, pkg)
+            if (due == null) {
+                if (p.apps[pkg] == DIRECT) remainingDirect += pkg
+                continue
+            }
+            val state = observations.getOrPut(pkg) { installed(pkg) }
+            val decision = state.decision(due, now, p.appSigners[pkg].takeUnless { p.apps[pkg] == BLOCK })
+            if (decision == WaitDecision.Expired) {
+                if (apps.remove(pkg) == DIRECT) expiredDirect += pkg
+                continue
+            }
+            if (p.apps[pkg] == DIRECT) remainingDirect += pkg
+            if (decision == WaitDecision.Active) {
+                if (pkg in pins && p.apps[pkg] != BLOCK) (state as? InstallState.Present)?.identity?.let { pins[pkg] = it.current }
+                continue
+            }
+            remaining[pkg] = due
+            if (effective) apps[pkg] = BLOCK
+        }
+        return PendingProfile(p.copy(apps = apps, appSigners = pins.filterKeys(apps::containsKey)), remaining)
+    }
+    val result = withWaits(resolve(live), profiles.map(::resolve))
+    val clear = expiredDirect - remainingDirect
+    return if (clear.none(prefs.filter.apps::containsKey)) result
+        else result.copy(prefs = prefs.copy(filter = prefs.filter.copy(apps = prefs.filter.apps - clear)))
+}
+
+/** A rejected profile switch must not resurrect a settled or expired wait from an earlier running snapshot. */
+internal fun Setup.rollbackWaits(savedSetup: Setup, ran: Setup): Setup {
+    if (savedSetup.waiting.isEmpty() && ran.waiting.isEmpty()) return this
+    val previous = if (savedSetup.profile == ran.profile) savedSetup.live else savedSetup.saved.firstOrNull { it.name == ran.profile }
+    val apps = apps.toMutableMap()
+    val due = mutableMapOf<String, Long>()
+    for ((pkg, route) in apps.toMap()) {
+        val old = ran.deadline(ran.live, pkg)
+        if (old != null && previous != null && pkg !in previous.apps) apps.remove(pkg)
+        else {
+            val whenDue = if (previous?.apps?.get(pkg) == route) savedSetup.deadline(previous, pkg) else old
+            if (whenDue != null) due[pkg] = whenDue
+        }
+    }
+    val active = PendingProfile(live.copy(apps = apps, appSigners = appSigners.filterKeys(apps::containsKey)), due)
+    return withWaits(active, profiles.map { p -> if (p.name == profile) active.copy(profile = active.profile.copy(name = p.name)) else savedSetup.pending(p) })
+}
+
+/** Rechoosing an installed app cancels its restore wait only in the profile the user edited. */
+internal fun Setup.clearAppWait(name: String?, pkg: String): Setup {
+    if (pkg !in waiting) return this
+    val target = name ?: profile
+    fun row(p: Profile, selected: Boolean): PendingProfile = pending(p).let { if (selected) it.copy(due = it.due - pkg) else it }
+    return withWaits(row(live, target == profile), profiles.map { row(it, it.name == target) })
+}
 
 /**
  * This phone's setup replaced by backup [b] ([Backup.valid]). Tailscale and the statistics consent stay as they are
@@ -507,19 +730,37 @@ const val WAIT_MS = 30 * 86_400_000L
  * whose name the backup uses for something else gets a new one. Null when there is no room for that profile, or the two
  * together hold more routes or own servers than a setup may ([Backup.MAX_EACH]).
  */
-fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true, installedAt: (String) -> Long? = { null }): Setup? {
-    // Read once an app: an install during the restore can't count one way here and another below.
-    val seenAt = HashMap<String, Long?>()
-    val installedAt = { p: String -> seenAt.getOrPut(p) { installedAt(p) } }
-    // Saved without keys: an own server this phone still has, the same in everything the file keeps, gets its config back here, and the home peer stays as it is.
-    // A route that had no own server here got one made up in the file: this phone's route of that id gives it back, only
-    // only where everything the file keeps of that server is the same here (plugin and allowed addresses too); an OpenVPN
-    // one holds just a name, so its route waits for its config.
+fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true, installedAt: (String) -> Long? = { null }): Setup? =
+    restoredWithInstalls(backup, keepAs, now, keys) { pkg -> installedAt(pkg)?.let { InstallState.Present(it) } ?: InstallState.Absent }
+
+internal fun Setup.restoredWithInstalls(backup: Setup, keepAs: String?, now: Long, keys: Boolean = true,
+                                        installed: (String) -> InstallState): Setup? {
+    val snapshot = HashMap<String, InstallState>()
+    val read = { pkg: String -> snapshot.getOrPut(pkg) { installed(pkg) } }
+    val kept = resolveWaiting(now, read)
+    return kept.mergeBackup(backup, keepAs, now, keys)?.resolveWaiting(now, read)
+}
+
+private fun Setup.mergeBackup(source: Setup, keepAs: String?, now: Long, keys: Boolean): Setup? {
+    if (!source.supportsSocks5Assignments()) return null
+    // Even a backup that contains credentials cannot confirm who owns a listener on this phone.
+    val backup = source.copy(
+        servers = source.servers.map { s -> s.socks5?.let { s.copy(socks5 = it.copy(needsConfirmation = true, allowUdp = false)) } ?: s },
+        routes = source.routes.map { r -> r.socks5?.let { r.copy(socks5 = it.copy(needsConfirmation = true, allowUdp = false)) } ?: r },
+    )
+    // A compact WireGuard label cannot establish which tunnel settings to use. Older files carry the
+    // settings on both the server and its route copies. Only a consistent, exact local match can refill them.
     val byOwn = backup.routes.groupBy { it.own }
-    val full = backup.servers.filter { it.keyless }.mapNotNull { k ->
-        (servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) } ?: byOwn[k.id].orEmpty().firstNotNullOfOrNull { x ->
-            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss) }?.takeIf { k.ovpn == null && it.withoutSecrets() == k }
-        })?.let { k.id to it }
+    val full = backup.servers.filter { it.keyless && it.socks5 == null }.mapNotNull { k ->
+        if (k.wg?.let { it.address.isEmpty() || it.allowedIps.isEmpty() } == true) return@mapNotNull null
+        val copies = byOwn[k.id].orEmpty()
+        if (copies.any { it.wg != k.wg }) return@mapNotNull null
+        val saved = servers.firstOrNull { !it.keyless && it.id == k.id && k.sameAs(it) }
+        val match = saved ?: copies.asSequence().mapNotNull { x ->
+            route(x.id)?.takeIf { it.own == null && it.imported && it.tsExit == null && !it.keyless }
+                ?.let { OwnServer(k.id, it.wg, it.ovpn, it.ss, socks5 = it.socks5) }?.takeIf { k.ovpn == null && k.sameAs(it) }
+        }.let { candidates -> if (k.wg == null) candidates.firstOrNull() else candidates.distinct().singleOrNull() }
+        match?.let { k.id to it }
     }.toMap()
     val b = if (full.isEmpty()) backup else backup.copy(
         servers = backup.servers.map { full[it.id] ?: it },
@@ -527,17 +768,15 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     )
     val pkgs = b.apps.keys + b.profiles.flatMap { it.apps.keys }
     var r = b.copy(home = home.copy(wg = if (keys) b.home.wg else home.wg), prefs = b.prefs.copy(stats = prefs.stats), pristine = false, version = VERSION,
-        waiting = pkgs, waitingUntil = if (pkgs.isEmpty()) 0 else now + WAIT_MS, waitingEach = emptyMap(), testing = emptySet())
+        waiting = pkgs, waitingUntil = if (pkgs.isEmpty()) 0 else now + WAIT_MS, waitingEach = emptyMap(),
+        waitOverrides = emptyMap(), profiles = b.profiles.map { it.copy(waitOverrides = emptyMap()) }, testing = emptySet())
     if (keepAs == null || untouched) return r
     if (r.profiles.size >= MAX_PROFILES) return null
     val name = (listOf(keepAs) + (2..MAX_PROFILES + 1).map { "$keepAs $it" }).firstNotNullOfOrNull { r.profileName(it) } ?: return null
     val fresh = { prefix: String, taken: Set<String> -> generateSequence { prefix + java.util.UUID.randomUUID().toString().take(8) }.first { it !in taken } }
     val here = routes.mapTo(HashSet()) { it.id }
     val ok = { id: String -> builtIn(id) || id in here }
-    val due = { p: String, x: String -> waitingEach[p]?.get(x) ?: waitingUntil }
-    // A choice whose wait is over is not kept: the backup's wait for the same app must not bring it back.
-    // One installed before it ([installedAt]) keeps its choice, also when nothing has looked at the installed apps since.
-    val apps = apps.filter { (p, x) -> ok(x) && (p !in waiting || now < due(p, x) || installedAt(p)?.let { it < due(p, x) } == true) }
+    val apps = apps.filterValues(ok)
     val sites = sites.filterValues(ok)
     // Without profiles every route here shows, those no app uses too: all of them are kept, as saving a first profile does.
     val listed = if (profiles.isEmpty()) (added + (routes.map { it.id } - (setOf(defaultRoute) + apps.values + sites.values + added))).distinct() else added
@@ -573,15 +812,11 @@ fun Setup.restoredFrom(backup: Setup, keepAs: String?, now: Long, keys: Boolean 
     val m = { id: String -> rt[id] ?: id }
     // The first profile: every route shown until now stays listed, as when the first profile is saved ([Setup.saveAs]).
     if (r.profiles.isEmpty()) r = r.copy(added = (r.added + (r.routes.map { it.id } - (setOf(r.defaultRoute) + r.apps.values + r.sites.values + r.added))).distinct())
-    val kept = Profile(name, if (ok(defaultRoute) && defaultRoute.isNotEmpty()) m(defaultRoute) else "", apps.mapValues { m(it.value) }, listed.filter(ok).map(m), sites.mapValues { m(it.value) })
-    // Choices of the kept setup's apps still waiting to be installed wait on, each until the deadline it had: otherwise the
-    // next look at the installed apps drops them, Block too. One the backup has as well waits as the backup's do.
-    val still = apps.filterKeys { it in waiting && installedAt(it) == null }.mapNotNull { (p, x) ->
-        due(p, x).takeIf { b.apps[p] != m(x) && b.profiles.none { f -> f.apps[p] == m(x) } }?.let { p to mapOf(m(x) to it) }
-    }.toMap()
-    // The older fields hold them too (until the latest deadline), so a version before per-app deadlines keeps them as well.
-    val merged = r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers, profiles = r.profiles + kept, waiting = r.waiting + still.keys,
-        waitingUntil = maxOf(r.waitingUntil, still.values.flatMap { it.values }.maxOrNull() ?: 0), waitingEach = still)
+    val kept = Profile(name, if (ok(defaultRoute) && defaultRoute.isNotEmpty()) m(defaultRoute) else "", apps.mapValues { m(it.value) }, listed.filter(ok).map(m), sites.mapValues { m(it.value) }, appSigners.filterKeys { it in apps })
+    // The old profile keeps its own cutoff even when the new backup names the same package, route and signer.
+    val prior = PendingProfile(kept, pending(live).due.filterKeys { it in apps })
+    val merged = r.copy(routes = r.routes + addRoutes, servers = r.servers + addServers)
+        .withWaits(r.pending(r.live), r.profiles.map(r::pending) + prior)
     // Kept, it must still fit a backup with keys: large OpenVPN configs of both setups together could pass the counts but not the size.
     if (runCatching { Backup.export(merged, "", now, true).size + 1024 > Backup.MAX }.getOrDefault(false)) return null
     return merged

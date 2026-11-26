@@ -107,6 +107,7 @@ import app.unbraid.data.BLOCK
 import app.unbraid.data.DIRECT
 import app.unbraid.data.MAX_PROFILES
 import app.unbraid.data.Home
+import app.unbraid.data.Ivpn
 import app.unbraid.data.Nord
 import app.unbraid.data.Providers
 import app.unbraid.data.Route
@@ -155,12 +156,26 @@ internal fun dropLabel(draft: String, removes: Boolean) = if (removes) "Remove r
  * the service stopped moving because no server works on this network ([stalled]), or an own server whose internet check
  * fails ([notAnswering]); null when none.
  */
-internal fun routeWarning(stalled: Boolean, notAnswering: Boolean, offline: String? = null) = when {
+internal fun routeWarning(stalled: Boolean, notAnswering: Boolean, offline: String? = null, proxy: Boolean = false) = when {
     offline != null -> "$offline is offline: its apps have no internet. Tap to choose another exit."
     stalled -> "Doesn't work on this network"
+    notAnswering && proxy -> "Not answering. Check that its proxy app is running."
     // Own servers only: a provider's downloaded file (PureVPN's, unused for a while) may simply have expired.
     notAnswering -> "Not answering. If this file came from a provider, it may have expired: download a new one."
     else -> null
+}
+
+/** An unfinished saved key change may still be using a working tunnel. Only the account flag reaches the cards. */
+internal fun ivpnKeyPending(account: String?) =
+    account != null && runCatching { Ivpn.account(account).pending != null }.getOrDefault(false)
+
+internal fun ivpnKeyNote(route: Route?, active: Boolean, pending: Boolean, vpn: VpnState): String? {
+    if (!pending || !active || vpn.phase != Phase.On || route == null || route.imported || route.loc.provider != Ivpn.id) return null
+    // A refusal applies to the account. A temporary failure on a different IVPN route needn't hide this one's note.
+    val refused = vpn.stuck[Ivpn.id]
+    if (refused == true || (refused == false && route.id !in vpn.servers) ||
+        route.id in vpn.stalled || route.id in vpn.notAnswering) return null
+    return "IVPN key change pending. $APP will retry if needed."
 }
 
 /** Apps whose chosen route no longer exists: [n] of them, offline until they get another. */
@@ -200,11 +215,12 @@ private fun where(r: Route, live: Map<String, Server>) = when {
     r.wg != null -> "WireGuard"
     r.ovpn != null -> "OpenVPN"
     r.ss != null -> "Shadowsocks"
+    r.socks5 != null -> if (r.socks5.allowUdp) "Proxy server" else "Proxy server · no UDP"
     r.tsExit != null -> "Tailscale exit node"
     else -> listOfNotNull(
         r.source,
         NordGroups.firstOrNull { it.first != null && it.first == r.loc.group }?.second.takeIf { r.loc.provider == "nord" },
-        r.loc.pinned?.name ?: r.loc.city ?: live[r.id]?.city?.ifBlank { null } ?: "Fastest",
+        r.loc.pinned?.name ?: r.loc.city ?: live[r.id]?.city?.ifBlank { null } ?: r.loc.automaticLabel,
         when (Nord.tech(r.loc).takeIf { r.loc.provider == "nord" } ?: r.loc.protocol) {
             "openvpn_udp" -> "OpenVPN"
             "openvpn_tcp" -> "OpenVPN TCP"
@@ -217,7 +233,7 @@ private fun where(r: Route, live: Map<String, Server>) = when {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 /** [quiet]: no sheet, dialog or tour is open over the app (the support card waits for that). */
-fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Boolean = true, openPicker: (String) -> Unit) {
+fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Boolean = true, openProxy: (String) -> Unit = {}, openPicker: (String) -> Unit) {
     val reveal = firstShow("routes")
     val context = LocalContext.current
     val openSettings = { action: String -> runCatching { context.startActivity(Intent(action)) } }
@@ -225,6 +241,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     val tsLogin = rememberTsLogin(setup.home.tsControlUrl)
     val vpn by ui.vpn.collectAsStateWithLifecycle()
     val apps by ui.apps.collectAsStateWithLifecycle()
+    val disclosed by ui.disclosed.collectAsStateWithLifecycle()
     var sheet by rememberSaveable { mutableStateOf<String?>(null) }
     var renaming by rememberSaveable { mutableStateOf<String?>(null) }
     // Profiles: the Manage page, the sheet ("" = new, else the name being edited), the note shown at the limit.
@@ -244,9 +261,12 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     // A profile shown but not in use (a draft): the page shows its routes, the connection stays the live one's.
     val viewing by ui.viewing.collectAsStateWithLifecycle()
     val draft = viewing?.takeIf { n -> n != setup.profile && setup.profiles.any { it.name == n } }
-    val shown by ui.shown.collectAsStateWithLifecycle()
+    val appRoutes by ui.appRoutes.collectAsStateWithLifecycle()
+    val shown = appRoutes.effective
     val lit = on && draft == null
-    val byRoute = remember(shown) { shown.apps.entries.groupBy({ it.value }, { it.key }) }
+    // Without the installed-app list, a saved signer says nothing about which app is on the phone now.
+    val hideApps = shown.apps.isNotEmpty() && (!disclosed || apps.none { it.identity != null })
+    val byRoute = remember(shown, hideApps) { if (hideApps) emptyMap() else shown.apps.entries.groupBy({ it.value }, { it.key }) }
     val sitesBy = remember(shown, vpn.tsSuffix) { sitesBy(shown, vpn.tsSuffix) }
     val live = if (lit) vpn.servers else emptyMap()
     // A profile lists its own routes, and routes nothing uses yet (one just added), never another profile's.
@@ -259,7 +279,6 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     val defaultPkgs = remember(apps, shown) { apps.filter { shown.routeOf(it.pkg) == shown.defaultRoute }.sortedBy { it.system }.map { it.pkg } }
     // Of those, the apps that chose the default: they stay when the default changes.
     val chosenDefault = defaultPkgs.count { !shown.follows(it) }
-    val disclosed by ui.disclosed.collectAsStateWithLifecycle()
     // A new default moves the apps that follow the default: asked first when there are any.
     var confirmDefault by rememberSaveable { mutableStateOf<String?>(null) }
     fun makeDefault(id: String) { if (ui.moving(id) > 0) confirmDefault = id else ui.setDefault(id) }
@@ -271,7 +290,10 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     var dropping by rememberSaveable { mutableStateOf<String?>(null) }
     val server = if (lit) vpn.servers[shown.defaultRoute] else null
     // Routes that no longer exist (damaged or older settings): said once on the page, with what fixes it.
-    val missingApps = shown.appsOnMissing
+    val missingApps = remember(shown, apps) {
+        val missing = shown.appsOnMissing
+        apps.filter { it.pkg in missing }
+    }
     val missingSites = shown.sitesOnMissing
     val shownError = vpn.error?.let { e ->
         listOf(serviceMissingLine.takeIf { missingApps.isNotEmpty() }, app.unbraid.vpn.Compiler.MISSING_DEFAULT.takeIf { shown.defaultMissing })
@@ -301,6 +323,9 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     val pendingOf = { r: ExitReport? -> r != null && r.ip == null && asking }
     // Right after a sign-in, a provider's new key may not reach all its servers for a minute: say so instead of nothing.
     val accounts by ui.accounts.collectAsStateWithLifecycle()
+    val ivpnAccount = accounts[Ivpn.id]
+    val keyPending = remember(ivpnAccount) { ivpnKeyPending(ivpnAccount) }
+    fun keyNote(route: Route?) = ivpnKeyNote(route, lit && route?.id in activeIds, keyPending, vpn)
     val settingUp by produceState(emptySet<String>(), on, setup, accounts) {
         while (true) {
             value = if (on) Providers.settingUp().filterTo(HashSet()) { p -> setup.activeRoutes.any { !it.imported && it.loc.provider == p } } else emptySet()
@@ -317,7 +342,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
     var tick by remember { mutableStateOf(0) }
     LaunchedEffect(Onboarding.leakUntil) { (Onboarding.leakUntil - System.currentTimeMillis()).takeIf { it > 0 }?.let { delay(it); tick++ } }
     val leakDue = remember(resumed, tick, Onboarding.leak, Onboarding.leakUntil) { Onboarding.leakDue }
-    val leakShown = leakDue && on && !(vpn.alwaysOn && vpn.lockdown)
+    val leakShown = leakDue && on && !(vpn.alwaysOn && (vpn.lockdown || setup.usesProxy))
 
     // One card slot at the top: a newer version first, otherwise (rarely) the support ask on a calm visit.
     val updates by ui.updates.collectAsStateWithLifecycle()
@@ -440,12 +465,13 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     else if (shown.defaultMissing) Notice(Icons.error, Ink.bad, "Your default route no longer exists. Choose one.", "Choose", live = true) { openPicker("default") }
                     else Rise("routes", 0, reveal) { DefaultTile(
                         key = shown.defaultRoute,
-                        apps = defaultLabel(defaultPkgs.size.takeIf { disclosed }, chosenDefault), code = route?.code, chip = if (lit && route != null) Ink.route(route.hue) else Ink.dim, direct = route == null,
+                        apps = defaultLabel(defaultPkgs.size.takeIf { disclosed && !hideApps }, chosenDefault), code = route?.code, chip = if (lit && route != null) Ink.route(route.hue) else Ink.dim, direct = route == null,
                         title = route?.name ?: "Direct", meta = route?.let { place(it, live, setup.routes) } ?: "No VPN for these apps",
                         extra = if (route != null && server != null) serverId(route, server) else null,
                         border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
                         exit = exitOf(shown.defaultRoute)?.takeIf { offlineExit(vpn, route) == null }?.let { it to pendingOf(it) },
-                        warning = routeWarning(lit && shown.defaultRoute in vpn.stalled, lit && shown.defaultRoute in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }),
+                        keyNote = keyNote(route),
+                        warning = routeWarning(lit && shown.defaultRoute in vpn.stalled, lit && shown.defaultRoute in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }, route?.socks5 != null),
                     ) { sheet = shown.defaultRoute } }
                 }
                 // Android refused the VPN: most often another VPN app holds Always-on.
@@ -459,7 +485,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     Notice(Icons.shield, Ink.accent, "Apps go online without $APP when it's off", "Set up", dismiss = { Onboarding.snoozeLeak() }, dismissLabel = "Not now", onAction = leakSetup)
                 }
                 if (missingApps.isNotEmpty()) item(key = "missingApps") {
-                    Notice(Icons.error, Ink.bad, missingAppsText(missingApps.size), "Follow default", live = true) { missingApps.forEach(ui::followDefault) }
+                    Notice(Icons.error, Ink.bad, missingAppsText(missingApps.size), "Follow default", live = true) { missingApps.forEach { ui.followDefault(it, appRoutes.profileName) } }
                 }
                 if (missingSites.isNotEmpty()) item(key = "missingSites") {
                     Notice(Icons.error, Ink.bad, missingSitesText(missingSites.size), "Remove", live = true) { missingSites.forEach { ui.site(it, null) } }
@@ -468,13 +494,17 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                 itemsIndexed(exceptions, key = { _, id -> id }) { i, id ->
                     val route = shown.route(id)
                     Rise("routes", i + 1, reveal) { RouteRow(
-                        ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size), sites = sitesBy[id].orEmpty(),
+                        ui, route, live, byRoute[id].orEmpty(), labels, lit, groupShape(i, exceptions.size), sites = sitesBy[id].orEmpty(), hideApps = hideApps,
                         exit = if (route == null || offlineExit(vpn, route) != null) null else exitOf(id)?.let { it to pendingOf(it) },
-                        warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }), blocked = id == BLOCK,
+                        keyNote = keyNote(route),
+                        warning = routeWarning(lit && id in vpn.stalled, lit && id in vpn.notAnswering, offlineExit(vpn, route)?.name?.takeIf { lit }, route?.socks5 != null), blocked = id == BLOCK,
                     ) { sheet = id } }
                 }
                 // Nothing set apart yet: say what that means instead of leaving the page empty.
-                if (shown.apps.values.all { it == shown.defaultRoute } && sitesBy.isEmpty() && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
+                if (hideApps) item(key = "verifyApps") {
+                    Text("Open Apps to check saved app assignments.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp))
+                }
+                if (!hideApps && shown.apps.values.all { it == shown.defaultRoute } && sitesBy.isEmpty() && shown.defaultRoute.isNotEmpty()) item(key = "allDefault") {
                     Text("All apps use the default route. Tap + to send some apps through another route.", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(start = 24.dp, end = Gutter, top = 12.dp))
                 }
                 if (setup.home.tailscale || setup.home.wg != null) item(key = "home") {
@@ -535,10 +565,14 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                     } else {
                         setup.route(id)?.takeIf { it.imported }?.let { r -> SheetAction("Rename") { act { newName = r.name; renaming = id } } }
                     }
+                    shown.route(id)?.let { r -> r.socks5?.let { p ->
+                        context.packageManager.getLaunchIntentForPackage(p.packageName)?.let { open -> SheetAction("Open its proxy app") { act { runCatching { context.startActivity(open) } } } }
+                        r.own?.let { own -> SheetAction("Proxy server settings") { act { openProxy(own) } } }
+                    } }
                     // A Shadowsocks plugin carries TCP only: the engine sends nothing else through it.
-                    if (shown.route(id)?.ss?.plugin != null) SheetNote("Calls and other UDP traffic don't go through this server.", sub = true)
+                    if (shown.route(id)?.let { it.ss?.plugin != null || it.socks5?.allowUdp == false } == true) SheetNote("Calls and other UDP traffic don't go through this server.", sub = true)
                     // An own server may not reach the internet by design (a home network only): its check is the user's call.
-                    setup.route(id)?.takeIf { draft == null && (it.wg != null || it.ovpn != null || it.ss != null) }?.let { r ->
+                    setup.route(id)?.takeIf { draft == null && (it.wg != null || it.ovpn != null || it.ss != null || it.socks5 != null) }?.let { r ->
                         SheetSwitch("Check internet access", "Shows Not answering when this server stops reaching the internet. Turn off for a server that only reaches a private network.", r.checksInternet) { ui.setCheckInternet(id, it) }
                     }
                     if (draft == null && id != setup.defaultRoute) {
@@ -586,6 +620,9 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
         Prompt("Make ${name ?: "Direct"} the default?", "Make default", { ui.setDefault(id); confirmDefault = null }, { confirmDefault = null }) {
             Text(moveText(ui.moving(id), name), style = Type.sub)
             Text("Apps that chose a route keep it.", style = Type.sub)
+            shown.route(id)?.socks5?.let { p ->
+                Text("They are offline while the proxy isn't running." + if (p.allowUdp) "" else " Calls, video and other UDP don't work until you allow them in its settings.", style = Type.sub)
+            }
         }
     }
     renaming?.let { id ->
@@ -796,7 +833,7 @@ internal fun appsLabel(pkgs: List<String>, labels: Map<String, String>, sites: L
 @Composable
 private fun DefaultTile(
     key: String, apps: String, code: String?, chip: Color, direct: Boolean, title: String, meta: String, extra: String?, border: Color,
-    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, onClick: () -> Unit,
+    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, keyNote: String? = null, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
@@ -826,7 +863,7 @@ private fun DefaultTile(
             Text(meta, style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
             extra?.let { Text(it, style = Type.code, color = Ink.dim, maxLines = 1) }
         }
-        warning?.let { Text(it, style = Type.caption, color = Ink.bad) }
+        (warning ?: keyNote)?.let { Text(it, style = Type.caption, color = if (warning != null) Ink.bad else Ink.dim) }
         exit?.let { (r, pending) -> ExitLine(r, pending) }
     }
 }
@@ -835,7 +872,7 @@ private fun DefaultTile(
 @Composable
 private fun RouteRow(
     ui: Ui, route: Route?, live: Map<String, Server>, pkgs: List<String>, labels: Map<String, String>, lit: Boolean, shape: Shape,
-    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, sites: List<String> = emptyList(), blocked: Boolean = false, onClick: () -> Unit,
+    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, keyNote: String? = null, sites: List<String> = emptyList(), blocked: Boolean = false, hideApps: Boolean = false, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val press = squish(source)
@@ -850,12 +887,12 @@ private fun RouteRow(
         // Websites only: their mark in place of the empty app slot.
         if (pkgs.isEmpty() && sites.isNotEmpty()) Box(Modifier.size(24.dp).clip(RoundedCornerShape(8.dp)).background(Ink.surfaceTop), Alignment.Center) { Icon(Icons.link, null, Modifier.size(16.dp), tint = Ink.text) }
         else AppStack(ui, pkgs, labels, edge = if (direct) Ink.ground else fill)
-        Text(appsLabel(pkgs, labels, sites), style = Type.caption, color = if (pkgs.isEmpty() && sites.isEmpty()) Ink.dim else Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis)
+        Text(if (hideApps && sites.isEmpty()) "App list unavailable" else appsLabel(pkgs, labels, sites), style = Type.caption, color = if (pkgs.isEmpty() && sites.isEmpty()) Ink.dim else Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis)
     }
     val where = @Composable { end: Boolean ->
         Text(route?.name ?: if (blocked) "Block" else "Direct", style = Type.title, color = Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
         Text(route?.let { place(it, live, ui.setup.value.routes) } ?: if (blocked) "No traffic" else "Skips the VPN", style = Type.caption, color = Ink.dim, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
-        warning?.let { Text(it, style = Type.caption, color = Ink.bad, textAlign = if (end) TextAlign.End else null) }
+        (warning ?: keyNote)?.let { Text(it, style = Type.caption, color = if (warning != null) Ink.bad else Ink.dim, textAlign = if (end) TextAlign.End else null) }
         if (!wide) exit?.let { (r, pending) -> ExitLine(r, pending) }
     }
     Column(

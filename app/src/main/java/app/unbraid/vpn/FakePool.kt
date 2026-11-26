@@ -60,6 +60,10 @@ object FakePool {
      */
     fun restoreBlock(ran: Int, spent: Int?) = spent ?: ran
 
+    /** A route id may already have a different listener and login after a refused edit. Only the exact published bridge survives. */
+    fun retainedBridges(published: Map<String, Compiler.SocksBridge>, available: Map<String, Compiler.SocksBridge>) =
+        available.filter { (id, bridge) -> published[id] == bridge }
+
     /**
      * What a restore or a move runs: what last ran ([last]) as it was compiled, on [block] (a move) or else
      * [restoreBlock], with a new probe pair, the sign-in way around the exit only ever narrowed, and the apps kept inside
@@ -70,17 +74,19 @@ object FakePool {
      * and its retry keep what runs: a change the engine refused before the old one was given up stays refused.
      */
     fun restoreInput(last: Compiler.Input, block: Int?, spent: Int?, probe: Pair<Int, String>, tsSuffixAllowed: String?, tsSuffix: String?,
-                     lockdown: Boolean, tsLoginPending: Boolean, move: Boolean, kin: (Setup) -> Set<String>): Compiler.Input {
-        val setup = if (move) last.setup else last.setup.copy(home = last.setup.home.copy(tsSuffixAllowed = tsSuffixAllowed))
-        return Compiler.Input(setup, last.links, last.selfPackage, if (move) last.lockdown else lockdown, last.tsDir, last.cacheFile, if (move) last.tsSuffix else tsSuffix, probe,
-            block ?: restoreBlock(last.fakeBlock, spent), last.blocked, last.tsLoginPending && tsLoginPending, last.blockedKin + runCatching { kin(setup) }.getOrDefault(emptySet()))
+                     lockdown: Boolean, tsLoginPending: Boolean, move: Boolean, verify: (Setup) -> Setup = { it }, socksBridges: Map<String, Compiler.SocksBridge> = emptyMap(), kin: (Setup) -> Set<String>): Compiler.Input {
+        val checked = verify(last.setup)
+        val setup = if (move) checked else checked.copy(home = checked.home.copy(tsSuffixAllowed = tsSuffixAllowed))
+        val blockNetwork = if (move) last.lockdown || lockdown && last.socksBridges.isNotEmpty() else lockdown
+        return Compiler.Input(setup, last.links, last.selfPackage, blockNetwork, last.tsDir, last.cacheFile, if (move) last.tsSuffix else tsSuffix, probe,
+            block ?: restoreBlock(last.fakeBlock, spent), last.blocked, last.tsLoginPending && tsLoginPending, last.blockedKin + runCatching { kin(setup) }.getOrDefault(emptySet()), socksBridges = retainedBridges(last.socksBridges, socksBridges))
     }
 
     /**
      * How a [restart] ended: [Ran]; [Kept], nothing given up (the engine runs as before); [Failed], none runs. Once the
      * old engine is gone (`gone`), every failure is [Failed].
      */
-    enum class Outcome { Ran, Kept, Failed }
+    enum class Outcome { Ran, Kept, Failed, Superseded }
 
     /**
      * Every start on [block], before the engine can hand out any of it: unless it is [spent] already, the old table in
@@ -100,12 +106,39 @@ object FakePool {
      * old engine up (from here nothing goes back to the old block) and [start] runs the new one.
      */
     inline fun restart(gone: Boolean, spent: Int?, dir: java.io.File, prepare: (spent: Int?) -> Pair<Compiler.Input, String>, noinline note: (Int) -> Unit,
-                       commit: (Compiler.Input) -> Unit, start: (Compiler.Input, String) -> Unit): Outcome {
-        val (input, json) = try { prepare(spent) } catch (e: Exception) { return if (gone) Outcome.Failed else Outcome.Kept }
-        try { spend(input.fakeBlock, spent, dir, note) } catch (e: Exception) { return if (gone) Outcome.Failed else Outcome.Kept }
-        commit(input)
-        return try { start(input, json); Outcome.Ran } catch (e: Exception) { Outcome.Failed }
+                       commit: (Compiler.Input) -> Unit, current: () -> Boolean = { true }, start: (Compiler.Input, String) -> Unit): Outcome {
+        val stale = if (gone) Outcome.Superseded else Outcome.Kept
+        if (!current()) return stale
+        val (input, json) = try { prepare(spent) } catch (e: Exception) {
+            return if (!current()) stale else if (gone) Outcome.Failed else Outcome.Kept
+        }
+        if (!current()) return stale
+        try { spend(input.fakeBlock, spent, dir, note) } catch (e: Exception) {
+            return if (!current()) stale else if (gone) Outcome.Failed else Outcome.Kept
+        }
+        // A new block's table has been cleared and its number saved. It can no longer be treated as an untouched move.
+        if (!current()) return if (input.fakeBlock != spent) Outcome.Superseded else stale
+        val ran = try {
+            commit(input)
+            if (!current()) return Outcome.Superseded
+            start(input, json)
+            true
+        } catch (e: Exception) { false }
+        return if (!current()) Outcome.Superseded else if (ran) Outcome.Ran else Outcome.Failed
     }
+
+    /** A refused edit can keep or recover the last working policy only within the same accepted restore. */
+    inline fun afterFailure(restarting: Boolean, current: () -> Boolean, recover: () -> Outcome): Outcome {
+        if (!current()) return Outcome.Superseded
+        val result = if (restarting) recover() else Outcome.Kept
+        return if (current()) result else Outcome.Superseded
+    }
+
+    /** Whether a start that failed keeps apps offline rather than ending: an engine was [lost], or a restore came since its setup was read ([from]; -1: not read). */
+    fun waits(lost: Boolean, from: Long, restores: Long) = lost || from >= 0 && from != restores
+
+    /** How long apps wait offline before try number [n] (0: the first) to connect again after the engine was lost, unless something changes. */
+    fun lostWait(n: Int): Long = longArrayOf(5_000, 15_000, 30_000, 60_000, 120_000, 300_000).let { it.getOrElse(n) { _ -> 600_000 } }
 
     /**
      * A move to the next block: [attempt] (`gone` false) and, if its start failed after the old engine was given up,

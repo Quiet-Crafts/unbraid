@@ -192,7 +192,13 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     val draft = viewing?.takeIf { n -> n != setup.profile && setup.profiles.any { it.name == n } }
     var chosen by rememberSaveable { mutableStateOf<String?>(null) }
     val provider = chosen?.takeIf { c -> signed.any { it.id == c } } ?: current?.provider?.takeIf { c -> signed.any { it.id == c } } ?: signed.firstOrNull()?.id
-    val catalog = provider?.let { catalogs[it] }.orEmpty()
+    // Older installations may have a full Proton directory cached. Only the current config can name its location.
+    val proton = signed.firstOrNull { it.id == provider } as? app.unbraid.data.ProtonVpn
+    val protonAccount = proton?.let { accounts[it.id] }
+    val protonCountries = remember(proton, protonAccount) {
+        if (proton != null && protonAccount != null) runCatching { proton.countries(protonAccount) } else null
+    }
+    val catalog = if (protonCountries != null) protonCountries.getOrNull().orEmpty() else provider?.let { catalogs[it] }.orEmpty()
     var q by rememberSaveable { mutableStateOf("") }
     val opening = nordOpening(current)
     var groupChoice by rememberSaveable { mutableStateOf(opening.first) }
@@ -218,7 +224,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     }
     val countries = remember(catalog, allowed) { allowed?.let { a -> catalog.filter { it.code in a } } ?: catalog }
     val tint = Ink.route(route?.hue ?: 0)
-    LaunchedEffect(provider, countries.isEmpty(), catalogsRead) { if (catalogsRead && provider != null && countries.isEmpty()) ui.refreshCountries(provider) }
+    LaunchedEffect(provider, countries.isEmpty(), catalogsRead) { if (proton == null && catalogsRead && provider != null && countries.isEmpty()) ui.refreshCountries(provider) }
     val hasLoad = Providers.get(provider.orEmpty())?.hasLoad == true
     var closed by remember { mutableStateOf(false) } // a second tap while the picker closes must not run the action again
     fun once(f: () -> Unit) { if (!closed) { closed = true; f() } }
@@ -308,7 +314,11 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
 
     fun LazyListScope.locations() {
         if (provider == null) return
-        if (countries.isEmpty()) {
+        if (protonCountries?.isFailure == true) {
+            item(key = "configRequired") { Caption(proton!!.reimport, Modifier.padding(horizontal = 24.dp)) }
+            return
+        }
+        if (countries.isEmpty() && protonCountries == null) {
             if (!catalogsRead) return // the saved list is still being read: nothing to say yet
             item(key = "empty") {
                 val (text, retry) = noLocations(catalog.isNotEmpty(), fetches[provider], groupLabel)
@@ -325,11 +335,13 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
                 Box(Modifier.size(36.dp).clip(RoundedCornerShape(12.dp)).background(Ink.surfaceTop), Alignment.Center) {
                     Icon(Icons.bolt, null, tint = Ink.accent, modifier = Modifier.size(20.dp))
                 }
-                Title(if (hasLoad) "Fastest anywhere" else "Automatic", "Any country, picked on connect")
+                if (proton != null) Title("Configured server", "The peer in your Proton WireGuard file")
+                else Title(if (hasLoad) "Fastest anywhere" else "Automatic", "Any country, picked on connect")
                 Trailing(pick.on(any), tint)
             }
         }
         favorites(ownFavs)
+        if (countries.isEmpty()) return
         item(key = "all") {
             PickRow({ allOpen = !allOpen }, false, tint, Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
                 Box(Modifier.width(36.dp), Alignment.Center) { Text("${countries.size}", style = Type.code, color = Ink.dim) }
@@ -360,12 +372,29 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
         typed?.let { t -> item(key = "tsTyped") { GroupRow(0, 1, "Use $t", "As this route's Tailscale exit node", onClick = { exit(t, t) }, trailing = { Chevron() }) } }
     }
 
+    val eligibleServers = setup.servers.filter { it.socks5 == null || setup.allowsLocalProxy(target, it.socks5.packageName) }
+    val (proxies, savedServers) = eligibleServers.partition { it.socks5 != null }
+    val silent by rememberSilentProxies(ui, if (mine) proxies else emptyList())
+    fun LazyListScope.proxies(list: List<OwnServer>, add: Boolean) {
+        if (!setup.allowsLocalProxy(target) || list.isEmpty() && !add) return
+        val n = list.size + if (add) 1 else 0
+        item(key = "proxyLabel") { SectionLabel("Proxy servers") }
+        itemsIndexed(list, key = { _, s -> "proxy:${s.id}" }) { i, s ->
+            val (tone, words) = proxyStatus(setup.viewAs(draft), s, vpn, s.id in silent)
+            GroupRow(i, n, s.name, "SOCKS5 · $words", onClick = {
+                    if (!closed) ui.useServer(target, s).let { id -> if (id.isNotEmpty() && (target != "default" || ui.setDefault(id))) once(close) }
+                },
+                leading = { ToneDot(tone) }, trailing = { if (route?.own == s.id) Icon(Icons.checkCircle, "Selected", tint = tint, modifier = Modifier.size(22.dp)) })
+        }
+        if (add) item(key = "proxyAdd") { GroupRow(n - 1, n, "Add a proxy server", titleColor = Ink.accent, onClick = { ui.openProxy(target) }, trailing = { Icon(Icons.add, null, Modifier.size(22.dp), tint = Ink.accent) }) }
+    }
+
     fun LazyListScope.saved(list: List<OwnServer>) {
         if (list.isEmpty()) return
         item(key = "savedLabel") { SectionLabel("Saved servers") }
         itemsIndexed(list, key = { _, s -> "own:${s.id}" }) { i, s ->
             GroupRow(
-                i, list.size, s.name, s.kind, onClick = { once { ui.useServer(target, s).let { id -> if (target == "default") ui.setDefault(id) }; close() } },
+                i, list.size, s.name, s.kind, onClick = { once { ui.useServer(target, s).let { id -> if (target == "default" && id.isNotEmpty()) ui.setDefault(id) }; close() } },
                 leading = { Code(s.code, Ink.dim, filled = false) },
                 trailing = { if (route?.own == s.id) Icon(Icons.checkCircle, "Selected", tint = tint, modifier = Modifier.size(22.dp)) },
             )
@@ -390,8 +419,9 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
 
     fun LazyListScope.myServers() {
         tsNote?.let { item(key = "tsLockNote") { Caption(it, color = Ink.text) } }
+        proxies(proxies, add = true)
         tailscale(nodes)
-        saved(setup.servers)
+        saved(savedServers)
         settingsNote(empty = !setup.tailscale && setup.servers.isEmpty())
     }
 
@@ -406,9 +436,11 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
     fun LazyListScope.results() {
         if (mine) {
             val devices = nodes.filter { hit(it.name) || hit(it.ip) }
-            val own = setup.servers.filter { hit(it.name) || hit(it.kind) }
+            val own = savedServers.filter { hit(it.name) || hit(it.kind) }
+            val proxy = proxies.filter { hit(it.name) || hit(it.kind) }
             val typed = query.takeIf { setup.tailscale && validNode(it) && vpn.tsExitNodes.none { n -> n.ip == it || n.name.equals(it, true) } }
-            if (devices.isEmpty() && own.isEmpty() && typed == null) item(key = "noMatches") { Text("No matches", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp)) }
+            if (devices.isEmpty() && own.isEmpty() && proxy.isEmpty() && typed == null) item(key = "noMatches") { Text("No matches", style = Type.sub, color = Ink.dim, modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp)) }
+            proxies(proxy, add = false)
             if (devices.isNotEmpty() || typed != null) tailscale(devices, searching = true, typed = typed)
             saved(own)
             return
@@ -463,7 +495,7 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             // Via: this route's tunnel goes through another route first. Saved at once, apart from the location.
             // Also shown for a Via the route can no longer use (it changed protocol, say), so it can always be cleared.
             if (route != null && (route.via != null || route.wg != null || !route.imported && route.loc.protocol?.startsWith("openvpn") != true)) {
-                val entries = setup.routes.filter { it.id != route.id && it.via == null && it.tsExit == null }
+                val entries = setup.routes.filter { it.id != route.id && it.via == null && it.tsExit == null && it.socks5 == null }
                 fun label(r: app.unbraid.data.Route) = listOfNotNull(r.name, Providers.short(r.loc.provider).takeIf { !r.imported }).joinToString(" · ")
                 Row(Modifier.padding(horizontal = Gutter).padding(bottom = 8.dp)) {
                     val hops = Providers.get(route.loc.provider)?.takeIf { !route.imported && it.nativeHop }

@@ -49,12 +49,12 @@ import app.unbraid.data.Providers
  * (by default [onClose]). Never in screenshots.
  */
 @Composable
-fun SignInScreen(ui: Ui, importFor: String = "", onImported: (() -> Unit)? = null, onClose: (() -> Unit)? = null) {
+fun SignInScreen(ui: Ui, importFor: String = "", onImported: (() -> Unit)? = null, proxy: (() -> Unit)? = null, onClose: (() -> Unit)? = null) {
     var step by rememberSaveable { mutableStateOf<String?>(null) }
     val provider = Providers.get(step.orEmpty())
     SecureWindow()
     BackHandler(provider != null) { provider?.let { ui.discardForm(it.id) }; step = null }
-    if (provider == null) Choose(ui, importFor, onImported ?: onClose, onClose) { step = it.id } else Form(ui, provider, onClose, back = { ui.discardForm(provider.id); step = null })
+    if (provider == null) Choose(ui, importFor, proxy, onImported ?: onClose, onClose) { step = it.id } else Form(ui, provider, onClose, back = { ui.discardForm(provider.id); step = null })
 }
 
 /**
@@ -66,7 +66,7 @@ internal fun importTarget(picker: String?, s: app.unbraid.data.Setup) = picker?.
 private class Other(val title: String, val sub: String, val go: () -> Unit)
 
 @Composable
-private fun Choose(ui: Ui, importFor: String, onImported: (() -> Unit)?, onClose: (() -> Unit)?, pick: (Provider) -> Unit) {
+private fun Choose(ui: Ui, importFor: String, proxy: (() -> Unit)?, onImported: (() -> Unit)?, onClose: (() -> Unit)?, pick: (Provider) -> Unit) {
     val importer = rememberImporter(ui, importFor) { onImported?.invoke() }
     val accounts by ui.accounts.collectAsStateWithLifecycle()
     val notice by ui.notice.collectAsStateWithLifecycle()
@@ -85,6 +85,7 @@ private fun Choose(ui: Ui, importFor: String, onImported: (() -> Unit)?, onClose
         val other = listOfNotNull(
             Other("Import a config file", "WireGuard .conf or OpenVPN .ovpn") { importer.file() },
             Other("Shadowsocks link", "Paste an ss:// access key") { importer.shadowsocks() },
+            Other("Proxy server", "SOCKS5, from a proxy app on this phone") { proxy?.invoke() }.takeIf { proxy != null && setup.allowsLocalProxy(importFor) },
             Other("Tailscale only", "No VPN provider, just your tailnet") { ui.useTailscaleOnly() }.takeIf { onClose == null },
             Other("Restore a backup", "A file saved with Back up settings") { ui.backup.startRestore() }.takeIf { onClose == null },
         )
@@ -132,7 +133,10 @@ private fun Form(ui: Ui, provider: Provider, onClose: (() -> Unit)?, back: () ->
     val context = androidx.compose.ui.platform.LocalContext.current
     var scanFor by rememberSaveable(provider.id) { mutableStateOf<String?>(null) }
     var scanning by rememberSaveable(provider.id) { mutableStateOf(false) }
-    val scan = rememberQrScan { uri -> provider.fields.firstOrNull { it.key == scanFor }?.let { ui.readQr(uri, key(it), provider.id) } }
+    val scan = rememberQrScan { uri, photo ->
+        val field = provider.fields.firstOrNull { it.key == scanFor }
+        if (field == null) photo?.close() else ui.readQr(uri, key(field), provider.id, photo)
+    }
     // The field's key, saved: the picker may outlive this activity (rotation), and its file must still land.
     var fileFor by rememberSaveable(provider.id) { mutableStateOf<String?>(null) }
     // Config files keep their line breaks only when loaded from a file; a pasted .conf in one line can't be parsed.

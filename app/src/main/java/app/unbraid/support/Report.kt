@@ -22,7 +22,7 @@ object Report {
     private fun plain(s: String) = s.filter { it.isLetterOrDigit() || it in " .-_()" }.take(40)
 
     private fun kind(r: Route) = when {
-        r.wg != null -> "Own WireGuard"; r.ovpn != null -> "Own OpenVPN"; r.ss != null -> "Own Shadowsocks"; r.tsExit != null -> "Tailscale exit"
+        r.wg != null -> "Own WireGuard"; r.ovpn != null -> "Own OpenVPN"; r.ss != null -> "Own Shadowsocks"; r.socks5 != null -> "Own SOCKS5"; r.tsExit != null -> "Tailscale exit"
         else -> Providers.get(r.loc.provider)?.name ?: "Other provider"
     }
 
@@ -45,7 +45,7 @@ object Report {
         val routes = s.routes.mapIndexed { i, r ->
             val status = when { r.id in vpn.notAnswering -> "not answering"; r.id in vpn.dropping -> "dropping"; r.id in used -> "active"; else -> "unused" }
             val place = if (r.imported) "n/a" else r.loc.countryCode?.takeIf(code::matches)?.uppercase() ?: "unknown"
-            "${i + 1}. ${kind(r)}, $place, $status, ${apps(r.id)}"
+            "${i + 1}. ${kind(r)}, $place, $status, ${apps(r.id)}" + (r.socks5?.let { ", UDP ${on(it.allowUdp)}" } ?: "")
         }
         val direct = listOfNotNull("- Direct, active, ${apps(DIRECT)}".takeIf { s.defaultRoute == DIRECT || DIRECT in s.apps.values || DIRECT in sites.values })
         val block = listOfNotNull("- Block, active, ${apps(BLOCK)}".takeIf { BLOCK in s.apps.values || BLOCK in sites.values })

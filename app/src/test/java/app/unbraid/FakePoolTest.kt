@@ -1,5 +1,8 @@
 package app.unbraid
 
+import app.unbraid.data.Filter
+import app.unbraid.data.DIRECT
+import app.unbraid.data.AppIdentity
 import app.unbraid.vpn.Compiler
 import app.unbraid.vpn.FakePool
 import app.unbraid.vpn.FakePool.Step
@@ -151,10 +154,10 @@ class FakePoolTest {
 
     private val setup = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands"))), defaultRoute = "nl",
         apps = mapOf("com.b" to BLOCK), version = VERSION, home = Home(tsSuffixAllowed = "old.ts.net"))
-    private fun input(block: Int, pending: Boolean = true) = Compiler.Input(setup, emptyMap(), "app.unbraid", false, "/tmp/ts", "/tmp/cache.db", "old.ts.net",
-        1 to "old", block, setOf("nl"), tsLoginPending = pending, blockedKin = setOf("com.b"))
+    private fun input(block: Int, pending: Boolean = true, bridges: Map<String, Compiler.SocksBridge> = emptyMap(), lockdown: Boolean = false) = Compiler.Input(setup, emptyMap(), "app.unbraid", lockdown, "/tmp/ts", "/tmp/cache.db", "old.ts.net",
+        1 to "old", block, setOf("nl"), tsLoginPending = pending, blockedKin = setOf("com.b"), socksBridges = bridges)
     private fun restore(last: Compiler.Input, block: Int?, spent: Int?, lockdown: Boolean = false, pending: Boolean = true, move: Boolean = false, kin: (Setup) -> Set<String> = { setOf("com.b") }) =
-        FakePool.restoreInput(last, block, spent, 2 to "new", null, "new.ts.net", lockdown, pending, move, kin)
+        FakePool.restoreInput(last, block, spent, 2 to "new", null, "new.ts.net", lockdown, pending, move, kin = kin)
 
     /**
      * A restore (also every move) runs what ran, with what may have changed since read again: a sibling of the blocked
@@ -177,6 +180,22 @@ class FakePoolTest {
         assertFalse(restore(input(3), null, 3, lockdown = false).lockdown) // today's, as a reload would compile it
         assertEquals(true, restore(input(3), null, 3).tsLoginPending)
         assertEquals(false, FakePool.restoreInput(input(3, pending = false), null, 3, 2 to "new", null, null, false, true, false) { emptySet() }.tsLoginPending)
+    }
+
+    @Test fun aFailedReloadKeepsOnlyTheSamePublishedBridge() {
+        val first = Compiler.SocksBridge(10010, "first", "private")
+        val second = Compiler.SocksBridge(10011, "second", "private")
+        val last = input(3, bridges = mapOf("kept" to first, "changed" to second, "gone" to second, "mode" to second))
+        val new = mapOf("kept" to first, "changed" to second.copy(password = "rotated"), "new" to second,
+            "mode" to second.copy(allowUdp = true))
+        assertEquals(mapOf("kept" to first), FakePool.retainedBridges(last.socksBridges, new))
+        for (move in listOf(true, false)) {
+            val restored = FakePool.restoreInput(last, 4, 3, 2 to "probe", null, null, true, false, move, socksBridges = new) { emptySet() }
+            assertEquals(mapOf("kept" to first), restored.socksBridges)
+            assertTrue(restored.lockdown)
+        }
+        val locked = FakePool.restoreInput(input(3, bridges = last.socksBridges, lockdown = true), 4, 3, 2 to "probe", null, null, false, false, true, socksBridges = new) { emptySet() }
+        assertTrue(locked.lockdown)
     }
 
     /**
@@ -236,9 +255,24 @@ class FakePoolTest {
         val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
         val tun = vpn.substringAfter("override fun openTun(").substringBefore("override fun ")
         assertFalse("openTun reads saved settings", tun.contains("store."))
-        assertTrue(tun.contains("Compiler.searchDomain(tunInput)"))
-        assertEquals(2, Regex("""tunInput = input\b""").findAll(vpn).count()) // set by both starts of a compiled input
+        assertTrue(tun.contains("Compiler.searchDomain(policy.input)"))
+        assertEquals(3, Regex("""tunPolicy = TunPolicy\(input,""").findAll(vpn).count()) // both starts plus a signer change with identical engine JSON
         assertTrue(vpn.contains("if (move) null else store.setup.value.home.tsSuffixAllowed, if (move) null else store.tsSuffix"))
+    }
+
+    @Test fun recoveryStopsAtTheLastAcceptedRestore() {
+        var current = true
+        var recoveries = 0
+        fun recover() = FakePool.Outcome.Ran.also { recoveries++ }
+        assertEquals(FakePool.Outcome.Kept, FakePool.afterFailure(false, { current }, ::recover))
+        assertEquals(FakePool.Outcome.Ran, FakePool.afterFailure(true, { current }, ::recover))
+        assertEquals(FakePool.Outcome.Superseded, FakePool.afterFailure(true, { current }) {
+            current = false
+            recover()
+        })
+        assertEquals(FakePool.Outcome.Superseded, FakePool.afterFailure(false, { current }, ::recover))
+        assertEquals(FakePool.Outcome.Superseded, FakePool.afterFailure(true, { current }, ::recover))
+        assertEquals(2, recoveries)
     }
 
     /** A slow count (the engine's lock taken by a database write) is read before the clock: no second wait after the deadline. */
@@ -278,6 +312,44 @@ class FakePoolTest {
         // The open table's own block was saved when it started: nothing to save, and a save failure can't stop it.
         assertEquals(FakePool.Outcome.Ran, run(4, 4, saveFails = true))
         assertEquals(listOf("prepare", "commit 4", "start json"), log)
+    }
+
+    @Test fun aCommitFailureAfterSpendingTheBlockNeverStartsTheHistoricalEngine() {
+        val events = mutableListOf<String>()
+        val outcome = FakePool.restart(false, 3, dir,
+            prepare = { input(4) to "policy" }, note = { events += "spent" },
+            commit = { error("could not open table") }) { _, _ -> events += "start" }
+        assertEquals(listOf("spent"), events)
+        assertEquals(FakePool.Outcome.Failed, outcome)
+    }
+
+    @Test fun poolRecoveryChecksTheRestoreBeforeEveryNativeStartAndRetry() {
+        for (point in listOf("before", "prepare", "spend", "commit", "start", "retry", "same")) {
+            var current = point != "before"
+            val events = mutableListOf<String>()
+            var attempts = 0
+            fun event(s: String) { events += s; if (s == point) current = false }
+            val outcome = FakePool.move { gone ->
+                if (++attempts == 2 && point == "retry") current = false
+                FakePool.restart(gone, 3, dir, prepare = { event("prepare"); input(4) to "policy" },
+                    note = { event("spend") }, commit = { event("commit") }, current = { current }) { _, _ ->
+                    event("start")
+                    if (point == "retry") error("native startup failed")
+                }
+            }
+            val all = listOf("prepare", "spend", "commit", "start")
+            val expected = when (point) {
+                "before" -> emptyList()
+                "retry", "same" -> all
+                else -> all.take(all.indexOf(point) + 1)
+            }
+            assertEquals(point, expected, events)
+            assertEquals(point, when (point) {
+                "before", "prepare" -> FakePool.Outcome.Kept
+                "same" -> FakePool.Outcome.Ran
+                else -> FakePool.Outcome.Superseded
+            }, outcome)
+        }
     }
 
     /** Once the old engine was given up before the call, nothing runs unless this start does: every failure is Failed. */
@@ -348,7 +420,7 @@ class FakePoolTest {
         assertTrue(vpn.contains("FakePool.spend(input.fakeBlock, lastBlock, filesDir) { store.fakeBlock = it }"))
         assertTrue(vpn.contains("FakePool.restart(gone, lastBlock, filesDir, prepare = { spent ->"))
         assertTrue(vpn.contains("FakePool.restoreInput(lastInput ?: error(\"nothing ran\"), block, spent, "))
-        assertTrue(vpn.contains("tsLoginPending, move) { blockedKin(it) }"))
+        assertTrue(vpn.contains("tsLoginPending, move, ::verifiedSetup, socksEndpoints()) { blockedKin(it) }"))
         // An app whose lookup fails stays inside, at a start and on a restore alike; it costs no other app its own.
         assertTrue(vpn.contains("catch (e: RuntimeException) { null }"))
         assertTrue(vpn.contains("restoreLastGood(srv, Compiler.nextBlock(last, false).takeIf { !gone }, gone, move = true)"))
@@ -406,6 +478,7 @@ class FakePoolTest {
                     if (FakePool.step(remaining, now - since) == Step.Rotate) {
                         val f = { rnd.nextInt(4) == 0 }
                         when (FakePool.move { gone -> restoreLastGood(Compiler.nextBlock(lastBlock!!, false).takeIf { !gone }, gone, f(), f(), f(), true) }) {
+                            FakePool.Outcome.Superseded -> error("the setup was not replaced")
                             FakePool.Outcome.Kept -> assertEquals("a move that wasn't started gave something up", before, Triple(ran, live, since))
                             FakePool.Outcome.Failed -> assertEquals(null, ran)
                             FakePool.Outcome.Ran -> assertTrue(ran != before.first)
@@ -473,5 +546,41 @@ class FakePoolTest {
 
     @Test fun everyBlockRefusesTheOthersInTheBlockEverythingConfig() = Compiler.FAKE_RANGES.indices.forEach { b ->
         assertRefusesOtherBlocks(kotlinx.serialization.json.Json.parseToJsonElement(Compiler.blockAll("app.unbraid", "/tmp/cache.db", b)).jsonObject, b)
+    }
+
+    // With no engine left, apps wait offline: only those on Direct by choice stay out of the tunnel.
+    private val lostPin = "aa".repeat(32)
+    private val lostRoute = Route("r", tsExit = "100.64.0.1")
+    private val lostSetup = Setup(routes = listOf(lostRoute), defaultRoute = DIRECT, apps = mapOf("d" to DIRECT, "v" to "r", "b" to BLOCK, "gone" to "x"),
+        appSigners = mapOf("d" to lostPin, "v" to lostPin, "gone" to lostPin))
+    private fun lostOut(s: Setup, lockdown: Boolean = false, kin: (String) -> Set<String>? = { setOf(it) }, identity: (String) -> AppIdentity? = { AppIdentity(lostPin, emptySet()) }) =
+        Compiler.mayStayOut(s, lockdown, kin, identity)
+
+    @Test fun onlyVerifiedDirectAppsStayOut() {
+        assertEquals(setOf("d"), lostOut(lostSetup)) // not the app on a route, on Block, on a route that is gone, nor any that follows a Direct default
+        assertTrue(lostOut(lostSetup, lockdown = true).isEmpty())
+        assertTrue(lostOut(lostSetup, identity = { AppIdentity("bb".repeat(32), emptySet()) }).isEmpty())
+        assertTrue(lostOut(lostSetup, identity = { null }).isEmpty())
+        assertTrue(lostOut(lostSetup, kin = { null }).isEmpty())
+        assertTrue(lostOut(lostSetup, kin = { setOf(it, "v") }).isEmpty()) // shares its user id with an app on a route
+        assertTrue(lostOut(lostSetup.copy(prefs = lostSetup.prefs.copy(filter = Filter(id = "own", value = "9.9.9.9", directApps = true)))).isEmpty())
+    }
+
+    @Test fun anAppMovedOffDirectIsInsideAtOnce() {
+        for (to in listOf("r", BLOCK)) assertTrue(lostOut(lostSetup.copy(apps = lostSetup.apps + ("d" to to))).isEmpty())
+    }
+
+    @Test fun aRestoreDuringAStartKeepsAppsWaiting() {
+        assertTrue(FakePool.waits(lost = true, from = -1, restores = 0))
+        assertTrue(FakePool.waits(lost = false, from = 3, restores = 4))
+        for (from in listOf(-1L, 4L)) assertFalse(FakePool.waits(lost = false, from = from, restores = 4)) // not read yet, or none came
+    }
+
+    @Test fun triesSlowDownAndNeverStop() {
+        val waits = (0..20).map(FakePool::lostWait)
+        assertEquals(5_000L, waits.first())
+        assertEquals(waits.sorted(), waits)
+        assertEquals(600_000L, waits.last())
+        assertEquals(600_000L, FakePool.lostWait(Int.MAX_VALUE))
     }
 }

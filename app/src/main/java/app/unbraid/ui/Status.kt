@@ -21,6 +21,34 @@ fun providerStatus(name: String, used: Boolean, refused: Boolean, settingUp: Boo
     else -> Tone.Good to "Server list up to date"
 }
 
+/** Proxy routes the running engine carries exactly as they are saved; null: not connected. */
+fun proxyRunning(s: app.unbraid.data.Setup, vpn: app.unbraid.vpn.VpnState): Set<String>? = if (vpn.phase != app.unbraid.vpn.VpnState.Phase.On) null
+    else vpn.servers.keys.filter { id -> s.route(id)?.socks5.let { it != null && it == app.unbraid.vpn.UnbraidVpn.running?.route(id)?.socks5 } }.toSet()
+
+/**
+ * How proxy server [sv] stands: what is saved, whether anything accepts connections on its port now ([silent]: nothing
+ * does), and what the engine's own checks saw of the routes it runs as saved ([running], null: not connected).
+ * Connected only on an answered check.
+ */
+fun proxyStatus(s: app.unbraid.data.Setup, sv: app.unbraid.data.OwnServer, vpn: app.unbraid.vpn.VpnState, silent: Boolean, running: Set<String>? = proxyRunning(s, vpn), net: Long? = app.unbraid.vpn.AutoSwitch.net.value?.id): Pair<Tone, String> {
+    val p = sv.socks5 ?: return Tone.Idle to "Not used"
+    val active = s.activeRoutes.filter { it.own == sv.id }
+    val passed = vpn.passed?.takeIf { net != null && net != 0L && it.engine == vpn.engine && it.net == net }
+    return when {
+        sv.keyless || p.needsConfirmation -> Tone.Bad to "Confirm its app"
+        !s.outside(p.packageName) -> Tone.Warn to "Its app needs Direct"
+        s.routes.none { it.own == sv.id } -> if (silent) Tone.Bad to "Its proxy isn't running" else Tone.Idle to "Not used"
+        vpn.lockdown && running != null -> Tone.Warn to "Offline: Block connections without VPN is on in Android"
+        silent -> Tone.Bad to "Its proxy isn't running"
+        active.isEmpty() -> Tone.Idle to "No app uses it yet"
+        running == null || !running.containsAll(active.map { it.id }) -> Tone.Idle to "Not connected"
+        active.any { it.id in vpn.notAnswering } -> Tone.Bad to "Not answering"
+        active.none { it.checksInternet } -> Tone.Idle to "Running, checks off"
+        active.all { !it.checksInternet || passed != null && app.unbraid.vpn.Health.answered(passed, it) } -> Tone.Good to "Connected"
+        else -> Tone.Idle to "Checking"
+    }
+}
+
 /** A catalogue's publication date ([app.unbraid.data.Catalog.published], epoch seconds), e.g. "6 Aug 2026". */
 fun publishedOn(epochSeconds: Long): String = runCatching {
     java.time.Instant.ofEpochSecond(epochSeconds).atZone(java.time.ZoneOffset.UTC).toLocalDate().format(java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy", java.util.Locale.ENGLISH))

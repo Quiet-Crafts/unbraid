@@ -3,6 +3,7 @@ package app.unbraid
 import app.unbraid.data.BLOCK
 import app.unbraid.data.Backup
 import app.unbraid.data.Backup.Reason
+import app.unbraid.data.InstallState
 import app.unbraid.data.DIRECT
 import app.unbraid.data.Filter
 import app.unbraid.data.Home
@@ -129,9 +130,9 @@ class BackupTest {
         assertEquals(Reason.Newer, reason { Backup.open(f, "correct horse") })
         assertEquals("This backup was made by a newer unbraid. Update unbraid, then restore it.", Reason.Newer.text)
         // A newer setup inside a file this version reads: refused as newer too, before anything is checked.
-        val newer = Backup.export(full(), "3.0", 0).toString(Charsets.UTF_8).replace("\"version\":2", "\"version\":${VERSION + 1}").toByteArray()
+        val newer = Backup.export(full(), "3.0", 0).toString(Charsets.UTF_8).replace("\"version\":${full().stamped.version}", "\"version\":${VERSION + 1}").toByteArray()
         assertEquals(Reason.Newer, reason { Backup.read(newer) })
-        val newerFormat = Backup.export(full(), "3.0", 0).toString(Charsets.UTF_8).replaceFirst("\"format\":1", "\"format\":2").toByteArray()
+        val newerFormat = Backup.export(full(), "3.0", 0).toString(Charsets.UTF_8).replaceFirst("\"format\":1", "\"format\":3").toByteArray()
         assertEquals(Reason.Newer, reason { Backup.read(newerFormat) })
     }
 
@@ -193,7 +194,7 @@ class BackupTest {
     }
 
     @Test fun olderSetupsAreMigrated() {
-        val old = Backup.export(full(), "", 0).toString(Charsets.UTF_8).replace("\"version\":2", "\"version\":0").toByteArray()
+        val old = Backup.export(full(), "", 0).toString(Charsets.UTF_8).replace("\"version\":${full().stamped.version}", "\"version\":0").toByteArray()
         assertTrue("\"version\":0" in String(old))
         assertEquals(VERSION, Backup.read(old).setup.version)
     }
@@ -310,6 +311,24 @@ class BackupTest {
         Backup.valid(two.copy(profiles = f.profiles + Profile("Fine", "t1", mapOf("org.example.a" to "t1"))))
     }
 
+    @Test fun olderReadersMustRefuseLocalGrantsWhileTheirInstallWindowIsPending() {
+        val pkg = "org.example.pending"
+        val pending = Setup(defaultRoute = DIRECT, apps = mapOf(pkg to DIRECT), waiting = setOf(pkg), waitingUntil = 100)
+        assertTrue(pending.stamped.version > 5)
+        assertEquals(5, Backup.contents(pending).stamped.version)
+    }
+
+    @Test fun theGlobalInstallDeadlineUsesTheOriginalInstallTime() {
+        val pkg = "org.example.restored"
+        val restored = Setup(defaultRoute = DIRECT, apps = mapOf(pkg to DIRECT), waiting = setOf(pkg), waitingUntil = 100)
+        assertEquals(DIRECT, keepKnown(restored, setOf(pkg), 200, installedAt = { 99 }).apps[pkg])
+        for (first in listOf(100L, 101L)) {
+            val settled = keepKnown(restored, setOf(pkg), 200, installedAt = { first })
+            assertFalse("expired app still has an explicit grant", pkg in settled.apps)
+            assertEquals(DIRECT, settled.routeOf(pkg))
+        }
+    }
+
     @Test fun restoredAppsWaitToBeInstalled() {
         val s = full().copy(waiting = setOf("org.example.a", "org.example.c"), waitingUntil = 5000)
         val known = setOf("org.example.b")
@@ -357,7 +376,7 @@ class BackupTest {
         assertFalse(pkg in day30.profiles.single { it.name == PREVIOUS }.apps)
         assertFalse(pkg in keepKnown(both, emptySet(), now = 2000 + WAIT_MS).apps)
         // Found installed only past the kept choice's deadline: that one goes, the backup's stays. Installed in time, both do.
-        val installed = keepKnown(both, setOf(pkg), now = 1000 + WAIT_MS)
+        val installed = keepKnown(both, setOf(pkg), now = 1000 + WAIT_MS, installedAt = { 1000 + WAIT_MS })
         assertEquals(BLOCK, installed.apps[pkg])
         assertFalse(pkg in installed.profiles.single { it.name == PREVIOUS }.apps)
         assertTrue(installed.waiting.isEmpty())
@@ -387,7 +406,9 @@ class BackupTest {
             defaultRoute = "nl", apps = mapOf(pkg to "us"), profiles = listOf(Profile("Trip", "nl")), waiting = setOf(pkg), waitingUntil = 1, version = VERSION)
         val big = Setup(routes = (1 until Backup.MAX_EACH).map { Route("b$it", Location("nord", 153, "NL", "Netherlands")) }, defaultRoute = "b1", version = VERSION)
         assertNull(here.restoredFrom(big, PREVIOUS, 0))
-        assertTrue(RestoreGate.check(RestoreGate.Ask(here, Backup.Contents(setup = big), true)).keepable)
+        val ask = RestoreGate.Ask(here, Backup.Contents(setup = big), true)
+        assertTrue(RestoreGate.check(ask, installed = { InstallState.Absent }).keepable)
+        assertFalse(RestoreGate.check(ask, installed = { InstallState.Unknown }).keepable)
     }
 
     @Test fun strengthIsAHintOnly() {
@@ -405,6 +426,95 @@ class BackupTest {
             val p = ss.copy(password = pw, pluginOpts = "obfs=tls;obfs-host=$it.example")
             assertEquals(pw, p, Manual.parseSs(Manual.ssLink(p), p.name))
         }
+    }
+
+    @Test fun sharedWireGuardTemplatesContainOnlyThePublicServerLabel() {
+        val peer = wg.copy(address = listOf("10.123.0.4/32"), dns = listOf("10.123.0.1"), allowedIps = listOf("10.123.0.0/24"),
+            mtu = 1392, keepalive = 17, junk = 9, presharedKey = key, vmess = app.unbraid.data.Vmess("private.invalid", 3456, "private-user"))
+        val phone = Setup(routes = listOf(Route("r1", wg = peer, own = "s"), Route("r2", wg = peer, own = "s")),
+            servers = listOf(OwnServer("s", wg = peer)), defaultRoute = DIRECT, profiles = listOf(Profile("Work", "r2")), version = VERSION)
+        val first = Backup.export(phone, "3.2.2", 0, keys = false)
+        val opened = Backup.read(first)
+        val waiting = phone.restoredFrom(opened.setup, null, 0, opened.keys)!!
+        for (bytes in listOf(first, Backup.export(waiting, "", 0, keys = false), Backup.export(waiting, "", 0, keys = true))) {
+            val doc = kotlinx.serialization.json.Json.parseToJsonElement(String(bytes)) as kotlinx.serialization.json.JsonObject
+            assertEquals("2", doc["format"].toString())
+            val setup = doc["setup"] as kotlinx.serialization.json.JsonObject
+            for (collection in listOf("servers", "routes")) for (item in setup[collection] as kotlinx.serialization.json.JsonArray) {
+                val record = item as kotlinx.serialization.json.JsonObject
+                val label = record["wgIdentity"] as kotlinx.serialization.json.JsonObject
+                assertEquals(setOf("name", "endpoint", "publicKey"), label.keys)
+                assertEquals(peer.endpoint, (label["endpoint"] as kotlinx.serialization.json.JsonPrimitive).content)
+                assertEquals(peer.name, (label["name"] as kotlinx.serialization.json.JsonPrimitive).content)
+                assertEquals(peer.publicKey, (label["publicKey"] as kotlinx.serialization.json.JsonPrimitive).content)
+                assertEquals("null", record["wg"].toString())
+            }
+            for (hidden in listOf("10.123.", "private.invalid", "private-user", key)) assertFalse(String(bytes).contains(hidden))
+        }
+        assertTrue(waiting.servers.single().keyless && waiting.routes.all { it.keyless })
+        assertEquals("r2", waiting.profiles.single().defaultRoute)
+        val ready = waiting.refilled("s", OwnServer("", wg = wg))!!
+        assertTrue(ready.routes.all { !it.keyless && it.wg == wg })
+        assertEquals(wg, ready.servers.single().wg)
+        assertEquals("r2", ready.profiles.single().defaultRoute)
+    }
+
+    @Test fun conflictingHistoricalWireGuardCopiesCannotBorrowLocalKeys() {
+        val saved = wg.copy(privateKey = "", presharedKey = null)
+        val incoming = Setup(routes = listOf(Route("r", wg = saved, own = "s", keyless = true),
+            Route("q", wg = saved, own = "s", keyless = true)), servers = listOf(OwnServer("s", wg = saved, keyless = true)),
+            defaultRoute = "r", profiles = listOf(Profile("Work", "q")), version = VERSION)
+        val loose = Setup(routes = listOf(Route("r", wg = wg), Route("q", wg = wg)), defaultRoute = "r", version = VERSION)
+        fun restored(here: Setup, file: Setup): Setup {
+            val bytes = kotlinx.serialization.json.Json { encodeDefaults = true }.encodeToString(Backup.Contents.serializer(), Backup.Contents(format = 1, setup = file, keys = false)).toByteArray()
+            return here.restoredFrom(Backup.read(bytes).setup, null, 0, keys = false)!!
+        }
+        assertFalse(restored(loose, incoming).servers.single().keyless)
+        val shifted = incoming.copy(routes = incoming.routes.map { if (it.id == "q") it.copy(wg = saved.copy(dns = listOf("10.234.0.1"))) else it })
+        val ambiguous = loose.copy(routes = loose.routes.map { if (it.id == "q") it.copy(wg = wg.copy(presharedKey = key)) else it })
+        for (held in listOf(restored(loose, shifted), restored(ambiguous, incoming))) {
+            assertTrue(held.servers.single().keyless)
+            assertTrue(held.routes.all { it.keyless })
+        }
+        val local = loose.copy(servers = listOf(OwnServer("s", wg = wg)))
+        assertTrue(restored(local, shifted).servers.single().keyless)
+    }
+
+    @Test fun missingLegacyWireGuardFieldsDoNotBecomeEvidenceForRefill() {
+        val local = wg.copy(dns = emptyList(), keepalive = null, mtu = 1420)
+        val here = Setup(routes = listOf(Route("r", wg = local, own = "s")), servers = listOf(OwnServer("s", wg = local)), defaultRoute = "r", version = VERSION)
+        val file = legacyWgTemplate(here, local)
+        val complete = kotlinx.serialization.json.Json { encodeDefaults = true }.encodeToString(Backup.Contents.serializer(), file)
+        fun restored(text: String) = here.restoredFrom(Backup.read(text.toByteArray()).setup, null, 0, keys = false)!!
+        assertFalse(restored(complete).servers.single().keyless)
+        assertEquals(Reason.Invalid, reason { restored(complete.replaceFirst("\"format\":1", "\"format\":0")) })
+        for (field in listOf("\"dns\":[]", "\"mtu\":1420", "\"keepalive\":null", "\"presharedKey\":null")) {
+            val partial = complete.replace("$field,", "")
+            assertFalse(complete == partial)
+            assertTrue(restored(partial).servers.single().keyless)
+            assertTrue(restored(partial).routes.single().keyless)
+        }
+    }
+
+    @Test fun compactWireGuardKeepsThePreviousProfileSeparateAndRejectsConflictingLabels() {
+        val here = Setup(routes = listOf(Route("r", wg = wg, own = "s")), servers = listOf(OwnServer("s", wg = wg)),
+            defaultRoute = "r", version = VERSION)
+        val compact = Backup.export(here, "", 0, false)
+        val raw = String(compact)
+        assertEquals(Reason.Invalid, reason { Backup.read(raw.replaceFirst("\"format\":2", "\"format\":1").toByteArray()) })
+        assertEquals(Reason.Invalid, reason { Backup.read(raw.replaceFirst("\"keyless\":true", "\"keyless\":false").toByteArray()) })
+        val read = Backup.read(compact)
+        val kept = here.restoredFrom(read.setup, PREVIOUS, 0, read.keys)!!
+        assertTrue(kept.route(kept.defaultRoute)!!.keyless)
+        val prior = kept.route(kept.profiles.single().defaultRoute)!!
+        assertFalse(prior.keyless)
+        assertEquals(wg, prior.wg)
+        assertFalse(kept.route(kept.defaultRoute)!!.own == prior.own)
+        val stored = kotlinx.serialization.json.Json.encodeToString(Setup.serializer(), kept)
+        val reopened = kotlinx.serialization.json.Json.decodeFromString(Setup.serializer(), stored)
+        val mixed = Backup.read(Backup.export(reopened, "", 0, true))
+        assertTrue(mixed.setup.route(mixed.setup.defaultRoute)!!.keyless)
+        assertEquals(wg, mixed.setup.route(prior.id)!!.wg)
     }
 
     @Test fun withoutKeysNoSecretIsInTheFile() {
@@ -459,9 +569,9 @@ class BackupTest {
         assertNull(back.refilled("gone", OwnServer("", wg = wg)))
     }
 
-    @Test fun restoringWithoutKeysOnTheSamePhoneKeepsItsKeys() {
+    @Test fun historicalKeylessSettingsCanStillIdentifyAnExactLocalServer() {
         val here = full()
-        val b = Backup.read(Backup.export(here, "", 0, keys = false))
+        val b = legacyWgTemplate(here, wg)
         val r = here.restoredFrom(b.setup, null, 0, b.keys)!!
         assertTrue(r.servers.none { it.keyless } && r.routes.none { it.keyless })
         assertEquals(here.servers, r.servers)
@@ -480,4 +590,15 @@ class BackupTest {
         assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(routes = s.routes.map { if (it.id == "w1") it.copy(keyless = false) else it })) })
         assertEquals(Reason.Invalid, reason { Backup.valid(s.copy(routes = s.routes.map { if (it.id == "nl") it.copy(keyless = true) else it })) })
     }
+}
+
+/** A format-one fixture built with the complete WireGuard fields earlier writers actually stored on both copies. */
+internal fun legacyWgTemplate(s: Setup, peer: app.unbraid.data.WgPeer): Backup.Contents {
+    val linked = Backup.contents(s, keys = false)
+    val stripped = peer.copy(privateKey = "", presharedKey = null)
+    val old = linked.copy(servers = linked.servers.map { if (it.wg != null) it.copy(wg = stripped) else it },
+        routes = linked.routes.map { if (it.wg != null) it.copy(wg = stripped) else it })
+    val bytes = kotlinx.serialization.json.Json { encodeDefaults = true }.encodeToString(Backup.Contents.serializer(),
+        Backup.Contents(format = 1, app = "3.0.2", setup = old.stamped, keys = false)).toByteArray()
+    return Backup.read(bytes)
 }

@@ -213,6 +213,7 @@ object Stats {
             r.ovpn != null -> listOf("ovpn") + app.unbraid.data.Manual.ovpnServers(r.ovpn)
             r.ss != null -> listOf("ss", r.ss.server, "${r.ss.port}")
             r.tsExit != null -> listOf("ts", r.tsExit)
+            r.socks5 != null -> listOf("socks", r.socks5.packageName, r.socks5.identity, r.socks5.host, "${r.socks5.port}")
             else -> listOf(l.provider, l.countryCode, l.countryId, l.cityId, l.city, l.region, l.group, l.protocol, l.pinned?.host).map { "$it" }
         }
         // Through another route its speeds are another tunnel's: a new history. Without a Via the digest stays as it was.
@@ -500,6 +501,7 @@ internal object Collector {
         }
         val replayed = HashSet<String>()
         var batch = false
+        val relays = app.unbraid.vpn.UnbraidVpn.running?.activeRoutes.orEmpty().mapNotNullTo(HashSet()) { it.socks5?.packageName }
         for (e in events) {
             var up: Long
             var down: Long
@@ -539,7 +541,8 @@ internal object Collector {
                 }
                 else -> continue
             }
-            Stats.add(now, c.app, c.exit, c.server, up, down)
+            // What a proxy app sends on for others was counted as theirs already.
+            if (c.exit != DIRECT || c.app !in relays) Stats.add(now, c.app, c.exit, c.server, up, down)
             // The live window takes only what flowed just now: never a replay's catch-up or a New's backlog.
             // unbraid's own traffic (speed tests, health checks) is drawn but counted apart: the live chart is your apps'.
             val own = c.app == Stats.ctx.packageName

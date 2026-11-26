@@ -1,5 +1,9 @@
 package app.unbraid
 
+import app.unbraid.data.AppIdentity
+import app.unbraid.data.InstallState
+import app.unbraid.data.BLOCK
+import app.unbraid.data.Profile
 import app.unbraid.data.Backup
 import app.unbraid.data.DIRECT
 import app.unbraid.data.Location
@@ -19,6 +23,72 @@ import org.junit.Test
 class RestoreGateTest {
     private val here = Setup(routes = listOf(Route("nl", Location("nord", 153, "NL", "Netherlands"))), defaultRoute = "nl", apps = mapOf("org.example.mail" to "nl"), version = VERSION)
     private fun open(s: Setup) = Backup.read(Backup.export(s, "3.0.2", 0))
+
+    @Test fun restoreComparesTheRoutesAuthorizedForThisPhone() {
+        val pkg = "org.example.mail"
+        val pin = "ab".repeat(32)
+        val otherPin = "cd".repeat(32)
+        val blocked = here.copy(apps = mapOf(pkg to BLOCK))
+        val direct = here.copy(apps = mapOf(pkg to DIRECT), appSigners = mapOf(pkg to pin))
+        val ask = RestoreGate.Ask(blocked, open(direct), false)
+        val matched = AppIdentity(pin, emptySet())
+        assertTrue(RestoreGate.check(ask, identity = { matched }).notes.isNotEmpty())
+        assertTrue(RestoreGate.check(ask, identity = { AppIdentity(otherPin, emptySet()) }).notes.isEmpty())
+        assertTrue(RestoreGate.check(ask, identity = { null }).notes.any { it.contains("phone's own connection") })
+        assertTrue(RestoreGate.check(ask).notes.any { it.contains("phone's own connection") })
+        assertEquals(DIRECT, ask.backup.setup.apps[pkg])
+
+        // A saved profile can become active later, even when the current profile has no assignment.
+        val profile = Profile("Work", defaultRoute = "nl", apps = blocked.apps)
+        val current = here.copy(apps = emptyMap(), profiles = listOf(profile))
+        val backup = current.copy(profiles = listOf(profile.copy(apps = direct.apps, appSigners = direct.appSigners)))
+        val profileAsk = RestoreGate.Ask(current, open(backup), false)
+        assertTrue(RestoreGate.check(profileAsk, identity = { matched }).notes.any { it.contains("Work") })
+        assertTrue(RestoreGate.check(profileAsk, identity = { null }).notes.any { it.contains("phone's own connection") })
+    }
+
+    @Test fun theRestorePreviewComparesTheDeadlineThatEachProfileActuallyUses() {
+        val pkg = "org.example.mail"
+        val signer = AppIdentity("ab".repeat(32), emptySet())
+        val pin = mapOf(pkg to signer.current)
+        val block = here.copy(apps = mapOf(pkg to BLOCK))
+        val imported = here.copy(apps = emptyMap(), profiles = listOf(Profile("Work", "nl", mapOf(pkg to DIRECT), appSigners = pin)))
+        val current = block.copy(profiles = listOf(Profile("Work", "nl", block.apps)))
+        val ask = RestoreGate.Ask(current, open(imported), false)
+        fun notes(state: InstallState, at: Long): List<String> {
+            var reads = 0
+            val result = RestoreGate.check(ask, installed = { reads++; state }, now = at)
+            assertEquals(1, reads)
+            return result.notes
+        }
+        assertTrue(notes(InstallState.Present(99, signer), 100).any { "Work" in it })
+        assertTrue(notes(InstallState.Unknown, 100).any { "before its restore deadline" in it })
+        assertEquals(DIRECT, ask.backup.setup.profiles.single().apps[pkg])
+
+        // The old setup's expired assignment is gone before comparison. Importing it anew is a fresh grant.
+        val old = here.copy(apps = mapOf(pkg to DIRECT), appSigners = pin, waiting = setOf(pkg), waitingUntil = 100)
+        val retry = RestoreGate.Ask(old, open(old), false)
+        assertTrue(RestoreGate.check(retry, installed = { InstallState.Present(100, signer) }, now = 200).notes.isNotEmpty())
+        assertTrue(RestoreGate.check(retry, installed = { InstallState.Present(99, signer) }, now = 200).notes.isEmpty())
+    }
+
+    @Test fun restoringWaitsForFreshEvidenceAcrossTheReviewedDeadline() {
+        val pkg = "org.example.mail"
+        val stamp = "ab".repeat(32)
+        val old = here.copy(apps = mapOf(pkg to DIRECT), appSigners = mapOf(pkg to stamp),
+            waiting = setOf(pkg), waitingUntil = 100)
+        val ask = RestoreGate.Ask(old, open(old), false)
+        val installed = InstallState.Present(null, AppIdentity(stamp, emptySet()))
+        val observations = RestoreGate.inventory(old, ask.backup.setup) { installed }
+        val check = RestoreGate.check(ask, installed = observations::getValue, now = 99)
+        assertTrue(check.stillApplies(99, observations))
+        assertTrue(check.stillApplies(99, mapOf(pkg to installed.copy(observedAt = 99))))
+        assertFalse(check.stillApplies(99, observations) { setOf(pkg, "org.example.sibling") })
+        assertFalse(check.stillApplies(100, observations))
+        assertFalse(check.stillApplies(98, observations))
+        assertFalse(check.stillApplies(99, mapOf(pkg to InstallState.Absent)))
+        assertFalse(check.stillApplies(99, mapOf(pkg to installed.copy(firstInstallTime = 98))))
+    }
 
     @Test fun restoreWaitsForTheCheckOfThisBackupSetupAndChoice() {
         val g = RestoreGate()
@@ -93,10 +163,10 @@ class RestoreGateTest {
         val keyless = Backup.read(Backup.export(withServer, "3.0.2", 0, keys = false))
         val fresh = RestoreGate.check(RestoreGate.Ask(Setup(pristine = true), keyless, true))
         assertEquals(1, fresh.missing)
-        // A new install's placeholder isn't kept; this phone's setup is, and has the server's config.
+        // Keeping the phone’s setup gives that profile its local server. The incoming WireGuard route still needs its config.
         assertFalse(fresh.keepable)
         val same = RestoreGate.check(RestoreGate.Ask(withServer, keyless, true))
         assertTrue(same.keepable)
-        assertEquals(0, same.missing)
+        assertEquals(1, same.missing)
     }
 }

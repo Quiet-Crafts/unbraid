@@ -1,5 +1,6 @@
 package app.unbraid
 
+import android.net.NetworkCapabilities
 import app.unbraid.data.MOBILE
 import app.unbraid.data.WIFI
 import app.unbraid.vpn.AutoSwitch
@@ -304,7 +305,63 @@ class NetSequencesTest {
         assertNull(AutoSwitch.notSwitched.value)
         // The restore calls it once the store holds the restored setup.
         val apply = java.io.File("src/main/java/app/unbraid/ui/Backup.kt").readText().substringAfter("fun apply()")
-        assertTrue(Regex("""t == null \|\| moved \|\| !taken\)[\s\S]*?return\s*\}[\s\S]*?AutoSwitch\.replaced\(\)""").containsMatchIn(apply))
+        assertTrue(Regex("""else if \(target == null\) finish\(false, KEEP_NO_ROOM\)\s*else commit\(here, target, c\)""").containsMatchIn(apply.substringBefore("private fun commit")))
+        val commit = apply.substringAfter("private fun commit").substringBefore("fun signIns")
+        assertTrue(Regex("""if \(!taken\)\s*\{[^}]*return\s*\}[\s\S]*?AutoSwitch\.replaced\(\)""").containsMatchIn(commit))
+    }
+
+    @Test fun anUnlistedTransportHasNoProfileRule() {
+        val connection = app.unbraid.vpn.Link(21, vpn = false, internet = true, unrestricted = true, mobile = false)
+        val observed = app.unbraid.vpn.own(true, connection, emptyList()).net!!
+        assertEquals(Net(null, 21), observed)
+        val run = AutoSwitch.Run()
+        run.seen(observed)
+        assertNull(run.decide(observed, mapOf(WIFI to "Home", MOBILE to "Work")))
+    }
+
+    @Test fun callbackAndUnderlyingSnapshotClassifyTheSameAndroidTransports() {
+        val cellular = NetworkCapabilities.TRANSPORT_CELLULAR
+        val wifi = NetworkCapabilities.TRANSPORT_WIFI
+        val ethernet = NetworkCapabilities.TRANSPORT_ETHERNET
+        val bluetooth = NetworkCapabilities.TRANSPORT_BLUETOOTH
+        val usb = NetworkCapabilities.TRANSPORT_USB
+        val vpn = app.unbraid.vpn.profileLink(9, true, true) { it == NetworkCapabilities.TRANSPORT_VPN }
+        val reports = listOf(
+            setOf(cellular) to MOBILE, setOf(wifi) to WIFI, setOf(ethernet) to WIFI,
+            setOf(cellular, wifi) to MOBILE, setOf(ethernet, cellular, bluetooth) to MOBILE, setOf(wifi, usb) to WIFI,
+            setOf(bluetooth) to null, setOf(usb) to null, setOf(NetworkCapabilities.TRANSPORT_WIFI_AWARE) to null,
+            setOf(99) to null, emptySet<Int>() to null,
+        )
+        for ((types, kind) in reports) {
+            val link = app.unbraid.vpn.profileLink(21, true, true, types::contains)
+            val expected = Net(kind, 21)
+            assertEquals(types.toString(), expected, link.net)
+            assertEquals(types.toString(), app.unbraid.vpn.Own(expected, false), app.unbraid.vpn.own(true, link, emptyList()))
+            assertEquals(types.toString(), app.unbraid.vpn.Own(expected, false), app.unbraid.vpn.own(true, vpn, listOf(vpn, link)))
+            assertNull(link.copy(handle = 0).net)
+        }
+        assertEquals(app.unbraid.vpn.Own(null, true), app.unbraid.vpn.own(true, vpn, listOf(vpn)))
+        assertEquals(app.unbraid.vpn.Own(null, false), app.unbraid.vpn.own(false, null, emptyList()))
+    }
+
+    @Test fun aLiveHandleWaitsForItsCapabilitiesAndKeepsManualPicks() {
+        val joined = app.unbraid.vpn.profileNet(21)!!
+        val known = app.unbraid.vpn.profileLink(21, true, true) { it == NetworkCapabilities.TRANSPORT_WIFI }.net!!
+        val rules = mapOf(WIFI to "Home", MOBILE to "Work")
+        assertNull(app.unbraid.vpn.profileNet(0))
+        AutoSwitch.Run().run {
+            seen(joined)
+            assertNull(decide(joined, rules))
+            seen(known)
+            val pending = settle(known, rules)!!
+            seen(joined)
+            assertFalse(commit(pending, rules, false))
+            pick(rules)
+            seen(known)
+            assertNull(decide(known, rules))
+            seen(known.copy(id = 22))
+            assertEquals("Home", decide(known.copy(id = 22), rules))
+        }
     }
 
     /** The phone's own network under another VPN: the one the monitor would follow, else the pick waits for the first network seen. */
@@ -506,7 +563,12 @@ class NetSequencesTest {
         // A loss reaches the model at once, before the engine's wait for the network to come back.
         assertTrue(Regex("""override fun onLost\(n: Network\) \{ if \(n == network\) \{[^\n]*AutoSwitch\.lost\(n\.networkHandle\);[^\n]*postDelayed\(lose""").containsMatchIn(net))
         // A network without its capabilities yet is seen as itself, of a kind not known yet, not as no network.
-        assertTrue(net.contains("AutoSwitch.seen(net(n, cm.getNetworkCapabilities(n)))"))
+        val available = net.substringAfter("override fun onAvailable").substringBefore("override fun onLinkPropertiesChanged")
+        assertTrue(available.contains("AutoSwitch.seen(profileNet(n.networkHandle))"))
+        assertFalse(available.contains("getNetworkCapabilities"))
+        val capabilities = net.substringAfter("override fun onCapabilitiesChanged").substringBefore("private fun push")
+        assertTrue(capabilities.substringBefore("AutoSwitch.seen(link(n, caps).net)").contains("if (n != network) return"))
+        assertTrue(capabilities.contains("AutoSwitch.seen(link(n, caps).net)"))
         assertTrue(Regex("""fun stop\(\) \{[^\n]*AutoSwitch\.unwatched\(\)""").containsMatchIn(net))
         assertFalse(net.contains("AutoSwitch.net.value ="))
         // A pick made with the VPN off says whether the phone's own network couldn't be told; the note lists a restore among the ends of a pick.

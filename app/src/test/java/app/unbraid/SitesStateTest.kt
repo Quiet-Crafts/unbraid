@@ -79,7 +79,9 @@ class SitesStateTest {
             .substringAfter("private fun connect(").substringBefore("\n    }\n")
         val first = connect.indexOf("state.value = VpnState(VpnState.Phase.On,")
         assertTrue(connect.substring(first).substringBefore("\n").contains("tsSuffix = lastInput?.tsSuffix"))
-        assertTrue(connect.indexOf("apply(srv, setup, picked, accounts)") in 0 until first)
+        val applied = connect.indexOf("apply(srv, setup, picked, accounts, seen)")
+        val current = connect.indexOf("requireCurrent(seen)", applied)
+        assertTrue(applied in 0 until current && current < first)
     }
 
     @Test fun answeredByAHeadscaleTailnet() {

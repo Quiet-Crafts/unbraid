@@ -328,8 +328,8 @@ const val LEAK_TRADEOFF = "With blocking on, every app, Direct apps included, lo
 
 /** Leak-proof setup: after the first connect, the way to Android's Always-on and Block switches; it says Leak-proof only once Android confirms both. */
 @Composable
-fun LeakSheet(alwaysOn: Boolean, lockdown: Boolean, open: () -> Unit, later: () -> Unit, never: () -> Unit, done: () -> Unit) {
-    if (alwaysOn && lockdown) return InfoSheet(
+fun LeakSheet(alwaysOn: Boolean, lockdown: Boolean, proxy: Boolean, open: () -> Unit, later: () -> Unit, never: () -> Unit, done: () -> Unit) {
+    if (alwaysOn && lockdown && !proxy) return InfoSheet(
         Icons.checkCircle, "All set", "Leak-proof", "Done", done, done, good = true, later = null,
     ) {
         Text("Apps can't go online without $APP now. $APP's own sign-ins and server lists still use your normal connection. To go online without $APP, turn blocking off in Android.", style = Type.sub.copy(fontSize = 15.sp, lineHeight = 22.sp), color = Ink.dim)
@@ -337,8 +337,8 @@ fun LeakSheet(alwaysOn: Boolean, lockdown: Boolean, open: () -> Unit, later: () 
         FlagRow(Icons.block, "Block connections without VPN", "Apps can't go online without $APP", true)
     }
     InfoSheet(Icons.shield, "One more step", "Stay protected when $APP is off", "Open Android settings", open, later, actionIcon = Icons.external) {
-        Text("Right now apps use your normal connection before $APP connects, while it's paused and if it stops. Android can block that.", style = Type.sub.copy(fontSize = 15.sp, lineHeight = 22.sp), color = Ink.dim)
-        listOf("In Android's VPN settings, tap the gear next to $APP.", "Turn on Always-on VPN, then Block connections without VPN.").forEachIndexed { i, t ->
+        Text("Right now apps use your normal connection before $APP connects, while it's paused and if it stops. " + if (proxy) "Always-on VPN starts $APP again." else "Android can block that.", style = Type.sub.copy(fontSize = 15.sp, lineHeight = 22.sp), color = Ink.dim)
+        listOf("In Android's VPN settings, tap the gear next to $APP.", if (proxy) "Turn on Always-on VPN. Leave Block connections without VPN off: a proxy server can't be used with it." else "Turn on Always-on VPN, then Block connections without VPN.").forEachIndexed { i, t ->
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 Box(Modifier.size(24.dp).border(1.5.dp, Ink.dim, CircleShape), Alignment.Center) { Text("${i + 1}", style = Type.code, color = Ink.text) }
                 Text(t, style = Type.sub.copy(fontSize = 15.sp, lineHeight = 22.sp), color = Ink.text)
@@ -346,7 +346,7 @@ fun LeakSheet(alwaysOn: Boolean, lockdown: Boolean, open: () -> Unit, later: () 
         }
         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Ink.surfaceTop).padding(horizontal = 14.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Icon(Icons.block, null, Modifier.size(20.dp), tint = Ink.accent)
-            Text("The catch: ${LEAK_TRADEOFF.replaceFirstChar { it.lowercase() }}", style = Type.sub, color = Ink.text)
+            Text(if (proxy) "The catch: without blocking, apps use your normal connection whenever $APP is off, paused or stops." else "The catch: ${LEAK_TRADEOFF.replaceFirstChar { it.lowercase() }}", style = Type.sub, color = Ink.text)
         }
         var asking by rememberSaveable { mutableStateOf(false) }
         Secondary("Don't remind me again", { asking = true }, Modifier.padding(start = 0.dp), color = Ink.dim)
