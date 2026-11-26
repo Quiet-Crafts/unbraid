@@ -576,6 +576,15 @@ class FakePoolTest {
         for (from in listOf(-1L, 4L)) assertFalse(FakePool.waits(lost = false, from = from, restores = 4)) // not read yet, or none came
     }
 
+    /** A start that takes up a setup restored meanwhile still counts the restore: if that start fails, apps wait offline. */
+    @Test fun aStartThatTakesUpARestoreStillWaitsIfItFails() {
+        val vpn = java.io.File("src/main/java/app/unbraid/vpn/UnbraidVpn.kt").readText()
+        val connect = vpn.substringAfter("private fun connect(").substringBefore("\n    }\n")
+        assertEquals(1, Regex("""(?<!var )\bfrom = """).findAll(connect).count())
+        assertTrue(connect.contains("from = seen"))
+        assertTrue(connect.contains("FakePool.waits(lost != null, from, store.restoreGeneration)"))
+    }
+
     @Test fun triesSlowDownAndNeverStop() {
         val waits = (0..20).map(FakePool::lostWait)
         assertEquals(5_000L, waits.first())

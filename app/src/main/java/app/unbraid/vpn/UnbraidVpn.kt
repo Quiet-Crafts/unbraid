@@ -509,7 +509,8 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
             while (!destroyed && store.setup.value != setup) {
                 val (now, restores) = store.policySnapshot()
                 if (now.defaultMissing) throw Compiler.MissingDefault()
-                setup = now; seen = restores; from = restores; accounts = store.accounts.value; again = true
+                // [from] stays the first read: a restore that came during this start still keeps apps waiting if it fails.
+                setup = now; seen = restores; accounts = store.accounts.value; again = true
                 picked = prepareSocks(setup, pickLinks(setup, picked.links, accounts, offline = true))
             }
             if (destroyed) return // the service went away during the provider calls: start no engine for it
