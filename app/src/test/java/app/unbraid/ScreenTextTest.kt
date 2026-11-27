@@ -315,5 +315,11 @@ class ScreenTextTest {
         assertEquals("Netherlands · Nord · ${fast.loc.automaticLabel}", names["f"])
         assertEquals("Italy · Nord", names["i"])
         assertEquals("Netherlands · Nord", viaLabels(listOf(ams, ita))["a"])
+        // Same place too: the profiles that list them tell them apart.
+        val fast2 = fast.copy(id = "g")
+        val both = viaLabels(listOf(fast, fast2, ita), listOf(Profile("Home", "f"), Profile("Mobile", "x", added = listOf("g"))))
+        assertEquals("Netherlands · Nord · Home", both["f"])
+        assertEquals("Netherlands · Nord · Mobile", both["g"])
+        assertEquals("Italy · Nord", both["i"])
     }
 }

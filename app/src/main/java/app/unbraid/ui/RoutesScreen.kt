@@ -111,6 +111,7 @@ import app.unbraid.data.MAX_PROFILES
 import app.unbraid.data.Home
 import app.unbraid.data.Ivpn
 import app.unbraid.data.Nord
+import app.unbraid.data.Profile
 import app.unbraid.data.Providers
 import app.unbraid.data.Route
 import app.unbraid.data.Server
@@ -213,11 +214,22 @@ internal fun serverId(r: Route, s: Server): String? = if (r.imported) null else 
 internal fun place(r: Route, live: Map<String, Server>, routes: List<Route> = emptyList()) =
     if (r.via != null && routes.none { it.id == r.via }) "Entry route removed" else where(r, live)
 
-/** The Via menu's names: route and provider, plus where it exits ("Netherlands · Nord · Amsterdam") only when two would read the same. */
-internal fun viaLabels(entries: List<Route>): Map<String, String> {
-    val short = entries.associate { it.id to listOfNotNull(it.name, Providers.short(it.loc.provider).takeIf { _ -> !it.imported }).joinToString(" · ") }
-    val twice = short.values.groupingBy { it }.eachCount().filterValues { it > 1 }.keys
-    return entries.associate { it.id to if (short[it.id] in twice) "${it.name} · ${where(it, emptyMap())}" else short.getValue(it.id) }
+/**
+ * The Via menu's names: route and provider. Two that read the same also get where they exit ("Netherlands · Nord ·
+ * Amsterdam"), and when that is the same too, the profiles that list them ("Netherlands · Nord · Mobile").
+ */
+internal fun viaLabels(entries: List<Route>, profiles: List<Profile> = emptyList()): Map<String, String> {
+    val short = { r: Route -> listOfNotNull(r.name, Providers.short(r.loc.provider).takeIf { !r.imported }).joinToString(" · ") }
+    val tiers = listOf<(Route) -> String?>(
+        { r -> "${r.name} · ${where(r, emptyMap())}" },
+        { r -> profiles.filter { r.id in it.own && it.name.isNotBlank() }.joinToString(", ") { it.name }.ifEmpty { null }?.let { "${short(r)} · $it" } },
+    )
+    val names = entries.associate { it.id to short(it) }.toMutableMap()
+    for (tier in tiers) {
+        val twice = names.values.groupingBy { it }.eachCount().filterValues { it > 1 }.keys.ifEmpty { break }
+        entries.filter { names[it.id] in twice }.forEach { r -> tier(r)?.let { names[r.id] = it } }
+    }
+    return names
 }
 
 /** The entry route's code for the small tag after [r]'s line: null without a Via, "?" when the entry route is gone. */
