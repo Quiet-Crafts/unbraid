@@ -213,6 +213,13 @@ internal fun serverId(r: Route, s: Server): String? = if (r.imported) null else 
 internal fun place(r: Route, live: Map<String, Server>, routes: List<Route> = emptyList()) =
     if (r.via != null && routes.none { it.id == r.via }) "Entry route removed" else where(r, live)
 
+/** The Via menu's names: route and provider, plus where it exits ("Netherlands · Nord · Amsterdam") only when two would read the same. */
+internal fun viaLabels(entries: List<Route>): Map<String, String> {
+    val short = entries.associate { it.id to listOfNotNull(it.name, Providers.short(it.loc.provider).takeIf { _ -> !it.imported }).joinToString(" · ") }
+    val twice = short.values.groupingBy { it }.eachCount().filterValues { it > 1 }.keys
+    return entries.associate { it.id to if (short[it.id] in twice) "${it.name} · ${where(it, emptyMap())}" else short.getValue(it.id) }
+}
+
 /** The entry route's code for the small tag after [r]'s line: null without a Via, "?" when the entry route is gone. */
 internal fun viaTag(r: Route, routes: List<Route>): String? = r.via?.let { v -> routes.firstOrNull { it.id == v }?.code ?: "?" }
 
@@ -243,7 +250,7 @@ private fun PlaceLine(text: String, tag: String?, spoken: String, maxLines: Int 
     ) { line(Modifier.weight(1f, fill = false)); ViaTag(tag, broken) }
 }
 
-private fun where(r: Route, live: Map<String, Server>) = when {
+internal fun where(r: Route, live: Map<String, Server>) = when {
     r.wg != null -> "WireGuard"
     r.ovpn != null -> "OpenVPN"
     r.ss != null -> "Shadowsocks"

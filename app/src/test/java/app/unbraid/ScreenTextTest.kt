@@ -4,6 +4,7 @@ import app.unbraid.data.DIRECT
 import app.unbraid.data.Ivpn
 import app.unbraid.data.NordApi
 import app.unbraid.ui.ivpnKeyNote
+import app.unbraid.ui.viaLabels
 import app.unbraid.ui.ivpnKeyPending
 import app.unbraid.vpn.VpnState
 import app.unbraid.data.Location
@@ -303,5 +304,16 @@ class ScreenTextTest {
         assertEquals(", via Netherlands", viaSpoken(v, setup.routes))
         assertEquals(", via Netherlands, one tunnel", viaSpoken(v.copy(viaNative = true), setup.routes))
         assertEquals("", viaSpoken(nl, setup.routes))
+    }
+
+    @Test fun twoEntriesWithOneNameAreToldApart() {
+        val ams = Route("a", Location("nord", countryCode = "NL", country = "Netherlands", city = "Amsterdam"))
+        val fast = Route("f", Location("nord", countryCode = "NL", country = "Netherlands"))
+        val ita = Route("i", Location("nord", countryCode = "IT", country = "Italy", city = "Milan"))
+        val names = viaLabels(listOf(ams, fast, ita))
+        assertEquals("Netherlands · Nord · Amsterdam", names["a"])
+        assertEquals("Netherlands · Nord · ${fast.loc.automaticLabel}", names["f"])
+        assertEquals("Italy · Nord", names["i"])
+        assertEquals("Netherlands · Nord", viaLabels(listOf(ams, ita))["a"])
     }
 }

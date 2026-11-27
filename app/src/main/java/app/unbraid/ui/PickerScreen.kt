@@ -497,7 +497,8 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
             // Also shown for a Via the route can no longer use (it changed protocol, say), so it can always be cleared.
             if (route != null && (route.via != null || route.wg != null || !route.imported && route.loc.protocol?.startsWith("openvpn") != true)) {
                 val entries = setup.routes.filter { it.id != route.id && it.via == null && it.tsExit == null && it.socks5 == null }
-                fun label(r: app.unbraid.data.Route) = listOfNotNull(r.name, Providers.short(r.loc.provider).takeIf { !r.imported }).joinToString(" · ")
+                val names = viaLabels(entries)
+                fun label(r: app.unbraid.data.Route) = names[r.id] ?: viaLabels(listOf(r)).getValue(r.id)
                 Row(Modifier.padding(horizontal = Gutter).padding(bottom = 8.dp)) {
                     val hops = Providers.get(route.loc.provider)?.takeIf { !route.imported && it.nativeHop }
                     Dropdown("Via", setup.route(route.via.orEmpty())?.let { label(it) + if (route.viaNative) ", one tunnel" else "" } ?: if (route.via != null) "Entry route removed" else "Straight to the server") { done ->
