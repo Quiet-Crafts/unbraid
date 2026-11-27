@@ -71,7 +71,8 @@ without a VPN. Every app follows the *default route* unless you give it one of i
 - With IVPN, each sign-in adds a Kyber key, which protects recorded traffic against future quantum computers. By
   default unbraid asks for a new key when it connects and the key is a week old.
 - Reach your home network through Tailscale, Headscale (a Tailscale server you run yourself) or your router's
-  WireGuard config, or send chosen apps out through a Tailscale exit node, such as a computer at home.
+  WireGuard config, or send chosen apps out through a Tailscale exit node, such as a computer at home. Sign in to
+  Tailscale or Headscale with your browser or with an auth key.
 - Let unbraid pick a server with little load when the provider publishes it, or pin one server yourself. If a
   provider's server keeps failing, unbraid can move to another port or another server that matches your choice
   (pinned servers and imported configs keep theirs).
@@ -113,8 +114,8 @@ app runs on the phone, or join a Tailscale network (a self-hosted Headscale work
    OpenVPN file, paste a Shadowsocks key, or use Tailscale on its own. Proxy servers are added later, in Settings.
 4. On the Routes tab, tap the default route, choose Change location and pick a country. This is where every app
    goes unless you say otherwise. If you imported a file, its server is already set. Then tap the power button to
-   connect and allow the VPN when Android asks. With Tailscale on its own, connect first and then tap Sign in to
-   Tailscale.
+   connect and allow the VPN when Android asks. With Tailscale on its own, open Settings, then Tailscale, and tap
+   Sign in with your browser (it connects first) or Sign in with an auth key.
 5. To send some apps somewhere else, tap +, then Route, and choose another country or server. Open the Apps tab
    and tap Show my apps (the list stays on your phone). Then tap an app and pick its route. Pick Direct for apps
    that should not use the VPN at all, like a banking app, or Block for an app that should get no internet connection.

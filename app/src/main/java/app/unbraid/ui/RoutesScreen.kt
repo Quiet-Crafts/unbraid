@@ -217,7 +217,8 @@ internal fun place(r: Route, live: Map<String, Server>, routes: List<Route> = em
 
 /** Routes [r] can go through first: one tunnel each, and listed by some profile (as apps are offered them), or its Via now. */
 internal fun viaEntries(s: Setup, r: Route): List<Route> {
-    val listed = s.saved.takeIf { s.profiles.isNotEmpty() }?.flatMap { it.own }?.toSet()
+    // The setup in use counts even when no profile is (its profile deleted), as for Setup.unlisted.
+    val listed = if (s.profiles.isEmpty()) null else s.live.own + s.saved.flatMap { it.own }
     return s.routes.filter { it.id != r.id && it.via == null && it.tsExit == null && it.socks5 == null && (listed == null || it.id in listed || it.id == r.via) }
 }
 

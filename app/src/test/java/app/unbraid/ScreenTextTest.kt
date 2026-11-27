@@ -337,6 +337,9 @@ class ScreenTextTest {
         assertEquals("Netherlands · Nord", viaLabels(entries, s.saved)["n1"])
         // A route already going through an unlisted one keeps it on offer, so the menu can show and clear it.
         assertEquals(listOf("n1", "n2"), viaEntries(s, af.copy(via = "n2")).map { it.id })
+        // The profile in use deleted: the routes the setup in use lists stay on offer.
+        val loose = s.copy(profile = null, profiles = listOf(Profile("Mobile", "x")))
+        assertEquals(listOf("n1"), viaEntries(loose, af.copy(via = null)).map { it.id })
         // Without profiles every route is offered.
         assertEquals(listOf("n1", "n2"), viaEntries(Setup(routes = listOf(shared, orphan, af)), af).map { it.id })
     }
