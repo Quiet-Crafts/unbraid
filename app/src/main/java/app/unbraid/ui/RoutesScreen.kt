@@ -114,6 +114,7 @@ import app.unbraid.data.Nord
 import app.unbraid.data.Profile
 import app.unbraid.data.Providers
 import app.unbraid.data.Route
+import app.unbraid.data.Setup
 import app.unbraid.data.Server
 import app.unbraid.data.Sites
 import app.unbraid.vpn.ExitReport
@@ -213,6 +214,12 @@ internal fun serverId(r: Route, s: Server): String? = if (r.imported) null else 
 /** [r]'s line: where it exits. The route it goes through first is the entry tag beside it ([viaTag]), not words here. */
 internal fun place(r: Route, live: Map<String, Server>, routes: List<Route> = emptyList()) =
     if (r.via != null && routes.none { it.id == r.via }) "Entry route removed" else where(r, live)
+
+/** Routes [r] can go through first: one tunnel each, and listed by some profile (as apps are offered them), or its Via now. */
+internal fun viaEntries(s: Setup, r: Route): List<Route> {
+    val listed = s.saved.takeIf { s.profiles.isNotEmpty() }?.flatMap { it.own }?.toSet()
+    return s.routes.filter { it.id != r.id && it.via == null && it.tsExit == null && it.socks5 == null && (listed == null || it.id in listed || it.id == r.via) }
+}
 
 /**
  * The Via menu's names: route and provider. Two that read the same also get where they exit ("Netherlands · Nord ·

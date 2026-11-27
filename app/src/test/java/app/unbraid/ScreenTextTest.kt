@@ -5,6 +5,7 @@ import app.unbraid.data.Ivpn
 import app.unbraid.data.NordApi
 import app.unbraid.ui.ivpnKeyNote
 import app.unbraid.ui.viaLabels
+import app.unbraid.ui.viaEntries
 import app.unbraid.ui.ivpnKeyPending
 import app.unbraid.vpn.VpnState
 import app.unbraid.data.Location
@@ -321,5 +322,22 @@ class ScreenTextTest {
         assertEquals("Netherlands · Nord · Home", both["f"])
         assertEquals("Netherlands · Nord · Mobile", both["g"])
         assertEquals("Italy · Nord", both["i"])
+    }
+
+    @Test fun viaOffersOnlyRoutesAProfileLists() {
+        // As on the owner's phone: one Netherlands route in Home and Mobile, a second one no profile lists.
+        val shared = Route("n1", Location("nord", 153, "NL", "Netherlands"))
+        val orphan = Route("n2", Location("nord", 153, "NL", "Netherlands"))
+        val af = Route("af", Location("nord", 3, "AF", "Afghanistan"), via = "n1")
+        val home = Profile("Home", DIRECT, apps = mapOf("sym" to "n1"), added = listOf("af"))
+        val s = Setup(routes = listOf(shared, orphan, af), defaultRoute = DIRECT, apps = home.apps, added = home.added,
+            profile = "Home", profiles = listOf(home, Profile("Mobile", "n1")))
+        val entries = viaEntries(s, af)
+        assertEquals(listOf("n1"), entries.map { it.id })
+        assertEquals("Netherlands · Nord", viaLabels(entries, s.saved)["n1"])
+        // A route already going through an unlisted one keeps it on offer, so the menu can show and clear it.
+        assertEquals(listOf("n1", "n2"), viaEntries(s, af.copy(via = "n2")).map { it.id })
+        // Without profiles every route is offered.
+        assertEquals(listOf("n1", "n2"), viaEntries(Setup(routes = listOf(shared, orphan, af)), af).map { it.id })
     }
 }
