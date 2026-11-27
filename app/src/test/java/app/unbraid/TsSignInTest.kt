@@ -3,6 +3,8 @@ package app.unbraid
 import app.unbraid.data.Store
 import app.unbraid.ui.tailscaleSub
 import app.unbraid.ui.tsBrowserSub
+import app.unbraid.ui.tsKeySlow
+import app.unbraid.ui.tsServerDropsRoutes
 import app.unbraid.ui.tsServerName
 import app.unbraid.ui.tsSignedIn
 import app.unbraid.ui.tsShownSignIn
@@ -77,7 +79,7 @@ class TsSignInTest {
     @Test fun rowsNameTheServerAndWhatATapDoes() {
         assertEquals("Tailscale", tsServerName(null))
         assertEquals("headscale.example.com", tsServerName("https://headscale.example.com:8443/"))
-        assertEquals("Signed in with an auth key" to "Tailscale", tsSignedIn(TsLogin.KEY, null))
+        assertEquals("Signed in with an auth key" to "Tailscale · the key was erased after sign-in", tsSignedIn(TsLogin.KEY, null))
         assertEquals("Signed in with your browser" to "headscale.example.com", tsSignedIn(TsLogin.BROWSER, "https://headscale.example.com"))
         assertEquals("Turns on unbraid, then opens the sign-in page", tsBrowserSub(null, off = true, waiting = false))
         assertEquals("Getting the sign-in page…", tsBrowserSub(null, off = true, waiting = true))
@@ -92,5 +94,31 @@ class TsSignInTest {
         assertEquals("Sign-in needed", tailscaleSub(enabled = true, connected = true, state = "NeedsLogin", keySaved = true))
         assertEquals("Waiting for your administrator to approve this phone", tailscaleSub(enabled = true, connected = true, state = "NeedsMachineAuth"))
         assertEquals("Reach your tailnet from every app", tailscaleSub(enabled = false, connected = false, state = null, keySaved = true))
+    }
+
+    /** The 20 s notice is for a key try that still asks to sign in: nothing else. */
+    @Test fun onlyAKeyThatStillAsksIsSlow() {
+        assertEquals(true, tsKeySlow(TsLogin.KEY, true, "NeedsLogin"))
+        assertEquals(false, tsKeySlow(TsLogin.BROWSER, true, "NeedsLogin"))
+        assertEquals(false, tsKeySlow(null, true, "NeedsLogin"))
+        assertEquals(false, tsKeySlow(TsLogin.KEY, false, "NeedsLogin"))
+        for (s in listOf(null, "NoState", "Starting", "NeedsMachineAuth", "Running")) assertEquals(s, false, tsKeySlow(TsLogin.KEY, true, s))
+    }
+
+    /** A key try is not cleared on NeedsLogin, so it still decides the method once the node runs. */
+    @Test fun aKeyTryOutlivesNeedsLogin() {
+        assertEquals(TsLogin.NONE, TsLogin.signIn("NeedsLogin", null, TsLogin.KEY, keySaved = false))
+        assertEquals(TsLogin.KEY, TsLogin.signIn("Running", TsLogin.NONE, TsLogin.KEY, keySaved = false))
+        assertEquals(TsLogin.KEY, TsLogin.signIn("Running", null, TsLogin.KEY, keySaved = false))
+    }
+
+    /** Only a real change of server, with exit routes of the old one, drops routes; a key change on the same server keeps them. */
+    @Test fun onlyARealServerChangeDropsRoutes() {
+        val routes = setOf("r1")
+        assertEquals(true, tsServerDropsRoutes("https://hs.example.com", null, routes))
+        assertEquals(true, tsServerDropsRoutes(null, "https://hs.example.com", routes))
+        assertEquals(false, tsServerDropsRoutes("https://hs.example.com", "https://hs.example.com", routes))
+        assertEquals(false, tsServerDropsRoutes(null, null, routes))
+        assertEquals(false, tsServerDropsRoutes("https://hs.example.com", null, emptySet()))
     }
 }

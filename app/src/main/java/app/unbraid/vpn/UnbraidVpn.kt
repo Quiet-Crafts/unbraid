@@ -132,6 +132,8 @@ internal fun individualDnsOwner(isApp: Boolean, uid: Int, serviceUid: Int, names
 class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
     companion object {
         val state = MutableStateFlow(VpnState())
+        /** The way to sign in to Tailscale the user just chose ([TsLogin.KEY] or BROWSER): kept until the node runs. */
+        val tsTry = MutableStateFlow<String?>(null)
         /** Runs [block] under the running service's lifecycle lock, so no engine starts meanwhile; null when none runs. Blocks: never on the main thread nor under that lock. */
         fun <T> underLock(block: () -> T): T? = kotlinx.coroutines.runBlocking { lock.withLock { current?.takeIf { !it.destroyed }?.let { block() } } }
         const val RESTORE_REFUSED = "The restored setup couldn't start. Check your routes."
@@ -1436,7 +1438,19 @@ class UnbraidVpn : VpnService(), PlatformInterface, CommandServerHandler {
                     }.sortedBy { it.name.lowercase() }
                     val suffix = Compiler.tsSuffix(ep.magicDNSSuffix)
                     val reported = if (ep.backendState == "Running") suffix else store.tsSuffix
+                    // How this phone signed in is decided before the screen hears the status, and before the key is erased
+                    // (a key the engine ran with is the fallback answer). The label is written first so the screen finds it.
+                    val ran = lastInput?.setup?.home?.tsAuthKey
+                    val was = store.tsSignIn
+                    val now = TsLogin.signIn(ep.backendState, was, tsTry.value, ran != null)
+                    if (now != was) store.tsSignIn = now
                     state.update { s -> s.copy(tsLoginUrl = ep.authURL.ifEmpty { null }, tsState = ep.backendState, tsExitNodes = nodes, tsAnnounced = reported) }
+                    // Signed in: the key is single-use and no longer needed. Only the key the engine ran with goes: a newer
+                    // one saved meanwhile stays.
+                    if (ep.backendState == "Running") {
+                        tsTry.value = null
+                        if (ran != null) store.update { st -> if (st.home.tsAuthKey == ran) st.copy(home = st.home.copy(tsAuthKey = null)) else st }
+                    }
                     // The sign-in pages' way around the exit opens with a sign-in link and closes only once signed in: a
                     // restarted engine reports no link at first, which must not close it (each reload restarts Tailscale).
                     // Compared with what the engine runs, so a reload that failed is tried again on the next status.

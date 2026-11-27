@@ -138,7 +138,10 @@ internal fun tsSignedIn(method: String, controlUrl: String?) = when (method) {
     app.unbraid.vpn.TsLogin.KEY -> "Signed in with an auth key"
     app.unbraid.vpn.TsLogin.BROWSER -> "Signed in with your browser"
     else -> "Signed in"
-} to tsServerName(controlUrl)
+} to tsServerName(controlUrl).let { if (method == app.unbraid.vpn.TsLogin.KEY) "$it · the key was erased after sign-in" else it }
+
+/** A key sign-in that still asks to sign in (never while starting or waiting for approval, never a browser one). */
+internal fun tsKeySlow(trying: String?, on: Boolean, state: String?) = trying == app.unbraid.vpn.TsLogin.KEY && on && state == "NeedsLogin"
 
 internal fun tailscaleSub(enabled: Boolean, connected: Boolean, state: String?, keySaved: Boolean = false) = when {
     !enabled -> IDLE
@@ -285,6 +288,11 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, connect: (
         vpn.tsLoginUrl?.takeIf { it != tsOldLink }?.let { tsWant = false; tsLogin(it) }
         if (vpn.tsState == "Running" || vpn.tsState == "NeedsMachineAuth") tsWant = false
     }
+    val tsTrying by UnbraidVpn.tsTry.collectAsStateWithLifecycle()
+    val tsKeyStuck = setup.tailscale && tsKeySlow(tsTrying, vpn.phase == Phase.On, vpn.tsState)
+    var tsSlow by remember { mutableStateOf(false) }
+    var tsWaited by remember { mutableStateOf(false) }
+    LaunchedEffect(tsKeyStuck) { tsSlow = false; if (tsKeyStuck) { delay(20_000); tsSlow = true } }
     LaunchedEffect(tsWant) { if (tsWant) { delay(45_000); tsWant = false } } // a start that never brings a link ends here
     LaunchedEffect(stack, setup.tailscale) { ui.checkTailscale() } // a node left behind can be signed out of
     val page = stack.lastOrNull()
@@ -554,6 +562,12 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, connect: (
 
             p == "tailscale" -> Page("Tailscale", back) {
                 notice(ui, notice)
+                if (tsSlow && tsKeyStuck && !tsWaited) item(key = "tsslow") {
+                    Column(Modifier.padding(start = 24.dp, end = Gutter, top = 8.dp)) {
+                        Text("Sign-in hasn't finished. Check your connection and the server address.", style = Type.caption, color = Ink.accent)
+                        Row { Secondary("Keep waiting", { tsWaited = true }); Secondary("Use another key", { tsKeyOpened = true; dialog = "tskey" }) }
+                    }
+                }
                 group(null, listOfNotNull(
                     Item("Reach your tailnet", if (home.tailscale) tsStatus else if (setup.tsExit != null) "Off · Tailscale still runs for your exit-node route" else "From apps routed through unbraid", { setTailscale(!home.tailscale) }, checked = home.tailscale, icon = Icons.hub) { Toggle(home.tailscale) },
                 ) + when {
@@ -797,7 +811,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, connect: (
             var own by rememberSaveable { mutableStateOf(home.tsControlUrl != null || dialog == "tsserver-own") }
             var url by rememberSaveable { mutableStateOf(home.tsControlUrl.orEmpty()) }
             val ok = !own || httpsUrl.matches(url.trim())
-            Prompt("Server", "Save", { dialog = null; ui.setTailscaleServer(url.trim().takeIf { own }, null) }, { dialog = null }, enabled = ok) {
+            Prompt("Server", "Save", { dialog = null; ui.setTailscaleServer(url.trim().takeIf { own }, null)?.let { ui.notice.value = it.text } }, { dialog = null }, enabled = ok) {
                 Text("Where this phone signs in.", style = Type.sub)
                 Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     listOf(false to ("Tailscale" to "The official service"), true to ("My own server" to "Headscale or another compatible server")).forEachIndexed { i, (mine, t) ->
@@ -813,13 +827,14 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, connect: (
                     Text(if (url.isBlank() || ok) "The full https:// address. Ask whoever runs the server." else "Use a full https:// address", style = Type.caption, color = if (url.isBlank() || ok) Ink.dim else Ink.bad)
                 }
                 if (home.tsAuthKey != null && (if (own) url.trim() else null) != home.tsControlUrl) Text("Changing the server forgets the key you saved.", style = Type.caption, color = Ink.accent)
+                if (tsServerDropsRoutes(url.trim().takeIf { own }, home.tsControlUrl, setup.routes.filter { it.tsExit != null }.mapTo(HashSet()) { it.id })) Text("Routes through the old server's exit nodes are removed; their apps follow the default route.", style = Type.caption, color = Ink.accent)
             }
         }
         "tskey" -> if (!tsKeyOpened) LaunchedEffect(Unit) { dialog = null } else {
             var key by remember { mutableStateOf("") }
             val off = vpn.phase != Phase.On
             Prompt("Sign in with an auth key", if (off) "Save key" else "Sign in", {
-                dialog = null; ui.tsPending = app.unbraid.vpn.TsLogin.KEY; ui.setTailscaleServer(home.tsControlUrl, key.trim())
+                dialog = null; UnbraidVpn.tsTry.value = app.unbraid.vpn.TsLogin.KEY; tsWaited = false; ui.setTailscaleServer(home.tsControlUrl, key.trim())
             }, { dialog = null }, enabled = key.isNotBlank(), secure = true) {
                 Text("Signs in to ${tsServerName(home.tsControlUrl)}." + if (off) " $APP is off, so the key is saved and used when it connects." else "", style = Type.sub)
                 DialogField(key, { key = it }, "Auth key", "Paste the key", secret = true)

@@ -892,6 +892,14 @@ class CompilerTest {
         assertTrue(runCatching { compile(with("http://hs.example.com")) }.exceptionOrNull() is IllegalArgumentException)
     }
 
+    /** The engine signs in with the saved key; once the service erases it, the next config has none. */
+    @Test fun tailscaleKeyIsInTheConfigOnlyWhileSaved() {
+        fun key(k: String?) = compile(example.copy(home = example.home.copy(tailscale = true, tsAuthKey = k)))["endpoints"]!!.jsonArray.map { it.jsonObject }
+            .single { it["type"]!!.jsonPrimitive.content == "tailscale" }["auth_key"]?.jsonPrimitive?.content
+        assertEquals("tskey-test", key("tskey-test"))
+        assertNull(key(null))
+    }
+
     /** Apps test "online?" with a TCP connect to 8.8.8.8:53; a hijacked TCP flow never completes, so only UDP is hijacked. */
     @Test fun onlyUdpDnsIsHijackedSoTcpPort53Connects() {
         val byPort = compile(example).rules().filter { it["port"]?.jsonPrimitive?.content == "53" }

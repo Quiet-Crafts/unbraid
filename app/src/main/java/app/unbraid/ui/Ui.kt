@@ -230,16 +230,10 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** How the kept node signed in ([TsLogin.KEY] or BROWSER), or null: not signed in, or not known yet. */
     private val _tsSignIn = MutableStateFlow<String?>(null)
     val tsSignIn = _tsSignIn.asStateFlow()
-    /** The way to sign in the user just chose, until the node runs or asks to sign in again. */
-    @Volatile var tsPending: String? = null
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            vpn.map { it.tsState }.distinctUntilChanged().collect { s ->
-                val was = store.tsSignIn
-                val now = TsLogin.signIn(s, was, tsPending, store.setup.value.home.tsAuthKey != null)
-                if (now != was) store.tsSignIn = now
-                if (s == "Running" || s == "NeedsLogin") tsPending = null
-                // The engine keeps a node it just made: what the page shows must know it is there.
+            vpn.map { it.tsState }.distinctUntilChanged().collect {
+                // The service records the method; the engine keeps a node it just made: the page must know it is there.
                 _tsStored.value = store.tsStored
                 _tsSignIn.value = store.tsSignIn
             }
@@ -247,7 +241,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     }
 
     /** Browser sign-in instead of a saved key: the key goes, or the engine would keep signing in with it. */
-    fun forgetTsKey() { tsPending = TsLogin.BROWSER; if (setup.value.home.tsAuthKey != null) setHome { it.copy(tsAuthKey = null) } }
+    fun forgetTsKey() { UnbraidVpn.tsTry.value = TsLogin.BROWSER; if (setup.value.home.tsAuthKey != null) setHome { it.copy(tsAuthKey = null) } }
     /** Signed in to at least one provider, or holding an imported config. */
     val accounts = store.accounts
     // A running VPN keeps its controls, also after its last provider signed out (its routes' apps wait blocked).
@@ -586,23 +580,34 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
 
     /** A new control server or auth key means a new node: drop the old Tailscale state and reconnect fresh. */
     /** Switches control server: the engine must be fully down before its Tailscale state is deleted. */
-    fun setTailscaleServer(url: String?, authKey: String?) = viewModelScope.launch(Dispatchers.IO) {
-        if (authKey == null && url == store.setup.value.home.tsControlUrl) return@launch // nothing changed: keep the sign-in
+    fun setTailscaleServer(url: String?, authKey: String?): app.unbraid.data.CarriesDefault? {
+        // A real server change drops the old server's exit routes, like a sign-out: checked first, and held until done.
+        val gone = { s: Setup -> if (tsServerDropsRoutes(url, s.home.tsControlUrl, s.tsRoutes)) s.tsRoutes else emptySet() }
+        val drops = gone(setup.value).isNotEmpty()
+        if (drops) store.reserve(gone, "Tailscale")?.let { return it }
+        viewModelScope.launch(Dispatchers.IO) { switchTailscaleServer(url, authKey, drops) }.invokeOnCompletion { if (drops) store.unreserve(gone) }
+        return null
+    }
+
+    private suspend fun switchTailscaleServer(url: String?, authKey: String?, drops: Boolean) {
+        if (authKey == null && url == store.setup.value.home.tsControlUrl) return // nothing changed: keep the sign-in
+        if (authKey == null) UnbraidVpn.tsTry.value = null // a new server: no key is being tried on it
         // Tailscale not in use: nothing runs on the old server, so nothing is stopped or restarted.
         if (!store.setup.value.tailscale) {
-            store.update { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl }, tsSuffixAllowed = null)) }
+            store.update { it.let { s -> if (drops) s.without(s.tsRoutes) else s }.let { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl }, tsSuffixAllowed = null)) } }
             File(getApplication<Application>().filesDir, "tailscale").deleteRecursively(); store.tsSuffix = null
-            authKey?.let(::clearClipboardIf); checkTailscale(); return@launch
+            authKey?.let(::clearClipboardIf); checkTailscale(); return
         }
         val wasOn = vpn.value.phase == VpnState.Phase.On || vpn.value.phase == VpnState.Phase.Connecting
-        stopVpn(false)
+        // Logs the old node out while the engine runs; on this path it is not signed in, so no warning.
+        stopVpn(vpn.value.phase == VpnState.Phase.On && store.tsStored)
         var saved = false
         // The new server is saved before the lock opens: a connect waiting for it starts with the new node, never the old one.
         if (!whileStopped("switch servers") {
             File(getApplication<Application>().filesDir, "tailscale").deleteRecursively()
             store.tsSuffix = null
-            saved = store.update { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl }, tsSuffixAllowed = null)) }
-        }) return@launch
+            saved = store.update { it.let { s -> if (drops) s.without(s.tsRoutes) else s }.let { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl }, tsSuffixAllowed = null)) } }
+        }) return
         if (saved) authKey?.let(::clearClipboardIf)
         checkTailscale()
         // A VPN that ran before comes back with the new server or key, so the key signs in straight away.
@@ -624,6 +629,7 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         val gone = { s: Setup -> s.tsRoutes }
         store.reserve(gone, "Tailscale")?.let { return it }
         val had = setup.value.tailscale
+        UnbraidVpn.tsTry.value = null // signed out: no sign-in is being tried
         viewModelScope.launch(Dispatchers.IO) {
             val loggedOut = stopVpn(had)
             if (!whileStopped("turn Tailscale off") {
@@ -1401,3 +1407,6 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         releasePending()
     }
 }
+
+/** Whether switching Tailscale to server [url] drops the old server's exit routes [tsRoutes]: a real change, with some. */
+internal fun tsServerDropsRoutes(url: String?, current: String?, tsRoutes: Set<String>) = url != current && tsRoutes.isNotEmpty()
