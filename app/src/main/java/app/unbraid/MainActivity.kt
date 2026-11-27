@@ -343,7 +343,7 @@ class MainActivity : ComponentActivity() {
                                         // Kept across tabs, as across a rotation: search, filter and system apps stay as left.
                                         screen == Tab.Apps.name -> appsState.SaveableStateProvider(Tab.Apps.name) { AppsScreen(ui, disclose = { sheet = "apps" }) { picker = it } }
                                         screen == Tab.Stats.name -> StatsScreen(ui)
-                                        else -> SettingsScreen(ui, addProvider = { adding = true }, tour = { tour = 0 }) { picker = "default" }
+                                        else -> SettingsScreen(ui, addProvider = { adding = true }, tour = { tour = 0 }, connect = ::connect) { picker = "default" }
                                     }
                                 }
                             }

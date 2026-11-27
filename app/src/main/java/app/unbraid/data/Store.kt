@@ -667,6 +667,14 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
             check(seal(TS_STATE, v)) { "Tailscale state not saved" }; File(dir, TS_PLAIN).delete()
         }
 
+    /**
+     * How the kept Tailscale node signed in ([app.unbraid.vpn.TsLogin.KEY] or BROWSER), once it ran; null when not
+     * known. Inside the node's directory, so every reset of the node forgets it too.
+     */
+    var tsSignIn: String?
+        get() = read(TS_SIGNIN)
+        set(v) { if (v == null) File(dir, TS_SIGNIN).delete() else if (File(dir, TS_STATE).parentFile?.isDirectory == true) write(TS_SIGNIN, v) }
+
     /** A Tailscale node is kept on this phone (sealed or from an older version), signed in or not. No decryption. */
     val tsStored get() = File(dir, TS_STATE).exists() || File(dir, TS_PLAIN).exists()
 
@@ -788,6 +796,7 @@ class Store(private val dir: File, private val dropKey: () -> Unit = ::dropKeyst
         const val TS_UNREADABLE = "Couldn't open the saved Tailscale sign-in. Try again. If it keeps failing, sign out of Tailscale in Settings and sign in again."
         const val TS_STATE = "tailscale/state.bin"
         const val TS_PLAIN = "tailscale/tailscaled.state"
+        const val TS_SIGNIN = "tailscale/signin"
         val countriesSer = ListSerializer(Country.serializer())
         val linksSer = MapSerializer(String.serializer(), Link.serializer())
         val accountsSer = MapSerializer(String.serializer(), String.serializer())

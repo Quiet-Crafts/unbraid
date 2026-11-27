@@ -1,5 +1,7 @@
 package app.unbraid.ui
 
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import app.unbraid.WORDMARK
 import app.unbraid.APP
 import app.unbraid.stats.Stats
@@ -113,11 +115,37 @@ private class Item(
 
 private const val IDLE = "Reach your tailnet from every app"
 
-internal fun tailscaleSub(enabled: Boolean, connected: Boolean, state: String?) = when {
+/** The server a Tailscale sign-in goes to, as the rows name it: Tailscale, or the own server's host. */
+internal fun tsServerName(controlUrl: String?) = controlUrl?.let { runCatching { java.net.URI(it.trim()).host }.getOrNull() ?: it } ?: "Tailscale"
+
+/** The browser sign-in row's line: what a tap does now. */
+internal fun tsBrowserSub(controlUrl: String?, off: Boolean, waiting: Boolean) = when {
+    waiting -> "Getting the sign-in page…"
+    off -> "Turns on $APP, then opens the sign-in page"
+    controlUrl == null -> "Opens the sign-in page of Tailscale"
+    else -> "Follow the steps on ${tsServerName(controlUrl)}. Whoever runs it may need to finish it."
+}
+
+/**
+ * How the kept node is signed in, as the page shows it: null = not signed in (no node, or it asks to sign in); "" = signed
+ * in some way not known (a node from an older version, never seen running since); else [TsLogin.KEY] or BROWSER.
+ */
+internal fun tsShownSignIn(stored: Boolean, saved: String?, asksNow: Boolean) =
+    if (!stored || asksNow || saved == app.unbraid.vpn.TsLogin.NONE) null else saved ?: ""
+
+/** The signed-in row: how (when known), and where. */
+internal fun tsSignedIn(method: String, controlUrl: String?) = when (method) {
+    app.unbraid.vpn.TsLogin.KEY -> "Signed in with an auth key"
+    app.unbraid.vpn.TsLogin.BROWSER -> "Signed in with your browser"
+    else -> "Signed in"
+} to tsServerName(controlUrl)
+
+internal fun tailscaleSub(enabled: Boolean, connected: Boolean, state: String?, keySaved: Boolean = false) = when {
     !enabled -> IDLE
+    !connected && keySaved -> "Key saved · turn on $APP to sign in"
     !connected -> "Connects with $APP"
     state == "NeedsLogin" -> "Sign-in needed"
-    state == "NeedsMachineAuth" -> "Waiting for approval in the Tailscale admin console"
+    state == "NeedsMachineAuth" -> "Waiting for your administrator to approve this phone"
     state == "InUseOtherUser" -> "In use by another user on this device"
     state.isNullOrEmpty() -> "Starting"
     state == "Starting" || state == "NoState" -> "Starting"
@@ -233,7 +261,7 @@ fun settingsProxy(id: String) { path = listOf("providers", "proxy:$id") }
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefault: () -> Unit) {
+fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, connect: () -> Unit, chooseDefault: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val setup by ui.setup.collectAsStateWithLifecycle()
@@ -247,6 +275,17 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
     val home = setup.home
     var stack by rememberSaveable { mutableStateOf(path) } // survives the app being killed behind a file picker
     val tsStored by ui.tsStored.collectAsStateWithLifecycle()
+    val tsSignIn by ui.tsSignIn.collectAsStateWithLifecycle()
+    // A browser sign-in asked for before the engine has its link: opened as soon as the link comes.
+    var tsWant by remember { mutableStateOf(false) }
+    var tsOldLink by remember { mutableStateOf<String?>(null) } // a link from before a saved key was forgotten: never opened
+    val tsShown = tsShownSignIn(tsStored, tsSignIn, vpn.phase == Phase.On && vpn.tsState == "NeedsLogin")
+    LaunchedEffect(tsWant, vpn.tsLoginUrl, vpn.tsState) {
+        if (!tsWant) return@LaunchedEffect
+        vpn.tsLoginUrl?.takeIf { it != tsOldLink }?.let { tsWant = false; tsLogin(it) }
+        if (vpn.tsState == "Running" || vpn.tsState == "NeedsMachineAuth") tsWant = false
+    }
+    LaunchedEffect(tsWant) { if (tsWant) { delay(45_000); tsWant = false } } // a start that never brings a link ends here
     LaunchedEffect(stack, setup.tailscale) { ui.checkTailscale() } // a node left behind can be signed out of
     val page = stack.lastOrNull()
     val go = { p: String -> stack = stack + p; path = stack }
@@ -331,7 +370,7 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
     LaunchedEffect(prefs.stats, dialog, page) { statsSize = Stats.size(); delay(800); statsSize = Stats.size() }
     val running = vpn.phase == Phase.On || vpn.phase == Phase.Paused
     val onOff = { b: Boolean -> if (b) "on" else "off" }
-    val tsStatus = tailscaleSub(home.tailscale, vpn.phase == Phase.On, vpn.tsState)
+    val tsStatus = tailscaleSub(home.tailscale, vpn.phase == Phase.On, vpn.tsState, keySaved = home.tsAuthKey != null && tsShown == null)
     val homeVia = listOfNotNull("Tailscale".takeIf { home.tailscale }, "WireGuard".takeIf { home.wg != null }).joinToString(" and ").ifEmpty { null }
 
     // A key's setup minute ends while Providers & servers may stay open.
@@ -353,6 +392,10 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                             setup.servers.size.takeIf { it > 0 }?.let { "$it ${if (it == 1) "server" else "servers"}" },
                         ).joinToString(" · "), { go("providers") }, icon = Icons.vpnKey, anchor = TourStop.Connections) { Chevron() },
                         Item("Tailscale", tailscaleHubSub(home.tailscale, setup.tsExit != null, if (home.tailscale) tsStatus else tailscaleSub(true, vpn.phase == Phase.On, vpn.tsState)), { go("tailscale") }, icon = Icons.hub) { Chevron() },
+                    ) + listOfNotNull(
+                        // Your own server, found without knowing Tailscale's page: until a server is chosen or the phone is signed in.
+                        Item("Your own server (Headscale)", "Opens Tailscale with your server picked", { go("tailscale"); dialog = "tsserver-own" }).takeIf { home.tsControlUrl == null && tsShown == null },
+                    ) + listOf(
                         Item("Local & home access", "Local network ${onOff(prefs.lan)} · ${homeVia?.let { "home via $it" } ?: "no home access"}", { go("local") }, icon = Icons.home, anchor = TourStop.LocalHome) { Chevron() },
                     ))
                     group("Safety", rise = play to 3, items = listOf(
@@ -513,8 +556,27 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 notice(ui, notice)
                 group(null, listOfNotNull(
                     Item("Reach your tailnet", if (home.tailscale) tsStatus else if (setup.tsExit != null) "Off · Tailscale still runs for your exit-node route" else "From apps routed through unbraid", { setTailscale(!home.tailscale) }, checked = home.tailscale, icon = Icons.hub) { Toggle(home.tailscale) },
-                    vpn.tsLoginUrl?.takeIf { setup.tailscale }?.let { url -> Item("Sign in to Tailscale", "Opens your browser", cta = true, onClick = { tsLogin(url) }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) } },
-                ))
+                ) + when {
+                    !setup.tailscale -> emptyList()
+                    // Signed in: one row says how and where. Changing either is a sign-out first (its caption says so).
+                    tsShown != null -> tsSignedIn(tsShown, home.tsControlUrl).let { (t, sub) -> listOf(Item(t, sub, icon = Icons.vpnKey)) }
+                    // Signed in, waiting for the server's approval: nothing to do on the phone.
+                    vpn.phase == Phase.On && vpn.tsState == "NeedsMachineAuth" -> emptyList()
+                    else -> listOf(
+                        Item("Server", tsServerName(home.tsControlUrl), { dialog = "tsserver" }, icon = Icons.dns) { Chevron() },
+                        Item(if (home.tsControlUrl == null) "Sign in with your browser" else "Open registration page",
+                            tsBrowserSub(home.tsControlUrl, vpn.phase != Phase.On, tsWant), cta = true, onClick = {
+                                val url = vpn.tsLoginUrl
+                                // With a saved key just forgotten, the engine brings a fresh link: wait for that one.
+                                tsOldLink = url.takeIf { home.tsAuthKey != null }
+                                ui.forgetTsKey()
+                                if (url != null && tsOldLink == null) tsLogin(url) else { tsWant = true; if (vpn.phase == Phase.Off || vpn.phase == Phase.Paused) connect() }
+                            }) { Icon(Icons.external, null, Modifier.size(20.dp), tint = Ink.dim) },
+                        Item("Sign in with an auth key", if (home.tsAuthKey != null && vpn.phase != Phase.On) "Key saved · tap to use another one" else "No browser: paste a key",
+                            { tsKeyOpened = true; dialog = "tskey" }, icon = Icons.vpnKey) { Chevron() },
+                    )
+                })
+                if (setup.tailscale && tsShown == null && vpn.tsState != "NeedsMachineAuth") caption("Using Headscale? Change the server first. Both ways to sign in work with Tailscale and with your own server.")
                 if (setup.tailscale && vpn.tsExitNodes.isNotEmpty()) group("Exit nodes", vpn.tsExitNodes.sortedByDescending { it.online }.map { n ->
                     val used = setup.routes.count { it.tsExit == n.ip }
                     Item(n.name, "${if (n.online) "Online" else "Offline"} · ${if (used == 0) "not used" else "used by $used ${if (used == 1) "route" else "routes"}"}")
@@ -522,16 +584,15 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
                 if (setup.tailscale) caption("Pick an exit node for a route in Routes. Reaching your home network through Tailscale is under Local & home access.")
                 // A Headscale server can name any domain: its devices' names answer apps only once the user allows that suffix.
                 val sfx = vpn.tsAnnounced?.takeIf { home.tailscale && !app.unbraid.vpn.Compiler.officialTs(home) }
-                if (setup.tailscale) advanced(advOpen, { advOpen = !advOpen }, "Control server: ${home.tsControlUrl ?: "Tailscale"}", listOfNotNull(
-                    Item("Control server", home.tsControlUrl ?: "Tailscale (default)", { tsKeyOpened = true; dialog = "tsserver" }, icon = Icons.dns) { Chevron() },
-                    sfx?.let { d ->
+                if (sfx != null) advanced(advOpen, { advOpen = !advOpen }, "Device names under $sfx", listOfNotNull(
+                    sfx.let { d ->
                         val on = home.tsSuffixAllowed == d
                         Item("Device names under $d", if (on) "On · your server answers every lookup under $d" else "Off · allow to reach devices by name; your server then answers every lookup under $d",
                             { ui.setHome { it.copy(tsSuffixAllowed = if (on) null else d) } }, checked = on) { Toggle(on) }
                     },
                 ))
                 // Whatever the sign-in's state, and also with Tailscale off while its node is still kept on the phone.
-                if (setup.tailscale || tsStored) group(null, listOf(ui.signOutTailscaleRefused().let { no -> Item("Sign out of Tailscale", no?.text ?: "Its exit routes are removed; their apps follow the default route", { dialog = "tsout" }.takeIf { no == null }, danger = true) }))
+                if (setup.tailscale || tsStored) group(null, listOf(ui.signOutTailscaleRefused().let { no -> Item("Sign out of Tailscale", no?.text ?: "Its exit routes are removed; their apps follow the default route. Sign out to change the server or how you sign in.", { dialog = "tsout" }.takeIf { no == null }, danger = true) }))
             }
 
             p == "local" -> Page("Local & home access", back) {
@@ -732,15 +793,38 @@ fun SettingsScreen(ui: Ui, addProvider: () -> Unit, tour: () -> Unit, chooseDefa
         "tsout" -> Prompt("Sign out of Tailscale?", "Sign out", { dialog = null; ui.signOutTailscale()?.let { ui.notice.value = it.text } }, { dialog = null }, danger = true) {
             Text("Tailscale exit routes are removed. Their apps follow the default route.", style = Type.sub)
         }
-        "tsserver" -> if (!tsKeyOpened) LaunchedEffect(Unit) { dialog = null } else {
+        "tsserver", "tsserver-own" -> {
+            var own by rememberSaveable { mutableStateOf(home.tsControlUrl != null || dialog == "tsserver-own") }
             var url by rememberSaveable { mutableStateOf(home.tsControlUrl.orEmpty()) }
+            val ok = !own || httpsUrl.matches(url.trim())
+            Prompt("Server", "Save", { dialog = null; ui.setTailscaleServer(url.trim().takeIf { own }, null) }, { dialog = null }, enabled = ok) {
+                Text("Where this phone signs in.", style = Type.sub)
+                Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    listOf(false to ("Tailscale" to "The official service"), true to ("My own server" to "Headscale or another compatible server")).forEachIndexed { i, (mine, t) ->
+                        Row(Modifier.fillMaxWidth().clip(groupShape(i, 2)).background(Ink.surfaceHigh).selectable(own == mine, role = Role.RadioButton) { own = mine }.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            androidx.compose.material3.RadioButton(own == mine, null, colors = androidx.compose.material3.RadioButtonDefaults.colors(selectedColor = Ink.text, unselectedColor = Ink.dim))
+                            Column { Text(t.first, style = Type.body, color = Ink.text); Text(t.second, style = Type.caption.copy(fontSize = 12.sp), color = Ink.dim) }
+                        }
+                    }
+                }
+                if (own) {
+                    DialogField(url, { url = it }, "Server address", "https://headscale.example.com")
+                    Text(if (url.isBlank() || ok) "The full https:// address. Ask whoever runs the server." else "Use a full https:// address", style = Type.caption, color = if (url.isBlank() || ok) Ink.dim else Ink.bad)
+                }
+                if (home.tsAuthKey != null && (if (own) url.trim() else null) != home.tsControlUrl) Text("Changing the server forgets the key you saved.", style = Type.caption, color = Ink.accent)
+            }
+        }
+        "tskey" -> if (!tsKeyOpened) LaunchedEffect(Unit) { dialog = null } else {
             var key by remember { mutableStateOf("") }
-            val ok = url.isBlank() || httpsUrl.matches(url.trim())
-            Prompt("Control server", "Save", { dialog = null; ui.setTailscaleServer(url.trim().ifEmpty { null }, key.trim().ifEmpty { null }) }, { dialog = null }, enabled = ok, secure = true) {
-                Text("For a self-hosted Headscale. Changing it signs this phone out of the current tailnet.", style = Type.sub)
-                DialogField(url, { url = it }, "Server URL", "https://headscale.example.com")
-                DialogField(key, { key = it }, "Auth key (optional)", "Signs in without a browser", secret = true)
-                if (!ok) Text("Use a full https:// address", style = Type.caption, color = Ink.bad)
+            val off = vpn.phase != Phase.On
+            Prompt("Sign in with an auth key", if (off) "Save key" else "Sign in", {
+                dialog = null; ui.tsPending = app.unbraid.vpn.TsLogin.KEY; ui.setTailscaleServer(home.tsControlUrl, key.trim())
+            }, { dialog = null }, enabled = key.isNotBlank(), secure = true) {
+                Text("Signs in to ${tsServerName(home.tsControlUrl)}." + if (off) " $APP is off, so the key is saved and used when it connects." else "", style = Type.sub)
+                DialogField(key, { key = it }, "Auth key", "Paste the key", secret = true)
+                Text("Where to get one: Tailscale admin console › Settings › Keys. On your own server, ask whoever runs it. A single-use key is enough.", style = Type.caption, color = Ink.dim)
+                Text("For a personal phone, use a key without a tag, and not Ephemeral. A tagged key can limit which devices and exit nodes this phone can use. An ephemeral one is removed whenever the phone goes offline.", style = Type.caption, color = Ink.accent)
             }
         }
         "subnets" -> HomeSubnetsDialog(home.subnets, ui, { dialog = null })

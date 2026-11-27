@@ -22,6 +22,21 @@ object TsLogin {
      */
     fun pending(authUrl: String, backend: String?, was: Boolean) = when { authUrl.isNotEmpty() -> true; backend == "Running" -> false; else -> was }
 
+    const val KEY = "key"
+    const val BROWSER = "browser"
+    /** Seen asking to sign in: not signed in. (No answer at all = a node from an older version, method unknown.) */
+    const val NONE = "none"
+
+    /**
+     * How this phone is signed in, from a Tailscale status and the saved answer [was]: decided once the node runs (the
+     * way just tried, [pending], else a saved key means the key), [NONE] when it needs signing in, else kept.
+     */
+    fun signIn(backend: String?, was: String?, pending: String?, keySaved: Boolean) = when (backend) {
+        "Running" -> was?.takeIf { it != NONE } ?: pending ?: if (keySaved) KEY else BROWSER
+        "NeedsLogin" -> NONE
+        else -> was
+    }
+
     fun check(url: String, controlUrl: String?): Result {
         val refuse = Result(Verdict.REFUSE, null, null)
         val u = runCatching { URI(url.trim()) }.getOrNull() ?: return refuse

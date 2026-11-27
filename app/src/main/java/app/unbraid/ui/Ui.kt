@@ -52,11 +52,14 @@ import app.unbraid.vpn.Profiles
 import app.unbraid.data.WgConf
 import app.unbraid.vpn.UnbraidVpn
 import app.unbraid.vpn.VpnState
+import app.unbraid.vpn.TsLogin
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
@@ -223,7 +226,28 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** A Tailscale node is kept on this phone ([app.unbraid.data.Store.tsStored]); refreshed by [checkTailscale]. */
     private val _tsStored = MutableStateFlow(false)
     val tsStored = _tsStored.asStateFlow()
-    fun checkTailscale() = viewModelScope.launch(Dispatchers.IO) { _tsStored.value = store.tsStored }
+    fun checkTailscale() = viewModelScope.launch(Dispatchers.IO) { _tsStored.value = store.tsStored; _tsSignIn.value = store.tsSignIn }
+    /** How the kept node signed in ([TsLogin.KEY] or BROWSER), or null: not signed in, or not known yet. */
+    private val _tsSignIn = MutableStateFlow<String?>(null)
+    val tsSignIn = _tsSignIn.asStateFlow()
+    /** The way to sign in the user just chose, until the node runs or asks to sign in again. */
+    @Volatile var tsPending: String? = null
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            vpn.map { it.tsState }.distinctUntilChanged().collect { s ->
+                val was = store.tsSignIn
+                val now = TsLogin.signIn(s, was, tsPending, store.setup.value.home.tsAuthKey != null)
+                if (now != was) store.tsSignIn = now
+                if (s == "Running" || s == "NeedsLogin") tsPending = null
+                // The engine keeps a node it just made: what the page shows must know it is there.
+                _tsStored.value = store.tsStored
+                _tsSignIn.value = store.tsSignIn
+            }
+        }
+    }
+
+    /** Browser sign-in instead of a saved key: the key goes, or the engine would keep signing in with it. */
+    fun forgetTsKey() { tsPending = TsLogin.BROWSER; if (setup.value.home.tsAuthKey != null) setHome { it.copy(tsAuthKey = null) } }
     /** Signed in to at least one provider, or holding an imported config. */
     val accounts = store.accounts
     // A running VPN keeps its controls, also after its last provider signed out (its routes' apps wait blocked).
@@ -564,6 +588,13 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
     /** Switches control server: the engine must be fully down before its Tailscale state is deleted. */
     fun setTailscaleServer(url: String?, authKey: String?) = viewModelScope.launch(Dispatchers.IO) {
         if (authKey == null && url == store.setup.value.home.tsControlUrl) return@launch // nothing changed: keep the sign-in
+        // Tailscale not in use: nothing runs on the old server, so nothing is stopped or restarted.
+        if (!store.setup.value.tailscale) {
+            store.update { it.copy(home = it.home.copy(tsControlUrl = url, tsAuthKey = authKey ?: it.home.tsAuthKey.takeIf { _ -> url == it.home.tsControlUrl }, tsSuffixAllowed = null)) }
+            File(getApplication<Application>().filesDir, "tailscale").deleteRecursively(); store.tsSuffix = null
+            authKey?.let(::clearClipboardIf); checkTailscale(); return@launch
+        }
+        val wasOn = vpn.value.phase == VpnState.Phase.On || vpn.value.phase == VpnState.Phase.Connecting
         stopVpn(false)
         var saved = false
         // The new server is saved before the lock opens: a connect waiting for it starts with the new node, never the old one.
@@ -574,6 +605,8 @@ class Ui(app: Application, state: androidx.lifecycle.SavedStateHandle) : Android
         }) return@launch
         if (saved) authKey?.let(::clearClipboardIf)
         checkTailscale()
+        // A VPN that ran before comes back with the new server or key, so the key signs in straight away.
+        if (saved && wasOn) UnbraidVpn.start(getApplication())
     }
 
     private val Setup.tsRoutes get() = routes.filter { it.tsExit != null }.map { it.id }.toSet()
