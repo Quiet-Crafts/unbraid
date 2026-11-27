@@ -161,6 +161,8 @@ data class Route(
 ) {
     val name get() = wg?.name ?: ovpn?.name ?: ss?.name ?: socks5?.name ?: tsName ?: tsExit ?: loc.country ?: loc.automaticLabel
     val code get() = when { wg != null -> "WG"; ovpn != null -> "OV"; ss != null -> "SS"; socks5 != null -> "S5"; tsExit != null -> "TS"; else -> loc.code }
+    /** Slashes on the route's chip: two when it goes through another route first, so a Via route reads at a glance. */
+    val hops get() = if (via != null) 2 else 1
     /** Not tied to a provider account. */
     val imported get() = wg != null || ovpn != null || ss != null || socks5 != null || tsExit != null
     val checksInternet: Boolean get() = when {

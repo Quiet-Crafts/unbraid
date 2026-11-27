@@ -36,6 +36,8 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.unit.Density
 import androidx.graphics.shapes.Morph
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -207,9 +209,39 @@ internal fun serverId(r: Route, s: Server): String? = if (r.imported) null else 
     "${s.load}% load".takeIf { s.load >= 0 && Providers.get(r.loc.provider)?.hasLoad == true },
 ).joinToString(" · ")
 
-/** [r]'s line, with the route it goes through first when it has a Via. */
-private fun place(r: Route, live: Map<String, Server>, routes: List<Route> = emptyList()) =
-    listOfNotNull(where(r, live), r.via?.let { v -> "via ${routes.firstOrNull { it.id == v }?.name ?: "a removed route"}${if (r.viaNative) ", one tunnel" else ""}" }).joinToString(" · ")
+/** [r]'s line: where it exits. The route it goes through first is the entry tag beside it ([viaTag]), not words here. */
+internal fun place(r: Route, live: Map<String, Server>, routes: List<Route> = emptyList()) =
+    if (r.via != null && routes.none { it.id == r.via }) "Entry route removed" else where(r, live)
+
+/** The entry route's code for the small tag after [r]'s line: null without a Via, "?" when the entry route is gone. */
+internal fun viaTag(r: Route, routes: List<Route>): String? = r.via?.let { v -> routes.firstOrNull { it.id == v }?.code ?: "?" }
+
+/** What TalkBack adds to the line, since the tag is decorative: ", via Netherlands, one tunnel". */
+internal fun viaSpoken(r: Route, routes: List<Route>): String =
+    routes.firstOrNull { it.id == r.via }?.let { ", via ${it.name}${if (r.viaNative) ", one tunnel" else ""}" }.orEmpty()
+
+/** The small outlined entry tag: mono code, or the bolt for "··"; red "?" when the entry route is gone. Same size at any text scale. */
+@Composable
+private fun ViaTag(tag: String, broken: Boolean) {
+    val bad = broken || tag == "?"
+    val ink = if (bad) Ink.bad else Ink.dim
+    CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, 1f)) {
+        Row(Modifier.height(16.dp).border(1.dp, if (bad) Ink.bad else Ink.line, RoundedCornerShape(5.dp)).padding(horizontal = 4.dp).clearAndSetSemantics {}, verticalAlignment = Alignment.CenterVertically) {
+            if (tag == "··") Icon(Icons.bolt, null, Modifier.size(10.dp), tint = ink)
+            else Text(tag, style = Type.code.copy(fontSize = 10.sp, lineHeight = 12.sp), color = ink, maxLines = 1)
+        }
+    }
+}
+
+/** A route's line with its entry tag after it: the text ellipsises, the tag never. [spoken] is what TalkBack reads instead. */
+@Composable
+private fun PlaceLine(text: String, tag: String?, spoken: String, maxLines: Int = 1, end: Boolean = false, color: Color = Ink.dim, broken: Boolean = false) {
+    val line = @Composable { m: Modifier -> Text(text, style = Type.caption, color = color, maxLines = maxLines, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null, modifier = m) }
+    if (tag == null) line(Modifier) else Row(
+        Modifier.clearAndSetSemantics { contentDescription = text + spoken }, verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = if (end) Arrangement.spacedBy(6.dp, Alignment.End) else Arrangement.spacedBy(6.dp),
+    ) { line(Modifier.weight(1f, fill = false)); ViaTag(tag, broken) }
+}
 
 private fun where(r: Route, live: Map<String, Server>) = when {
     r.wg != null -> "WireGuard"
@@ -467,6 +499,7 @@ fun RoutesScreen(ui: Ui, connect: () -> Unit, leakSetup: () -> Unit, quiet: Bool
                         key = shown.defaultRoute,
                         apps = defaultLabel(defaultPkgs.size.takeIf { disclosed && !hideApps }, chosenDefault), code = route?.code, chip = if (lit && route != null) Ink.route(route.hue) else Ink.dim, direct = route == null,
                         title = route?.name ?: "Direct", meta = route?.let { place(it, live, setup.routes) } ?: "No VPN for these apps",
+                        hops = route?.hops ?: 1, tag = route?.let { viaTag(it, setup.routes) }, broken = route?.let { setup.viaProblem(it) } != null, spoken = route?.let { viaSpoken(it, setup.routes) }.orEmpty(),
                         extra = if (route != null && server != null) serverId(route, server) else null,
                         border = (route?.let { Ink.route(it.hue) } ?: Ink.line).copy(alpha = if (lit) 0.45f else 0.25f),
                         exit = exitOf(shown.defaultRoute)?.takeIf { offlineExit(vpn, route) == null }?.let { it to pendingOf(it) },
@@ -833,7 +866,7 @@ internal fun appsLabel(pkgs: List<String>, labels: Map<String, String>, sites: L
 @Composable
 private fun DefaultTile(
     key: String, apps: String, code: String?, chip: Color, direct: Boolean, title: String, meta: String, extra: String?, border: Color,
-    exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, keyNote: String? = null, onClick: () -> Unit,
+    hops: Int = 1, tag: String? = null, broken: Boolean = false, spoken: String = "", exit: Pair<ExitReport, Boolean>? = null, warning: String? = null, keyNote: String? = null, onClick: () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
@@ -852,15 +885,15 @@ private fun DefaultTile(
             Icon(Icons.chevron, null, Modifier.size(20.dp), tint = Ink.dim)
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            RouteMark(code, chip, Modifier.clearAndSetSemantics {}, direct = direct)
+            RouteMark(code, chip, Modifier.clearAndSetSemantics {}, direct = direct, hops = hops)
             Text(title, style = Type.title.copy(fontSize = 24.sp, lineHeight = 30.sp), color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         // At large text the place and the server each take a line, instead of the place being cut short.
         if (LocalDensity.current.fontScale >= 1.5f) {
-            Text(meta, style = Type.caption, color = Ink.dim)
+            PlaceLine(meta, tag, spoken, maxLines = Int.MAX_VALUE, broken = broken)
             extra?.let { Text(it, style = Type.code, color = Ink.dim) }
         } else Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(meta, style = Type.caption, color = Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            Box(Modifier.weight(1f, fill = false)) { PlaceLine(meta, tag, spoken, broken = broken) }
             extra?.let { Text(it, style = Type.code, color = Ink.dim, maxLines = 1) }
         }
         (warning ?: keyNote)?.let { Text(it, style = Type.caption, color = if (warning != null) Ink.bad else Ink.dim) }
@@ -891,7 +924,10 @@ private fun RouteRow(
     }
     val where = @Composable { end: Boolean ->
         Text(route?.name ?: if (blocked) "Block" else "Direct", style = Type.title, color = Ink.text, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
-        Text(route?.let { place(it, live, ui.setup.value.routes) } ?: if (blocked) "No traffic" else "Skips the VPN", style = Type.caption, color = Ink.dim, maxLines = if (stacked) 2 else 1, overflow = TextOverflow.Ellipsis, textAlign = if (end) TextAlign.End else null)
+        val routes = ui.setup.value.routes
+        PlaceLine(route?.let { place(it, live, routes) } ?: if (blocked) "No traffic" else "Skips the VPN", route?.let { viaTag(it, routes) }, route?.let { viaSpoken(it, routes) }.orEmpty(), if (stacked) 2 else 1, end,
+            // A Via the route can't use (its entry changed, say) blocks it: the tag turns red, as for a removed entry.
+            broken = route?.let { ui.setup.value.viaProblem(it) } != null)
         (warning ?: keyNote)?.let { Text(it, style = Type.caption, color = if (warning != null) Ink.bad else Ink.dim, textAlign = if (end) TextAlign.End else null) }
         if (!wide) exit?.let { (r, pending) -> ExitLine(r, pending) }
     }
@@ -907,14 +943,14 @@ private fun RouteRow(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { apps() }
             Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) { where(false) }
-                Slot { RouteMark(route?.code ?: "··", chip, Modifier.clearAndSetSemantics {}, direct = direct, block = blocked) }
+                Slot { RouteMark(route?.code ?: "··", chip, Modifier.clearAndSetSemantics {}, direct = direct, hops = route?.hops ?: 1, block = blocked) }
             }
         } else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             // Fixed width, so the exit column always takes the rest and every row's chip ends on the same edge.
             Column(Modifier.width(AppsColumn), verticalArrangement = Arrangement.spacedBy(8.dp)) { apps() }
             // The exit reads right-aligned beside its chip, which closes the row on the right.
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) { where(true) }
-            Slot { RouteMark(route?.code ?: "··", chip, Modifier.clearAndSetSemantics {}, direct = direct, block = blocked) }
+            Slot { RouteMark(route?.code ?: "··", chip, Modifier.clearAndSetSemantics {}, direct = direct, hops = route?.hops ?: 1, block = blocked) }
         }
         exit?.takeIf { wide }?.let { (r, pending) -> Box(Modifier.fillMaxWidth().padding(end = 48.dp), contentAlignment = Alignment.CenterEnd) { ExitLine(r, pending) } }
     }

@@ -447,7 +447,7 @@ fun ProfilesPage(ui: Ui, setup: Setup, onBack: () -> Unit, onAdd: (empty: Boolea
                     },
                     contentAlignment = Alignment.Center,
                 ) { Icon(Icons.drag, null, Modifier.size(20.dp), tint = Ink.dim) }
-                RouteMark(route?.code, if (route != null) Ink.route(route.hue) else Ink.direct, Modifier.clearAndSetSemantics {}, direct = route == null)
+                RouteMark(route?.code, if (route != null) Ink.route(route.hue) else Ink.direct, Modifier.clearAndSetSemantics {}, direct = route == null, hops = route?.hops ?: 1)
                 Column(Modifier.weight(1f).padding(start = 12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(p.name, style = Type.title, color = Ink.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))

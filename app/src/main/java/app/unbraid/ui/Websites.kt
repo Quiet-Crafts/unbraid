@@ -193,7 +193,7 @@ private fun SiteRow(ui: Ui, site: String, setup: Setup, offered: List<Route>, ex
                     modifier = Modifier.semantics { contentDescription = name })
                 Text(state, style = Type.caption, color = if (!builtIn(id) && route == null) Ink.bad else Ink.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            RouteMark(route?.code ?: "··", route?.let { Ink.route(it.hue) } ?: if (id == BLOCK) Ink.bad else Ink.direct, Modifier.clearAndSetSemantics {}, direct = id == DIRECT, block = id == BLOCK)
+            RouteMark(route?.code ?: "··", route?.let { Ink.route(it.hue) } ?: if (id == BLOCK) Ink.bad else Ink.direct, Modifier.clearAndSetSemantics {}, direct = id == DIRECT, hops = route?.hops ?: 1, block = id == BLOCK)
         }
         AnimatedVisibility(
             expanded,

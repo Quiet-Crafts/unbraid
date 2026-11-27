@@ -31,6 +31,9 @@ import app.unbraid.ui.missingAppsText
 import app.unbraid.ui.summary
 import app.unbraid.ui.pausedLabel
 import app.unbraid.ui.serverId
+import app.unbraid.ui.place
+import app.unbraid.ui.viaSpoken
+import app.unbraid.ui.viaTag
 import app.unbraid.data.Server
 import app.unbraid.data.WgPeer
 import app.unbraid.ui.Fetch
@@ -281,5 +284,24 @@ class ScreenTextTest {
         assertEquals(listOf("US app"), keptWith(through, "chose.direct", usApp))
         assertEquals("Not used now: its lookups go as US app's do", lookupsSub(true, "NextDNS", listOf("US app")))
         assertEquals("Outside unbraid, with the phone's DNS", lookupsSub(false, "NextDNS"))
+    }
+
+    /** A Via route's chip has two slashes and its line carries the entry route's code as a tag, never "via" words. */
+    @Test fun viaRouteShowsEntryTag() {
+        val v = us.copy(via = "nl")
+        val unknown = Route("zz", Location("nord"))
+        val bolt = unknown.copy(id = "e")
+        assertEquals(1, nl.hops)
+        assertEquals(2, v.hops)
+        assertEquals(2, v.copy(viaNative = true).hops)
+        assertEquals(null, viaTag(nl, setup.routes))
+        assertEquals("NL", viaTag(v, setup.routes))
+        assertEquals("··", viaTag(v.copy(via = "e"), setup.routes + bolt))
+        assertEquals("?", viaTag(v.copy(via = "gone"), setup.routes))
+        assertEquals("Entry route removed", place(v.copy(via = "gone"), emptyMap(), setup.routes))
+        assertFalse(place(v, emptyMap(), setup.routes).contains("via"))
+        assertEquals(", via Netherlands", viaSpoken(v, setup.routes))
+        assertEquals(", via Netherlands, one tunnel", viaSpoken(v.copy(viaNative = true), setup.routes))
+        assertEquals("", viaSpoken(nl, setup.routes))
     }
 }

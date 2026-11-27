@@ -351,7 +351,7 @@ private fun AppRow(ui: Ui, a: AppInfo, routes: AppRoutes, offered: List<app.unbr
             // An empty profile has no default route yet: its unassigned apps have no exit.
             // Filled: the app chose this route (the default too); outlined: it follows the default.
             if (current.isEmpty()) Text("Not set", style = Type.caption, color = Ink.dim)
-            else RouteMark(setup.codeOf(current), setup.colorOf(current), Modifier.clearAndSetSemantics {}, filled = !setup.follows(a.pkg), direct = current == DIRECT, block = current == BLOCK)
+            else RouteMark(setup.codeOf(current), setup.colorOf(current), Modifier.clearAndSetSemantics {}, filled = !setup.follows(a.pkg), direct = current == DIRECT, hops = setup.route(current)?.hops ?: 1, block = current == BLOCK)
         }
         // The exits spring open under the row and fade in; closing reverses it.
         AnimatedVisibility(

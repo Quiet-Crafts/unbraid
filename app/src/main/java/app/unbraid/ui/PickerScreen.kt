@@ -5,6 +5,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
 import app.unbraid.APP
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -499,13 +500,15 @@ fun PickerScreen(ui: Ui, target: String, close: () -> Unit, settings: () -> Unit
                 fun label(r: app.unbraid.data.Route) = listOfNotNull(r.name, Providers.short(r.loc.provider).takeIf { !r.imported }).joinToString(" · ")
                 Row(Modifier.padding(horizontal = Gutter).padding(bottom = 8.dp)) {
                     val hops = Providers.get(route.loc.provider)?.takeIf { !route.imported && it.nativeHop }
-                    Dropdown("Via", setup.route(route.via.orEmpty())?.let { label(it) + if (route.viaNative) ", one tunnel" else "" } ?: "None, straight to the server") { done ->
-                        MenuRow("None", "Straight to the server", selected = route.via == null, tint = tint) { ui.setVia(route.id, null); done() }
+                    Dropdown("Via", setup.route(route.via.orEmpty())?.let { label(it) + if (route.viaNative) ", one tunnel" else "" } ?: if (route.via != null) "Entry route removed" else "Straight to the server") { done ->
+                        MenuRow("Straight to the server", selected = route.via == null, tint = tint) { ui.setVia(route.id, null); done() }
+                        // Heads the routes below it, not the straight choice above.
+                        if (entries.isNotEmpty()) Text("Connect through another route first", style = Type.caption, color = Ink.dim, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp).semantics { heading() })
                         entries.forEach { e ->
-                            MenuRow(label(e), "Two tunnels: it sees your address, this server only its", selected = route.via == e.id && !route.viaNative, tint = tint) { ui.setVia(route.id, e.id); done() }
+                            MenuRow(label(e), selected = route.via == e.id && !route.viaNative, tint = tint) { ui.setVia(route.id, e.id); done() }
                             // The provider's own multi-hop: one tunnel, forwarded by its entry server.
                             if (hops != null && !e.imported && e.loc.provider == route.loc.provider)
-                                MenuRow("${label(e)}, one tunnel", "${hops.name}'s multi-hop: its server there forwards to this one. Faster, but your network can tell which server you leave from", selected = route.via == e.id && route.viaNative, tint = tint) { ui.setVia(route.id, e.id, native = true); done() }
+                                MenuRow("${label(e)}, one tunnel", "Faster; your network can see the exit server", selected = route.via == e.id && route.viaNative, tint = tint) { ui.setVia(route.id, e.id, native = true); done() }
                         }
                     }
                 }
